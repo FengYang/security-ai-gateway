@@ -34,6 +34,7 @@ build/
 # ===== 生成的 HTML 报告/演示 =====
 # 由技能生成的 HTML 交付物（可从源码/文档重新生成）
 otp-mask-*/
+vllm-masked-inference-plan/
 .trae-html-share-packages/
 security-ai-gateway.html
 *.html.zip
