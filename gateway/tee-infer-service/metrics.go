@@ -22,25 +22,29 @@ import (
 
 // otpmaskMetrics 指标集合（按标签维度 map 累加，线程安全）。
 type otpmaskMetrics struct {
-	mu        sync.Mutex
-	requests  map[string]int64 // tenant|result
-	tokensIn  map[string]int64 // tenant
-	tokensOut map[string]int64 // tenant
-	denies    map[string]int64 // tenant|reason
-	keyIssues map[string]int64 // tenant
-	reconcile map[string]int64 // reason（审计-计费对账偏差，）
+	mu          sync.Mutex
+	requests    map[string]int64 // tenant|result
+	tokensIn    map[string]int64 // tenant
+	tokensOut   map[string]int64 // tenant
+	denies      map[string]int64 // tenant|reason
+	keyIssues   map[string]int64 // tenant
+	reconcile   map[string]int64 // reason（审计-计费对账偏差，）
 	tokenTraffic map[string]int64 // tenant
+	recomputeOps map[string]int64 // op（补算调用计数）
+	recomputeDur map[string]int64 // op（补算耗时累计，毫秒）
 }
 
 func newMetrics() *otpmaskMetrics {
 	return &otpmaskMetrics{
-		requests:  make(map[string]int64),
-		tokensIn:  make(map[string]int64),
-		tokensOut: make(map[string]int64),
-		denies:    make(map[string]int64),
-		keyIssues: make(map[string]int64),
-		reconcile: make(map[string]int64),
+		requests:     make(map[string]int64),
+		tokensIn:     make(map[string]int64),
+		tokensOut:    make(map[string]int64),
+		denies:       make(map[string]int64),
+		keyIssues:    make(map[string]int64),
+		reconcile:    make(map[string]int64),
 		tokenTraffic: make(map[string]int64),
+		recomputeOps: make(map[string]int64),
+		recomputeDur: make(map[string]int64),
 	}
 }
 
@@ -55,6 +59,14 @@ func (m *otpmaskMetrics) incReconcileMismatch(diff int64) {
 func (m *otpmaskMetrics) incAttestTokenTraffic(tenant string) {
 	m.mu.Lock()
 	m.tokenTraffic[tenant]++
+	m.mu.Unlock()
+}
+
+// incRecompute 记录补算调用计数与耗时（毫秒累计）。
+func (m *otpmaskMetrics) incRecompute(op string, durationMs int64) {
+	m.mu.Lock()
+	m.recomputeOps[op]++
+	m.recomputeDur[op] += durationMs
 	m.mu.Unlock()
 }
 
@@ -94,6 +106,8 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	writeCounter(w, "otpmask_key_issue_total", "密钥签发计数（按租户）", m.keyIssues, []string{"tenant"})
 	writeCounter(w, "otpmask_reconcile_mismatch_total", "审计-计费对账偏差累计", m.reconcile, []string{"reason"})
 	writeCounter(w, "otpmask_attest_token_traffic_total", "token 证明模式流量", m.tokenTraffic, []string{"tenant"})
+	writeCounter(w, "otpmask_recompute_ops_total", "补算调用计数（按算子）", m.recomputeOps, []string{"op"})
+	writeCounter(w, "otpmask_recompute_duration_ms_total", "补算耗时累计（按算子，毫秒）", m.recomputeDur, []string{"op"})
 	if auditEvents > 0 {
 		fmt.Fprintf(w, "# HELP otpmask_audit_events 审计哈希链当前长度\n# TYPE otpmask_audit_events gauge\n")
 		fmt.Fprintf(w, "otpmask_audit_events %d\n", auditEvents)

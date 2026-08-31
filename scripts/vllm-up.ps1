@@ -4,18 +4,22 @@
 # 本地验证：后台启动 Go mock 适配器（复用 tee-infer 本地模型）→ 同上
 #
 # 用法：
-#   powershell -File scripts/vllm-up.ps1 -Mode Gpu    -Model Qwen/Qwen2.5-7B-Instruct   # GPU 真实引擎
+#   powershell -File scripts/vllm-up.ps1 -Mode Gpu    -Model Qwen/Qwen2.5-7B-Instruct   # GPU 真实引擎（明文）
+#   powershell -File scripts/vllm-up.ps1 -Mode Masked -Model Qwen/Qwen2.5-7B-Instruct   # GPU 真实引擎（密文模式，路线 2）
 #   powershell -File scripts/vllm-up.ps1 -Mode Mock                                         # 本地 mock 验证
 #   powershell -File scripts/vllm-up.ps1 -Mode Status                                       # 接线/适配器状态
 #   powershell -File scripts/vllm-up.ps1 -Mode TearDown                                     # 停适配器 + 还原
 #
 # 说明：docker compose 场景下 tee-infer 在容器内，经 host.docker.internal 访问宿主适配器。
+# Masked 模式注入密文环境变量：VLLM_MASKED_ENGINE_TYPE=masked_vector（vllm.masked 包开关）。
 
 param(
-    [ValidateSet('Gpu', 'Mock', 'Status', 'TearDown')]
+    [ValidateSet('Gpu', 'Masked', 'Mock', 'Status', 'TearDown')]
     [string]$Mode = 'Mock',
     [string]$Model = 'Qwen/Qwen2.5-7B-Instruct',
-    [int]$AdapterPort = 19190
+    [int]$AdapterPort = 19190,
+    [string]$TeeUrl = 'http://127.0.0.1:19090',
+    [string]$SessionToken = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,6 +66,16 @@ function Start-Adapter {
         $py = Join-Path $root 'gateway\vllm-adapter\vllm_adapter.py'
         Write-Host "[vllm] 启动真实 vLLM 适配器（model=$Model，需 GPU，pip install vllm）..."
         return Start-Process -FilePath 'python' -ArgumentList @($py, '--model', $Model, '--listen', ":${AdapterPort}") -WindowStyle Hidden -PassThru
+    }
+    if ($Mode -eq 'Masked') {
+        $py = Join-Path $root 'gateway\vllm-adapter\vllm_adapter.py'
+        Write-Host "[vllm] 启动真实 vLLM 适配器（密文模式 model=$Model）..."
+        $maskedEnv = @{
+            'VLLM_MASKED_ENGINE_TYPE'   = 'masked_vector'
+            'VLLM_MASKED_TEE_URL'       = $TeeUrl
+            'VLLM_MASKED_SESSION_TOKEN' = $SessionToken
+        }
+        return Start-Process -FilePath 'python' -ArgumentList @($py, '--model', $Model, '--listen', ":${AdapterPort}") -WindowStyle Hidden -PassThru -Environment $maskedEnv
     }
     $dir = Join-Path $root 'gateway\vllm-adapter'
     Write-Host "[vllm] 启动 Go mock 适配器（复用本地模型）..."

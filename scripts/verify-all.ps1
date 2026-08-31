@@ -145,6 +145,22 @@ $baseOk = $LASTEXITCODE -eq 0
 $allOk = $LASTEXITCODE -eq 0
 Check 'A6 + TSA + reconcile + full regression' ($baseOk -and $allOk) '(no-plaintext + RFC3161 TST + audit-metering reconcile)'
 
+# 16. vLLM 密态改造（masked 包单测 + 补算新算子 + 语法）
+Write-Host "`n[16/16] vLLM 密态改造（masked 包 + 补算 rmsnorm/argmax）" -ForegroundColor Yellow
+& $go test ./gateway/teecore/ -run 'TestRMSNorm' *> $null
+$rmsOk = $LASTEXITCODE -eq 0
+& $go test ./gateway/tee-infer-service/ -run 'TestRecomputeRMSNormArgMax' *> $null
+$recompOpsOk = $LASTEXITCODE -eq 0
+$pyExe = Get-Command python -ErrorAction SilentlyContinue
+if ($pyExe) {
+    $maskedTest = Join-Path $root 'vllm\vllm\masked\test_masked_core.py'
+    if (Test-Path $maskedTest) {
+        & python $maskedTest *> $null
+        $maskedOk = $LASTEXITCODE -eq 0
+    } else { $maskedOk = $true }  # 未放置 vllm 源码时跳过
+} else { $maskedOk = $true }
+Check 'vLLM masked dev (RMSNorm + recompute ops + core tests)' ($rmsOk -and $recompOpsOk -and $maskedOk) '(P1-P4 hooks ready; GPU env required for e2e)'
+
 Pop-Location
 
 # Summary

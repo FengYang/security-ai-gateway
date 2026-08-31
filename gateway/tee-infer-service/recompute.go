@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"security-ai-gateway/cipher/mask"
 	"security-ai-gateway/gateway/teecore"
@@ -27,6 +28,9 @@ type recomputeRequest struct {
 	Beta        []float64  `json:"beta,omitempty"`
 	Signature   string     `json:"signature"`
 }
+
+// recomputeBatchLimit 单请求 batch 上限（vLLM 连续批处理对齐，防超长请求）
+const recomputeBatchLimit = 4096
 
 type recomputeResponse struct {
 	RequestID string     `json:"request_id"`
@@ -134,6 +138,14 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "recompute 签名无效", http.StatusUnauthorized)
 		return
 	}
+	// batch 上限（连续批处理对齐）
+	if len(req.Batch) == 0 || len(req.Batch) > recomputeBatchLimit {
+		http.Error(w, fmt.Sprintf("batch 长度 %d 超限（1..%d）", len(req.Batch), recomputeBatchLimit), http.StatusBadRequest)
+		return
+	}
+	// 遥测：补算调用计数
+	s.metrics.incRecompute(req.Op, 0)
+	t0 := time.Now()
 	// 层序校验
 	st := s.recomputeStates.state(sess.ID)
 	if err := st.checkLayerOrder(req.Layer); err != nil {
@@ -202,8 +214,16 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 			yFloat = teecore.Softmax(yFloat)
 		case "layernorm":
 			yFloat = teecore.LayerNorm(yFloat, req.Gamma, req.Beta, 1e-5)
+		case "rmsnorm":
+			// vLLM RMSNorm（无均值减法）；Gamma 为权重，Beta 不使用
+			yFloat = teecore.RMSNorm(yFloat, req.Gamma, 1e-6)
+		case "argmax":
+			// 方案 C 采样确认（P4）：TEE 内 ArgMax 决定 token，不再重掩码
+			tokenIdx := teecore.ArgMax(yFloat)
+			result[b] = []uint64{uint64(tokenIdx)}
+			continue
 		default:
-			http.Error(w, fmt.Sprintf("未知算子 %q（gelu|softmax|layernorm）", req.Op), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("未知算子 %q（gelu|softmax|layernorm|rmsnorm|argmax）", req.Op), http.StatusBadRequest)
 			return
 		}
 		// 定点化 + 重掩码
@@ -226,6 +246,8 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 		MaskNext:  maskNext(sess.K_sig, req.Layer, req.RequestID),
 	}
 	resp.Signature = signRecompute(sess.K_sig, resp)
+	// 遥测：补算耗时（毫秒累计）
+	s.metrics.incRecompute(req.Op, time.Since(t0).Milliseconds())
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 	log.Printf("[tee] recompute session=%s layer=%d op=%s batch=%d mask_next=%s...",

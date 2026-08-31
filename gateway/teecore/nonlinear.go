@@ -43,6 +43,29 @@ func Softmax(v []float64) []float64 {
 	return out
 }
 
+// RMSNorm 均方根归一化：x / sqrt(mean(x^2) + eps) * gamma（无均值减法）。
+// vLLM 的 RMSNorm（layernorm.py）语义，供路线 2 补算服务使用。
+func RMSNorm(x, gamma []float64, eps float64) []float64 {
+	n := len(x)
+	out := make([]float64, n)
+	if n == 0 {
+		return out
+	}
+	var sqSum float64
+	for _, v := range x {
+		sqSum += v * v
+	}
+	invStd := 1 / math.Sqrt(sqSum/float64(n)+eps)
+	for i, v := range x {
+		norm := v * invStd
+		if gamma != nil {
+			norm *= gamma[i]
+		}
+		out[i] = norm
+	}
+	return out
+}
+
 // LayerNorm 层归一化：(x - mean) / sqrt(var + eps) * gamma + beta。
 // x 为激活向量，gamma/beta 为仿射参数（可为 nil，此时忽略缩放平移）。
 func LayerNorm(x, gamma, beta []float64, eps float64) []float64 {
