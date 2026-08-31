@@ -1,0 +1,6 @@
+# 监控栈入口：kubectl apply -k deploy/monitoring
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- prometheus.yaml
+- grafana.yaml

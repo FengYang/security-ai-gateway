@@ -1,0 +1,51 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    higress.io/destination: higress-console.static:80
+    higress.io/enable-rewrite: "true"
+    higress.io/rewrite-path: /landing
+  creationTimestamp: "2026-08-30T08:28:49Z"
+  labels:
+    higress.io/domain_higress-default-domain: "true"
+    higress.io/resource-definer: higress
+  managedFields:
+  - apiVersion: networking.k8s.io/v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:annotations:
+          .: {}
+          f:higress.io/destination: {}
+          f:higress.io/enable-rewrite: {}
+          f:higress.io/rewrite-path: {}
+        f:labels:
+          .: {}
+          f:higress.io/domain_higress-default-domain: {}
+          f:higress.io/resource-definer: {}
+      f:spec:
+        f:ingressClassName: {}
+        f:rules: {}
+        f:tls: {}
+    manager: Kubernetes Java Client
+    operation: Update
+    time: "2026-08-30T08:28:49Z"
+  name: default
+  namespace: higress-system
+  resourceVersion: "1"
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+        path: /
+        pathType: Exact
+  tls:
+  - secretName: default
+status:
+  loadBalancer: {}

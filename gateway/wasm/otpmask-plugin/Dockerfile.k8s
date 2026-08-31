@@ -1,0 +1,10 @@
+# envoy-gateway 镜像（K8s 部署用）：基于 Higress Gateway 镜像打包 otpmask wasm 插件。
+#
+# 构建（仓库根执行）：
+#   docker build -t otpmask/envoy-gateway:latest -f gateway/wasm/otpmask-plugin/Dockerfile.k8s gateway/wasm/otpmask-plugin
+#
+# wasm 插件（7.1MB）超出 ConfigMap 1MiB 限制，故随镜像分发；
+# 镜像已含 /usr/local/bin/envoy 入口，K8s 启动参数经 args 覆盖为 -c /etc/envoy/envoy.yaml。
+FROM higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/gateway:v2.1.5
+
+COPY main.wasm /etc/envoy/main.wasm

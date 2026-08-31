@@ -1,0 +1,53 @@
+# 水平自动扩缩容（autoscaling/v2，CPU 资源指标；依赖 metrics-server）
+{{- if .Values.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: embedding-service-hpa
+  namespace: {{ include "otpmask.namespace" . }}
+  labels:
+    app: embedding-service
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: embedding-service
+  minReplicas: {{ .Values.hpa.embedding.minReplicas }}
+  maxReplicas: {{ .Values.hpa.embedding.maxReplicas }}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {{ .Values.hpa.embedding.cpuUtilization }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ .Values.hpa.scaleDownStabilizationSeconds }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tee-infer-service-hpa
+  namespace: {{ include "otpmask.namespace" . }}
+  labels:
+    app: tee-infer-service
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tee-infer-service
+  minReplicas: {{ .Values.hpa.teeInfer.minReplicas }}
+  maxReplicas: {{ .Values.hpa.teeInfer.maxReplicas }}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {{ .Values.hpa.teeInfer.cpuUtilization }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ .Values.hpa.scaleDownStabilizationSeconds }}
+{{- end }}

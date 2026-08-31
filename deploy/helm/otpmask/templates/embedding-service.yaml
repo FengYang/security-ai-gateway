@@ -1,0 +1,73 @@
+# embedding-service：文本 → token → 向量（明文，企业内部可信域）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embedding-service
+  namespace: {{ include "otpmask.namespace" . }}
+  labels:
+    app: embedding-service
+    {{- include "otpmask.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.embedding.replicas }}
+  selector:
+    matchLabels:
+      app: embedding-service
+  template:
+    metadata:
+      labels:
+        app: embedding-service
+      annotations:
+        {{- if .Values.metricsAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: {{ .Values.embedding.port | quote }}
+        {{- end }}
+    spec:
+      containers:
+      - name: embedding-service
+        image: {{ printf "%s%s:%s" .Values.images.registry .Values.images.embeddingService .Values.images.tag }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        ports:
+        - containerPort: {{ .Values.embedding.port }}
+          name: http
+          protocol: TCP
+        resources:
+          requests:
+            cpu: {{ .Values.embedding.resources.requests.cpu }}
+            memory: {{ .Values.embedding.resources.requests.memory }}
+          limits:
+            cpu: {{ .Values.embedding.resources.limits.cpu }}
+            memory: {{ .Values.embedding.resources.limits.memory }}
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: http
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embedding-service
+  namespace: {{ include "otpmask.namespace" . }}
+  labels:
+    app: embedding-service
+spec:
+  selector:
+    app: embedding-service
+  ports:
+  - name: http
+    port: {{ .Values.embedding.port }}
+    targetPort: http

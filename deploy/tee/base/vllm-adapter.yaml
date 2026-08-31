@@ -1,0 +1,54 @@
+# vllm-adapter：TEE 内推理引擎适配器（4.7，路线 1 vLLM 零改造接入）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-adapter
+  namespace: otpmask
+  labels:
+    app: vllm-adapter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-adapter
+  template:
+    metadata:
+      labels:
+        app: vllm-adapter
+    spec:
+      containers:
+      - name: vllm-adapter
+        image: otpmask/vllm-adapter:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - "-listen=:19190"
+        ports:
+        - containerPort: 19190
+          name: http
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 4000m
+            memory: 4Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-adapter
+  namespace: otpmask
+spec:
+  selector:
+    app: vllm-adapter
+  ports:
+  - name: http
+    port: 19190
+    targetPort: http

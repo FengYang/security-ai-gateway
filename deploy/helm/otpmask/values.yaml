@@ -1,0 +1,59 @@
+# otpmask Helm Chart 默认值（与 deploy/k8s kustomize 清单语义一致）
+# 覆盖方式：helm install otpmask ./deploy/helm/otpmask -f my-values.yaml
+
+# 命名空间（release 所在命名空间，通常即部署目标）
+namespace: otpmask
+
+# 协议签名密钥与远程证明令牌（演示值；生产必须覆盖）
+secret:
+  sigKey: "3031323334353637383961626364656630313233343536373839616263646566"
+  attestToken: "3031323334353637383961626364656630313233343536373839616263646566"
+  create: true # false 时引用既有 secret（名称见 secret.existingName）
+
+images:
+  registry: ""
+  pullPolicy: IfNotPresent
+  tag: latest
+  embeddingService: otpmask/embedding-service
+  teeInferService: otpmask/tee-infer-service
+  envoyGateway: otpmask/envoy-gateway
+
+# 网关（Envoy + otpmask wasm 插件）
+envoy:
+  replicas: 2
+  nodePort: 30000
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 1000m, memory: 512Mi }
+
+# 文本向量服务
+embedding:
+  replicas: 2
+  port: 18080
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
+# TEE 密态推理服务
+teeInfer:
+  replicas: 2
+  port: 19090
+  engineUrl: "" # 非空时经 vLLM 适配器远程推理（M12 对接层），如 http://vllm-adapter:19190
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 1000m, memory: 512Mi }
+
+# 水平扩缩容（autoscaling/v2，需 metrics-server）
+hpa:
+  enabled: true
+  embedding: { minReplicas: 1, maxReplicas: 5, cpuUtilization: 60 }
+  teeInfer: { minReplicas: 1, maxReplicas: 4, cpuUtilization: 70 }
+  scaleDownStabilizationSeconds: 300
+
+# Pod 干扰预算
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# Prometheus 抓取注解（应用 /metrics）
+metricsAnnotations: true

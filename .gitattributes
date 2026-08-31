@@ -1,0 +1,35 @@
+# 统一换行符
+* text=auto eol=lf
+
+# Go 源码
+*.go text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+
+# 协议
+*.proto text eol=lf
+
+# Python
+*.py text eol=lf
+
+# 文档
+*.md text eol=lf
+
+# 配置
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+
+# 脚本
+*.ps1 text eol=crlf
+*.sh text eol=lf
+Makefile text eol=lf
+
+# 二进制
+*.exe binary
+*.wasm binary
+*.png binary
+*.jpg binary
+*.ttf binary
+*.woff binary
+*.woff2 binary

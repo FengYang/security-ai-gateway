@@ -1,0 +1,22 @@
+# golangci-lint 配置（OTP-Mask 工业级实现）
+run:
+  timeout: 3m
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - gosec
+    - errcheck
+    - ineffassign
+    - unused
+    - misspell
+  disable:
+    - exhaustruct
+
+issues:
+  exclude-rules:
+    # 密码模块允许 big.Int 运算（gosec G401/G404 误报源：非标准哈希/随机）
+    - path: cipher/
+      linters:
+        - gosec

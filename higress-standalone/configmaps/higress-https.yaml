@@ -1,0 +1,29 @@
+apiVersion: v1
+data:
+  cert: |
+    acmeIssuer:
+    - ak: ""
+      email: your52429@yours6281.com
+      name: letsencrypt
+      sk: ""
+    automaticHttps: true
+    credentialConfig: []
+    fallbackForInvalidSecret: false
+    renewBeforeDays: 30
+    version: "20260830082842"
+kind: ConfigMap
+metadata:
+  creationTimestamp: "2026-08-30T08:28:42Z"
+  managedFields:
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:data:
+        .: {}
+        f:cert: {}
+    manager: higress
+    operation: Update
+    time: "2026-08-30T08:28:42Z"
+  name: higress-https
+  namespace: higress-system
+  resourceVersion: "1"

@@ -1,0 +1,11 @@
+# Kustomize 入口：kubectl apply -k deploy/k8s
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- namespace.yaml
+- secret.yaml
+- embedding-service.yaml
+- tee-infer-service.yaml
+- envoy-gateway.yaml
+- hpa.yaml
+- pdb.yaml

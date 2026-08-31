@@ -1,0 +1,48 @@
+# 水平自动扩缩容（HPA，autoscaling/v2，CPU 资源指标）
+# 依赖：集群安装 metrics-server（kind 单节点验证需先部署 metrics-server）。
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: embedding-service-hpa
+  namespace: otpmask
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: embedding-service
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300 # 防止抖动
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tee-infer-service-hpa
+  namespace: otpmask
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tee-infer-service
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70 # TEE 推理 CPU 敏感，阈值保守
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300

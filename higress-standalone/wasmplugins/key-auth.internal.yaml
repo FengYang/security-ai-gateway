@@ -1,0 +1,60 @@
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  annotations:
+    higress.io/comment: PLEASE DO NOT EDIT DIRECTLY. This resource is managed by Higress.
+    higress.io/wasm-plugin-description: Authentication based on API Key.
+    higress.io/wasm-plugin-icon: https://img.alicdn.com/imgextra/i4/O1CN01BPFGlT1pGZ2VDLgaH_!!6000000005333-2-tps-42-42.png
+    higress.io/wasm-plugin-title: Key Auth
+  creationTimestamp: "2026-08-30T08:28:49Z"
+  labels:
+    higress.io/internal: "true"
+    higress.io/resource-definer: higress
+    higress.io/wasm-plugin-built-in: "true"
+    higress.io/wasm-plugin-category: auth
+    higress.io/wasm-plugin-name: key-auth
+    higress.io/wasm-plugin-version: 1.0.0
+  managedFields:
+  - apiVersion: extensions.higress.io/v1alpha1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:annotations:
+          .: {}
+          f:higress.io/comment: {}
+          f:higress.io/wasm-plugin-description: {}
+          f:higress.io/wasm-plugin-icon: {}
+          f:higress.io/wasm-plugin-title: {}
+        f:labels:
+          .: {}
+          f:higress.io/internal: {}
+          f:higress.io/resource-definer: {}
+          f:higress.io/wasm-plugin-built-in: {}
+          f:higress.io/wasm-plugin-category: {}
+          f:higress.io/wasm-plugin-name: {}
+          f:higress.io/wasm-plugin-version: {}
+      f:spec:
+        f:defaultConfigDisable: {}
+        f:failStrategy: {}
+        f:matchRules: {}
+        f:phase: {}
+        f:priority: {}
+        f:url: {}
+    manager: Kubernetes Java Client
+    operation: Update
+    time: "2026-08-30T08:28:49Z"
+  name: key-auth.internal
+  namespace: higress-system
+  resourceVersion: "1"
+spec:
+  defaultConfigDisable: true
+  failStrategy: FAIL_OPEN
+  matchRules:
+  - config: {}
+    configDisable: true
+    ingress:
+    - default
+  phase: AUTHN
+  priority: 310
+  url: http://localhost:8002/plugins/key-auth/1.0.0/plugin.wasm
+status: {}

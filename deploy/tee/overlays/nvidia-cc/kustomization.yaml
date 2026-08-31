@@ -1,0 +1,42 @@
+# NVIDIA Confidential Computing 平台 overlay（4.1.2，）：
+# - 机密 VM 节点标签选择器 otpmask.dev/tee: "nvidia-cc"
+# - NVIDIA Remote Attestation Service（证明端点差异）
+# - 多卡扩展优先 Blackwell 及以上（NVLink 加密补齐，4.1.2）
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../base
+patches:
+- target:
+    kind: Deployment
+    name: tee-infer-service
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/env/0
+      value:
+        name: ENCLAVE_MODE
+        value: "sgx"
+    - op: add
+      path: /spec/template/spec/nodeSelector
+      value:
+        otpmask.dev/tee: "nvidia-cc"
+    - op: add
+      path: /spec/template/spec/tolerations
+      value:
+      - key: otpmask.dev/tee
+        operator: Exists
+        effect: NoSchedule
+- target:
+    kind: Deployment
+    name: vllm-adapter
+  patch: |-
+    - op: add
+      path: /spec/template/spec/nodeSelector
+      value:
+        otpmask.dev/tee: "nvidia-cc"
+    - op: add
+      path: /spec/template/spec/tolerations
+      value:
+      - key: otpmask.dev/tee
+        operator: Exists
+        effect: NoSchedule

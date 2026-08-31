@@ -1,0 +1,73 @@
+// otpmask.proto — 南向私有二进制协议（M5，技术方案 4.2）
+//
+// 说明：MVP 采用手写 Varint 二进制编解码（wire format 与 Protobuf 兼容），
+// 避免 protoc 工具链依赖。本文件为协议权威定义，Go/Python 实现必须一致。
+//
+// Wire format（与 Protobuf 字段编码兼容，无字段号——按固定顺序，更紧凑）：
+//
+//	CipherVector:
+//	  varint dim
+//	  varint 元素个数 n
+//	  n × varint（无符号，uint64 元素）
+//
+//	InferenceRequest:
+//	  string request_id        (varint 长度 + UTF-8 字节)
+//	  varint timestamp_ns
+//	  string model             (varint 长度 + 字节)
+//	  varint max_new_tokens
+//	  bytes nonce              (varint 长度 + 字节)
+//	  varint 向量个数 m
+//	  m × CipherVector
+//	  bytes cipher_text        (varint 长度 + 字节；M9-4 guardrail 密文文本，可空)
+//	  bytes signature          (varint 长度 + HMAC-SHA256 32 字节)
+//	  [string engine_type]     (6.2 可选扩展：追加于末尾；"tee_gpu" | "masked_vector"；空=缺省 tee_gpu)
+//	  [string attest_type]     (6.2 可选扩展：追加于末尾；"quote" | "token"；空=缺省 token/MVP 兼容)
+//
+//	InferenceResponse:
+//	  string request_id
+//	  varint timestamp_ns
+//	  varint status            (0=OK 1=ERROR 2=RATE_LIMITED 3=MODEL_NOT_FOUND)
+//	  CipherVector cipher_output
+//	  varint tokens_generated
+//	  bytes signature
+//
+// 签名：HMAC-SHA256(K_sig, request_id || timestamp_ns || nonce || payload)
+//   - K_sig 与掩码密钥分离（4.2.3），MVP 由环境变量注入，生产 TEE 签发
+//   - 防重放：timestamp_ns 窗口 30s + request_id 去重
+
+syntax = "proto3";
+
+package otpmask.protocol;
+
+message CipherVector {
+  repeated uint64 data = 1; // 量化密文/明文向量元素
+}
+
+message InferenceRequest {
+  string request_id = 1;
+  int64 timestamp_ns = 2;
+  string model = 3;
+  uint32 max_new_tokens = 4;
+  bytes nonce = 5;
+  repeated CipherVector cipher_vectors = 6;
+  bytes cipher_text = 7; // M9-4 guardrail 密文文本（可空）
+  bytes signature = 8; // HMAC-SHA256
+  string engine_type = 9; // 6.2 可选扩展："tee_gpu"（缺省）| "masked_vector"
+  string attest_type = 10; // 6.2 可选扩展："quote" | "token"（缺省，MVP 兼容）
+}
+
+enum Status {
+  OK = 0;
+  ERROR = 1;
+  RATE_LIMITED = 2;
+  MODEL_NOT_FOUND = 3;
+}
+
+message InferenceResponse {
+  string request_id = 1;
+  int64 timestamp_ns = 2;
+  Status status = 3;
+  CipherVector cipher_output = 4;
+  uint32 tokens_generated = 5;
+  bytes signature = 6;
+}

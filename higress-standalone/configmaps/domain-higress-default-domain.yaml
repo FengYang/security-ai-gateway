@@ -1,0 +1,31 @@
+apiVersion: v1
+data:
+  cert: default
+  domain: higress-default-domain
+  enableHttps: "on"
+kind: ConfigMap
+metadata:
+  creationTimestamp: "2026-08-30T08:28:49Z"
+  labels:
+    higress.io/config-map-type: domain
+    higress.io/resource-definer: higress
+  managedFields:
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:data:
+        .: {}
+        f:cert: {}
+        f:domain: {}
+        f:enableHttps: {}
+      f:metadata:
+        f:labels:
+          .: {}
+          f:higress.io/config-map-type: {}
+          f:higress.io/resource-definer: {}
+    manager: Kubernetes Java Client
+    operation: Update
+    time: "2026-08-30T08:28:49Z"
+  name: domain-higress-default-domain
+  namespace: higress-system
+  resourceVersion: "1"

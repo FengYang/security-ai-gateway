@@ -1,0 +1,43 @@
+# 阿里云 gn8v-tee 平台 overlay（4.8，）：
+# - TEE 节点标签选择器 otpmask.dev/tee: "tdx"（ACK 机密节点池）
+# - 模型加密加载：KMS 注入模型解密密钥（对齐官方流程，CSI/KBS 注入点）
+# - TDX Quote 远程证明经阿里云 Trustee（OPA 四维验证）
+# - 多卡优先单机单路/NUMA（TDX 双路开销 12-24%，4.3）
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../base
+patches:
+- target:
+    kind: Deployment
+    name: tee-infer-service
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/env/0
+      value:
+        name: ENCLAVE_MODE
+        value: "tdx"
+    - op: add
+      path: /spec/template/spec/nodeSelector
+      value:
+        otpmask.dev/tee: "tdx"
+    - op: add
+      path: /spec/template/spec/tolerations
+      value:
+      - key: otpmask.dev/tee
+        operator: Exists
+        effect: NoSchedule
+- target:
+    kind: Deployment
+    name: vllm-adapter
+  patch: |-
+    - op: add
+      path: /spec/template/spec/nodeSelector
+      value:
+        otpmask.dev/tee: "tdx"
+    - op: add
+      path: /spec/template/spec/tolerations
+      value:
+      - key: otpmask.dev/tee
+        operator: Exists
+        effect: NoSchedule

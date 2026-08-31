@@ -1,0 +1,55 @@
+version: '3.7'
+
+services:
+  envoy:
+    image: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/gateway:v2.1.5
+    entrypoint: /usr/local/bin/envoy
+    command: -c /etc/envoy/envoy.yaml --component-log-level wasm:debug
+    depends_on:
+    - mock-infer
+    networks:
+    - wasmtest
+    ports:
+    - "10000:10000"
+    volumes:
+    - ./envoy.yaml:/etc/envoy/envoy.yaml
+    - ./main.wasm:/etc/envoy/main.wasm
+
+  mock-infer:
+    image: python:3-alpine
+    working_dir: /app
+    volumes:
+    - ./mock_infer.py:/app/mock_infer.py
+    command: python /app/mock_infer.py
+    environment:
+    - MOCK_DELTA=7
+    networks:
+    - wasmtest
+    ports:
+    - "19000:9000"
+
+  embedding-service:
+    build:
+      context: ../../..
+      dockerfile: gateway/embedding-service/Dockerfile
+    networks:
+    - wasmtest
+    ports:
+    - "18080:18080"
+
+  tee-infer-service:
+    build:
+      context: ../../..
+      dockerfile: gateway/tee-infer-service/Dockerfile
+    command:
+    - "-sig-key"
+    - "3031323334353637383961626364656630313233343536373839616263646566"
+    - "-attest-token"
+    - "3031323334353637383961626364656630313233343536373839616263646566"
+    networks:
+    - wasmtest
+    ports:
+    - "19090:19090"
+
+networks:
+  wasmtest: {}

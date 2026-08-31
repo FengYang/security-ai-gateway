@@ -1,0 +1,23 @@
+# kind 单节点集群（M10 本地真实验证）
+#
+# 创建：kind create cluster --config deploy/kind/kind-config.yaml
+# 说明：单 control-plane 节点，无需 worker；extraPortMappings 把 NodePort
+#       映射到宿主机，保持与 docker-compose 开发环境一致的访问端口：
+#         10000 -> envoy-gateway (NodePort 30000)  网关
+#         3000   -> grafana        (NodePort 30001)  监控面板
+#         9090   -> prometheus     (NodePort 30090)  指标查询
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: otpmask
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - containerPort: 30000
+    hostPort: 10000
+    protocol: TCP
+  - containerPort: 30001
+    hostPort: 3000
+    protocol: TCP
+  - containerPort: 30090
+    hostPort: 9090
+    protocol: TCP

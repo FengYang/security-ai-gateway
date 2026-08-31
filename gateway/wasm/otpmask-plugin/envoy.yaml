@@ -1,0 +1,114 @@
+admin:
+  address:
+    socket_address:
+      protocol: TCP
+      address: 0.0.0.0
+      port_value: 9901
+
+static_resources:
+  listeners:
+  - name: listener_0
+    address:
+      socket_address:
+        protocol: TCP
+        address: 0.0.0.0
+        port_value: 10000
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          scheme_header_transformation:
+            scheme_to_overwrite: https
+          stat_prefix: ingress_http
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: local_service
+              domains: ["*"]
+              routes:
+              - match:
+                  prefix: "/infer"
+                route:
+                  cluster: tee-infer
+          http_filters:
+          - name: envoy.filters.http.buffer
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.buffer.v3.Buffer
+              max_request_bytes: 16777216
+          - name: otpmask
+            typed_config:
+              "@type": type.googleapis.com/udpa.type.v1.TypedStruct
+              type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
+              value:
+                config:
+                  name: otpmask
+                  vm_config:
+                    runtime: envoy.wasm.runtime.v8
+                    code:
+                      local:
+                        filename: /etc/envoy/main.wasm
+                  configuration:
+                    "@type": "type.googleapis.com/google.protobuf.StringValue"
+                    value: |
+                      {
+                        "mask_modulus": 4294967296,
+                        "model": "mock",
+                        "embedding_service": "embedding_service",
+                        "embedding_port": 18080,
+                        "tee_service": "tee_infer_service",
+                        "tee_port": 19090,
+                        "sig_key": "3031323334353637383961626364656630313233343536373839616263646566",
+                        "attest_token": "3031323334353637383961626364656630313233343536373839616263646566"
+                      }
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+  # 密态推理服务（路径 A，南向协议二进制）
+  - name: tee-infer
+    connect_timeout: 30s
+    type: LOGICAL_DNS
+    dns_lookup_family: V4_ONLY
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: tee-infer
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: tee-infer-service
+                port_value: 19090
+  # wrapper.NewClusterClient(DnsCluster{ServiceName:"embedding_service",Port:18080})
+  # 生成的 Istio 风格 cluster 名
+  - name: "outbound|18080||embedding_service.dns"
+    connect_timeout: 5s
+    type: LOGICAL_DNS
+    dns_lookup_family: V4_ONLY
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: "outbound|18080||embedding_service.dns"
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: embedding-service
+                port_value: 18080
+  # wrapper.NewClusterClient(DnsCluster{ServiceName:"tee_infer_service",Port:19090})
+  - name: "outbound|19090||tee_infer_service.dns"
+    connect_timeout: 5s
+    type: LOGICAL_DNS
+    dns_lookup_family: V4_ONLY
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: "outbound|19090||tee_infer_service.dns"
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: tee-infer-service
+                port_value: 19090

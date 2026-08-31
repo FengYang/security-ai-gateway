@@ -1,0 +1,34 @@
+# Pod 干扰预算（PDB，policy/v1）：自愿干扰（节点维护/滚动升级）时保证至少 1 副本可用。
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: embedding-service-pdb
+  namespace: otpmask
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: embedding-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tee-infer-service-pdb
+  namespace: otpmask
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: tee-infer-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: envoy-gateway-pdb
+  namespace: otpmask
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: envoy-gateway

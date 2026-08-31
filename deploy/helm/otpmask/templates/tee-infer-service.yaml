@@ -1,0 +1,93 @@
+# tee-infer-service：TEE 密态推理（MVP 模拟飞地；生产迁移 TDX/SGX）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tee-infer-service
+  namespace: {{ include "otpmask.namespace" . }}
+  labels:
+    app: tee-infer-service
+    {{- include "otpmask.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.teeInfer.replicas }}
+  selector:
+    matchLabels:
+      app: tee-infer-service
+  template:
+    metadata:
+      labels:
+        app: tee-infer-service
+      annotations:
+        {{- if .Values.metricsAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: {{ .Values.teeInfer.port | quote }}
+        {{- end }}
+    spec:
+      containers:
+      - name: tee-infer-service
+        image: {{ printf "%s%s:%s" .Values.images.registry .Values.images.teeInferService .Values.images.tag }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        args:
+        - "-sig-key"
+        - "$(SIG_KEY)"
+        - "-attest-token"
+        - "$(ATTEST_TOKEN)"
+        {{- if .Values.teeInfer.engineUrl }}
+        - "-engine-url"
+        - "{{ .Values.teeInfer.engineUrl }}"
+        {{- end }}
+        env:
+        - name: SIG_KEY
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-keys
+              key: sig-key
+        - name: ATTEST_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-keys
+              key: attest-token
+        ports:
+        - containerPort: {{ .Values.teeInfer.port }}
+          name: http
+          protocol: TCP
+        resources:
+          requests:
+            cpu: {{ .Values.teeInfer.resources.requests.cpu }}
+            memory: {{ .Values.teeInfer.resources.requests.memory }}
+          limits:
+            cpu: {{ .Values.teeInfer.resources.limits.cpu }}
+            memory: {{ .Values.teeInfer.resources.limits.memory }}
+        readinessProbe:
+          httpGet:
+            path: /attest
+            port: http
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /attest
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tee-infer-service
+  namespace: {{ include "otpmask.namespace" . }}
+  labels:
+    app: tee-infer-service
+spec:
+  selector:
+    app: tee-infer-service
+  ports:
+  - name: http
+    port: {{ .Values.teeInfer.port }}
+    targetPort: http

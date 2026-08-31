@@ -1,0 +1,36 @@
+# Pod 干扰预算（policy/v1）：自愿干扰时保证至少 minAvailable 副本可用
+{{- if .Values.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: embedding-service-pdb
+  namespace: {{ include "otpmask.namespace" . }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: embedding-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tee-infer-service-pdb
+  namespace: {{ include "otpmask.namespace" . }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: tee-infer-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: envoy-gateway-pdb
+  namespace: {{ include "otpmask.namespace" . }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: envoy-gateway
+{{- end }}

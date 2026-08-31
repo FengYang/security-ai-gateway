@@ -1,0 +1,18 @@
+OTP-Mask 安全 AI 网关已部署（{{ .Chart.Name }} {{ .Chart.Version }}）。
+
+访问入口：
+  网关推理（SSE）: http://<node>:{{ .Values.envoy.nodePort }}/infer
+    curl -X POST http://<node>:{{ .Values.envoy.nodePort }}/infer \
+      -H 'Content-Type: application/json' -H 'X-Tenant-ID: acme' \
+      -d '{"text":"hello secure ai"}'
+
+治理与观测（tee-infer 服务）：
+  用量:   curl http://<node>:30000/metrics   # 经网关；或直连 tee-infer /usage
+  审计:   GET /audit/verify（哈希链完整性）
+  指标:   GET /metrics（Prometheus 文本）
+
+部署要点：
+  - 生产必须覆盖 secret.sigKey / secret.attestToken（或 secret.create=false 引用 Vault 注入）
+  - 真实 vLLM 引擎：设置 teeInfer.engineUrl=http://vllm-adapter:19190
+  - HPA 依赖 metrics-server；PDB 需 replicas > minAvailable 才能正常驱逐
+  - 监控栈（Prometheus/Grafana）见 deploy/monitoring（kustomize 独立部署）
