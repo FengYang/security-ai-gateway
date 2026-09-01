@@ -76,3 +76,6 @@ logs/
 # ===== vLLM 独立代码库 =====
 # vLLM 是独立仓库，单独维护，不纳入本项目
 /vllm/
+
+# ===== WorkBuddy 工作区记忆（agent 私有，不入库）=====
+.workbuddy/
