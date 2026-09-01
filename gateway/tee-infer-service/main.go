@@ -139,6 +139,7 @@ type teeServer struct {
 	weightProvider  LayerWeightProvider    // 层权重提供器（掩码像计算）
 	route           *RouteConfig           // 双路线路由配置
 	tokenizer       Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
+	cache           model.SemanticCache    // GF.4.1 精确缓存（演示实现；nil = 关闭）
 	mu              sync.Mutex
 }
 
@@ -787,6 +788,21 @@ func estimateTokens(text string) int {
 	return (len(text) + 3) / 4
 }
 
+// replayEngine 缓存命中回放引擎（GF.4.1 演示）：把缓存文本作为单块流输出，
+// 跳过真实推理引擎。仅用于精确缓存命中路径（text 载荷）。
+type replayEngine struct{ text string }
+
+// Predict vectors 路径不支持（缓存仅用于 text 路径），返回 -1。
+func (replayEngine) Predict([]float64) int { return -1 }
+
+// Generate 单块回放缓存文本（空文本不回调，等价于空生成）。
+func (r replayEngine) Generate(_ model.GenerateRequest, onDelta func(string) error) error {
+	if r.text == "" {
+		return nil
+	}
+	return onDelta(r.text)
+}
+
 // handleTextInfer text 载荷推理：信封内明文 messages → Guardrail → 引擎流式生成 →
 // SSE 逐块 s2c 信封（Stream=true）或单信封聚合响应（Stream=false）。
 // fail-closed：text 载荷仅限证明会话信封通道（token 模式无信封，拒绝）。
@@ -867,8 +883,20 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		return
 	}
 	genReq := model.GenerateRequest{Model: req.Model, Messages: msgs, MaxTokens: req.MaxNewTokens}
-	log.Printf("[tee] infer(text) tenant=%s request=%s engine=%s stream=%v msgs=%d",
-		tenant, req.RequestID, engType, req.Stream, len(msgs))
+	// GF.4.1 精确缓存（演示）：键 = 租户+引擎+模型+参数+transformed_hash 哈希，
+	// 命中则跳过真实引擎推理，以缓存文本回放（replayEngine，不产出半截明文）。
+	var cacheKey string
+	var cacheHit bool
+	if s.cache != nil {
+		cacheKey = sha256hex([]byte(fmt.Sprintf("%s|%s|%s|%d|%s",
+			tenant, engType, req.Model, req.MaxNewTokens, txHash)))
+		if cached, ok := s.cache.Get(cacheKey); ok {
+			cacheHit = true
+			eng = replayEngine{text: cached}
+		}
+	}
+	log.Printf("[tee] infer(text) tenant=%s request=%s engine=%s stream=%v msgs=%d cache_hit=%v",
+		tenant, req.RequestID, engType, req.Stream, len(msgs), cacheHit)
 
 	// 统一 SSE 信封流输出（seq 严格递增 + finish 分片）；stream=false 语义为单分片聚合。
 	var agg strings.Builder
@@ -876,6 +904,10 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		// 流式失败（200 已发出或写出失败）：审计 deny 后返回（流已以 error 分片终止）
 		s.denyAndAudit(tenant, req.RequestID, "engine_error", payloadSHA)
 		return
+	}
+	// 未命中回填缓存（命中路径不重复回填）。
+	if s.cache != nil && !cacheHit {
+		s.cache.Put(cacheKey, agg.String())
 	}
 
 	// M9-2/M9-3：计量 + 审计 + 指标（估算口径见 estimateTokens；输入已在配额预占计入，仅补记输出）
@@ -887,6 +919,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		Result: "ok", PayloadSHA: payloadSHA,
 		// P2a：双 hash 审计——PayloadSHA 为入站密文哈希，TransformedHash 为引擎实收内容哈希
 		TransformedHash: txHash,
+		CacheHit:        cacheHit, // GF.4.1：精确缓存命中标记
 	})
 	s.metrics.incRequest(tenant, "ok")
 	s.metrics.addTokens(tenant, int64(s.countTokens(inputText.String())), int64(tokensOut))
@@ -1373,7 +1406,8 @@ func main() {
 		recomputeStates: newRecomputeStates(),
 		weightProvider:  NewMockWeightProvider(32),
 		route:           routeCfg,
-		tokenizer:       charDiv4Tokenizer{}, // GF.2.4：计量口径默认字符/4，真机 tokenizer 接入点
+		tokenizer:       charDiv4Tokenizer{},       // GF.2.4：计量口径默认字符/4，真机 tokenizer 接入点
+		cache:           model.NewExactCache(1024), // GF.4.1：精确缓存演示（LRU 1024）；真机替换为语义缓存
 		tenants:         make(map[string]*teecore.KeyManager),
 		usage:           make(map[string]*usageRecord),
 		quota:           make(map[string]int64),

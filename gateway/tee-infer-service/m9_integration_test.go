@@ -18,14 +18,14 @@ import (
 	"time"
 
 	"security-ai-gateway/cipher/mask"
-	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/gateway/tee-infer-service/model"
+	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/protocol/go"
 )
 
 const testAttest = "m9-test-attest-token"
 
-// TestRemoteAttestationE2E 
+// TestRemoteAttestationE2E
 // 挑战-响应 → 验证链 → ECDH+HKDF 派生会话 K_sig → 会话签名推理全链路。
 func TestRemoteAttestationE2E(t *testing.T) {
 	_, ts := newM9Server(t)
@@ -42,10 +42,10 @@ func TestRemoteAttestationE2E(t *testing.T) {
 	}
 	defer attestResp.Body.Close()
 	var ar struct {
-		Status    string           `json:"status"`
-		Protocol  string           `json:"protocol"`
-		SessionID string           `json:"session_id"`
-		ServerPub string           `json:"server_pub"`
+		Status    string            `json:"status"`
+		Protocol  string            `json:"protocol"`
+		SessionID string            `json:"session_id"`
+		ServerPub string            `json:"server_pub"`
 		Proof     *AttestationProof `json:"proof"`
 	}
 	if err := json.NewDecoder(attestResp.Body).Decode(&ar); err != nil {
@@ -208,8 +208,8 @@ func setupTestSession(t *testing.T, ts *httptest.Server) (string, []byte, []byte
 	}
 	defer resp.Body.Close()
 	var ar struct {
-		SessionID string           `json:"session_id"`
-		ServerPub string           `json:"server_pub"`
+		SessionID string            `json:"session_id"`
+		ServerPub string            `json:"server_pub"`
 		Proof     *AttestationProof `json:"proof"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&ar); err != nil {
@@ -248,7 +248,7 @@ func buildRecomputeReq(fullURL, sessionID string, kSig []byte, req *recomputeReq
 	return hr
 }
 
-// TestRecomputeE2E 
+// TestRecomputeE2E
 // 未证明会话 401；合法会话 gelu 补算成功（返回 result + mask_next）；层序乱序拒绝。
 func TestRecomputeE2E(t *testing.T) {
 	srv, ts := newM9Server(t)
@@ -343,21 +343,22 @@ func newM9Server(t *testing.T) (*teeServer, *httptest.Server) {
 	}
 	srv := &teeServer{
 		km: km, kSig: bytes.Repeat([]byte{0x42}, 32), attest: testAttest,
-		enclave:      encl,
-		model:   model.New(),
-		protoVersion: protocol.Version,
-		seen:    make(map[string]bool),
-		seenAt:  make(map[string]int64),
-		sessions: make(map[string]*teeSession),
+		enclave:         encl,
+		model:           model.New(),
+		protoVersion:    protocol.Version,
+		seen:            make(map[string]bool),
+		seenAt:          make(map[string]int64),
+		sessions:        make(map[string]*teeSession),
 		recomputeStates: newRecomputeStates(),
-		weightProvider: NewMockWeightProvider(8),
-		route:          DefaultRouteConfig(),
-		tenants: make(map[string]*teecore.KeyManager),
-		usage:   make(map[string]*usageRecord),
-		quota:   make(map[string]int64),
-		audit:   newAuditChain(),
-		guard:   newGuardrail(),
-		metrics: newMetrics(),
+		weightProvider:  NewMockWeightProvider(8),
+		route:           DefaultRouteConfig(),
+		cache:           model.NewExactCache(1024), // GF.4.1 精确缓存演示
+		tenants:         make(map[string]*teecore.KeyManager),
+		usage:           make(map[string]*usageRecord),
+		quota:           make(map[string]int64),
+		audit:           newAuditChain(),
+		guard:           newGuardrail(),
+		metrics:         newMetrics(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/attest", srv.handleAttest)

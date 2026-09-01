@@ -16,6 +16,8 @@ package main
 import (
 	"regexp"
 	"strings"
+
+	"security-ai-gateway/gateway/tee-infer-service/model"
 )
 
 // guardrailHit 检测命中结果。
@@ -28,7 +30,7 @@ type guardrailHit struct {
 type guardrail struct {
 	piiPatterns []*regexp.Regexp
 	sqlPatterns []*regexp.Regexp
-	injTerms    []string // 提示词注入关键词（小写）
+	classifier  model.Classifier // GF.4.3：语义分类器（nil = 关闭；现以关键词规则占位）
 }
 
 // newGuardrail 构造 guardrail；正则编译失败 panic（服务拒绝启动，符合 fail-closed）。
@@ -36,8 +38,8 @@ func newGuardrail() *guardrail {
 	g := &guardrail{}
 	// PII：数字边界捕获组 (^|[^0-9]) 与 ([^0-9]|$)，命中取 group 2
 	for _, pat := range []string{
-		`(^|[^0-9])(1[3-9][0-9]{9})([^0-9]|$)`,            // 手机号
-		`(^|[^0-9])([0-9]{17}[0-9Xx])([^0-9]|$)`,          // 身份证 18 位
+		`(^|[^0-9])(1[3-9][0-9]{9})([^0-9]|$)`,           // 手机号
+		`(^|[^0-9])([0-9]{17}[0-9Xx])([^0-9]|$)`,         // 身份证 18 位
 		`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`, // 邮箱
 		`(^|[^0-9])([0-9]{16,19})([^0-9]|$)`,             // 银行卡
 	} {
@@ -56,14 +58,21 @@ func newGuardrail() *guardrail {
 	} {
 		g.sqlPatterns = append(g.sqlPatterns, regexp.MustCompile(pat))
 	}
-	// 提示词注入 / 越狱关键词（统一小写匹配）
-	g.injTerms = []string{
+	// 提示词注入 / 越狱关键词：经 Classifier 接口执行（GF.4.3 接线）。
+	// 现以关键词规则占位，语义与既有 injTerms 完全一致（大小写不敏感、顺序命中）；
+	// 真机到位后替换为模型分类器，check 调用点不变。
+	injTerms := []string{
 		"忽略以上", "忽略之前", "忽略前面的", "忽略上述", "无视以上", "忘记所有指令",
 		"忘记之前的指令", "请忽略", "输出你的系统提示词", "你的系统提示词",
 		"ignore previous instructions", "ignore all previous", "ignore the above",
 		"disregard previous", "reveal your system prompt", "developer message",
 		"jailbreak", "dan mode", "do anything now",
 	}
+	rules := make([][2]string, 0, len(injTerms))
+	for _, term := range injTerms {
+		rules = append(rules, [2]string{"prompt_injection", term})
+	}
+	g.classifier = model.NewKeywordClassifier(rules...)
 	return g
 }
 
@@ -90,10 +99,10 @@ func (g *guardrail) check(text string) *guardrailHit {
 			return &guardrailHit{Category: "sql_injection", Match: m}
 		}
 	}
-	low := strings.ToLower(text)
-	for _, t := range g.injTerms {
-		if strings.Contains(low, t) {
-			return &guardrailHit{Category: "prompt_injection", Match: t}
+	// GF.4.3：提示词注入检测经分类器（现为关键词规则占位，真机替换为模型分类器）。
+	if g.classifier != nil {
+		if cat, match := g.classifier.Classify(text); cat != "" {
+			return &guardrailHit{Category: cat, Match: match}
 		}
 	}
 	return nil

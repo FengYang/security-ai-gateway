@@ -37,6 +37,8 @@ type AuditEvent struct {
 	// 不进 hash()（保持 WORM 旧链向后兼容）——链完整性由 PayloadSHA 段保障，
 	// TransformedHash 供"引擎实际收到什么"回溯（双 hash 审计）。
 	TransformedHash string `json:"transformed_hash,omitempty"`
+	// GF.4.1：精确缓存命中标记（演示实现）。同样不进 hash()，仅作审计证据字段。
+	CacheHit bool `json:"cache_hit,omitempty"`
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。
@@ -71,8 +73,8 @@ type auditChain struct {
 	mu      sync.Mutex
 	events  []AuditEvent
 	lastHex string
-	file    *os.File // 非 nil = WORM 持久化模式（只追加）
-	anchor  *os.File // 非 nil = 锚定文件（只追加）
+	file    *os.File  // 非 nil = WORM 持久化模式（只追加）
+	anchor  *os.File  // 非 nil = 锚定文件（只追加）
 	tsa     TSASigner // RFC 3161 可信时间戳服务
 }
 

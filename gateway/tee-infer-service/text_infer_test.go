@@ -180,3 +180,100 @@ func TestTextInferGuardrail(t *testing.T) {
 		t.Fatalf("PII 文本应 403，got %d", resp.StatusCode)
 	}
 }
+
+// TestTextInferCacheHit GF.4.1 精确缓存（演示）：相同输入第二次请求命中缓存，
+// 跳过真实引擎以缓存文本回放；审计 infer 事件带 cache_hit 标记。
+func TestTextInferCacheHit(t *testing.T) {
+	srv, ts := newM9Server(t)
+	const text = "缓存命中测试内容"
+
+	// 第一次（会话1）：缓存未命中 → 本地引擎回显 → 回填缓存
+	sessionID1, ksig1, kenc1 := setupTestSession(t, ts)
+	hr1 := buildTextInferRequest(t, ts.URL+"/v1/infer", sessionID1, ksig1, kenc1, text, protocol.EngineTypeTEEGPU, true, 1)
+	resp1, err := http.DefaultClient.Do(hr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body1 := mustReadAll(t, resp1.Body)
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("首次推理应 200，got %d", resp1.StatusCode)
+	}
+	if out, finish := decodeTextSSE(t, body1, sessionID1, kenc1); out != text || finish != "stop" {
+		t.Fatalf("首次明文不符: %q finish=%q", out, finish)
+	}
+
+	// 第二次（会话2，同租户）：相同输入 → 缓存命中（回放缓存文本，不再走引擎）
+	sessionID2, ksig2, kenc2 := setupTestSession(t, ts)
+	hr2 := buildTextInferRequest(t, ts.URL+"/v1/infer", sessionID2, ksig2, kenc2, text, protocol.EngineTypeTEEGPU, true, 1)
+	resp2, err := http.DefaultClient.Do(hr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body2 := mustReadAll(t, resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("缓存命中推理应 200，got %d", resp2.StatusCode)
+	}
+	if out, finish := decodeTextSSE(t, body2, sessionID2, kenc2); out != text || finish != "stop" {
+		t.Fatalf("命中明文不符: %q finish=%q", out, finish)
+	}
+
+	// 审计：两次 infer，第一次 cache_hit=false，第二次 cache_hit=true
+	var inferEvents []AuditEvent
+	for _, e := range srv.audit.query("") {
+		if e.Action == "infer" {
+			inferEvents = append(inferEvents, e)
+		}
+	}
+	if len(inferEvents) < 2 {
+		t.Fatalf("应有至少 2 次 infer 审计，got %d", len(inferEvents))
+	}
+	first, second := inferEvents[len(inferEvents)-2], inferEvents[len(inferEvents)-1]
+	if first.CacheHit {
+		t.Fatal("首次 infer 不应 cache_hit")
+	}
+	if !second.CacheHit {
+		t.Fatal("第二次 infer 应 cache_hit（精确缓存命中）")
+	}
+}
+
+// TestTextInferCacheIsolation 缓存键租户/参数隔离：不同输入不命中缓存。
+func TestTextInferCacheIsolation(t *testing.T) {
+	srv, ts := newM9Server(t)
+
+	sessionID1, ksig1, kenc1 := setupTestSession(t, ts)
+	first := buildTextInferRequest(t, ts.URL+"/v1/infer", sessionID1, ksig1, kenc1, "输入A", protocol.EngineTypeTEEGPU, true, 1)
+	resp1, err := http.DefaultClient.Do(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body1 := mustReadAll(t, resp1.Body)
+	resp1.Body.Close()
+	if out, _ := decodeTextSSE(t, body1, sessionID1, kenc1); out != "输入A" {
+		t.Fatalf("输入A 明文不符: %q", out)
+	}
+
+	sessionID2, ksig2, kenc2 := setupTestSession(t, ts)
+	second := buildTextInferRequest(t, ts.URL+"/v1/infer", sessionID2, ksig2, kenc2, "输入B", protocol.EngineTypeTEEGPU, true, 1)
+	resp2, err := http.DefaultClient.Do(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body2 := mustReadAll(t, resp2.Body)
+	resp2.Body.Close()
+	if out, _ := decodeTextSSE(t, body2, sessionID2, kenc2); out != "输入B" {
+		t.Fatalf("输入B 明文不符: %q（不同输入不应命中缓存）", out)
+	}
+
+	// 输入B 未命中，不应出现 cache_hit
+	var hit bool
+	for _, e := range srv.audit.query("") {
+		if e.Action == "infer" && e.CacheHit {
+			hit = true
+		}
+	}
+	if hit {
+		t.Fatal("不同输入不应触发 cache_hit")
+	}
+}
