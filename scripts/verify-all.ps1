@@ -161,6 +161,30 @@ if ($pyExe) {
 } else { $maskedOk = $true }
 Check 'vLLM masked dev (RMSNorm + recompute ops + core tests)' ($rmsOk -and $recompOpsOk -and $maskedOk) '(P1-P4 hooks ready; GPU env required for e2e)'
 
+# 17. 路线 1：text 载荷全链路（P2/P5，D1 南向统一 text）
+Write-Host "`n[17/18] 路线 1 text 载荷全链路（tee_gpu 流式 + cmaas fail-closed + guardrail）" -ForegroundColor Yellow
+& $go test ./gateway/tee-infer-service/ -run 'TestTextInfer' *> $null
+$textInfer = $LASTEXITCODE -eq 0
+& $go test ./gateway/tee-infer-service/model/ -run 'TestRemoteEngineGenerate|TestCmaasEngine|TestLocalEngineGenerate' *> $null
+$engStream = $LASTEXITCODE -eq 0
+Check '路线 1 text 全链路 (text 载荷 + SSE 信封 + 引擎流式)' ($textInfer -and $engStream) '(quote 会话 + tee_gpu/cmaas + guardrail 拦截 + 引擎流式 fail-closed)'
+
+# 18. 路线 1：降级攻击/重放/乱序 + 协议一致性（P1a/P1b 升级 + P2 text 载荷字段）
+Write-Host "`n[18/18] 路线 1 防降级/反重放/流序 + 跨语言一致性" -ForegroundColor Yellow
+& $go test ./gateway/tee-infer-service/ -run 'TestSessionEnvelopeReplay|TestSessionPlaintextFailClosed|TestSessionKeyIsolation|TestSessionDestroyAndZeroize' *> $null
+$envReplay = $LASTEXITCODE -eq 0
+& $go test ./gateway/attest-verify/... *> $null
+$sidecarOk = $LASTEXITCODE -eq 0
+python protocol/python/cross_test.py *> $null
+$crossOk = $LASTEXITCODE -eq 0
+Check '路线 1 反重放/防降级 + sidecar + 跨语言一致性' ($envReplay -and $sidecarOk -and $crossOk) '(信封重放拒绝 + 明文 fail-closed + attest-verify sidecar + Go/Py text 载荷一致)'
+
+# 19. AI 网关能力补齐（P0a/P1/P2a）：配额管控 + 脱敏/装饰 + 双 hash 审计
+Write-Host "`n[19/19] AI 网关能力补齐（配额 + 脱敏 + 装饰 + 双 hash）" -ForegroundColor Yellow
+& $go test ./gateway/tee-infer-service/ -run 'TestQuota|TestMaskPII|TestPII|TestInjectionAlways|TestSystemPrompt' *> $null
+$capOk = $LASTEXITCODE -eq 0
+Check 'AI 网关能力补齐（P0a/P1/P2a）' $capOk '(token 配额 429/预占防超卖 + PII 脱敏/拦截 + 提示词装饰 + transformed_hash 审计)'
+
 Pop-Location
 
 # Summary

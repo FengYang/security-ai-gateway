@@ -66,16 +66,26 @@ func TestMockEnclaveMeasureStable(t *testing.T) {
 	}
 }
 
-// TestMockEnclaveAttest 证明载荷：nonce 回显 + 签名可验证（A1 基础）。
+// TestMockEnclaveAttest 证明载荷：nonce 回显 + report_data 回显 + 签名可验证（A1 基础 + P1b 绑定）。
 func TestMockEnclaveAttest(t *testing.T) {
 	e, _ := NewMockEnclave()
 	challenge := []byte("client-challenge-32-bytes-xxxxxxxx")
-	proof, err := e.Attest(challenge)
+	serverPub := []byte("server-ephemeral-pub-raw-bytes!!!")
+	reportData := reportDataBinding(challenge, serverPub)
+
+	// report_data 为空必须报错（绑定材料必填，防跳过绑定）
+	if _, err := e.Attest(challenge, nil); err == nil {
+		t.Fatal("空 report_data 未被拒绝")
+	}
+	proof, err := e.Attest(challenge, reportData)
 	if err != nil {
 		t.Fatalf("Attest: %v", err)
 	}
 	if !bytes.Equal(proof.Nonce, challenge) {
 		t.Fatal("nonce 回显不一致")
+	}
+	if !bytes.Equal(proof.ReportData, reportData) {
+		t.Fatal("report_data 回显不一致")
 	}
 	if proof.Platform != "mock" {
 		t.Fatalf("platform 应为 mock: %q", proof.Platform)
@@ -83,13 +93,13 @@ func TestMockEnclaveAttest(t *testing.T) {
 	if proof.Measurements["app_hash"] == "" {
 		t.Fatal("measurements 缺少 app_hash")
 	}
-	// 校验签名：对 (nonce || signing_key) 的 sha256 用 signing_key 对应公钥验签
+	// 校验签名：对 (report_data || signing_key) 的 sha256 用 signing_key 对应公钥验签
 	x, y := elliptic.Unmarshal(elliptic.P256(), proof.SigningKey)
 	if x == nil {
 		t.Fatal("signing_key 非 P-256 公钥")
 	}
 	pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
-	toSign := append(append([]byte(nil), challenge...), proof.SigningKey...)
+	toSign := append(append([]byte(nil), reportData...), proof.SigningKey...)
 	h := sha256.Sum256(toSign)
 	r := new(big.Int).SetBytes(proof.Signature[:32])
 	s := new(big.Int).SetBytes(proof.Signature[32:])

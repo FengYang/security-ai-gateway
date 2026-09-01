@@ -55,8 +55,10 @@ func TestRemoteAttestationE2E(t *testing.T) {
 		t.Fatalf("attest 响应异常: %+v", ar)
 	}
 
-	// 2. 客户验证证明链
-	if err := VerifyAttestationProof(ar.Proof, expectedHash); err != nil {
+	// 2. 客户验证证明链（report_data 须绑定 H(nonce ‖ server_pub)，防握手公钥替换）
+	serverPubBytes, _ := hex.DecodeString(ar.ServerPub)
+	expectedRD := reportDataBinding(nonce, serverPubBytes)
+	if err := VerifyAttestationProof(ar.Proof, expectedHash, expectedRD); err != nil {
 		t.Fatalf("证明链验证失败: %v", err)
 	}
 	if !bytes.Equal(ar.Proof.Nonce, nonce) {
@@ -82,19 +84,32 @@ func TestRemoteAttestationE2E(t *testing.T) {
 	}
 	compResp.Body.Close()
 
-	// 5. 用会话 K_sig 签发密钥并推理（X-Session-ID 头）
+	// 5. 用会话 K_sig 签发密钥并推理（X-Session-ID 头；P1c 段① 信封全链路）
+	// key/issue：请求体入 c2s 信封（counter=1），响应从 s2c 信封解出
 	keyBody, _ := json.Marshal(map[string]string{"model": "mock", "request_id": nextTestRequestID("ses")})
-	keyReq, _ := http.NewRequest("POST", ts.URL+"/key/issue", bytes.NewReader(keyBody))
+	keySealed, err := protocol.SealEnvelope(clientKenc, ar.SessionID, protocol.EndpointKeyIssue, protocol.DirectionC2S, 1, keyBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyReq, _ := http.NewRequest("POST", ts.URL+"/key/issue", bytes.NewReader(keySealed))
 	keyReq.Header.Set("X-Session-ID", ar.SessionID)
 	keyResp, err := http.DefaultClient.Do(keyReq)
 	if err != nil {
 		t.Fatalf("会话 key/issue 失败: %v", err)
 	}
-	var ki keyIssueResponse
-	if err := json.NewDecoder(keyResp.Body).Decode(&ki); err != nil {
-		t.Fatalf("key/issue 解析失败: %v", err)
+	if keyResp.StatusCode != 200 {
+		raw, _ := io.ReadAll(keyResp.Body)
+		t.Fatalf("会话 key/issue 返回 %d: %s", keyResp.StatusCode, string(raw))
+	}
+	keyPlain, _, err := protocol.OpenEnvelope(clientKenc, ar.SessionID, protocol.EndpointKeyIssue, protocol.DirectionS2C, mustReadAll(t, keyResp.Body))
+	if err != nil {
+		t.Fatalf("key/issue 响应信封解密失败: %v", err)
 	}
 	keyResp.Body.Close()
+	var ki keyIssueResponse
+	if err := json.Unmarshal(keyPlain, &ki); err != nil {
+		t.Fatalf("key/issue 解析失败: %v", err)
+	}
 
 	// 构造推理请求：会话 K_sig 签名（未用 X-Attest-Token，验证会话密钥路径）
 	seed, _ := hex.DecodeString(ki.Seed)
@@ -116,7 +131,12 @@ func TestRemoteAttestationE2E(t *testing.T) {
 	}
 	protocol.SignRequest(clientKsig, infReq) // 会话 K_sig 签名
 	enc, _ := protocol.EncodeRequest(infReq)
-	infHTTPReq, _ := http.NewRequest("POST", ts.URL+"/v1/infer", bytes.NewReader(enc))
+	// infer：请求体入 c2s 信封（counter=2，与 key/issue 共享 c2s 计数器——插件侧同语义）
+	infSealed, err := protocol.SealEnvelope(clientKenc, ar.SessionID, protocol.EndpointInfer, protocol.DirectionC2S, 2, enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	infHTTPReq, _ := http.NewRequest("POST", ts.URL+"/v1/infer", bytes.NewReader(infSealed))
 	infHTTPReq.Header.Set("X-Session-ID", ar.SessionID)
 	infResp, err := http.DefaultClient.Do(infHTTPReq)
 	if err != nil {
@@ -127,15 +147,18 @@ func TestRemoteAttestationE2E(t *testing.T) {
 		raw, _ := io.ReadAll(infResp.Body)
 		t.Fatalf("会话 infer 返回 %d: %s", infResp.StatusCode, string(raw))
 	}
-	protoResp, err := protocol.DecodeResponse(mustReadAll(t, infResp.Body))
+	// 响应从 s2c 信封解出（counter=2：key/issue 响应已用 1）
+	infPlain, _, err := protocol.OpenEnvelope(clientKenc, ar.SessionID, protocol.EndpointInfer, protocol.DirectionS2C, mustReadAll(t, infResp.Body))
+	if err != nil {
+		t.Fatalf("infer 响应信封解密失败: %v", err)
+	}
+	protoResp, err := protocol.DecodeResponse(infPlain)
 	if err != nil {
 		t.Fatalf("响应解码失败: %v", err)
 	}
 	if !protocol.VerifyResponse(clientKsig, protoResp) {
 		t.Fatal("会话 K_sig 响应验签失败")
 	}
-	// K_enc 已派生但 key_issue 响应仍为 MVP 明文
-	_ = clientKenc
 
 	// 6. 无会话请求（MVP token 模式）仍向后兼容
 	keyBody2, _ := json.Marshal(map[string]string{"model": "mock", "request_id": nextTestRequestID("tok")})
@@ -192,11 +215,11 @@ func setupTestSession(t *testing.T, ts *httptest.Server) (string, []byte, []byte
 	if err := json.NewDecoder(resp.Body).Decode(&ar); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyAttestationProof(ar.Proof, expectedHash); err != nil {
+	serverPub, _ := hex.DecodeString(ar.ServerPub)
+	if err := VerifyAttestationProof(ar.Proof, expectedHash, reportDataBinding(nonce, serverPub)); err != nil {
 		t.Fatalf("证明链验证失败: %v", err)
 	}
 	clientPriv, _ := newClientSession()
-	serverPub, _ := hex.DecodeString(ar.ServerPub)
 	ksig, kenc, err := deriveClientSessionKey(clientPriv, serverPub, nonce)
 	if err != nil {
 		t.Fatal(err)
@@ -331,6 +354,7 @@ func newM9Server(t *testing.T) (*teeServer, *httptest.Server) {
 		route:          DefaultRouteConfig(),
 		tenants: make(map[string]*teecore.KeyManager),
 		usage:   make(map[string]*usageRecord),
+		quota:   make(map[string]int64),
 		audit:   newAuditChain(),
 		guard:   newGuardrail(),
 		metrics: newMetrics(),
@@ -343,6 +367,7 @@ func newM9Server(t *testing.T) (*teeServer, *httptest.Server) {
 	mux.HandleFunc("/v1/recompute", srv.handleRecompute)
 	mux.HandleFunc("/infer", srv.handleInfer)
 	mux.HandleFunc("/usage", srv.handleUsage)
+	mux.HandleFunc("/usage/quota", srv.handleQuota)
 	mux.HandleFunc("/audit", srv.handleAudit)
 	mux.HandleFunc("/audit/verify", srv.handleAuditVerify)
 	ts := httptest.NewServer(mux)

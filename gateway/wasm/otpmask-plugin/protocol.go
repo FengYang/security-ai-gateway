@@ -27,9 +27,13 @@ type plainRequest struct {
 	Vectors [][]uint64 `json:"vectors"`
 }
 
-// textRequest 明文请求（文本输入，M4）。
+// textRequest 明文请求（文本输入，M4；P2 扩展可选 stream/engine_type）。
 type textRequest struct {
 	Text string `json:"text"`
+	// Stream 流式响应（缺省 true：SSE 逐块；false = 聚合单响应）。
+	Stream *bool `json:"stream,omitempty"`
+	// EngineType 引擎类型（缺省 tee_gpu；cmaas = 百炼 C-MaaS，P5）。
+	EngineType string `json:"engine_type,omitempty"`
 }
 
 // embedResponse embedding-service 响应。

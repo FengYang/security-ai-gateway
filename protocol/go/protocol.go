@@ -30,6 +30,8 @@ const (
 	EngineTypeTEEGPU = "tee_gpu"
 	// EngineTypeMaskedVector 路线 2：密态向量推理。
 	EngineTypeMaskedVector = "masked_vector"
+	// EngineTypeCMAAS 路线 1：百炼 Confidential MaaS（P5）。
+	EngineTypeCMAAS = "cmaas"
 	// AttestTypeQuote TEE 证明（生产默认；挑战-响应 + Quote 验证）。
 	AttestTypeQuote = "quote"
 	// AttestTypeToken MVP 凭证（向后兼容；仅限测试/灰度环境）。
@@ -65,8 +67,14 @@ type InferenceRequest struct {
 	CipherText    []byte // M9-4：OTP-Mask 逐字节密文文本（guardrail 用；空 = 未启用）
 	Signature     []byte
 	// 协议扩展（可选，追加于 wire 末尾，向后兼容）：
-	EngineType string // "tee_gpu"（缺省）| "masked_vector"
+	EngineType string // "tee_gpu"（缺省）| "masked_vector" | "cmaas"（P5）
 	AttestType string // "quote" | "token"（缺省，MVP 兼容）
+	// P2/P5（D1）：text 载荷——明文 messages JSON（OpenAI 兼容 [{"role","content"}]），
+	// 仅在段① K_enc 信封通道内合法（无会话信封时服务端 fail-closed 拒绝）；
+	// vectors 载荷（CipherVectors）为路线 2 保留路径，两者互斥。
+	TextPayload []byte
+	// Stream 流式响应（SSE 信封流；false = 单信封聚合响应）。
+	Stream bool
 }
 
 // InferenceResponse 推理响应。
@@ -199,10 +207,13 @@ func EncodeRequest(req *InferenceRequest) ([]byte, error) {
 	}
 	buf = putBytes(buf, req.CipherText) // M9-4 密文文本通道（可空）
 	buf = putBytes(buf, req.Signature)
-	// 协议扩展（可选字段，追加于末尾；空串不编码，保持向后兼容）
+	// 协议扩展（可选字段，追加于末尾；空 engine_type 不编码，保持向后兼容）。
+	// P2/P5：text 载荷请求必然声明 engine_type，故 TextPayload/Stream 随扩展段编码。
 	if req.EngineType != "" {
 		buf = putString(buf, req.EngineType)
 		buf = putString(buf, req.AttestType)
+		buf = putBytes(buf, req.TextPayload)
+		buf = putUint64(buf, boolWord(req.Stream))
 	}
 	return buf, nil
 }
@@ -252,7 +263,9 @@ func DecodeRequest(data []byte) (*InferenceRequest, error) {
 	if req.Signature, pos, err = readLenBytes(data, pos); err != nil {
 		return nil, err
 	}
-	// 协议扩展（可选字段，缺省为空 = 旧格式请求，向后兼容）
+	// 协议扩展（可选字段，缺省为空 = 旧格式请求，向后兼容）。
+	// P2/P5：text 载荷与流式标志逐字段探测（部分存在则读，尾部缺失容忍——
+	// 旧编码端只写 engine_type/attest_type 时仍可解码）。
 	if pos < len(data) {
 		if req.EngineType, pos, err = readString(data, pos); err != nil {
 			return nil, err
@@ -261,7 +274,27 @@ func DecodeRequest(data []byte) (*InferenceRequest, error) {
 			return nil, err
 		}
 	}
+	if pos < len(data) {
+		if req.TextPayload, pos, err = readLenBytes(data, pos); err != nil {
+			return nil, err
+		}
+	}
+	if pos < len(data) {
+		var sw uint64
+		if sw, pos, err = readVarint(data, pos); err != nil {
+			return nil, err
+		}
+		req.Stream = sw == 1
+	}
 	return req, nil
+}
+
+// boolWord 布尔 → wire 字（0/1）。
+func boolWord(b bool) uint64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // ---------- 响应 ----------
@@ -323,7 +356,7 @@ func signMessage(kSig []byte, reqID string, ts int64, nonce, payload []byte) []b
 	return mac.Sum(nil)
 }
 
-// SignRequest 对请求签名（覆盖 request_id || ts || nonce || 向量负载 || 密文文本）。
+// SignRequest 对请求签名（覆盖 request_id || ts || nonce || 向量负载 || 密文文本 || text 载荷）。
 // 返回的签名写入 req.Signature。
 func SignRequest(kSig []byte, req *InferenceRequest) {
 	payload := make([]byte, 0)
@@ -334,6 +367,8 @@ func SignRequest(kSig []byte, req *InferenceRequest) {
 		payload = append(payload, EncodeVector(v)...)
 	}
 	payload = putBytes(payload, req.CipherText) // M9-4：密文文本纳入签名
+	payload = putBytes(payload, req.TextPayload) // P2/P5：text 载荷纳入签名
+	payload = putUint64(payload, boolWord(req.Stream))
 	req.Signature = signMessage(kSig, req.RequestID, req.TimestampNS, req.Nonce, payload)
 }
 

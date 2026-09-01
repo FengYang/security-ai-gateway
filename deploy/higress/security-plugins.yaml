@@ -1,0 +1,124 @@
+# 安全插件启用（P0b：Higress 插件生态，全部 FAIL_CLOSED）
+#
+# 链序：cors（CORS phase，预检豁免）→ key-auth（AUTHN）→ IP Restriction（AUTHZ）
+#       → Local Rate Limit（RATE_LIMIT）→ otpmask（DEFAULT，段① 加密）→ 路由
+# 强制项（v3 评审 P0）：所有启用插件的 failStrategy 显式 FAIL_CLOSED，
+# 故障即拒绝，不降级放行（对齐项目 fail-closed 哲学）。
+# 注意：本文件为启用模板，插件 url 指向 Higress 内建插件服务（localhost:8002），
+# 由 Higress 控制面统一分发；生产请确认镜像版本包含对应插件（并做插件 schema
+# 字段级核验，见研发计划 GF.1）。
+
+---
+# Key Auth：消费者 API Key 认证（调用方层；otpmask 内部 JWT 保留为租户层，二者叠加）
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: key-auth
+  namespace: higress-system
+  annotations:
+    higress.io/wasm-plugin-title: Key Auth
+    higress.io/wasm-plugin-category: auth
+spec:
+  url: http://localhost:8002/plugins/key-auth/1.0.0/plugin.wasm
+  failStrategy: FAIL_CLOSED
+  matchRules:
+  - ingress:
+    - infer
+    config:
+      consumers:
+      - name: otpmask-customer-a
+        key: "CHANGE_ME_API_KEY_A"
+      - name: otpmask-customer-b
+        key: "CHANGE_ME_API_KEY_B"
+      keys:
+      - x-api-key
+      global_auth: true
+
+---
+# IP Restriction：IP 黑白名单（白名单模式，FAIL_CLOSED = 名单外一律 403）
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ip-restriction
+  namespace: higress-system
+  annotations:
+    higress.io/wasm-plugin-title: IP Restriction
+    higress.io/wasm-plugin-category: security
+spec:
+  url: http://localhost:8002/plugins/ip-restriction/1.0.0/plugin.wasm
+  failStrategy: FAIL_CLOSED
+  defaultConfigDisable: true
+  matchRules:
+  - ingress:
+    - infer
+    config:
+      allow:
+      - "0.0.0.0/0" # 生产改为内网/管理网段 CIDR
+  - ingress:
+    - tee-admin
+    config:
+      # 治理端点内网隔离为硬约束：仅内网/管理网段可达（FAIL_CLOSED）
+      allow:
+      - "10.0.0.0/8"   # 生产按实际内网/管理网段收紧
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+
+---
+# Local Rate Limit：QPS 限流（进程内 token bucket；集群级一致性需 Cluster Rate Limit + Redis）
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: local-rate-limit
+  namespace: higress-system
+  annotations:
+    higress.io/wasm-plugin-title: Local Rate Limit
+    higress.io/wasm-plugin-category: traffic
+spec:
+  url: http://localhost:8002/plugins/local-rate-limit/1.0.0/plugin.wasm
+  failStrategy: FAIL_CLOSED
+  matchRules:
+  - ingress:
+    - infer
+    config:
+      rule_name: otpmask-qps
+      match:
+        # 按请求匹配（连接建立扣减一次；流时长限流为扩展项，见方案 §6）
+        path_prefix: "/infer"
+      limit_by_header: ""   # 全局维度；按租户可配 x-tenant-id
+      limit:
+        unit: second
+        quota: 1000          # 每秒 1000 请求
+        burst_multiplier: 2  # 突发系数
+
+---
+# CORS：跨域（允许来源按生产收紧）
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: cors
+  namespace: higress-system
+  annotations:
+    higress.io/wasm-plugin-title: CORS
+    higress.io/wasm-plugin-category: security
+spec:
+  url: http://localhost:8002/plugins/cors/1.0.0/plugin.wasm
+  failStrategy: FAIL_CLOSED
+  matchRules:
+  - ingress:
+    - infer
+    config:
+      allow_origins:
+      - prefix: "*"
+      allow_methods:
+      - GET
+      - POST
+      - OPTIONS
+      allow_headers:
+      - content-type
+      - authorization
+      - x-tenant-id
+      - x-session-id
+      - x-attest-token
+      expose_headers:
+      - content-type
+      max_age: "1728000"

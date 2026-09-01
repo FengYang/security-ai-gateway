@@ -256,11 +256,30 @@ func failClosed(log logs.Log, msg string) types.Action {
 	return types.ActionContinue
 }
 
-// handleTextRequest 文本输入（M5 南向协议链路）：
+// respFailClosed 响应侧 fail-closed：解密/验签失败拒绝返回，不透传可疑响应体。
+func respFailClosed(log logs.Log, msg string) types.Action {
+	log.Errorf("otpmask-plugin: fail-closed 拒绝响应: %s", msg)
+	_ = proxywasm.SendHttpResponse(502, [][2]string{{"Content-Type", "text/plain"}},
+		[]byte("otpmask: secure response verification failed"), -1)
+	return types.ActionContinue
+}
+
+// responseStatus 读取下游响应状态码（":status" 伪头）。
+func responseStatus() string {
+	st, err := proxywasm.GetHttpResponseHeader(":status")
+	if err != nil {
+		return ""
+	}
+	return st
+}
+
+// handleTextRequest 文本输入（M5 南向协议链路 + P1b 段① 信封）：
 //
-//	TEE /key/issue → embedding /embed → 加密 → 南向协议请求（签名）→ 替换 body
+//	[quote] 挑战-响应握手 → TEE /key/issue（信封）→ embedding /embed → 加密 →
+//	        南向协议请求（签名，整体入信封）→ 替换 body
+//	[token] TEE /key/issue（明文 JSON）→ embedding → 加密 → 南向协议请求（明文协议，dev 兼容）
 //
-// 请求体替换为南向协议二进制后，由 Envoy 路由到 tee-infer-service（路径 A）。
+// 请求体替换后由 Envoy 路由到 tee-infer-service（路径 A）。
 // 任何 TEE 链路失败均 fail-closed（503 拒绝，不透传明文）。
 func handleTextRequest(ctx wrapper.HttpContext, config PluginConfig, req *textRequest, log logs.Log) types.Action {
 	requestID := newRequestID()
@@ -269,8 +288,9 @@ func handleTextRequest(ctx wrapper.HttpContext, config PluginConfig, req *textRe
 	if config.AttestMode == "quote" {
 		if !Session.valid() {
 			doAttestHandshake(config, log,
-				func(_ string, _ []byte) {
-					// 握手完成 → 走 TEE 签发流程（会话 K_sig 已缓存）
+				func(id string, ksig, kenc []byte) {
+					// 握手完成 → 落存会话（K_sig + K_enc）→ 走 TEE 签发流程
+					Session.set(id, ksig, kenc)
 					proceedKeyIssue(ctx, config, req, requestID, log)
 				},
 				func(msg string) {
@@ -287,6 +307,8 @@ func handleTextRequest(ctx wrapper.HttpContext, config PluginConfig, req *textRe
 }
 
 // proceedKeyIssue 第一层：TEE 签发密钥（token 模式带 X-Attest-Token；quote 模式带 X-Session-ID）。
+// quote 模式（P1b）：请求体与响应体均整体入 K_enc 信封（段①，AAD 绑定 /key/issue）；
+// 200 响应非信封即拒绝（fail-closed，防降级攻击）。
 func proceedKeyIssue(ctx wrapper.HttpContext, config PluginConfig, req *textRequest, requestID string, log logs.Log) types.Action {
 	keyClient := wrapper.NewClusterClient(wrapper.DnsCluster{
 		ServiceName: config.TEEService,
@@ -295,7 +317,10 @@ func proceedKeyIssue(ctx wrapper.HttpContext, config PluginConfig, req *textRequ
 	keyBody, _ := json.Marshal(map[string]string{"model": config.Model, "request_id": requestID})
 	attestHeaders := [][2]string{{"Content-Type", "application/json"}}
 	if config.AttestMode == "quote" {
-		attestHeaders = append(attestHeaders, [2]string{"X-Session-ID", Session.SessionID})
+		attestHeaders = [][2]string{
+			{"Content-Type", "application/octet-stream"},
+			{"X-Session-ID", Session.SessionID},
+		}
 	} else if config.AttestToken != "" {
 		attestHeaders = append(attestHeaders, [2]string{"X-Attest-Token", config.AttestToken})
 	}
@@ -303,35 +328,37 @@ func proceedKeyIssue(ctx wrapper.HttpContext, config PluginConfig, req *textRequ
 	if t := tenantHeaderValue(ctx); t != "" {
 		attestHeaders = append(attestHeaders, [2]string{"X-Tenant-ID", t})
 	}
-	err := keyClient.Post("/key/issue", attestHeaders, keyBody,
+	postBody := keyBody
+	if config.AttestMode == "quote" {
+		sealed, err := Session.sealPayload(protocol.EndpointKeyIssue, keyBody)
+		if err != nil {
+			return failClosed(log, "key/issue 请求加密失败: "+err.Error())
+		}
+		postBody = sealed
+	}
+	err := keyClient.Post("/key/issue", attestHeaders, postBody,
 		func(statusCode int, _ http.Header, body []byte) {
+			if statusCode == http.StatusUnauthorized && config.AttestMode == "quote" {
+				// 会话失效（服务端 TTL/重启）→ 清除本地会话（下次请求重握手），本请求 fail-closed
+				Session.clear()
+				failClosed(log, fmt.Sprintf("TEE 密钥签发失败 %d（会话失效，已触发重握手）", statusCode))
+				return
+			}
 			if statusCode != 200 {
 				failClosed(log, fmt.Sprintf("TEE 密钥签发失败 %d", statusCode))
 				return
 			}
-			var ki struct {
-				Seed            string `json:"seed"`
-				Nonce           string `json:"nonce"`
-				ProtocolVersion string `json:"protocol_version"`
+			if config.AttestMode == "quote" {
+				pt, err := Session.openPayload(protocol.EndpointKeyIssue, body)
+				if err != nil {
+					// 信封解不开 = 会话密钥不同步（服务端重启等）→ 清会话，fail-closed
+					Session.clear()
+					failClosed(log, "key/issue 响应解密失败: "+err.Error())
+					return
+				}
+				body = pt
 			}
-			if err := json.Unmarshal(body, &ki); err != nil {
-				failClosed(log, fmt.Sprintf("解析密钥响应失败: %v", err))
-				return
-			}
-			// C-4b 版本一致性校验：TEE 协议版本不匹配 → fail-closed，
-			// 防止 wire 格式不兼容的插件/TEE 混合部署导致静默错乱。
-			if ki.ProtocolVersion != "" && ki.ProtocolVersion != protocol.Version {
-				failClosed(log, fmt.Sprintf("协议版本不匹配: TEE=%q 插件=%q", ki.ProtocolVersion, protocol.Version))
-				return
-			}
-			seed, err := hex.DecodeString(ki.Seed)
-			if err != nil {
-				failClosed(log, fmt.Sprintf("seed hex 解码失败: %v", err))
-				return
-			}
-			// 按 requestID 存密钥（响应解密回溯），seed 同时供本层加密
-			KeyStore.Store(requestID, seed)
-			finishTextFlow(ctx, config, req, requestID, seed, ki.Nonce, log)
+			parseKeyIssueResponse(ctx, config, req, requestID, body, log)
 		}, 5000)
 	if err != nil {
 		return failClosed(log, fmt.Sprintf("调用 TEE 密钥服务失败: %v", err))
@@ -339,10 +366,44 @@ func proceedKeyIssue(ctx wrapper.HttpContext, config PluginConfig, req *textRequ
 	return types.ActionPause
 }
 
-// finishTextFlow 第二层：embedding → 加密 → 南向协议请求替换。
+// parseKeyIssueResponse 解析密钥签发响应并进入第二层（token/quote 模式共用）。
+func parseKeyIssueResponse(ctx wrapper.HttpContext, config PluginConfig, req *textRequest,
+	requestID string, body []byte, log logs.Log) {
+	var ki struct {
+		Seed            string `json:"seed"`
+		Nonce           string `json:"nonce"`
+		ProtocolVersion string `json:"protocol_version"`
+	}
+	if err := json.Unmarshal(body, &ki); err != nil {
+		failClosed(log, fmt.Sprintf("解析密钥响应失败: %v", err))
+		return
+	}
+	// C-4b 版本一致性校验：TEE 协议版本不匹配 → fail-closed，
+	// 防止 wire 格式不兼容的插件/TEE 混合部署导致静默错乱。
+	if ki.ProtocolVersion != "" && ki.ProtocolVersion != protocol.Version {
+		failClosed(log, fmt.Sprintf("协议版本不匹配: TEE=%q 插件=%q", ki.ProtocolVersion, protocol.Version))
+		return
+	}
+	seed, err := hex.DecodeString(ki.Seed)
+	if err != nil {
+		failClosed(log, fmt.Sprintf("seed hex 解码失败: %v", err))
+		return
+	}
+	// 按 requestID 存密钥（响应解密回溯），seed 同时供本层加密
+	KeyStore.Store(requestID, seed)
+	finishTextFlow(ctx, config, req, requestID, seed, ki.Nonce, log)
+}
+
+// finishTextFlow 第二层：按引擎类型分流——
+// text 载荷直通（P2/P5：tee_gpu/cmaas，南向统一 text，D1）或
+// 既有 embedding→vectors（未指定/masked_vector，向后兼容，路线 2 保留路径）。
 func finishTextFlow(ctx wrapper.HttpContext, config PluginConfig, req *textRequest,
 	requestID string, seed []byte, nonceHex string, log logs.Log) {
 
+	if req.EngineType == protocol.EngineTypeTEEGPU || req.EngineType == protocol.EngineTypeCMAAS {
+		finishTextDirect(ctx, config, req, requestID, seed, nonceHex, log)
+		return
+	}
 	embClient := wrapper.NewClusterClient(wrapper.DnsCluster{
 		ServiceName: config.EmbeddingService,
 		Port:        config.EmbeddingPort,
@@ -391,11 +452,25 @@ func finishTextFlow(ctx wrapper.HttpContext, config PluginConfig, req *textReque
 				failClosed(log, fmt.Sprintf("编码协议请求失败: %v", err))
 				return
 			}
+			// P1b：quote 模式下南向协议请求整体入 K_enc 信封（段①，AAD 绑定 /v1/infer）
+			if config.AttestMode == "quote" {
+				sealed, err := Session.sealPayload(protocol.EndpointInfer, encBody)
+				if err != nil {
+					failClosed(log, "推理请求加密失败: "+err.Error())
+					return
+				}
+				encBody = sealed
+			}
 			if err := proxywasm.ReplaceHttpRequestBody(encBody); err != nil {
 				failClosed(log, fmt.Sprintf("替换请求体失败: %v", err))
 				return
 			}
 			_ = proxywasm.ReplaceHttpRequestHeader("content-type", "application/octet-stream")
+			// P1b 修复：quote 模式推理请求须携带 X-Session-ID（此前缺失，
+			// 服务端无法按会话校验信封通道，真实链路会 fail-closed 拒绝）
+			if config.AttestMode == "quote" {
+				_ = proxywasm.ReplaceHttpRequestHeader("X-Session-ID", Session.SessionID)
+			}
 			log.Infof("otpmask-plugin: 南向协议请求构造完成 text=%d chars tokens=%d dim=%d req=%s",
 				len(req.Text), len(er.Tokens), len(er.Vectors[0]), requestID[:8])
 			if err := proxywasm.ResumeHttpRequest(); err != nil {
@@ -409,8 +484,98 @@ func finishTextFlow(ctx wrapper.HttpContext, config PluginConfig, req *textReque
 	}
 }
 
-// onResponseBody 响应侧解密：南向协议二进制响应 → 验签 → 解密 → 明文 JSON。
+// finishTextDirect P2/P5：text 载荷直通——南向统一 text（D1，不经 embedding）。
+// 仅 quote 模式可用（服务端对无证明会话的 text 载荷 fail-closed 拒绝，防明文降级）；
+// 请求为段① K_enc 信封 + X-Session-ID，响应为 SSE 信封流（onResponseBody 解密重组）。
+func finishTextDirect(ctx wrapper.HttpContext, config PluginConfig, req *textRequest,
+	requestID string, seed []byte, nonceHex string, log logs.Log) {
+	defer wipe(seed)
+	if config.AttestMode != "quote" {
+		failClosed(log, "text 载荷引擎（tee_gpu/cmaas）须 quote 证明会话（token 模式不支持）")
+		return
+	}
+	messages, _ := json.Marshal([]map[string]string{{"role": "user", "content": req.Text}})
+	stream := true
+	if req.Stream != nil {
+		stream = *req.Stream
+	}
+	nonce, _ := hex.DecodeString(nonceHex)
+	infReq := &protocol.InferenceRequest{
+		RequestID:    requestID,
+		TimestampNS:  time.Now().UnixNano(),
+		Model:        config.Model,
+		MaxNewTokens: 256,
+		Nonce:        nonce,
+		EngineType:   req.EngineType,
+		AttestType:   protocol.AttestTypeQuote,
+		TextPayload:  messages,
+		Stream:       stream,
+	}
+	// M9-4：guardrail 密文文本（域分离掩码流，TEE 内解密检测；C-MaaS 无内容安全，本层补位）
+	if ct, err := maskText(seed, req.Text); err != nil {
+		failClosed(log, fmt.Sprintf("加密 guardrail 文本失败: %v", err))
+		return
+	} else {
+		infReq.CipherText = ct
+	}
+	if kSig := requestK_sig(config); kSig != nil {
+		protocol.SignRequest(kSig, infReq)
+	}
+	encBody, err := protocol.EncodeRequest(infReq)
+	if err != nil {
+		failClosed(log, fmt.Sprintf("编码协议请求失败: %v", err))
+		return
+	}
+	// P1b：quote 模式下南向协议请求整体入 K_enc 信封（段①，AAD 绑定 /v1/infer）
+	sealed, err := Session.sealPayload(protocol.EndpointInfer, encBody)
+	if err != nil {
+		failClosed(log, "推理请求加密失败: "+err.Error())
+		return
+	}
+	if err := proxywasm.ReplaceHttpRequestBody(sealed); err != nil {
+		failClosed(log, fmt.Sprintf("替换请求体失败: %v", err))
+		return
+	}
+	_ = proxywasm.ReplaceHttpRequestHeader("content-type", "application/octet-stream")
+	_ = proxywasm.ReplaceHttpRequestHeader("X-Session-ID", Session.SessionID)
+	log.Infof("otpmask-plugin: text 载荷协议请求构造完成 engine=%s stream=%v req=%s",
+		req.EngineType, stream, requestID[:8])
+	if err := proxywasm.ResumeHttpRequest(); err != nil {
+		log.Errorf("otpmask-plugin: ResumeHttpRequest 失败: %v", err)
+	}
+}
+
+// onResponseBody 响应侧解密（P1b：quote 模式段① 信封出口，fail-closed）：
+//
+//	quote 模式 + 200：响应必须为 s2c 信封——单响应（协议二进制）或 SSE 加密流；
+//	                 明文响应一律拒绝（防降级攻击）；非 200 错误体原样透传。
+//	token 模式：南向协议二进制 → 验签 → 解密 → 明文 SSE（既有流程）。
 func onResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, log logs.Log) types.Action {
+	if config.AttestMode == "quote" && responseStatus() == "200" {
+		if isSSEBody(body) {
+			// tee_gpu 流式响应：SSE 分片逐块解密 + 流内序号校验，重组客户端明文 SSE
+			plain, err := decryptSSEBody(body)
+			if err != nil {
+				// 会话密钥不同步（服务端重启等）→ 清会话触发重握手（与单响应分支一致）
+				Session.clear()
+				return respFailClosed(log, "SSE 流解密失败: "+err.Error())
+			}
+			if err := proxywasm.ReplaceHttpResponseBody(plain); err != nil {
+				return respFailClosed(log, fmt.Sprintf("替换响应体失败: %v", err))
+			}
+			_ = proxywasm.ReplaceHttpResponseHeader("content-type", "text/event-stream")
+			log.Infof("otpmask-plugin: SSE 流解密完成 session=%s", Session.SessionID[:8])
+			return types.HeaderContinue
+		}
+		// 单响应：信封解密 → 南向协议响应（走既有验签/解密）
+		pt, err := Session.openPayload(protocol.EndpointInfer, body)
+		if err != nil {
+			// 会话密钥不同步（服务端重启等）→ 清会话触发重握手；明文响应拒绝（fail-closed）
+			Session.clear()
+			return respFailClosed(log, "推理响应解密失败（疑似降级攻击）: "+err.Error())
+		}
+		body = pt
+	}
 	resp, err := protocol.DecodeResponse(body)
 	if err != nil {
 		// 非协议响应：TEE 已拒绝（403 guardrail / 400 协议错误），错误文本原样透传。

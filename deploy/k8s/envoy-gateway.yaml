@@ -36,16 +36,70 @@ data:
                 virtual_hosts:
                 - name: local_service
                   domains: ["*"]
+                  cors:
+                    # P0a：CORS（生产按需收紧 allow_origin_string_match，如仅企业域名）
+                    allow_origin_string_match:
+                    - prefix: "*"
+                    allow_methods: GET, POST, OPTIONS
+                    allow_headers: content-type, authorization, x-tenant-id, x-session-id, x-attest-token
+                    expose_headers: content-type
+                    max_age: "1728000"
                   routes:
                   - match:
                       prefix: "/infer"
                     route:
                       cluster: tee-infer
               http_filters:
+              - name: envoy.filters.http.cors
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
               - name: envoy.filters.http.buffer
                 typed_config:
                   "@type": type.googleapis.com/envoy.extensions.filters.http.buffer.v3.Buffer
                   max_request_bytes: 16777216
+              # P0a：IP 黑白名单（RBAC，fail-closed 语义：白名单内放行，其余 403）。
+              # 默认 0.0.0.0/0 = 放行全部；生产改为内网/管理网段 CIDR。
+              # 位于 wasm 加密链前端，仅按 source IP 决策，不接触密文 body。
+              - name: envoy.filters.http.rbac
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
+                  stat_prefix: rbac_ip
+                  rules:
+                    action: ALLOW
+                    policies:
+                      ip_allowlist:
+                        permissions:
+                        - any: true
+                        principals:
+                        - remote_ip:
+                            address_prefix: 0.0.0.0
+                            prefix_len: 0
+              # P0a：QPS 限流（Envoy 本地限流，进程内 token bucket，零外部依赖）。
+              # 集群级多副本一致限流需 envoy.filters.http.ratelimit + 独立 ratelimit 服务（Redis），
+              # 见 GA-AI网关能力补齐方案 §5 P0a 升级路径。超限返回 429。
+              - name: envoy.filters.http.local_ratelimit
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                  stat_prefix: http_local_rate_limiter
+                  token_bucket:
+                    max_tokens: 4000
+                    tokens_per_fill: 2000
+                    fill_interval: 1s
+                  filter_enabled:
+                    runtime_key: local_rate_limit_enabled
+                    default_value:
+                      numerator: 100
+                      denominator: HUNDRED
+                  filter_enforced:
+                    runtime_key: local_rate_limit_enforced
+                    default_value:
+                      numerator: 100
+                      denominator: HUNDRED
+                  response_headers_to_add:
+                  - append: false
+                    header:
+                      key: x-local-rate-limit
+                      value: "true"
               - name: otpmask
                 typed_config:
                   "@type": type.googleapis.com/udpa.type.v1.TypedStruct

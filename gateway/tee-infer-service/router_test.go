@@ -127,7 +127,104 @@ func TestDualRouteInferE2E(t *testing.T) {
 	}
 }
 
-// TestEngineTypeRouting 验证协议字段在 wire 上正确传递（masked_vector 请求可解析）。
+// TestOrderedEnginesCostPolicy D-6 成本路由：按价格升序。
+func TestOrderedEnginesCostPolicy(t *testing.T) {
+	cfg := DefaultRouteConfig()
+	cfg.Policy = "cost"
+	got := cfg.OrderedEngines("mock")
+	// mock Costs：cmaas 0.5 < masked_vector 1.5 < tee_gpu 3.0
+	want := []string{protocol.EngineTypeCMAAS, protocol.EngineTypeMaskedVector, protocol.EngineTypeTEEGPU}
+	assertEngineOrder(t, got, want)
+}
+
+// TestOrderedEnginesQualityPolicy 质量路由：按质量降序（tee_gpu 95 首选）。
+func TestOrderedEnginesQualityPolicy(t *testing.T) {
+	cfg := DefaultRouteConfig()
+	cfg.Policy = "quality"
+	got := cfg.OrderedEngines("mock")
+	want := []string{protocol.EngineTypeTEEGPU, protocol.EngineTypeMaskedVector, protocol.EngineTypeCMAAS}
+	assertEngineOrder(t, got, want)
+}
+
+// TestOrderedEnginesLatencyPolicy 延迟路由：按 P50 升序。
+func TestOrderedEnginesLatencyPolicy(t *testing.T) {
+	cfg := DefaultRouteConfig()
+	cfg.Policy = "latency"
+	got := cfg.OrderedEngines("mock")
+	// tee_gpu 80 < masked_vector 120 < cmaas 200
+	want := []string{protocol.EngineTypeTEEGPU, protocol.EngineTypeMaskedVector, protocol.EngineTypeCMAAS}
+	assertEngineOrder(t, got, want)
+}
+
+// TestOrderedEnginesNoPolicy 缺省策略保持声明序（向后兼容，不改变既有行为）。
+func TestOrderedEnginesNoPolicy(t *testing.T) {
+	cfg := DefaultRouteConfig()
+	got := cfg.OrderedEngines("mock")
+	want := []string{protocol.EngineTypeTEEGPU, protocol.EngineTypeMaskedVector, protocol.EngineTypeCMAAS}
+	assertEngineOrder(t, got, want)
+}
+
+// TestOrderedEnginesUnknownPolicy 未知策略保守保持声明序（防误路由）。
+func TestOrderedEnginesUnknownPolicy(t *testing.T) {
+	cfg := DefaultRouteConfig()
+	cfg.Policy = "weird"
+	got := cfg.OrderedEngines("mock")
+	want := []string{protocol.EngineTypeTEEGPU, protocol.EngineTypeMaskedVector, protocol.EngineTypeCMAAS}
+	assertEngineOrder(t, got, want)
+}
+
+// TestOrderedEnginesUnknownModel 未知模型回退缺省引擎单元素。
+func TestOrderedEnginesUnknownModel(t *testing.T) {
+	cfg := DefaultRouteConfig()
+	got := cfg.OrderedEngines("no-such-model")
+	if len(got) != 1 || got[0] != protocol.EngineTypeTEEGPU {
+		t.Fatalf("未知模型应回退 [tee_gpu], got %v", got)
+	}
+}
+
+// TestResolveEngineExplicitFailClosed 显式指定引擎不可用时 fail-closed（不静默降级）。
+func TestResolveEngineExplicitFailClosed(t *testing.T) {
+	srv, _ := newM9Server(t)
+	if _, err := srv.engineFor(protocol.EngineTypeCMAAS); err == nil {
+		t.Skip("测试环境已配置 cmaas，跳过 fail-closed 断言")
+	}
+	// 显式指定 cmaas 但未配置 → 必须返回 error（503），不得 failover 到 tee_gpu
+	if _, _, err := srv.resolveEngineWithFailover("t1", "mock", protocol.EngineTypeCMAAS); err == nil {
+		t.Fatal("显式指定 cmaas 未配置应 fail-closed，不得降级到其他引擎")
+	}
+}
+
+// TestResolveEngineAutoFailover 自动择优（preferred 为空）时按成本顺序 failover。
+func TestResolveEngineAutoFailover(t *testing.T) {
+	srv, _ := newM9Server(t)
+	// 默认无 cmaas：成本策略下首候选 cmaas 应被跳过，failover 到后续引擎
+	srv.route.Policy = "cost"
+	et, eng, err := srv.resolveEngineWithFailover("t1", "mock", "")
+	if err != nil {
+		t.Fatalf("自动择优 failover 应成功，但失败: %v", err)
+	}
+	// mock 成本排序：cmaas(0.5) < masked_vector(1.5) < tee_gpu(3.0)；
+	// cmaas 未配置被跳过 → 应落到 masked_vector（engineFor 可服务）或 tee_gpu
+	if et != protocol.EngineTypeMaskedVector && et != protocol.EngineTypeTEEGPU {
+		t.Fatalf("failover 应落到可用引擎，got %q", et)
+	}
+	if eng == nil {
+		t.Fatal("返回引擎不应为 nil")
+	}
+}
+
+func assertEngineOrder(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("引擎顺序长度不匹配: got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("引擎顺序不匹配（索引 %d）: got %v want %v", i, got, want)
+		}
+	}
+}
+
 func TestEngineTypeRouting(t *testing.T) {
 	km, _ := teecore.NewKeyManager(0)
 	req := &protocol.InferenceRequest{

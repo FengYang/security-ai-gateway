@@ -1,0 +1,113 @@
+# 安全插件扩展（GF.2.1 WAF/Bot + GF.2.2 OAuth/OIDC，全部 FAIL_CLOSED）
+#
+# 本文件在 security-plugins.yaml（key-auth / ip-restriction / local-rate-limit / cors）
+# 基础上补齐生态插件的**启用模板**，链序与既有插件一致（phase/priority 由插件内建
+# 元数据保证，此处显式声明 phase/priority 便于核对与覆盖）：
+#   cors(340) → key-auth(AUTHN,321) → bot-detect(AUTHZ,310) → ip-restriction(AUTHZ,210)
+#   → waf(AUTHZ,330) → rate-limit(RATE_LIMIT) → otpmask(DEFAULT, 段① 加密) → 路由
+#
+# 关键边界（方案 §3.10.4 / 研发计划 GF.2.1）：推理路径 body 为段① 密文，WAF/Bot 仅做
+# **元数据级**防护（URL / Header / User-Agent / Method / 客户端 IP），不做密文内容检测；
+# 内容安全由 tee-infer Guardrail 承担。WAF 建议先以 DetectionOnly 影子模式观察，
+# 无误杀后再切 On（研发计划 GF.2.1 风险项）。
+#
+# 字段级核验（GF.1.7）：以下配置字段对齐 Higress v2.1.5 官方插件 schema
+# （bot-detect: allow/deny/blocked_code/blocked_message；waf: sec_rule_engine/default_rule_set），
+# 接入前仍须在目标版本上做字段级复核；OAuth/OIDC 依赖企业 IdP，字段按 IdP 填充并核验。
+
+---
+# Bot Detect：基于 User-Agent 的爬虫/扫描器识别（AUTHZ，priority 310）
+# allow/deny 均为正则数组；blocked_code 默认 403。
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: bot-detect
+  namespace: higress-system
+  annotations:
+    higress.io/wasm-plugin-title: Bot Detect
+    higress.io/wasm-plugin-category: security
+spec:
+  url: http://localhost:8002/plugins/bot-detect/1.0.0/plugin.wasm
+  failStrategy: FAIL_CLOSED
+  phase: AUTHZ
+  priority: 310
+  matchRules:
+  - ingress:
+    - infer
+    config:
+      # 放行规则（优先于 deny）：搜索引擎/监控探活，避免误杀正常流量
+      allow:
+      - "(?i)(googlebot|bingbot|baiduspider|yandexbot|duckduckbot)"
+      - "(?i)(uptimerobot|pingdom|site24x7|datadog)"
+      # 拦截规则：常见扫描器/无头浏览器/恶意爬虫框架
+      deny:
+      - "(?i)(sqlmap|nikto|nmap|masscan|zgrab|nuclei)"
+      - "(?i)(phantomjs|headless|selenium|puppeteer|playwright)"
+      - "(?i)(scrapy|python-requests|go-http-client|java/|okhttp)"
+      blocked_code: 403
+      blocked_message: "forbidden: automated client detected"
+
+---
+# WAF：Coraza 规则引擎（AUTHZ，priority 330）
+# 边界：仅元数据级防护（密文 body 不检测）；先影子模式（DetectionOnly）观察，
+# 确认无误杀后切 On（GF.2.1）。
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: waf
+  namespace: higress-system
+  annotations:
+    higress.io/wasm-plugin-title: WAF
+    higress.io/wasm-plugin-category: security
+spec:
+  url: http://localhost:8002/plugins/waf/1.0.0/plugin.wasm
+  failStrategy: FAIL_CLOSED
+  phase: AUTHZ
+  priority: 330
+  matchRules:
+  - ingress:
+    - infer
+    config:
+      # DetectionOnly：只记录不拦截（影子模式，生产切换前首阶段）
+      # 稳定无误杀后改为 "On"（fail-closed 拦截）；"Off" 禁用。
+      sec_rule_engine: "DetectionOnly"
+      # 默认规则集：owasp_crs（OWASP CRS，默认）/ coraza_hyper（轻量）
+      default_rule_set: "owasp_crs"
+
+---
+# OAuth2/OIDC 接入企业 IdP（GF.2.2，ext-authz；AUTHN，priority 350）
+#
+# 说明（研发计划 GF.2.2）：
+#   - 与 key-auth（调用方 API Key）、otpmask 内部 JWT（租户）三层叠加，claim 边界先评审；
+#   - 本模板为接入骨架，client_id/client_secret 严禁明文，走 KMS/Vault（GF.2.5）；
+#   - 实际字段（授权/令牌/用户信息端点、redirect、scope、claim 映射）按企业 IdP 填充，
+#     并在目标 Higress 版本做字段级核验（GF.1.7）后方可上线。
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: oauth-oidc
+  namespace: higress-system
+  annotations:
+    higress.io/wasm-plugin-title: OAuth / OIDC
+    higress.io/wasm-plugin-category: auth
+spec:
+  url: http://localhost:8002/plugins/oauth/1.0.0/plugin.wasm
+  failStrategy: FAIL_CLOSED
+  phase: AUTHN
+  priority: 350
+  matchRules:
+  - ingress:
+    - infer
+    config:
+      # 以下为接入骨架，按企业 IdP 实际参数填充（字段级核验 GF.1.7）
+      auth_url: "https://idp.example.com/authorize"
+      token_url: "https://idp.example.com/token"
+      user_info_url: "https://idp.example.com/userinfo"
+      client_id: "CHANGE_ME_OIDC_CLIENT_ID"
+      client_secret: "__OIDC_CLIENT_SECRET__"   # KMS/Vault 注入，严禁明文（GF.2.5）
+      cookie_secret: "__OIDC_COOKIE_SECRET__"   # KMS/Vault 注入
+      redirect_url: "https://gateway.example.com/oauth2/callback"
+      scopes:
+      - "openid"
+      - "profile"
+      - "email"

@@ -33,6 +33,10 @@ type AuditEvent struct {
 	Result     string `json:"result"` // ok / deny
 	PayloadSHA string `json:"payload_hash"`
 	PrevHash   string `json:"prev_hash"` // 哈希链
+	// P2a：改造后明文哈希（装饰/脱敏后的引擎实收内容；附加证据字段）。
+	// 不进 hash()（保持 WORM 旧链向后兼容）——链完整性由 PayloadSHA 段保障，
+	// TransformedHash 供"引擎实际收到什么"回溯（双 hash 审计）。
+	TransformedHash string `json:"transformed_hash,omitempty"`
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。

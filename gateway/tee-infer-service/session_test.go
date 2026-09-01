@@ -64,41 +64,69 @@ func TestSessionCompleteOnce(t *testing.T) {
 	}
 }
 
-// TestVerifyAttestationProof 证明链验证通过；篡改 app_hash / 伪造签名 / 错误 nonce 被拒。
+// TestVerifyAttestationProof 证明链验证通过；篡改 app_hash / 伪造签名 / report_data 绑定不匹配被拒。
+// report_data = H(nonce ‖ server_pub)：客户端用自己发出的 nonce 与服务端临时公钥
+// 计算期望绑定材料，防止中间人替换握手公钥（P1b / 评审 F3）。
 func TestVerifyAttestationProof(t *testing.T) {
 	e, _ := NewMockEnclave()
 	measure, _ := e.Measure()
 	expectedHash := hex.EncodeToString(measure)
 
-	// 合法载荷通过
 	challenge, _ := randomNonce()
-	proof, err := e.Attest(challenge)
+	serverPub := []byte("server-ephemeral-pub-raw-bytes!!!")
+	expectedRD := reportDataBinding(challenge, serverPub)
+
+	// 合法载荷通过（含 report_data 绑定强校验）
+	proof, err := e.Attest(challenge, expectedRD)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyAttestationProof(proof, expectedHash); err != nil {
+	if err := VerifyAttestationProof(proof, expectedHash, expectedRD); err != nil {
 		t.Fatalf("合法载荷被拒: %v", err)
 	}
 	if !bytes.Equal(proof.Nonce, challenge) {
 		t.Fatal("nonce 回显不一致")
 	}
+	// 不传期望绑定（宽松模式，向后兼容）也通过
+	if err := VerifyAttestationProof(proof, expectedHash, nil); err != nil {
+		t.Fatalf("宽松校验被拒: %v", err)
+	}
+
+	// report_data 与期望绑定不匹配（中间人替换握手公钥场景）→ 拒绝
+	mitmRD := reportDataBinding(challenge, bytes.Repeat([]byte{0x33}, 32))
+	if err := VerifyAttestationProof(proof, expectedHash, mitmRD); err == nil {
+		t.Fatal("report_data 绑定不匹配未被拒绝")
+	}
+
+	// report_data 缺失 → 拒绝
+	proofEmptyRD := *proof
+	proofEmptyRD.ReportData = nil
+	if err := VerifyAttestationProof(&proofEmptyRD, expectedHash, nil); err == nil {
+		t.Fatal("缺少 report_data 未被拒绝")
+	}
+
+	// 篡改 report_data（签名覆盖 report_data，篡改即验签失败）→ 拒绝
+	proofBadRD := *proof
+	proofBadRD.ReportData = bytes.Repeat([]byte{0x44}, 32)
+	if err := VerifyAttestationProof(&proofBadRD, expectedHash, nil); err == nil {
+		t.Fatal("篡改 report_data 未被拒绝")
+	}
 
 	// 篡改 app_hash → 拒绝
-	proof.Measurements["app_hash"] = hex.EncodeToString(bytes.Repeat([]byte{0xAB}, 32))
-	if err := VerifyAttestationProof(proof, expectedHash); err == nil {
+	proofBadHash := *proof
+	proofBadHash.Measurements = map[string]string{
+		"app_hash": hex.EncodeToString(bytes.Repeat([]byte{0xAB}, 32)),
+		"runtime":  "mock",
+	}
+	if err := VerifyAttestationProof(&proofBadHash, expectedHash, expectedRD); err == nil {
 		t.Fatal("篡改 app_hash 未被拒绝")
 	}
-	// 恢复并伪造签名 → 拒绝
-	proof.Measurements["app_hash"] = expectedHash
-	proof.Signature = bytes.Repeat([]byte{0x01}, 64)
-	if err := VerifyAttestationProof(proof, expectedHash); err == nil {
+
+	// 伪造签名 → 拒绝
+	proofBadSig := *proof
+	proofBadSig.Signature = bytes.Repeat([]byte{0x01}, 64)
+	if err := VerifyAttestationProof(&proofBadSig, expectedHash, expectedRD); err == nil {
 		t.Fatal("伪造签名未被拒绝")
-	}
-	// 错误 nonce 回显（篡改 nonce）→ 拒绝
-	proof2, _ := e.Attest(challenge)
-	proof2.Nonce = bytes.Repeat([]byte{0x02}, 32)
-	if err := VerifyAttestationProof(proof2, expectedHash); err == nil {
-		t.Fatal("错误 nonce 未被拒绝")
 	}
 }
 

@@ -1,16 +1,19 @@
 package main
 
-// 插件侧远程证明会话管理。
+// 插件侧远程证明会话管理（P1b 升级：会话承载 K_enc，段① 信封通道）。
 //
 // quote 模式（attest_mode=quote）：首次请求前发起挑战-响应握手：
 // 1. POST /attest {nonce} → 证明载荷 + 服务端 ECDH 公钥
-// 2. 验证证明链（nonce 回显 + app_hash + 签名）
+// 2. 验证证明链：nonce 回显 + report_data 绑定 H(nonce‖server_pub)（防握手公钥
+//    替换/MITM，RA-TLS 标准做法）+ app_hash 比对 + 签名验证
 // 3. 生成客户端 ECDH 密钥对 → POST /attest/complete
-// 4. 派生会话 K_sig，后续请求携带 X-Session-ID + 会话签名
+// 4. 派生会话 K_sig（协议签名）与 K_enc（段① 信封加密），后续请求：
+//    - X-Session-ID 头 + 会话签名（K_sig）
+//    - 请求体/响应体/SSE 分片整体入 AES-256-GCM 信封（K_enc，方向子密钥）
 //
-// token 模式（缺省，向后兼容）：沿用 X-Attest-Token MVP 凭证。
+// token 模式（缺省，向后兼容）：沿用 X-Attest-Token MVP 凭证，明文南向协议（dev）。
 //
-// Wasm 环境限制：ECDH/X25519 与 ECDSA 验签均为纯 Go 标准库（无 cgo），
+// Wasm 环境限制：ECDH/X25519、ECDSA 验签与 AES-GCM 均为纯 Go 标准库（无 cgo），
 // 可在 wasip1 编译。
 
 import (
@@ -32,53 +35,96 @@ import (
 
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	logs "github.com/higress-group/wasm-go/pkg/log"
+
+	"security-ai-gateway/protocol/go"
 )
 
 // attestSession 插件侧会话（进程级单例，跨请求复用）。
 type attestSession struct {
-	mu        sync.Mutex
-	SessionID string
-	K_sig     []byte
-	ExpiresAt time.Time
+	mu          sync.Mutex
+	SessionID   string
+	K_sig       []byte
+	K_enc       []byte                     // 段① 信封加密密钥（P1b）
+	sendCounter uint64                     // c2s 单调计数器（下一信封取值，从 1 起）
+	recvWindow  protocol.CounterWindow     // s2c 反重放滑动窗口（key/issue 响应 + 推理响应 + SSE 分片共用）
+	ExpiresAt   time.Time
 }
 
 // sessionTTL 会话有效期（与服务端 sessionTTL=5min 对齐，）。
 const sessionTTL = 5 * time.Minute
 
-// valid 会话是否有效（未过期）。
+// valid 会话是否有效（未过期，双密钥齐备）。
 func (s *attestSession) valid() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.SessionID != "" && len(s.K_sig) == 32 && time.Now().Before(s.ExpiresAt)
+	return s.SessionID != "" && len(s.K_sig) == 32 && len(s.K_enc) == 32 && time.Now().Before(s.ExpiresAt)
 }
 
-// set 更新会话。
-func (s *attestSession) set(id string, kSig []byte) {
+// set 更新会话（重置计数器与反重放窗口——新会话 nonce 空间全新）。
+func (s *attestSession) set(id string, kSig, kEnc []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.SessionID = id
 	s.K_sig = append([]byte(nil), kSig...)
+	s.K_enc = append([]byte(nil), kEnc...)
+	s.sendCounter = 1
+	s.recvWindow = protocol.CounterWindow{}
 	s.ExpiresAt = time.Now().Add(sessionTTL)
 }
 
-// clear 清除会话。
+// clear 清除会话（密钥零化，best-effort：Go GC 下切片拷贝不可控，威胁模型如实声明）。
 func (s *attestSession) clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.K_sig {
 		s.K_sig[i] = 0
 	}
+	for i := range s.K_enc {
+		s.K_enc[i] = 0
+	}
 	s.SessionID = ""
 	s.K_sig = nil
+	s.K_enc = nil
+	s.sendCounter = 0
+	s.recvWindow = protocol.CounterWindow{}
+}
+
+// sealPayload 以会话 K_enc 加密 c2s 载荷（计数器单调递增保证 nonce 唯一）。
+func (s *attestSession) sealPayload(endpoint string, plaintext []byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.SessionID == "" || len(s.K_enc) != 32 {
+		return nil, errors.New("envelope: 会话未建立或 K_enc 缺失")
+	}
+	counter := s.sendCounter
+	s.sendCounter++
+	return protocol.SealEnvelope(s.K_enc, s.SessionID, endpoint, protocol.DirectionC2S, counter, plaintext)
+}
+
+// openPayload 解密 s2c 信封并做反重放窗口校验（重放/越窗拒绝）。
+func (s *attestSession) openPayload(endpoint string, wire []byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.SessionID == "" || len(s.K_enc) != 32 {
+		return nil, errors.New("envelope: 会话未建立或 K_enc 缺失")
+	}
+	pt, counter, err := protocol.OpenEnvelope(s.K_enc, s.SessionID, endpoint, protocol.DirectionS2C, wire)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.recvWindow.Check(counter); err != nil {
+		return nil, err
+	}
+	return pt, nil
 }
 
 // Session 全局会话（进程级）。
 var Session = &attestSession{}
 
 // doAttestHandshake 挑战-响应握手（quote 模式）：
-// attest → 验证链 → complete → 派生会话 K_sig。
-// 完成后调用 onDone(sessionID, ksig)；任一失败调用 onFail(msg)。
-func doAttestHandshake(config PluginConfig, log logs.Log, onDone func(id string, ksig []byte), onFail func(msg string)) {
+// attest → 验证链（含 report_data 绑定）→ complete → 派生会话 K_sig/K_enc。
+// 完成后调用 onDone(sessionID, ksig, kenc)；任一失败调用 onFail(msg)。
+func doAttestHandshake(config PluginConfig, log logs.Log, onDone func(id string, ksig, kenc []byte), onFail func(msg string)) {
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		onFail("生成 nonce 失败: " + err.Error())
@@ -97,17 +143,22 @@ func doAttestHandshake(config PluginConfig, log logs.Log, onDone func(id string,
 				return
 			}
 			var ar struct {
-				Status    string            `json:"status"`
-				SessionID string            `json:"session_id"`
-				ServerPub string            `json:"server_pub"`
-				Proof     map[string]any    `json:"proof"`
+				Status    string         `json:"status"`
+				SessionID string         `json:"session_id"`
+				ServerPub string         `json:"server_pub"`
+				Proof     map[string]any `json:"proof"`
 			}
 			if err := json.Unmarshal(body, &ar); err != nil {
 				onFail("解析 attest 响应失败: " + err.Error())
 				return
 			}
-			// 验证链
-			if err := verifyPluginProof(ar.Proof, nonce, config.ExpectedAppHash); err != nil {
+			serverPub, err := hex.DecodeString(ar.ServerPub)
+			if err != nil {
+				onFail("server_pub hex 解码失败")
+				return
+			}
+			// 验证链（含 report_data = H(nonce‖server_pub) 绑定，防握手公钥替换）
+			if err := verifyPluginProof(ar.Proof, nonce, serverPub, config.ExpectedAppHash); err != nil {
 				onFail("证明链验证失败: " + err.Error())
 				return
 			}
@@ -117,17 +168,11 @@ func doAttestHandshake(config PluginConfig, log logs.Log, onDone func(id string,
 				onFail("生成客户端密钥失败: " + err.Error())
 				return
 			}
-			serverPub, err := hex.DecodeString(ar.ServerPub)
-			if err != nil {
-				onFail("server_pub hex 解码失败")
-				return
-			}
 			ksig, kenc, err := derivePluginSessionKey(clientPriv, serverPub, nonce)
 			if err != nil {
 				onFail("派生会话密钥失败: " + err.Error())
 				return
 			}
-			_ = kenc // K_enc 预留（key_issue 响应加密，后续）
 			// complete
 			compBody, _ := json.Marshal(map[string]string{
 				"session_id": ar.SessionID,
@@ -139,8 +184,8 @@ func doAttestHandshake(config PluginConfig, log logs.Log, onDone func(id string,
 						onFail(fmt.Sprintf("attest/complete 返回 %d", code))
 						return
 					}
-					log.Infof("otpmask-plugin: 挑战-响应握手完成 session=%s", ar.SessionID[:8])
-					onDone(ar.SessionID, ksig)
+					log.Infof("otpmask-plugin: 挑战-响应握手完成 session=%s（K_enc 通道就绪）", ar.SessionID[:8])
+					onDone(ar.SessionID, ksig, kenc)
 				}, 5000)
 			if err != nil {
 				onFail("调用 attest/complete 失败: " + err.Error())
@@ -152,8 +197,12 @@ func doAttestHandshake(config PluginConfig, log logs.Log, onDone func(id string,
 }
 
 // verifyPluginProof 插件侧证明链验证：
-// 1. nonce 回显 == 客户挑战；2. app_hash == 期望；3. signature 与 signing_key 匹配。
-func verifyPluginProof(proof map[string]any, challenge []byte, expectedAppHash string) error {
+// 1. nonce 回显 == 客户挑战；
+// 2. report_data == H(nonce ‖ server_pub)（绑定握手公钥，防 MITM 替换）；
+// 3. app_hash == 期望测量值（配置时）；
+// 4. 签名覆盖 (report_data ‖ signing_key)。
+// 真实 TDX quote 下签名链根植 Intel CA（P3 验证 sidecar 完成）；mock 模式为开发占位。
+func verifyPluginProof(proof map[string]any, challenge, serverPub []byte, expectedAppHash string) error {
 	if proof == nil {
 		return errors.New("attest: 空证明载荷")
 	}
@@ -164,6 +213,16 @@ func verifyPluginProof(proof map[string]any, challenge []byte, expectedAppHash s
 	}
 	if subtle.ConstantTimeCompare(gotNonce, challenge) != 1 {
 		return errors.New("attest: nonce 回显不匹配")
+	}
+	// report_data 绑定：H(nonce ‖ server_ephemeral_pub)
+	wantReportData := reportDataBinding(challenge, serverPub)
+	reportDataHex, _ := proof["report_data"].(string)
+	gotReportData, err := hex.DecodeString(reportDataHex)
+	if err != nil || len(gotReportData) == 0 {
+		return errors.New("attest: 证明缺少 report_data")
+	}
+	if subtle.ConstantTimeCompare(gotReportData, wantReportData) != 1 {
+		return errors.New("attest: report_data 与 H(nonce‖server_pub) 不匹配（疑似握手公钥被替换）")
 	}
 	measurements, _ := proof["measurements"].(map[string]any)
 	if expectedAppHash != "" {
@@ -186,7 +245,7 @@ func verifyPluginProof(proof map[string]any, challenge []byte, expectedAppHash s
 	if x == nil {
 		return errors.New("attest: signing_key 非 P-256 公钥")
 	}
-	toSign := append(append([]byte(nil), challenge...), key...)
+	toSign := append(append([]byte(nil), gotReportData...), key...)
 	h := sha256.Sum256(toSign)
 	if len(sig) != 64 {
 		return errors.New("attest: 签名长度须为 64")
@@ -198,6 +257,14 @@ func verifyPluginProof(proof map[string]any, challenge []byte, expectedAppHash s
 		return errors.New("attest: 证明签名无效")
 	}
 	return nil
+}
+
+// reportDataBinding quote report_data 绑定材料：H(nonce ‖ server_pub)。
+func reportDataBinding(nonce, serverPub []byte) []byte {
+	h := sha256.New()
+	h.Write(nonce)
+	h.Write(serverPub)
+	return h.Sum(nil)
 }
 
 // constTimeHexEq 常量时间 hex 比较。

@@ -34,6 +34,20 @@
 // 签名：HMAC-SHA256(K_sig, request_id || timestamp_ns || nonce || payload)
 //   - K_sig 与掩码密钥分离（4.2.3），MVP 由环境变量注入，生产 TEE 签发
 //   - 防重放：timestamp_ns 窗口 30s + request_id 去重
+//
+// 段① 载荷加密信封（P1a，GA-路线1发布规划；见 protocol/go/envelope.go）：
+//
+//	Envelope:
+//	  varint version      信封格式版本（当前 1）
+//	  varint suite        密码套件 ID（1 = AES-256-GCM；国密 SM4-GCM 预留）
+//	  byte  direction     1 = c2s（网关→TEE），2 = s2c（TEE→网关）
+//	  8 字节大端 counter  64bit 单调计数器
+//	  bytes ciphertext    varint 长度 + AEAD 密文（含 16 字节 GCM tag）
+//
+//   - 方向子密钥：HKDF-SHA256(K_enc, info="otpmask/kdf/enc/{c2s|s2c}/v1")
+//   - nonce：12 字节 = "OTPE" + 8 字节大端计数器（同方向计数器唯一 ⇒ nonce 唯一）
+//   - AAD（不随 wire 传输）：sessionID/方向/计数器/endpoint 规范化序列化
+//   - 反重放：接收侧 CounterWindow 64 槽滑动窗口（请求）或严格递增校验（SSE 分片）
 
 syntax = "proto3";
 
@@ -70,4 +84,13 @@ message InferenceResponse {
   CipherVector cipher_output = 4;
   uint32 tokens_generated = 5;
   bytes signature = 6;
+}
+
+// 段① 加密信封（P1a；wire 见文件头注释，Go/Python 双实现逐位一致）
+message Envelope {
+  uint32 version = 1;    // 信封格式版本（当前 1）
+  uint32 suite = 2;      // 密码套件 ID（1 = AES-256-GCM；国密预留）
+  uint32 direction = 3;  // 1 = c2s（网关→TEE），2 = s2c（TEE→网关）
+  uint64 counter = 4;    // 64bit 单调计数器（nonce 与 AAD 的来源）
+  bytes ciphertext = 5;  // AEAD 密文（含 16 字节 GCM tag）
 }

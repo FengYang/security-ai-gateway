@@ -1,0 +1,55 @@
+# otpmask 插件 WasmPlugin 挂载（P0b：形态 A → 形态 B 迁移）
+#
+# 背景：D-0 修正为 Higress 控制面形态。otpmask 插件代码零改动
+# （Proxy-Wasm ABI 兼容），仅挂载方式从 envoy.yaml 裸挂改为 WasmPlugin CRD。
+#
+# 插件分发（wasm 7.1MB 超 ConfigMap 1MiB，二选一）：
+#   1. OCI artifact（推荐）：编译 main.wasm（Go wasip1）后用
+#      oras push <registry>/plugins/otpmask:1.0.0 \
+#        --artifact-type application/vnd.module.wasm.content.layer.v1+wasm main.wasm
+#      （或 docker buildx imagetools 方式；如用镜像内打包需先补 Dockerfile.oci）
+#      并将下方 url 改为: oci://<registry>/plugins/otpmask:1.0.0
+#   2. 本地 HTTP 服务（与 key-auth.internal 同机制）：
+#      将 main.wasm 放到网关可访问的静态服务，url: http://<host>/otpmask/1.0.0/plugin.wasm
+#
+# phase/priority：phase 缺省（DEFAULT）→ 在 AUTHN（key-auth 等）之后执行，
+# 保证"外部认证/安全 → otpmask 段① 加密"的链序；failStrategy FAIL_CLOSED
+# （评审 P0 强制项：插件故障即拒绝，不降级放行）。
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: otpmask
+  namespace: higress-system
+spec:
+  # url 为插件 wasm 拉取地址（OCI 或 HTTP）；按上方说明替换为实际地址。
+  # 占位值指向仓库内置镜像（构建后推送真实 registry 时替换）。
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/otpmask:1.0.0
+  failStrategy: FAIL_CLOSED
+  defaultConfigDisable: false
+  matchRules:
+  - ingress:
+    - infer
+    configDisable: false
+    config:
+      mask_modulus: "4294967296"
+      model: "mock"
+      embedding_service: "embedding_service"
+      embedding_port: "18080"
+      tee_service: "tee_infer_service"
+      tee_port: "19090"
+      # 密钥生产化（评审 P0，2026-09-01）：以下两项仅在 token 模式（attest_mode: token）下
+      # 使用，且必须与 tee-infer 侧 otpmask-keys Secret 完全一致（sig_key 用于协议签名
+      # 验签、attest_token 为共享证明凭证），否则签名/证明校验 fail-closed 拒绝。
+      # 当前 attest_mode=quote 下二者不生效（用挑战-响应会话 K_sig），但仍严禁硬编码
+      # 演示值——生产由部署流水线从 K8s Secret（otpmask-secret.yaml）经 Kustomize/Helm/
+      # CI 变量替换注入占位符；切回 token 模式前必须完成注入，见 deploy/higress/README.md §6。
+      sig_key: "__SIG_KEY_HEX__"
+      attest_token: "__ATTEST_TOKEN_HEX__"
+      attest_mode: "quote"
+  defaultConfig:
+    # 默认配置（未匹配 Ingress 时兜底；与 matchRules.config 同构）
+    mask_modulus: "4294967296"
+    model: "mock"
+    tee_service: "tee_infer_service"
+    tee_port: "19090"
+    attest_mode: "quote"

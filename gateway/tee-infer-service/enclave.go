@@ -20,6 +20,7 @@ import (
 type AttestationProof struct {
 	Nonce        []byte            `json:"nonce"`
 	Platform     string            `json:"platform"`
+	ReportData   []byte            `json:"report_data"` // quote 绑定材料：H(nonce ‖ server_pub)（P1b，防握手公钥替换）
 	Quote        []byte            `json:"quote,omitempty"`
 	Measurements map[string]string `json:"measurements"`
 	SigningKey   []byte            `json:"signing_key"`
@@ -28,7 +29,9 @@ type AttestationProof struct {
 
 // Enclave 定义飞地能力的抽象接口
 type Enclave interface {
-	Attest(challenge []byte) (*AttestationProof, error)
+	// Attest 生成证明载荷；reportData 为握手绑定材料（quote report_data，
+	// 真实 TDX 下注入 quote 的 REPORTDATA 字段，随证书链根植信任根）。
+	Attest(challenge, reportData []byte) (*AttestationProof, error)
 	Seal(plaintext []byte, context string) ([]byte, error)
 	Unseal(ciphertext []byte, context string) ([]byte, error)
 	Measure() ([]byte, error)
@@ -146,10 +149,15 @@ func (e *MockEnclave) Unseal(ciphertext []byte, context string) ([]byte, error) 
 	return plain, nil
 }
 
-// Attest 生成模拟证明，mock 模式 Quote 为空，签名用测试私钥自签
-func (e *MockEnclave) Attest(challenge []byte) (*AttestationProof, error) {
+// Attest 生成模拟证明，mock 模式 Quote 为空，签名用测试私钥自签。
+// 签名覆盖 (reportData ‖ signing_key)：reportData 含 H(nonce‖server_pub)，
+// 客户端据此外验握手公钥绑定（真实 TDX 下 reportData 注入 quote REPORTDATA 字段）。
+func (e *MockEnclave) Attest(challenge, reportData []byte) (*AttestationProof, error) {
+	if len(reportData) == 0 {
+		return nil, errors.New("enclave: report_data 为空（握手绑定材料必填）")
+	}
 	signingPub := elliptic.Marshal(e.signKey.PublicKey.Curve, e.signKey.PublicKey.X, e.signKey.PublicKey.Y)
-	toSign := append(append([]byte(nil), challenge...), signingPub...)
+	toSign := append(append([]byte(nil), reportData...), signingPub...)
 	h := sha256.Sum256(toSign)
 	r, s, err := ecdsa.Sign(rand.Reader, e.signKey, h[:])
 	if err != nil {
@@ -157,8 +165,9 @@ func (e *MockEnclave) Attest(challenge []byte) (*AttestationProof, error) {
 	}
 	sigBytes := encodeSig(r, s)
 	return &AttestationProof{
-		Nonce:    challenge,
-		Platform: e.platform,
+		Nonce:      challenge,
+		Platform:   e.platform,
+		ReportData: append([]byte(nil), reportData...),
 		Measurements: map[string]string{
 			"app_hash": hex.EncodeToString(e.measure),
 			"runtime":  "mock",
@@ -204,6 +213,7 @@ func (p *AttestationProof) proofJSON() (string, error) {
 	out, err := json.Marshal(map[string]any{
 		"nonce":        hex.EncodeToString(p.Nonce),
 		"platform":     p.Platform,
+		"report_data":  hex.EncodeToString(p.ReportData),
 		"quote_len":    len(p.Quote),
 		"measurements": p.Measurements,
 		"signing_key":  hex.EncodeToString(p.SigningKey),

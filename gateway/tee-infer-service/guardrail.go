@@ -120,6 +120,29 @@ func normalize(s string) string {
 	return b.String()
 }
 
+// maskPII 对文本中的 PII 命中做脱敏替换（P2a，数据保护类）：
+// 手机号/身份证/银行卡替换为 [已脱敏]（保留数字边界字符），邮箱替换为 [已脱敏]。
+// 返回脱敏文本与命中数。基于 normalize 后文本替换（与 check 的混淆归一化一致）；
+// 插入空白/连字符的混淆格式 PII 由 check 拦截处理（fail-closed），不在此脱敏路径。
+// SQL 注入/提示注入属攻击类，一律走拦截，不脱敏放行。
+func (g *guardrail) maskPII(text string) (string, int) {
+	norm := normalize(text)
+	hits := 0
+	for _, re := range g.piiPatterns {
+		norm = re.ReplaceAllStringFunc(norm, func(m string) string {
+			sub := re.FindStringSubmatch(m)
+			if len(sub) > 2 && sub[2] != "" {
+				// 数字边界捕获组模式：仅替换中间组，保留前后边界字符
+				hits++
+				return sub[1] + "[已脱敏]" + sub[3]
+			}
+			hits++
+			return "[已脱敏]"
+		})
+	}
+	return norm, hits
+}
+
 // compactText 移除空白与连字符（PII 数字串混淆防御）。
 func compactText(s string) string {
 	return strings.Map(func(r rune) rune {

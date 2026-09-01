@@ -35,7 +35,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
-        self.end_headers
+        self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
@@ -80,12 +80,12 @@ def _generate_vllm(llm, sampling, text):
     return list(out[0].outputs[0].token_ids)
 
 
-def main:
+def main():
     ap = argparse.ArgumentParser(description='vLLM 密态对接适配器（TEE 内）')
     ap.add_argument('--listen', default=':19190', help='监听地址')
     ap.add_argument('--mock', action='store_true', help='mock 引擎（本地无 GPU 验证）')
     ap.add_argument('--model', default='', help='真实 vLLM 模型（需 GPU + vllm 安装）')
-    args = ap.parse_args
+    args = ap.parse_args()
 
     if not args.mock and args.model:
         from vllm import LLM, SamplingParams  # 延迟导入：无 GPU 环境不加载
@@ -96,8 +96,8 @@ def main:
     srv = ThreadingHTTPServer((host or '0.0.0.0', int(port)), Handler)
     engine = 'mock' if args.mock else 'vllm'
     print(f'vllm-adapter ready on {args.listen} engine={engine}')
-    srv.serve_forever
+    srv.serve_forever()
 
 
 if __name__ == '__main__':
-    main
+    main()
