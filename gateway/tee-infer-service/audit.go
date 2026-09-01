@@ -39,6 +39,13 @@ type AuditEvent struct {
 	TransformedHash string `json:"transformed_hash,omitempty"`
 	// GF.4.1：精确缓存命中标记（演示实现）。同样不进 hash()，仅作审计证据字段。
 	CacheHit bool `json:"cache_hit,omitempty"`
+	// GF.4.2：服务商 key 指纹（sha256 前 8 hex，多账号消耗归属；不暴露明文 key）。
+	// 租户维度（tenant_id，配额/计费）与平台维度（key_fp，成本核算）双口径分离。
+	// 同样不进 hash()（证据字段）。
+	KeyFP string `json:"key_fp,omitempty"`
+	// GF.2.4：计量口径标记（estimate=估算未校准 / tokenizer=真机已校准）。
+	// 证据字段，不进 hash()。
+	MeteringMode string `json:"metering_mode,omitempty"`
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。

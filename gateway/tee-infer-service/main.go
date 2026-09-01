@@ -857,7 +857,8 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		txHash = sha256hex([]byte(sb.String()))
 	}
 	// P1：配额预占（输入 token，超限 429 fail-closed；原子占位防并发超卖。
-	// 计量口径为估算（字符/4），生产须接入真机 tokenizer，见 GA-AI网关能力补齐方案 D-3）
+	// 计量口径为 CJK 感知估算（过渡口径，GF.2.4），生产须接入真机 tokenizer，
+	// 见 GA-AI网关能力补齐方案 D-3）
 	if !s.reserveQuota(tenant, int64(s.countTokens(inputText.String()))) {
 		s.denyAndAudit(tenant, req.RequestID, "quota_exceeded", payloadSHA)
 		log.Printf("[tee] 配额超限拒绝（text）tenant=%s req=%s", tenant, req.RequestID)
@@ -910,16 +911,25 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		s.cache.Put(cacheKey, agg.String())
 	}
 
-	// M9-2/M9-3：计量 + 审计 + 指标（估算口径见 estimateTokens；输入已在配额预占计入，仅补记输出）
+	// M9-2/M9-3：计量 + 审计 + 指标（过渡口径见 estimateTokensCJK；输入已在配额预占计入，仅补记输出）
 	tokensOut := s.countTokens(agg.String())
 	s.recordUsage(tenant, 0, tokensOut, false)
+	// GF.4.2：Key 池计量归属（评审 P1-4）——审计事件附 key 指纹（平台维度消耗
+	// 核算，sha256 前 8 hex，不暴露明文 key），与 tenant_id（租户维度配额/计费）
+	// 双口径分离。本地引擎/缓存回放无 key，指纹为空。
+	keyFP := ""
+	if fp, ok := eng.(interface{ LastKeyFingerprint() string }); ok {
+		keyFP = fp.LastKeyFingerprint()
+	}
 	s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: req.RequestID, Action: "infer",
 		TokensIn: s.countTokens(inputText.String()), TokensOut: tokensOut,
 		Result: "ok", PayloadSHA: payloadSHA,
 		// P2a：双 hash 审计——PayloadSHA 为入站密文哈希，TransformedHash 为引擎实收内容哈希
 		TransformedHash: txHash,
-		CacheHit:        cacheHit, // GF.4.1：精确缓存命中标记
+		CacheHit:        cacheHit,         // GF.4.1：精确缓存命中标记
+		KeyFP:           keyFP,            // GF.4.2：服务商 key 指纹（多账号归属）
+		MeteringMode:    s.meteringMode(), // GF.2.4：计量口径标记（estimate=未校准）
 	})
 	s.metrics.incRequest(tenant, "ok")
 	s.metrics.addTokens(tenant, int64(s.countTokens(inputText.String())), int64(tokensOut))
@@ -930,6 +940,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 			s.audit.append(AuditEvent{
 				TenantID: tenant, RequestID: req.RequestID, Action: "cmaas_attest",
 				Result: "ok", PayloadSHA: sha256hex([]byte(ref)),
+				KeyFP: s.cmaasEngine.LastKeyFingerprint(), // GF.4.2：证明按 key 关联
 			})
 		}
 	}
@@ -1406,7 +1417,7 @@ func main() {
 		recomputeStates: newRecomputeStates(),
 		weightProvider:  NewMockWeightProvider(32),
 		route:           routeCfg,
-		tokenizer:       charDiv4Tokenizer{},       // GF.2.4：计量口径默认字符/4，真机 tokenizer 接入点
+		tokenizer:       nil,                       // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
 		cache:           model.NewExactCache(1024), // GF.4.1：精确缓存演示（LRU 1024）；真机替换为语义缓存
 		tenants:         make(map[string]*teecore.KeyManager),
 		usage:           make(map[string]*usageRecord),

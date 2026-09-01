@@ -6,7 +6,11 @@
 // 开通多账号后经 NewRoundRobinKeyPool 装配替换（接口不变，仅装配点改动）。
 package model
 
-import "sync"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"sync"
+)
 
 // KeyPool 服务商账号/密钥池。Acquire 返回当前应使用的凭证（轮询/故障驱动），
 // Release 在单次调用结束归还（可携带失败标记触发淘汰），
@@ -62,4 +66,12 @@ func (p *RoundRobinKeyPool) Len() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.keys)
+}
+
+// KeyFingerprint 凭证指纹（sha256 前 8 hex）。GF.4.2 计量归属（评审 P1-4）：
+// 审计/计量事件以指纹标识所用服务商账号（平台维度消耗核算），
+// 全程不落明文 key，与租户维度（tenant_id）双口径分离。
+func KeyFingerprint(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:4])
 }

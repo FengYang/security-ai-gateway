@@ -29,7 +29,9 @@ type CmaasEngine struct {
 	client   *http.Client
 
 	mu              sync.Mutex
-	lastAttestation string // 最近一次响应透出的证明/透明度引用（落审计链）
+	lastAttestation string            // 最近一次响应透出的证明/透明度引用（落审计链）
+	lastKeyFP       string            // 最近一次请求所用 key 指纹（GF.4.2 计量归属）
+	attestByFP      map[string]string // key 指纹 → 最近证明引用（GF.4.2：证明按 key 关联）
 }
 
 // ensure *CmaasEngine implements Engine。
@@ -39,9 +41,10 @@ var _ Engine = (*CmaasEngine)(nil)
 // apiKey/model 可为空（由代理侧环境变量与部署参数决定时）。
 func NewCmaasEngine(proxyURL, apiKey, model string) *CmaasEngine {
 	return &CmaasEngine{
-		proxyURL: strings.TrimSuffix(proxyURL, "/"),
-		apiKey:   apiKey,
-		model:    model,
+		proxyURL:   strings.TrimSuffix(proxyURL, "/"),
+		apiKey:     apiKey,
+		model:      model,
+		attestByFP: make(map[string]string),
 		// C-MaaS 流式整体超时与 vLLM 对齐（120s 生成窗口）
 		client: &http.Client{Timeout: 120 * time.Second},
 	}
@@ -83,6 +86,14 @@ func (e *CmaasEngine) Generate(req GenerateRequest, onDelta func(delta string) e
 	if apiKey != "" {
 		headers = append(headers, [2]string{"Authorization", "Bearer " + apiKey})
 	}
+	// GF.4.2：记录本次请求所用 key 指纹（计量归属；单账号路径同样记录）。
+	e.mu.Lock()
+	if apiKey != "" {
+		e.lastKeyFP = KeyFingerprint(apiKey)
+	} else {
+		e.lastKeyFP = ""
+	}
+	e.mu.Unlock()
 	// 代理地址按部署固定 base，路径为 OpenAI 兼容标准路径
 	url := e.proxyURL + "/v1/chat/completions"
 	err := StreamChat(e.client, url, headers, req, onDelta)
@@ -100,10 +111,14 @@ func (e *CmaasEngine) Generate(req GenerateRequest, onDelta func(delta string) e
 func (e *CmaasEngine) Predict(x []float64) int { return -1 }
 
 // RecordAttestation 记录证明/透明度引用（供审计链；透明度报告路径或引用 ID）。
+// GF.4.2：引用同时按最近请求的 key 指纹关联存储（多账号可追溯）。
 func (e *CmaasEngine) RecordAttestation(ref string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.lastAttestation = ref
+	if e.lastKeyFP != "" {
+		e.attestByFP[e.lastKeyFP] = ref
+	}
 }
 
 // LastAttestation 最近一次证明/透明度引用（空 = 暂无）。
@@ -111,4 +126,23 @@ func (e *CmaasEngine) LastAttestation() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.lastAttestation
+}
+
+// LastKeyFingerprint 最近一次请求所用 key 指纹（空 = 无 key/未发起请求）。
+// GF.4.2：审计事件据此做平台维度消耗归属（与租户维度双口径分离）。
+func (e *CmaasEngine) LastKeyFingerprint() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastKeyFP
+}
+
+// AttestationByKey 返回 key 指纹 → 最近证明引用 的快照（多账号证明按 key 关联）。
+func (e *CmaasEngine) AttestationByKey() map[string]string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make(map[string]string, len(e.attestByFP))
+	for k, v := range e.attestByFP {
+		out[k] = v
+	}
+	return out
 }
