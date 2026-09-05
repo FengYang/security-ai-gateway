@@ -40,7 +40,7 @@ metadata:
   resourceVersion: "3"
 spec:
   defaultConfigDisable: false
-  failStrategy: FAIL_OPEN
+  failStrategy: FAIL_CLOSED
   priority: 100
   url: http://localhost:8002/plugins/otpmask/1.0.0/plugin.wasm
 status: {}
