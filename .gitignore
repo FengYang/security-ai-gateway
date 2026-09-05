@@ -43,6 +43,12 @@ security-ai-gateway.html
 _shared/
 assets/
 
+# ===== 核心文档例外：ai-gateway-roadmap 为根目录活文档，渲染资产需入库 =====
+!/ai-gateway-roadmap/assets/
+!/ai-gateway-roadmap/_shared/
+!/ai-gateway-roadmap/implementation-status-report/assets/
+!/ai-gateway-roadmap/implementation-status-report/_shared/
+
 # ===== IDE / 编辑器 =====
 .claude/
 .vscode/

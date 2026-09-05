@@ -122,7 +122,7 @@ scripts/         验证套件（verify-all / verify-k8s / pen_test）
 docs/            里程碑文档（M1-M12）
 ```
 
-## 7. 文档索引（当前有效，仅 13 份；历史文档见 `docs/archive/`）
+## 7. 文档索引（当前有效；历史文档见 `docs/archive/`）
 
 **新开发/集成方入口（按序读）**：`README.md` → `docs/GA-项目总览与路线图.md`（全景进度，先看"走到哪了"）→ `docs/GA-网关功能面研发计划.md`（**当前开发依据**）→ `docs/GA-路线1发布规划.md`；角色选读见各文档"读者"标注。
 
@@ -134,6 +134,7 @@ docs/            里程碑文档（M1-M12）
 | `docs/GA-路线1发布规划.md` | 路线 1 总纲（P1-P5，已验收，历史主线） |
 | `docs/GA-路线1研发落地验收报告.md` | 路线 1 验收证据（M1-M3 冻结）与遗留项（M4） |
 | `docs/GA-AI网关能力补齐方案.md` | 网关功能面方案（v4，实施中） |
+| `ai-gateway-roadmap/ai-gateway-roadmap.html` | **战略路线图（管理层视图）**：三阶段策略/时间轴/验收/资源；进度单一事实源见 `docs/GA-项目总览与路线图.md` |
 | `docs/GA-CMAAS对接设计.md` | C-MaaS 引擎对接设计 |
 | `docs/总体技术方案-v2.md` | 架构基线 v3.0（含 §2.4/§3.10 网关功能面） |
 | `docs/API-参考.md` | 全服务接口契约（text 载荷/SSE 信封/配额端点） |
