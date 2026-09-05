@@ -5,6 +5,20 @@
 > （key-auth / IP Restriction / Rate Limit / CORS，后续可加 WAF / Bot / OAuth）。
 > 前置决策：D-0 = B（2026-09-01 修正）。
 
+## 0. 集群基线（评审 P1-1，GF.1 启动前填写）
+
+> 研发计划 GF.1 要求：GF.1 启动前记录集群基线并归档至本文件，作为 GF.5 性能对照的起点，
+> 变更需记录（新增/变更行加日期）。当前集群未就绪，下表为字段模板，GF.1 部署时填写。
+
+| 基线项 | 值 | 记录日期 |
+| --- | --- | --- |
+| K8s 版本 | （待填，如 v1.29.x） | — |
+| 节点规格 | （CPU/内存/数量，含 higress-system 与 otpmask 命名空间调度） | — |
+| Higress 版本 | Gateway v2.1.5（对齐镜像） | — |
+| 网络策略 | 内网隔离 CIDR：10.0.0.0/8、172.16.0.0/12、192.168.0.0/16 | — |
+| Pod 限额与资源预留 | （网关/tee-infer 的 requests/limits 实测值） | — |
+| 变更记录 | （基线变更时追加行，含变更内容与日期） | — |
+
 ## 1. 迁移原理
 
 - 现有 `gateway/wasm/otpmask-plugin/Dockerfile.k8s` 基镜像**就是 Higress Gateway v2.1.5**，

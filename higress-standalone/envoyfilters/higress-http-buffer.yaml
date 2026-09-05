@@ -1,0 +1,27 @@
+# 为网关 HTTP 链路注入请求体缓冲 filter。
+# 背景：Higress 数据面（all-in-one）默认不缓冲请求体，插件替换后的 body
+#      在大请求下会触发包体流式回压/丢体（实测 2000 元素 ~8.9KB 请求耗时 ~15s 触达超时）。
+# 解决：在 HCM filter 链最前插入 envoy.filters.http.buffer（max_request_bytes=32MiB），
+#      让 wasm 插件 ReplaceHttpRequestBody 结果完整随上游发送。
+# 结构仿照已验证的 higress-gateway-global-custom-response.yaml，避免字段兼容坑。
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: higress-http-buffer
+  namespace: higress-system
+spec:
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+      patch:
+        operation: INSERT_FIRST
+        value:
+          name: envoy.filters.http.buffer
+          typed_config:
+            '@type': type.googleapis.com/envoy.extensions.filters.http.buffer.v3.Buffer
+            max_request_bytes: 33554432

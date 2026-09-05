@@ -1,0 +1,46 @@
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  annotations:
+    higress.io/wasm-plugin-description: OTP掩码插件，用于在日志和监控中隐藏OTP短信验证码
+    higress.io/wasm-plugin-title: otpmask
+  creationTimestamp: "2026-09-05T07:38:11Z"
+  labels:
+    higress.io/resource-definer: higress
+    higress.io/wasm-plugin-built-in: "false"
+    higress.io/wasm-plugin-category: custom
+    higress.io/wasm-plugin-name: otpmask
+    higress.io/wasm-plugin-version: 1.0.0
+  managedFields:
+  - apiVersion: extensions.higress.io/v1alpha1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:annotations:
+          .: {}
+          f:higress.io/wasm-plugin-description: {}
+          f:higress.io/wasm-plugin-title: {}
+        f:labels:
+          .: {}
+          f:higress.io/resource-definer: {}
+          f:higress.io/wasm-plugin-built-in: {}
+          f:higress.io/wasm-plugin-category: {}
+          f:higress.io/wasm-plugin-name: {}
+          f:higress.io/wasm-plugin-version: {}
+      f:spec:
+        f:defaultConfigDisable: {}
+        f:failStrategy: {}
+        f:priority: {}
+        f:url: {}
+    manager: Kubernetes Java Client
+    operation: Update
+    time: "2026-09-05T08:04:40Z"
+  name: otpmask-1.0.0
+  namespace: higress-system
+  resourceVersion: "3"
+spec:
+  defaultConfigDisable: false
+  failStrategy: FAIL_OPEN
+  priority: 100
+  url: http://localhost:8002/plugins/otpmask/1.0.0/plugin.wasm
+status: {}

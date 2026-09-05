@@ -1,0 +1,26 @@
+# Higress Standalone 独立部署（Docker Compose，脱离 K8s 集群）
+# 复用官方 all-in-one 镜像：内嵌控制面（Higress Controller）+ 数据面（Envoy）+
+# 内置插件下载服务(localhost:8002)。
+# /data 绑定到仓库 higress-standalone/（控制面运行时快照：configmaps/wasmplugins/ingresses 等）。
+# 用途：GF.1 网关插件链本地验证（无集群/真机），P0b 云原生模式的前置验证环境。
+#
+# 启动：docker compose -f deploy/higress/docker-compose.higress.yaml up -d
+# 端口：8001=控制台  8080=HTTP 网关  8443=HTTPS 网关  8002=内置插件 wasm 下载服务
+
+services:
+  higress-control-plane:
+    image: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/all-in-one:latest
+    container_name: higress-chain-control-plane
+    entrypoint: ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+    volumes:
+      - ../../higress-standalone:/data
+      - ../../gateway/wasm/otpmask-plugin/main.wasm:/usr/share/nginx/html/plugins/otpmask/1.0.0/plugin.wasm:ro
+    ports:
+      - "8001:8001"   # Higress Console
+      - "8080:8080"   # 网关 HTTP
+      - "8443:8443"   # 网关 HTTPS
+      - "8002:8002"   # 内置插件 wasm http 服务（key-auth 等从 localhost:8002/plugins/... 拉取）
+
+networks:
+  default:
+    name: higress-chain-nw

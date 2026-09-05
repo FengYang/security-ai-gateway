@@ -4,7 +4,7 @@ data:
   index.redirect-target: ""
   mode: standalone
   route.default.initialized: "true"
-  system.initialized: "false"
+  system.initialized: "true"
 kind: ConfigMap
 metadata:
   creationTimestamp: "2000-01-01T00:00:00Z"
@@ -17,9 +17,10 @@ metadata:
       f:data:
         f:dashboard.builtin: {}
         f:route.default.initialized: {}
+        f:system.initialized: {}
     manager: Kubernetes Java Client
     operation: Update
-    time: "2026-08-30T08:28:50Z"
+    time: "2026-09-05T07:33:16Z"
   name: higress-console
   namespace: higress-system
-  resourceVersion: "3"
+  resourceVersion: "10"

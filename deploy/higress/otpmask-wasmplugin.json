@@ -1,0 +1,18 @@
+{
+  "kind": "WasmPlugin",
+  "apiVersion": "extensions.higress.io/v1alpha1",
+  "metadata": {
+    "name": "otpmask",
+    "namespace": "higress-system"
+  },
+  "spec": {
+    "url": "http://localhost:8002/plugins/otpmask/1.0.0/plugin.wasm",
+    "failStrategy": "FAIL_CLOSED",
+    "defaultConfigDisable": false,
+    "phase": "DEFAULT",
+    "priority": 100,
+    "defaultConfig": {
+      "mask_modulus": "4294967296"
+    }
+  }
+}
