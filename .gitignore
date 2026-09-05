@@ -79,3 +79,7 @@ logs/
 
 # ===== WorkBuddy 工作区记忆（agent 私有，不入库）=====
 .workbuddy/
+
+# ===== 构建/调试残留（不入库）=====
+security-ai-gateway-linux.tar.gz
+higress-standalone/req.json
