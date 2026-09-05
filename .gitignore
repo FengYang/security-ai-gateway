@@ -83,3 +83,6 @@ logs/
 # ===== 构建/调试残留（不入库）=====
 security-ai-gateway-linux.tar.gz
 higress-standalone/req.json
+
+# ===== 归档的 HTML 导出快照（含大体积字体/echarts 资产，权威文本版在 docs/*.md）=====
+docs/archive/html-snapshots/
