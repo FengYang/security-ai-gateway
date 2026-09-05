@@ -8,7 +8,7 @@
 #   bash scripts/setup-env.sh --skip-verify   # 跳过验证套件
 #   bash scripts/setup-env.sh --with-k8s      # 额外检查 kubectl/helm
 #
-# 依赖：Ubuntu/Debian（apt）或 CentOS/RHEL（yum）；Docker 20+；Go 1.24+；Python 3.10+
+# 依赖：Ubuntu/Debian（apt）或 CentOS/RHEL（yum）；Docker 20+ + Compose；Go 1.25+（go.mod 要求）；Python 3.10+
 # 验证套件使用 pwsh（PowerShell Core）——未安装时提示或跳过。
 
 set -e
@@ -22,10 +22,10 @@ for arg in "$@"; do
   esac
 done
 
-say_ok  { echo "[PASS] $1"; }
-say_fail{ echo "[FAIL] $1"; }
+say_ok() { echo "[PASS] $1"; }
+say_fail() { echo "[FAIL] $1"; }
 
-has_cmd { command -v "$1" >/dev/null 2>&1; }
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 echo "===== OTP-Mask 环境搭建（Linux） ====="
 
@@ -45,10 +45,37 @@ for tool in git docker; do
   fi
 done
 
+# docker compose 插件检测（第 5 步使用 `docker compose`；缺失时回退 docker-compose v1）
+COMPOSE_CMD="docker compose"
+if has_cmd docker; then
+  if docker compose version >/dev/null 2>&1; then
+    say_ok "docker compose 插件可用"
+  elif has_cmd docker-compose; then
+    say_ok "docker-compose（v1）可用"
+    COMPOSE_CMD="docker-compose"
+  else
+    say_fail "docker compose 插件缺失——请安装 Docker Compose v2 插件（https://docs.docker.com/compose/install/）"
+  fi
+fi
+
+# Go 版本：go.mod 要求 go 1.25.0，需显式校验（发行版 golang-go 版本通常滞后）
+GO_TOO_OLD=0
+go_version_ok() {
+  local have want
+  have="$(command go version 2>/dev/null | awk '{print $3}' | sed 's/go//')"
+  want="$1"
+  [ -n "$have" ] && [ "$(printf '%s\n%s\n' "$have" "$want" | sort -V | head -1)" = "$want" ]
+}
 if has_cmd go; then
-  say_ok "go 已安装（$(go version | awk '{print $3}')）"
+  if go_version_ok 1.25; then
+    say_ok "go 已安装（$(go version | awk '{print $3}')，满足 go.mod 1.25）"
+  else
+    say_fail "go 版本 $(go version | awk '{print $3}') 低于 go.mod 要求的 1.25"
+    GO_TOO_OLD=1
+  fi
 else
-  say_fail "go 缺失（生产环境请安装 Go 1.24+：https://go.dev/dl）"
+  say_fail "go 缺失（请安装 Go 1.25+：https://go.dev/dl）"
+  GO_TOO_OLD=1
 fi
 if has_cmd python3; then
   say_ok "python3 已安装"
@@ -64,6 +91,10 @@ fi
 # 2. Go 环境
 echo ""
 echo "[2/6] Go 环境"
+if [ "$GO_TOO_OLD" = "1" ]; then
+  >&2 echo "[ERROR] Go 不足或缺失，中止部署。请安装 Go 1.25+（https://go.dev/dl/）后重试"
+  exit 1
+fi
 go env -w GOPROXY=https://goproxy.cn,direct
 say_ok "GOPROXY=https://goproxy.cn,direct"
 
@@ -86,7 +117,7 @@ PYTHON="${PYTHON_BIN:-python3}"
 echo ""
 echo "[5/6] 启动容器"
 cd "$ROOT/gateway/wasm/otpmask-plugin"
-docker compose up -d --build
+$COMPOSE_CMD up -d --build
 sleep 6
 say_ok "容器已启动（网关 10000 / embedding 18080 / tee-infer 19090）"
 cd "$ROOT"

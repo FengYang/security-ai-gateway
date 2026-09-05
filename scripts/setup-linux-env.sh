@@ -29,6 +29,8 @@ VENV="/opt/venv-vllm"
 HF_MIRROR="https://hf-mirror.com"
 SKIP_VERIFY=0
 MIRROR="https://pypi.tuna.tsinghua.edu.cn/simple"
+# Go 工具链目标版本（go.mod 要求 go 1.25.0；可用 GO_VERSION 覆盖）
+GO_VERSION="${GO_VERSION:-1.25.0}"
 
 usage() {
   sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -81,14 +83,35 @@ say() { printf '\n== %s ==\n' "$1"; }
 ok()  { echo "  [PASS] $1"; PASS=$((PASS+1)); }
 bad() { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
 
-# ---------- 1. 系统依赖（含 Go 工具链） ----------
+# ---------- 1. 系统依赖（Go 工具链单独处理：需 ≥ go.mod 1.25） ----------
 say "1/8 系统依赖"
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   build-essential cmake ninja-build python3-dev python3-venv \
-  libopenblas-dev libgomp1 libaio-dev pkg-config git curl golang-go
-command -v go >/dev/null || { echo "Go 安装失败"; exit 1; }
-ok "系统依赖 + Go $(go version | awk '{print $3}')"
+  libopenblas-dev libgomp1 libaio-dev pkg-config git curl
+ok "系统依赖（build-essential/cmake/ninja/python3-dev/openblas/git/curl）"
+
+# Go：go.mod 要求 go 1.25，发行版 golang-go 版本通常滞后。
+#  分支：已有满足版本→复用；amd64→官方 tarball 安装（GO_VERSION 可覆盖）；其他架构→提示手装
+go_version_ok() {
+  local have want
+  have="$(command go version 2>/dev/null | awk '{print $3}' | sed 's/go//')"
+  want="$1"
+  [ -n "$have" ] && [ "$(printf '%s\n%s\n' "$have" "$want" | sort -V | head -1)" = "$want" ]
+}
+if command -v go >/dev/null 2>&1 && go_version_ok "$GO_VERSION"; then
+  ok "Go $(go version | awk '{print $3}')（满足 go.mod $GO_VERSION，PATH 已有）"
+elif [ "$(uname -m)" != "x86_64" ]; then
+  echo "未内置非 amd64 的 Go 安装；请手动安装 Go $GO_VERSION+（https://go.dev/dl）并加入 PATH" >&2; exit 1
+else
+  echo "  [INFO] 安装 Go $GO_VERSION（官方 tarball，~80MB）..."
+  curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
+  rm -rf /usr/local/go
+  tar -C /usr/local -xzf /tmp/go.tgz
+  rm -f /tmp/go.tgz
+  export PATH="/usr/local/go/bin:$PATH"
+  ok "Go 官方安装 $GO_VERSION（$(go version | awk '{print $3}')，已加入 PATH）"
+fi
 
 # ---------- 2. venv + 基础 Python 依赖 ----------
 say "2/8 venv 与基础依赖"

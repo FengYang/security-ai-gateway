@@ -20,7 +20,7 @@ if (-not $go) {
     $g = Get-Command go -ErrorAction SilentlyContinue
     if ($g) { $go = $g.Source } else { $go = 'C:\Program Files\Go\bin\go.exe' }
 }
-$results = @
+$results = @()
 
 function Check($name, [bool]$ok, $detail = '') {
     $tag = if ($ok) { 'PASS' } else { 'FAIL' }
