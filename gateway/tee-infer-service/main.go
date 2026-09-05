@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -140,6 +141,8 @@ type teeServer struct {
 	route           *RouteConfig           // 双路线路由配置
 	tokenizer       Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
 	cache           model.SemanticCache    // GF.4.1 精确缓存（演示实现；nil = 关闭）
+	billing         *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
+	meterToken      string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
 	mu              sync.Mutex
 }
 
@@ -149,6 +152,18 @@ type usageRecord struct {
 	TokensOut int `json:"tokens_out"`
 	Requests  int `json:"requests"`
 	Denies    int `json:"denies"`
+	// GA-计费 P0-1：模型维度计量（key = "engine_type/model"，累计口径）。
+	// 配额与租户总额仍以顶层字段为准（预占发生在引擎解析前，模型维度在
+	// 请求完成时补记）；出账分价以 from/to 审计事件聚合为权威（billing.go）。
+	Models map[string]*modelUsage `json:"by_model,omitempty"`
+}
+
+// modelUsage 模型维度用量（GA-计费 P0-1：同租户混用多模型的分价计费基础）。
+type modelUsage struct {
+	TokensIn  int `json:"tokens_in"`
+	TokensOut int `json:"tokens_out"`
+	Requests  int `json:"requests"`
+	Denies    int `json:"denies,omitempty"`
 }
 
 // tenantHeader 租户标识请求头。
@@ -199,7 +214,8 @@ func (s *teeServer) recordUsage(tenant string, tokensIn, tokensOut int, denied b
 // reserveQuota 预占式配额检查（原子）：在 s.mu 内完成"检查 + 占位"，杜绝并发超卖。
 // 占位计入 usage.TokensIn（输入侧控制，计费计量不丢）；推理成功后 recordUsage 只补记输出。
 // 配额 <=0 = 不限（仍占位累计 TokensIn，仅跳过上限检查）；
-// 失败路径（engine_error 等）占位不回收——保守方向（异常/攻击流量占用配额），审计 deny 可查。
+// 失败路径（GA-计费 P0-3）：预占后失败且无任何输出交付 → rollbackQuota 退回输入
+// 计量（fail-closed 故障不向租户计费）；流中断已有部分输出 → 按实收计费（不回滚）。
 // 输出侧配额控制为扩展项（流式输出无法预知）。
 func (s *teeServer) reserveQuota(tenant string, tokensIn int64) bool {
 	s.mu.Lock()
@@ -234,6 +250,47 @@ func (s *teeServer) quotaOf(tenant string) int64 {
 	return s.quotaDefault
 }
 
+// recordModelUsage 模型维度计量（GA-计费 P0-1：分价计费数据基础）。
+// 与租户总额（recordUsage）独立累计——预占发生在引擎解析前，模型维度在
+// 请求完成时按实际引擎/模型补记；deny（不计费）不入模型维度。
+func (s *teeServer) recordModelUsage(tenant, engineType, model string, tokensIn, tokensOut int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec := s.usage[tenant]
+	if rec == nil {
+		rec = &usageRecord{}
+		s.usage[tenant] = rec
+	}
+	if rec.Models == nil {
+		rec.Models = make(map[string]*modelUsage)
+	}
+	key := modelDimensionKey(engineType, model)
+	mu := rec.Models[key]
+	if mu == nil {
+		mu = &modelUsage{}
+		rec.Models[key] = mu
+	}
+	mu.TokensIn += tokensIn
+	mu.TokensOut += tokensOut
+	mu.Requests++
+}
+
+// rollbackQuota 回滚预占（GA-计费 P0-3）：预占后失败且无任何输出交付时，
+// 输入计量退回（fail-closed 故障不向租户计费）。下限保护不退成负数。
+func (s *teeServer) rollbackQuota(tenant string, tokensIn int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec := s.usage[tenant]
+	if rec == nil || tokensIn <= 0 {
+		return
+	}
+	if int64(rec.TokensIn) < tokensIn {
+		tokensIn = int64(rec.TokensIn)
+	}
+	rec.TokensIn -= int(tokensIn)
+	log.Printf("[tee] 配额预占回滚 tenant=%s tokens=%d（fail-closed 故障不计费）", tenant, tokensIn)
+}
+
 // tenantOf 读取请求租户（空则默认）。
 func tenantOf(r *http.Request) string {
 	t := r.Header.Get(tenantHeader)
@@ -265,6 +322,25 @@ func (s *teeServer) checkAdmin(r *http.Request) bool {
 	}
 	a := sha256.Sum256([]byte(token))
 	b := sha256.Sum256([]byte(s.adminToken))
+	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
+}
+
+// checkMetering 校验计量查询凭证（/usage GET，GA-计费 P1-2）：
+// 管理令牌，或独立只读计量令牌（meter-token，最小权限——只能读用量，
+// 不能写配额 /usage/quota、不能读 /audit /metrics）。
+func (s *teeServer) checkMetering(r *http.Request) bool {
+	if s.checkAdmin(r) {
+		return true
+	}
+	if s.meterToken == "" {
+		return false
+	}
+	token := r.Header.Get(adminHeader)
+	if token == "" {
+		return false
+	}
+	a := sha256.Sum256([]byte(token))
+	b := sha256.Sum256([]byte(s.meterToken))
 	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
 }
 
@@ -658,12 +734,16 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	for _, cv := range req.CipherVectors {
 		plain, err := unmaskVector(seed, maskModulus, cv.Data)
 		if err != nil {
+			// GA-计费 P0-3：预占后失败且无输出交付 → 回滚输入计量
+			s.rollbackQuota(tenant, int64(len(req.CipherVectors)))
 			s.denyAndAudit(tenant, req.RequestID, "decrypt_error", payloadSHA)
 			http.Error(w, fmt.Sprintf("解密失败: %v", err), http.StatusBadRequest)
 			return
 		}
 		tokenID := s.model.Predict(toFloat(plain))
 		if tokenID < 0 {
+			// GA-计费 P0-3：引擎不可用（fail-closed 故障不计费）
+			s.rollbackQuota(tenant, int64(len(req.CipherVectors)))
 			s.denyAndAudit(tenant, req.RequestID, "engine_unavailable", payloadSHA)
 			http.Error(w, "推理引擎不可用（fail-closed）", http.StatusServiceUnavailable)
 			return
@@ -676,6 +756,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	// 加密输出（同 seed）：token ID 序列密文（方案 C：TEE 内采样后加密回传）
 	cipherOut, err := maskVector(seed, maskModulus, tokens)
 	if err != nil {
+		s.rollbackQuota(tenant, int64(len(req.CipherVectors))) // GA-计费 P0-3：无输出交付
 		s.denyAndAudit(tenant, req.RequestID, "encrypt_error", payloadSHA)
 		http.Error(w, fmt.Sprintf("加密失败: %v", err), http.StatusInternalServerError)
 		return
@@ -697,11 +778,19 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	}
 	// M9-2/M9-3：用量计量（token 级；输入已在配额预占计入，仅补记输出）+ 审计
 	s.recordUsage(tenant, 0, len(tokens), false)
-	s.audit.append(AuditEvent{
+	vecEng := req.EngineType // GA-计费 P0-1：模型/引擎维度（vectors 默认本地引擎）
+	if vecEng == "" {
+		vecEng = protocol.EngineTypeTEEGPU
+	}
+	s.recordModelUsage(tenant, vecEng, req.Model, len(req.CipherVectors), len(tokens))
+	vecEv := s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: req.RequestID, Action: "infer",
 		TokensIn: len(req.CipherVectors), TokensOut: len(tokens),
 		Result: "ok", PayloadSHA: payloadSHA,
+		EngineType: vecEng, // GA-计费 P0-1
+		Model:      req.Model,
 	})
+	go s.billing.notify(vecEv) // GA-计费 P1-1：Webhook（nil = no-op）
 	// M10：指标
 	s.metrics.incRequest(tenant, "ok")
 	s.metrics.addTokens(tenant, int64(len(req.CipherVectors)), int64(len(tokens)))
@@ -879,6 +968,9 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	// 按候选顺序自动切换（engineFor 失败即失败，绝不产出半截明文；流式阶段不切换）。
 	engType, eng, err := s.resolveEngineWithFailover(tenant, req.Model, engType)
 	if err != nil {
+		// GA-计费 P0-3：预占后引擎不可用（无任何输出交付）→ 输入计量回滚，
+		// fail-closed 故障不向租户计费。
+		s.rollbackQuota(tenant, int64(s.countTokens(inputText.String())))
 		s.denyAndAudit(tenant, req.RequestID, "engine_unavailable", payloadSHA)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -902,8 +994,29 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	// 统一 SSE 信封流输出（seq 严格递增 + finish 分片）；stream=false 语义为单分片聚合。
 	var agg strings.Builder
 	if serr := s.streamTextInfer(w, sess, eng, genReq, &agg); serr != nil {
-		// 流式失败（200 已发出或写出失败）：审计 deny 后返回（流已以 error 分片终止）
-		s.denyAndAudit(tenant, req.RequestID, "engine_error", payloadSHA)
+		// GA-计费 P0-3/P1-3 失败路径计费口径：
+		// - 已有部分输出（客户端已收到）→ 按实收计费：输入计量保留，输出按 agg
+		//   实际累计补记，审计记 infer/engine_error 事件（带 token 数，供出账聚合）；
+		// - 完全无输出 → 整单回滚输入预占（fail-closed 故障不向租户计费）。
+		tokensOut := s.countTokens(agg.String())
+		if tokensOut > 0 {
+			tokensIn := s.countTokens(inputText.String())
+			s.recordUsage(tenant, 0, tokensOut, false)
+			s.recordModelUsage(tenant, engType, req.Model, tokensIn, tokensOut)
+			ev := s.audit.append(AuditEvent{
+				TenantID: tenant, RequestID: req.RequestID, Action: "infer",
+				TokensIn: tokensIn, TokensOut: tokensOut,
+				Result: "engine_error", PayloadSHA: payloadSHA,
+				EngineType: engType, Model: req.Model,
+				TransformedHash: txHash,
+				MeteringMode:    s.meteringMode(),
+			})
+			go s.billing.notify(ev) // GA-计费 P1-1：Webhook（nil = no-op；异步不阻塞主链）
+		} else {
+			s.rollbackQuota(tenant, int64(s.countTokens(inputText.String())))
+			s.denyAndAudit(tenant, req.RequestID, "engine_error", payloadSHA)
+		}
+		s.metrics.incDeny(tenant, "engine_error")
 		return
 	}
 	// 未命中回填缓存（命中路径不重复回填）。
@@ -913,7 +1026,9 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 
 	// M9-2/M9-3：计量 + 审计 + 指标（过渡口径见 estimateTokensCJK；输入已在配额预占计入，仅补记输出）
 	tokensOut := s.countTokens(agg.String())
+	tokensIn := s.countTokens(inputText.String())
 	s.recordUsage(tenant, 0, tokensOut, false)
+	s.recordModelUsage(tenant, engType, req.Model, tokensIn, tokensOut) // GA-计费 P0-1：模型维度
 	// GF.4.2：Key 池计量归属（评审 P1-4）——审计事件附 key 指纹（平台维度消耗
 	// 核算，sha256 前 8 hex，不暴露明文 key），与 tenant_id（租户维度配额/计费）
 	// 双口径分离。本地引擎/缓存回放无 key，指纹为空。
@@ -921,16 +1036,19 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	if fp, ok := eng.(interface{ LastKeyFingerprint() string }); ok {
 		keyFP = fp.LastKeyFingerprint()
 	}
-	s.audit.append(AuditEvent{
+	ev := s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: req.RequestID, Action: "infer",
-		TokensIn: s.countTokens(inputText.String()), TokensOut: tokensOut,
+		TokensIn: tokensIn, TokensOut: tokensOut,
 		Result: "ok", PayloadSHA: payloadSHA,
 		// P2a：双 hash 审计——PayloadSHA 为入站密文哈希，TransformedHash 为引擎实收内容哈希
 		TransformedHash: txHash,
+		EngineType:      engType,          // GA-计费 P0-1：模型/引擎维度（分价计费）
+		Model:           req.Model,        // GA-计费 P0-1
 		CacheHit:        cacheHit,         // GF.4.1：精确缓存命中标记
 		KeyFP:           keyFP,            // GF.4.2：服务商 key 指纹（多账号归属）
 		MeteringMode:    s.meteringMode(), // GF.2.4：计量口径标记（estimate=未校准）
 	})
+	go s.billing.notify(ev) // GA-计费 P1-1：Webhook（nil = no-op；异步不阻塞主链）
 	s.metrics.incRequest(tenant, "ok")
 	s.metrics.addTokens(tenant, int64(s.countTokens(inputText.String())), int64(tokensOut))
 	// P5：C-MaaS 证明/透明度引用落审计链（含 Rekor 日志引用，SDK 开通后经
@@ -1050,9 +1168,16 @@ type usageView struct {
 
 // handleUsage 用量查询：GET /usage（全部租户）或 ?tenant=X（单租户）。
 // P1 起响应含配额视图（quota / used_tokens）。
+// GA-计费 P0-4：?from=&to= 增量查询——按审计事件时间戳聚合 [from, to)
+// （左闭右开，UTC；RFC 3339 或 Unix 秒），免疫进程重启丢失、自带模型维度。
+// GA-计费 P1-2：接受管理令牌或独立只读计量令牌（meter-token）。
 func (s *teeServer) handleUsage(w http.ResponseWriter, r *http.Request) {
-	if !s.checkAdmin(r) {
-		http.Error(w, "管理认证失败", http.StatusUnauthorized)
+	if !s.checkMetering(r) {
+		http.Error(w, "计量查询认证失败", http.StatusUnauthorized)
+		return
+	}
+	if q := r.URL.Query(); q.Get("from") != "" || q.Get("to") != "" {
+		s.handleUsageIncremental(w, q)
 		return
 	}
 	s.mu.Lock()
@@ -1081,6 +1206,35 @@ func (s *teeServer) handleUsage(w http.ResponseWriter, r *http.Request) {
 		out[t] = view(t, rec)
 	}
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handleUsageIncremental GA-计费 P0-4：from/to 增量聚合（按审计事件）。
+// 时间语义：左闭右开 [from, to)；from 缺省 = 最早事件；to 缺省 = 当前；
+// 出账权威口径（累计值跨重启丢基线，事件聚合免疫）。
+func (s *teeServer) handleUsageIncremental(w http.ResponseWriter, q url.Values) {
+	now := time.Now().UnixNano()
+	from, ok := parseBillingTime(q.Get("from"), 0)
+	if !ok {
+		http.Error(w, "from 须为 RFC 3339（推荐 UTC）或 Unix 秒", http.StatusBadRequest)
+		return
+	}
+	to, ok := parseBillingTime(q.Get("to"), now)
+	if !ok {
+		http.Error(w, "to 须为 RFC 3339（推荐 UTC）或 Unix 秒", http.StatusBadRequest)
+		return
+	}
+	if from >= to {
+		http.Error(w, "from 须早于 to（区间左闭右开）", http.StatusBadRequest)
+		return
+	}
+	tenants := aggregateUsage(s.audit.query(q.Get("tenant")), from, to)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"from":             time.Unix(0, from).UTC().Format(time.RFC3339Nano),
+		"to":               time.Unix(0, to).UTC().Format(time.RFC3339Nano),
+		"window_semantics": "[from, to) UTC，按审计事件时间戳聚合（免疫重启丢失；deny 不计费）",
+		"tenants":          tenants,
+	})
 }
 
 // quotaRequest 配额设置请求。
@@ -1243,6 +1397,9 @@ func main() {
 	sigKeyHex := flag.String("sig-key", "", "协议签名密钥 K_sig（32 字节 hex；默认随机生成并打印）")
 	attestToken := flag.String("attest-token", "", "远程证明共享令牌（模拟）；默认随机生成并打印")
 	adminToken := flag.String("admin-token", "", "管理端点（/metrics /audit /usage）认证令牌；为空 = 开发模式不拦截")
+	meterToken := flag.String("meter-token", "", "独立只读计量令牌（GA-计费 P1-2）：仅可读 /usage（含 from/to 增量），不可写配额/读审计；为空 = 仅管理令牌可用")
+	billingURL := flag.String("billing-url", "", "计费 Webhook 推送地址（GA-计费 P1-1，如 http://billing:8080/events）；为空 = 推送关闭，拉取为主")
+	billingSecret := flag.String("billing-secret", "", "计费 Webhook HMAC-SHA256 签名密钥（与 billing-url 同时配置；为空 = 不签名，仅内网明文模式）")
 	engineURL := flag.String("engine-url", "", "明文域推理引擎（vLLM OpenAI 兼容地址，如 http://vllm:8000；text 载荷流式直连；为空使用本地模拟引擎）")
 	cmaasURL := flag.String("cmaas-url", "", "百炼 C-MaaS openai-proxy 地址（P5，如 http://127.0.0.1:8080；为空 = cmaas 引擎未配置，请求 fail-closed）")
 	cmaasAPIKey := flag.String("cmaas-api-key", "", "C-MaaS API Key（DASHSCOPE_API_KEY，Bearer 透传代理；可由代理侧环境变量提供）")
@@ -1406,6 +1563,8 @@ func main() {
 		enclave:         encl,
 		requireAttest:   *requireAttest,
 		adminToken:      *adminToken,
+		meterToken:      *meterToken,                                    // GA-计费 P1-2：独立只读计量令牌（/usage 最小权限）
+		billing:         newBillingWebhook(*billingURL, *billingSecret), // GA-计费 P1-1：nil = 推送关闭（拉取为主）
 		model:           eng,
 		cmaasEngine:     cmaasEng,
 		protoVersion:    *protoVersion,

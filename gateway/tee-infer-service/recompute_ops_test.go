@@ -15,7 +15,7 @@ func TestRecomputeRMSNormArgMax(t *testing.T) {
 	// rmsnorm（layer 0，Gamma 全 1 → 输出为归一化值）
 	reqRMS := &recomputeRequest{
 		RequestID: "rc-rms-1", Layer: 0, Op: "rmsnorm",
-		Batch: [][]uint64{{100, 200, 300, 400, 500, 600, 700, 800}},
+		Batch:       [][]uint64{{100, 200, 300, 400, 500, 600, 700, 800}},
 		MaskVersion: 0,
 		Gamma:       []float64{1, 1, 1, 1, 1, 1, 1, 1},
 	}
@@ -42,7 +42,7 @@ func TestRecomputeRMSNormArgMax(t *testing.T) {
 	// argmax（layer 1，P4 采样确认：返回单元素 token 向量）
 	reqAM := &recomputeRequest{
 		RequestID: "rc-am-1", Layer: 1, Op: "argmax",
-		Batch: [][]uint64{{100, 200, 300, 400, 500, 600, 700, 800}},
+		Batch:       [][]uint64{{100, 200, 300, 400, 500, 600, 700, 800}},
 		MaskVersion: 0,
 	}
 	ha := buildRecomputeReq(ts.URL+"/v1/recompute", sessionID, ksig, reqAM)

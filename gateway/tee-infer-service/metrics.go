@@ -22,13 +22,13 @@ import (
 
 // otpmaskMetrics 指标集合（按标签维度 map 累加，线程安全）。
 type otpmaskMetrics struct {
-	mu          sync.Mutex
-	requests    map[string]int64 // tenant|result
-	tokensIn    map[string]int64 // tenant
-	tokensOut   map[string]int64 // tenant
-	denies      map[string]int64 // tenant|reason
-	keyIssues   map[string]int64 // tenant
-	reconcile   map[string]int64 // reason（审计-计费对账偏差，）
+	mu           sync.Mutex
+	requests     map[string]int64 // tenant|result
+	tokensIn     map[string]int64 // tenant
+	tokensOut    map[string]int64 // tenant
+	denies       map[string]int64 // tenant|reason
+	keyIssues    map[string]int64 // tenant
+	reconcile    map[string]int64 // reason（审计-计费对账偏差，）
 	tokenTraffic map[string]int64 // tenant
 	recomputeOps map[string]int64 // op（补算调用计数）
 	recomputeDur map[string]int64 // op（补算耗时累计，毫秒）

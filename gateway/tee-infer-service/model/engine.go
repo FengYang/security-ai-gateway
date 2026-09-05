@@ -1,10 +1,10 @@
 // Package model — 推理引擎抽象（M12 vLLM 对接层；P2 升级：text 载荷流式生成）。
 //
 // Engine 接口把"TEE 内推理引擎"从 tee-infer 的本地确定性模型解耦为可插拔：
-// - LocalEngine（默认）：tee-infer 进程内的确定性演示模型（M7 既有行为）
-// - RemoteEngine：text 载荷下直连 vLLM OpenAI 兼容接口流式推理（P2，D1）；
-//   vectors 载荷仍经 vLLM 适配器（gateway/vllm-adapter，路线 2 保留路径）
-// - CmaasEngine：百炼 Confidential MaaS（P5，engine_cmaas.go）
+//   - LocalEngine（默认）：tee-infer 进程内的确定性演示模型（M7 既有行为）
+//   - RemoteEngine：text 载荷下直连 vLLM OpenAI 兼容接口流式推理（P2，D1）；
+//     vectors 载荷仍经 vLLM 适配器（gateway/vllm-adapter，路线 2 保留路径）
+//   - CmaasEngine：百炼 Confidential MaaS（P5，engine_cmaas.go）
 //
 // 明文边界不变：向量/文本仅在 TEE 内明文域出现，Engine 是明文域内的推理后端。
 package model

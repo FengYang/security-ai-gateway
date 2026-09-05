@@ -26,13 +26,13 @@ import (
 )
 
 const (
-	embedURL   = "http://127.0.0.1:18080/embed"
-	attestURL  = "http://127.0.0.1:19090/attest"
-	keyURL     = "http://127.0.0.1:19090/key/issue"
-	inferURL   = "http://127.0.0.1:19090/v1/infer"
+	embedURL  = "http://127.0.0.1:18080/embed"
+	attestURL = "http://127.0.0.1:19090/attest"
+	keyURL    = "http://127.0.0.1:19090/key/issue"
+	inferURL  = "http://127.0.0.1:19090/v1/infer"
 	attestTok = "3031323334353637383961626364656630313233343536373839616263646566" // 与 docker-compose -attest-token 一致
 	sigKeyHex = "3031323334353637383961626364656630313233343536373839616263646566"
-	R          = uint64(1) << 32
+	R         = uint64(1) << 32
 )
 
 func main() {

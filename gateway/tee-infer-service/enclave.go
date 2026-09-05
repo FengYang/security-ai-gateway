@@ -44,10 +44,10 @@ const mockSealKeyEnv = "OTPMASK_MOCK_SEAL_KEY"
 
 // MockEnclave 进程内模拟飞地，用 AES-256-GCM 做密封，自签证明用于 CI
 type MockEnclave struct {
-	sealKey   []byte
-	measure   []byte
-	signKey   *ecdsa.PrivateKey
-	platform  string
+	sealKey  []byte
+	measure  []byte
+	signKey  *ecdsa.PrivateKey
+	platform string
 }
 
 func NewMockEnclave() (*MockEnclave, error) {

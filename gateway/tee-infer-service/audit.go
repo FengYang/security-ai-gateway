@@ -46,6 +46,10 @@ type AuditEvent struct {
 	// GF.2.4：计量口径标记（estimate=估算未校准 / tokenizer=真机已校准）。
 	// 证据字段，不进 hash()。
 	MeteringMode string `json:"metering_mode,omitempty"`
+	// GA-计费 P0-1：模型/引擎维度（分价计费数据基础；key_fp 平台成本与
+	// tenant 租户账单双口径分离下的第三个维度）。证据字段，不进 hash()。
+	EngineType string `json:"engine_type,omitempty"`
+	Model      string `json:"model,omitempty"`
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。
@@ -141,7 +145,8 @@ func (c *auditChain) load(path string) error {
 }
 
 // append 追加审计事件（自动计算哈希链；WORM 模式同步写文件）。
-func (c *auditChain) append(e AuditEvent) {
+// 返回落链后的终态事件（EventID/Timestamp 已定，供计费 Webhook 等下游对齐幂等键）。
+func (c *auditChain) append(e AuditEvent) AuditEvent {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e.PrevHash = c.lastHex
@@ -158,6 +163,7 @@ func (c *auditChain) append(e AuditEvent) {
 	}
 	c.events = append(c.events, e)
 	c.lastHex = e.hash()
+	return e
 }
 
 // AnchorRecord 锚定记录。

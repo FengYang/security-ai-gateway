@@ -14,13 +14,13 @@ import (
 
 // TST 时间戳令牌
 type TST struct {
-	Version       int    `json:"version"`
-	Algorithm     string `json:"algorithm"`
-	TimestampNS   int64  `json:"timestamp_ns"`
+	Version        int    `json:"version"`
+	Algorithm      string `json:"algorithm"`
+	TimestampNS    int64  `json:"timestamp_ns"`
 	MessageImprint string `json:"message_imprint"`
-	Signature     string `json:"signature"`
-	TSAPublicKey  string `json:"tsa_public_key"`
-	Source        string `json:"source"`
+	Signature      string `json:"signature"`
+	TSAPublicKey   string `json:"tsa_public_key"`
+	Source         string `json:"source"`
 }
 
 // TSASigner 时间戳签名接口

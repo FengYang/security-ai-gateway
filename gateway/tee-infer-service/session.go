@@ -42,8 +42,8 @@ type teeSession struct {
 	// P1c：段① 信封通道状态（服务端侧）。独立于 teeServer.mu——
 	// 会话从 map 取出后由各 handler 并发使用，信封计数器/窗口须自持锁。
 	envMu       sync.Mutex
-	sendCounter uint64                  // s2c 单调计数器（下一信封取值，从 1 起）
-	recvWindow  protocol.CounterWindow  // c2s 反重放滑动窗口（/key/issue 与 /v1/infer 共用）
+	sendCounter uint64                 // s2c 单调计数器（下一信封取值，从 1 起）
+	recvWindow  protocol.CounterWindow // c2s 反重放滑动窗口（/key/issue 与 /v1/infer 共用）
 }
 
 func newSession(nonce []byte) (*teeSession, error) {
