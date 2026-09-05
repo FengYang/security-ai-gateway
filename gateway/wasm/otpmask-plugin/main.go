@@ -58,6 +58,11 @@ type PluginConfig struct {
 	JWTSecretHex     string `json:"jwt_secret"`   // 租户鉴权 JWT 密钥（32 字节 hex，C-6）；空 = 不启用
 	RequireAuth      bool   `json:"require_auth"` // true 时无有效 JWT 拒绝 401（C-6）
 	ConfigVersion    string `json:"config_version"` // 配置版本标识（C-8 热更新观测；发布方维护）
+	// gateway-core 推送整合（拉路径 B / 冷启动 L3）：启用后启动/周期拉取默认路由表。
+	GatewayCoreEnabled bool   `json:"gateway_core_enabled"`
+	GatewayCoreService string `json:"gateway_core_service"`
+	GatewayCorePort    int64  `json:"gateway_core_port"`
+	RouteVerifyKeyHex  string `json:"route_verify_key"` // 路由表验签密钥 K_rx（32 字节 hex，与 gateway-core 一致）
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -74,6 +79,16 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.JWTSecretHex = json.Get("jwt_secret").String()
 	config.RequireAuth = json.Get("require_auth").Bool()
 	config.ConfigVersion = json.Get("config_version").String()
+	config.GatewayCoreEnabled = json.Get("gateway_core_enabled").Bool()
+	config.GatewayCoreService = json.Get("gateway_core_service").String()
+	config.GatewayCorePort = json.Get("gateway_core_port").Int()
+	config.RouteVerifyKeyHex = json.Get("route_verify_key").String()
+	if config.GatewayCoreService == "" {
+		config.GatewayCoreService = "gateway-core" // 缺省 K8s service 名
+	}
+	if config.GatewayCorePort == 0 {
+		config.GatewayCorePort = 8085
+	}
 	if config.MaskModulus < 2 {
 		config.MaskModulus = defaultMaskModulus
 	}
@@ -281,8 +296,14 @@ func responseStatus() string {
 //
 // 请求体替换后由 Envoy 路由到 tee-infer-service（路径 A）。
 // 任何 TEE 链路失败均 fail-closed（503 拒绝，不透传明文）。
+// pendingRequestID 当前处理请求的 ID（onRequestBody 生成；SSE 响应用作 OpenAI chunk id）。
+// 与 Session/KeyStore 同为包级状态，按 Envoy wasm 单请求串行回调语义使用。
+var pendingRequestID string
+
+// handleTextRequest 文本请求主入口：quote 优先，token 兼容，遇证伪/解密失败一律 fail-closed。
 func handleTextRequest(ctx wrapper.HttpContext, config PluginConfig, req *textRequest, log logs.Log) types.Action {
 	requestID := newRequestID()
+	pendingRequestID = requestID
 
 	// quote 模式先确保挑战-响应会话（无有效会话 → 握手 → 完成后走正常流程）
 	if config.AttestMode == "quote" {
@@ -494,7 +515,11 @@ func finishTextDirect(ctx wrapper.HttpContext, config PluginConfig, req *textReq
 		failClosed(log, "text 载荷引擎（tee_gpu/cmaas）须 quote 证明会话（token 模式不支持）")
 		return
 	}
-	messages, _ := json.Marshal([]map[string]string{{"role": "user", "content": req.Text}})
+	messages, err := marshalMessages(req)
+	if err != nil {
+		failClosed(log, err.Error())
+		return
+	}
 	stream := true
 	if req.Stream != nil {
 		stream = *req.Stream
@@ -553,8 +578,8 @@ func finishTextDirect(ctx wrapper.HttpContext, config PluginConfig, req *textReq
 func onResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, log logs.Log) types.Action {
 	if config.AttestMode == "quote" && responseStatus() == "200" {
 		if isSSEBody(body) {
-			// tee_gpu 流式响应：SSE 分片逐块解密 + 流内序号校验，重组客户端明文 SSE
-			plain, err := decryptSSEBody(body)
+			// tee_gpu 流式响应：SSE 分片逐块解密 + 流内序号校验，重组客户端标准 OpenAI SSE
+			plain, err := decryptSSEBody(body, pendingRequestID, config.Model)
 			if err != nil {
 				// 会话密钥不同步（服务端重启等）→ 清会话触发重握手（与单响应分支一致）
 				Session.clear()
@@ -578,8 +603,16 @@ func onResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, l
 	}
 	resp, err := protocol.DecodeResponse(body)
 	if err != nil {
-		// 非协议响应：TEE 已拒绝（403 guardrail / 400 协议错误），错误文本原样透传。
-		log.Warnf("otpmask-plugin: 非协议响应，透传错误体: %v", err)
+		// 回退：尝试 mock JSON 密文响应（段①，M2/M3 协议）。
+		// 与南向协议互斥：南向协议是非 UTF-8 二进制，mock JSON 必然含 cipher_output+nonce。
+		if plain, mockErr := handleMockCipherResponse(config, body, log); mockErr == nil {
+			if perr := proxywasm.ReplaceHttpResponseBody(plain); perr != nil {
+				return respFailClosed(log, fmt.Sprintf("替换明文响应失败: %v", perr))
+			}
+			_ = proxywasm.ReplaceHttpResponseHeader("content-type", "application/json")
+			return types.HeaderContinue
+		}
+		log.Warnf("otpmask-plugin: 非协议/非 mock 响应，透传错误体: %v", err)
 		return types.HeaderContinue
 	}
 	if kSig := requestK_sig(config); kSig != nil && !protocol.VerifyResponse(kSig, resp) {
@@ -610,6 +643,31 @@ func onResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, l
 	_ = proxywasm.ReplaceHttpResponseHeader("content-type", "text/event-stream")
 	log.Infof("otpmask-plugin: 响应解密完成 tokens=%d req=%s", len(plain), resp.RequestID[:8])
 	return types.HeaderContinue
+}
+
+// handleMockCipherResponse 处理 mock JSON 密文响应（段①，M2/M3 协议）：
+// {"cipher_output":[...],"nonce":hex} → 按 nonce 回溯 seed → 解密 → 明文 {"output":[...]}。
+func handleMockCipherResponse(config PluginConfig, body []byte, log logs.Log) ([]byte, error) {
+	cr, err := parseCipherResponse(body)
+	if err != nil {
+		return nil, err
+	}
+	seed, ok := KeyStore.Lookup(cr.Nonce)
+	if !ok {
+		return nil, fmt.Errorf("otpmask: mock 响应无对应请求密钥 nonce=%s", cr.Nonce[:8])
+	}
+	defer KeyStore.Delete(cr.Nonce)
+	defer wipe(seed)
+	plain, err := unmaskVector(seed, config.MaskModulus, cr.CipherOutput)
+	if err != nil {
+		return nil, fmt.Errorf("otpmask: mock 响应解密失败: %w", err)
+	}
+	plainBody, err := encodePlainResponse(plain, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	log.Infof("otpmask-plugin: mock 密文响应解密完成 tokens=%d nonce=%s", len(plain), cr.Nonce[:8])
+	return plainBody, nil
 }
 
 // buildSSE 组装 SSE 流式响应：每 token 一行 data + [DONE] 结束标记。

@@ -27,9 +27,19 @@ type plainRequest struct {
 	Vectors [][]uint64 `json:"vectors"`
 }
 
+// chatMsg 消息项（统一 text 载荷 = OpenAI messages；与 tee-infer-service/model.ChatMessage JSON 同构，
+// 见 tee-infer-service/main.go handleTextInfer json.Unmarshal 消费）。不改 import，避免 wasm 膨胀/耦合。
+type chatMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 // textRequest 明文请求（文本输入，M4；P2 扩展可选 stream/engine_type）。
+// 统一 text 载荷（对齐1）：Messages 为优先形态（OpenAI messages），Text 为既有单 text 兼容回退。
 type textRequest struct {
 	Text string `json:"text"`
+	// Messages 统一 text 载荷（OpenAI messages 数组，GF3.2 对齐1）。
+	Messages []chatMsg `json:"messages,omitempty"`
 	// Stream 流式响应（缺省 true：SSE 逐块；false = 聚合单响应）。
 	Stream *bool `json:"stream,omitempty"`
 	// EngineType 引擎类型（缺省 tee_gpu；cmaas = 百炼 C-MaaS，P5）。
@@ -79,16 +89,40 @@ func parsePlainRequest(body []byte) (*plainRequest, error) {
 	return &req, nil
 }
 
-// parseTextRequest 解析文本明文请求。
+// validRole 角色白名单：仅 system/user/assistant；未知角色 fail-closed（与 tee model.normalizeRole 一致）。
+func validRole(r string) bool {
+	return r == "system" || r == "user" || r == "assistant"
+}
+
+// parseTextRequest 解析文本明文请求（双形态，统一 text 载荷 = OpenAI messages）：
+//   - messages 优先：非空则逐项校验角色（未知角色 fail-closed），原样作为统一载荷；
+//   - 否则回退 text：兼容既有单 text 调用。
 func parseTextRequest(body []byte) (*textRequest, error) {
 	var req textRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("otpmask: 解析文本请求失败: %w", err)
 	}
+	if len(req.Messages) > 0 {
+		for _, m := range req.Messages {
+			if !validRole(m.Role) {
+				return nil, fmt.Errorf("otpmask: 未知消息角色 %q（fail-closed）", m.Role)
+			}
+		}
+		return &req, nil
+	}
 	if req.Text == "" {
-		return nil, fmt.Errorf("otpmask: 文本请求无 text")
+		return nil, fmt.Errorf("otpmask: 文本请求既无 text 也无 messages")
 	}
 	return &req, nil
+}
+
+// marshalMessages 按双形态构造段① 内层 TextPayload（OpenAI messages，对齐1）：
+// messages 优先整体透传；否则单 text 回退为单条 user（既有行为不变）。
+func marshalMessages(req *textRequest) ([]byte, error) {
+	if len(req.Messages) > 0 {
+		return json.Marshal(req.Messages)
+	}
+	return json.Marshal([]chatMsg{{Role: "user", Content: req.Text}})
 }
 
 // parseEmbedResponse 解析 embedding-service 响应。

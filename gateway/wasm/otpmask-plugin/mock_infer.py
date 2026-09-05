@@ -19,8 +19,13 @@ DELTA = int(os.environ.get("MOCK_DELTA", "7"))
 
 
 class Handler(BaseHTTPRequestHandler):
+    # HTTP/1.1：网关移除 Content-Length 后用 chunked 上传密文 body，
+    # 仅 HTTP/1.0 后端不支持 chunked，导致 body 读空（bad json）。
+    protocol_version = "HTTP/1.1"
+
     def do_POST(self):
-        raw = self._read_body
+        print(f"[mock-infer] HEADERS={dict(self.headers)}", flush=True)
+        raw = self._read_body()
         print(f"[mock-infer] RAW({len(raw)}B)={raw!r}", flush=True)
         try:
             body = json.loads(raw)
@@ -53,8 +58,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
-        self.end_headers
+        self.send_header("Connection", "close")
+        self.end_headers()
         self.wfile.write(data)
+        self.wfile.flush()
 
     def _read_body(self) -> bytes:
         """读取请求体：支持 Content-Length 与 chunked 两种传输编码。"""
@@ -82,4 +89,4 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"[mock-infer] starting, MOCK_DELTA={DELTA}", flush=True)
-    HTTPServer(("0.0.0.0", 9000), Handler).serve_forever
+    HTTPServer(("0.0.0.0", 9000), Handler).serve_forever()

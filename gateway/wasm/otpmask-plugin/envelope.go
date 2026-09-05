@@ -18,7 +18,7 @@ package main
 // 双层设计原因：外层计数器全局唯一（GCM nonce 安全），内层 seq 绑定流位置
 // （并发流交错时仍可严格校验单流顺序）。
 //
-// 插件解密后重组为客户端 SSE：data: {"token":"..."} 分片 + data: [DONE]。
+// 插件解密后重组为客户端标准 OpenAI SSE：data: choices[].delta.content 分片 + data: [DONE]。
 
 import (
 	"encoding/hex"
@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"security-ai-gateway/protocol/go"
 )
@@ -35,6 +36,27 @@ type streamChunk struct {
 	Seq    uint64 `json:"seq"`              // 流内序号（1 起严格递增）
 	Delta  string `json:"delta"`            // 增量文本
 	Finish string `json:"finish,omitempty"` // 终止标记（""=继续，"stop"=正常结束）
+}
+
+// sseDelta OpenAI 流式 delta 载荷（choices[].delta）。
+type sseDelta struct {
+	Content string `json:"content,omitempty"`
+}
+
+// sseChoice OpenAI 流式 choice（正常 chunk 带 content；finish chunk 带 finish_reason）。
+type sseChoice struct {
+	Index        int      `json:"index"`
+	Delta        sseDelta `json:"delta,omitempty"`
+	FinishReason string   `json:"finish_reason,omitempty"`
+}
+
+// sseChunk 客户端标准 OpenAI Chat Completions SSE 单块。
+type sseChunk struct {
+	ID      string      `json:"id"`
+	Object  string      `json:"object"`
+	Created int64       `json:"created"`
+	Model   string      `json:"model"`
+	Choices []sseChoice `json:"choices"`
 }
 
 // sseStreamDecryptor 单条 SSE 流的解密状态（请求级，onResponseBody 内创建）。
@@ -63,9 +85,34 @@ func (d *sseStreamDecryptor) decryptSSEChunk(dataLine string) (*streamChunk, err
 	return &chunk, nil
 }
 
-// decryptSSEBody 解密整段 tee-infer SSE 响应体，重组为客户端明文 SSE。
+// writeSSEChunk 将单个解密分片编译为标准 OpenAI SSE data 行。
+// 正常块：choices[].delta.content = delta；finish=="stop" 块：delta 置空 + finish_reason="stop"。
+func writeSSEChunk(sb *strings.Builder, reqID, model string, chunk *streamChunk) error {
+	choice := sseChoice{Index: 0}
+	if chunk.Finish == "stop" {
+		choice.FinishReason = "stop"
+	} else {
+		choice.Delta.Content = chunk.Delta
+	}
+	payload, err := json.Marshal(sseChunk{
+		ID:      reqID,
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []sseChoice{choice},
+	})
+	if err != nil {
+		return err
+	}
+	sb.WriteString("data: ")
+	sb.Write(payload)
+	sb.WriteString("\n\n")
+	return nil
+}
+
+// decryptSSEBody 解密整段 tee-infer SSE 响应体，重组为客户端标准 OpenAI SSE。
 // 任一分片解密失败/序号乱序/重放 → 整流拒绝（fail-closed，不输出半截明文）。
-func decryptSSEBody(body []byte) ([]byte, error) {
+func decryptSSEBody(body []byte, reqID, model string) ([]byte, error) {
 	dec := &sseStreamDecryptor{}
 	var sb strings.Builder
 	sawAny := false
@@ -83,11 +130,15 @@ func decryptSSEBody(body []byte) ([]byte, error) {
 			return nil, err
 		}
 		sawAny = true
-		sb.WriteString("data: ")
-		payload, _ := json.Marshal(map[string]string{"token": chunk.Delta})
-		sb.Write(payload)
-		sb.WriteString("\n\n")
+		if err := writeSSEChunk(&sb, reqID, model, chunk); err != nil {
+			return nil, err
+		}
 		if chunk.Finish != "" {
+			// finish="stop" 为正常终止；其他值（如 "error"/"filter"）为异常终止，
+			// 一律 fail-closed（整流拒绝，不输出半截明文，防客户端误判成功）。
+			if chunk.Finish != "stop" {
+				return nil, fmt.Errorf("envelope: SSE 流异常终止（finish=%q）", chunk.Finish)
+			}
 			sb.WriteString("data: [DONE]\n\n")
 			return []byte(sb.String()), nil
 		}
