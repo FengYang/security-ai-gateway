@@ -90,5 +90,12 @@ logs/
 security-ai-gateway-linux.tar.gz
 higress-standalone/req.json
 
+# higress standalone 控制面重建恢复凭证（本地保留，不入库）
+higress-standalone/_recovery/
+
+# higress standalone 运行时生成的 CA 证书/CRL（pilot-discovery 轮换写入，本地保留，不入库）
+higress-standalone/configmaps/higress-ca-root-cert.yaml
+higress-standalone/configmaps/istio-ca-crl.yaml
+
 # ===== 归档的 HTML 导出快照（含大体积字体/echarts 资产，权威文本版在 docs/*.md）=====
 docs/archive/html-snapshots/
