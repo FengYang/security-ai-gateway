@@ -5,6 +5,7 @@ package main
 // cross_test.py 覆盖），此处只测插件侧流状态机。
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"strings"
@@ -192,5 +193,153 @@ func TestIsSSEBody(t *testing.T) {
 	}
 	if isSSEBody([]byte("")) {
 		t.Fatal("空体不应识别为 SSE")
+	}
+}
+
+// ---------------- P1b 增量状态机测试 ----------------
+// SSEStreamDecoder.Feed：跨帧拼合、乱序/重放/截断/篡改拒绝，安全语义与整包解密等价。
+// 注：sseChunk.Created = time.Now()，故不对比两次运行的完整字节，改用结构包含判定。
+
+// feedAll 逐字节喂入（frame=1，最细粒度跨帧边界），末尾帧置 isLastChunk=true。
+func feedAll(dec *SSEStreamDecoder, data []byte) ([]byte, error) {
+	var out []byte
+	for i := 0; i < len(data); i++ {
+		last := i == len(data)-1
+		chunk, err := dec.Feed(data[i:i+1], last)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, chunk...)
+	}
+	return out, nil
+}
+
+// TestSSEDecoderIncrementalValid 合法流跨帧重组：逐字节喂入，重组结果与整包版结构一致。
+func TestSSEDecoderIncrementalValid(t *testing.T) {
+	_, kenc := newSessionForTest(t)
+	body := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+		{Seq: 1, Delta: "Hello"},
+		{Seq: 2, Delta: " 世界"},
+		{Seq: 3, Delta: "", Finish: "stop"},
+	}, []uint64{1, 2, 3})
+	out, err := feedAll(NewSSEStreamDecoder("reqInc", "modelInc"), body)
+	if err != nil {
+		t.Fatalf("增量解密失败: %v", err)
+	}
+	s := string(out)
+	for _, want := range []string{
+		`"object":"chat.completion.chunk"`,
+		`"id":"reqInc"`,
+		`"model":"modelInc"`,
+		`"delta":{"content":"Hello"`,
+		`"delta":{"content":" 世界"`,
+		`"finish_reason":"stop"`,
+		"data: [DONE]",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("增量重组缺 %q: %q", want, s)
+		}
+	}
+	if !strings.HasSuffix(s, "data: [DONE]\n\n") {
+		t.Fatal("增量流未以 [DONE] 终止")
+	}
+}
+
+// TestSSEDecoderIncrementalCoarseFrame 粗粒度跨帧（frame=5）同样正确重组。
+func TestSSEDecoderIncrementalCoarseFrame(t *testing.T) {
+	_, kenc := newSessionForTest(t)
+	body := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+		{Seq: 1, Delta: "a"},
+		{Seq: 2, Delta: "b", Finish: "stop"},
+	}, []uint64{1, 2})
+	dec := NewSSEStreamDecoder("reqC", "modelC")
+	var out []byte
+	frame := 5
+	for i := 0; i < len(body); i += frame {
+		end := i + frame
+		if end > len(body) {
+			end = len(body)
+		}
+		chunk, err := dec.Feed(body[i:end], end == len(body))
+		if err != nil {
+			t.Fatalf("Feed: %v", err)
+		}
+		out = append(out, chunk...)
+	}
+	s := string(out)
+	if !strings.Contains(s, `"delta":{"content":"a"`) || !strings.Contains(s, "data: [DONE]") {
+		t.Fatalf("粗粒度跨帧重组异常: %q", s)
+	}
+}
+
+// TestSSEDecoderIncrementalReorder 流内序号乱序（1→3）→ 整流拒绝。
+func TestSSEDecoderIncrementalReorder(t *testing.T) {
+	_, kenc := newSessionForTest(t)
+	body := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+		{Seq: 1, Delta: "a"},
+		{Seq: 3, Delta: "c"},
+	}, []uint64{1, 2})
+	if _, err := feedAll(NewSSEStreamDecoder("reqR", "modelR"), body); err == nil {
+		t.Fatal("流内序号乱序未被拒绝")
+	}
+}
+
+// TestSSEDecoderIncrementalReplay 外层计数器重放 → 整流拒绝。
+func TestSSEDecoderIncrementalReplay(t *testing.T) {
+	_, kenc := newSessionForTest(t)
+	body := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+		{Seq: 1, Delta: "a"},
+		{Seq: 2, Delta: "b", Finish: "stop"},
+	}, []uint64{1, 1}) // 第二分片重放 counter=1
+	if _, err := feedAll(NewSSEStreamDecoder("reqP", "modelP"), body); err == nil {
+		t.Fatal("外层计数器重放未被拒绝")
+	}
+}
+
+// TestSSEDecoderIncrementalTruncated 流被截断（缺 finish，无 [DONE] 亦然）→ 整流拒绝。
+func TestSSEDecoderIncrementalTruncated(t *testing.T) {
+	_, kenc := newSessionForTest(t)
+	body := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+		{Seq: 1, Delta: "a"},
+		{Seq: 2, Delta: "b"},
+	}, []uint64{1, 2})
+	// 去掉末尾 [DONE] 行与空行，模拟流被硬截断
+	trim := bytes.TrimSuffix(body, []byte("data: [DONE]\n\n"))
+	if _, err := feedAll(NewSSEStreamDecoder("reqT", "modelT"), trim); err == nil {
+		t.Fatal("截断流（缺 finish）未被拒绝")
+	}
+}
+
+// TestSSEDecoderIncrementalFinishError finish="error" → fail-closed 整流拒绝。
+func TestSSEDecoderIncrementalFinishError(t *testing.T) {
+	_, kenc := newSessionForTest(t)
+	body := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+		{Seq: 1, Delta: "partial"},
+		{Seq: 2, Delta: "", Finish: "error"},
+	}, []uint64{1, 2})
+	if _, err := feedAll(NewSSEStreamDecoder("reqF", "modelF"), body); err == nil {
+		t.Fatal("finish=error 未被拒绝")
+	}
+}
+
+// TestSSEDecoderIncrementalEmpty 仅 [DONE] 空流 → 拒绝（判空流）。
+func TestSSEDecoderIncrementalEmpty(t *testing.T) {
+	newSessionForTest(t)
+	if _, err := feedAll(NewSSEStreamDecoder("reqE", "modelE"), []byte("data: [DONE]\n\n")); err == nil {
+		t.Fatal("无加密分片的 [DONE] 空流未被拒绝")
+	}
+}
+
+// TestSSEDecoderIncrementalLatch 首次 error 后状态机闭锁：后续帧一律返回同一错误，不透传明文。
+func TestSSEDecoderIncrementalLatch(t *testing.T) {
+	newSessionForTest(t)
+	dec := NewSSEStreamDecoder("reqL", "modelL")
+	// 直接喂入非法数据触发首错
+	if _, err := dec.Feed([]byte("data: nothex!\n\n"), false); err == nil {
+		t.Fatal("非法 hex 分片未被拒绝")
+	}
+	// 闭锁后合法数据帧也应被拒绝（不透传明文）
+	if _, err := dec.Feed([]byte("data: 616263\n\n"), true); err == nil {
+		t.Fatal("闭锁后新帧未被拒绝")
 	}
 }

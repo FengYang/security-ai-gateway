@@ -21,6 +21,7 @@ package main
 // 插件解密后重组为客户端标准 OpenAI SSE：data: choices[].delta.content 分片 + data: [DONE]。
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -88,25 +89,11 @@ func (d *sseStreamDecryptor) decryptSSEChunk(dataLine string) (*streamChunk, err
 // writeSSEChunk 将单个解密分片编译为标准 OpenAI SSE data 行。
 // 正常块：choices[].delta.content = delta；finish=="stop" 块：delta 置空 + finish_reason="stop"。
 func writeSSEChunk(sb *strings.Builder, reqID, model string, chunk *streamChunk) error {
-	choice := sseChoice{Index: 0}
-	if chunk.Finish == "stop" {
-		choice.FinishReason = "stop"
-	} else {
-		choice.Delta.Content = chunk.Delta
-	}
-	payload, err := json.Marshal(sseChunk{
-		ID:      reqID,
-		Object:  "chat.completion.chunk",
-		Created: time.Now().Unix(),
-		Model:   model,
-		Choices: []sseChoice{choice},
-	})
+	line, err := sseLine(reqID, model, chunk)
 	if err != nil {
 		return err
 	}
-	sb.WriteString("data: ")
-	sb.Write(payload)
-	sb.WriteString("\n\n")
+	sb.Write(line)
 	return nil
 }
 
@@ -158,4 +145,114 @@ func isSSEBody(body []byte) bool {
 		}
 	}
 	return false
+}
+
+// SSEStreamDecoder 增量 SSE 密文流解密状态机（P1b 流式外发）。
+//
+// 与整包 decryptSSEBody 的差异：后者在 endOfStream 一次性收全 body 再解密；
+// 本状态机把 tee-infer 密文 body 的字节流（逐 frame 到达）跨 frame 拼合为
+// 完整 data: 行，逐帧即时解密并追加输出，从而可配合 ProcessStreamingResponseBody
+// 逐片外发，规避 Envoy 响应整体缓冲的大响应挂起（§4.2）。
+//
+// 安全语义与整包版等价：任一分片解密失败 / 外层计数器重放 / 内层 seq 乱序 →
+// 整流拒绝（err 非 nil，外层不再外发），不输出半截明文；已外发的合法前缀由
+// 外层以 fail-closed 截断丢弃（HTTP 上表现为流中断）。
+type SSEStreamDecoder struct {
+	dec     *sseStreamDecryptor
+	reqID   string
+	model   string
+	done    bool   // 已收到 finish="stop" 并输出 [DONE]
+	first   bool   // 是否已见到首个 data: 行（判空流）
+	pending []byte // 跨 frame 未拼合完整行的残留字节
+	err     error  // 首个不可恢复错误（整流拒绝后不再处理新帧）
+}
+
+// NewSSEStreamDecoder 创建增量解密状态机。
+func NewSSEStreamDecoder(reqID, model string) *SSEStreamDecoder {
+	return &SSEStreamDecoder{dec: &sseStreamDecryptor{}, reqID: reqID, model: model}
+}
+
+// Feed 喂入一个响应 body 分帧（后续末尾帧的 isLastChunk=true），返回本帧拼合后
+// 可外发的明文字节。返回非 nil err 表示整流拒绝，此后任何 Feed 均返回该 err。
+func (d *SSEStreamDecoder) Feed(chunk []byte, isLastChunk bool) ([]byte, error) {
+	if d.err != nil {
+		return nil, d.err
+	}
+	d.pending = append(d.pending, chunk...)
+	var out []byte
+	for {
+		idx := bytes.IndexByte(d.pending, '\n')
+		if idx < 0 {
+			break // 无完整行，等下一帧
+		}
+		line := strings.TrimRight(string(d.pending[:idx]), "\r")
+		d.pending = d.pending[idx+1:]
+		dataLine, ok := strings.CutPrefix(line, "data:")
+		if !ok {
+			continue // 注释/空行，忽略
+		}
+		if strings.TrimSpace(dataLine) == "[DONE]" {
+			continue // tee 侧流结束标记，解密收尾由 finish 分片判定
+		}
+		sc, err := d.dec.decryptSSEChunk(dataLine)
+		if err != nil {
+			d.err = err
+			return nil, err
+		}
+		d.first = true
+		bs, err := sseLine(d.reqID, d.model, sc)
+		if err != nil {
+			d.err = err
+			return nil, err
+		}
+		out = append(out, bs...)
+		if sc.Finish != "" {
+			if sc.Finish != "stop" {
+				d.err = fmt.Errorf("envelope: SSE 流异常终止（finish=%q）", sc.Finish)
+				return nil, d.err
+			}
+			out = append(out, "data: [DONE]\n\n"...)
+			d.done = true
+			return out, nil
+		}
+	}
+	// 流结束（isLastChunk）时强制收尾校验
+	if isLastChunk {
+		if !d.first {
+			return nil, errors.New("envelope: SSE 流无有效加密分片")
+		}
+		if len(d.pending) != 0 {
+			return nil, errors.New("envelope: SSE 流被截断（残留未完成帧）")
+		}
+		if d.done == false {
+			return nil, errors.New("envelope: SSE 流未正常终止（缺 finish 分片）")
+		}
+	}
+	return out, d.err
+}
+
+// sseLine 将单个解密分片编译为标准 OpenAI SSE data 行（含行尾 \n\n）。
+// 正常块：choices[].delta.content = delta；finish=="stop" 块：delta 置空 + finish_reason="stop"。
+func sseLine(reqID, model string, chunk *streamChunk) ([]byte, error) {
+	choice := sseChoice{Index: 0}
+	if chunk.Finish == "stop" {
+		choice.FinishReason = "stop"
+	} else {
+		choice.Delta.Content = chunk.Delta
+	}
+	payload, err := json.Marshal(sseChunk{
+		ID:      reqID,
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []sseChoice{choice},
+	})
+	if err != nil {
+		return nil, err
+	}
+	line := make([]byte, 0, len(payload)+len("data: ")+2)
+	line = append(line, "data: "...)
+	line = append(line, payload...)
+	line = append(line, '\n', '\n')
+	return line, nil
 }
