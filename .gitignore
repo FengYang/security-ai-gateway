@@ -90,6 +90,9 @@ logs/
 security-ai-gateway-linux.tar.gz
 higress-standalone/req.json
 
+# 本地工具链（w64devkit 编译器套装，本地保留，不入库）
+/tools/
+
 # higress standalone 控制面重建恢复凭证（本地保留，不入库）
 higress-standalone/_recovery/
 
