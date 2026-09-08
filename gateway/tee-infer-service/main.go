@@ -1392,6 +1392,22 @@ func writeSealFile(path string, masterBlob, sigBlob []byte) error {
 	return os.WriteFile(path, buf, 0o600)
 }
 
+// maxRequestBodyBytes 请求体上限（4MiB）：防超大 body 资源耗尽（T-1 评审项）。
+const maxRequestBodyBytes = 4 << 20
+
+// limitBody 请求体限制中间件：Content-Length 超限确定性 413；chunked 越限由
+// MaxBytesReader 在读取时拦截（处理器读取失败走既有 400 fail-closed 路径）。
+func limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > maxRequestBodyBytes {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	addr := flag.String("listen", ":19090", "监听地址")
 	sigKeyHex := flag.String("sig-key", "", "协议签名密钥 K_sig（32 字节 hex；默认随机生成并打印）")
@@ -1608,7 +1624,15 @@ func main() {
 	defer audit.Close() // WORM 模式落盘文件随进程退出关闭
 
 	log.Printf("tee-infer-service 就绪: %s（KeyManager 主密钥轮换 TTL=%v + attestation 双向）", *addr, teecore.DefaultMasterTTL)
-	if err := http.ListenAndServe(*addr, mux); err != nil {
+	httpSrv := &http.Server{
+		Addr:              *addr,
+		Handler:           limitBody(mux),
+		ReadHeaderTimeout: 5 * time.Second,  // 防 slowloris（对齐 auth-service 现有实践）
+		ReadTimeout:       60 * time.Second, // body 一次性读完；不影响响应
+		IdleTimeout:       120 * time.Second,
+		// WriteTimeout 不设：SSE 流式响应为长写连接，统一写超时会截断流（P1b 流式语义）
+	}
+	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatalf("服务退出: %v", err)
 	}
 }

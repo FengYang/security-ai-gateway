@@ -47,8 +47,9 @@ func verifyJWT(secret []byte, token string) (*jwtClaims, error) {
 	if err := json.Unmarshal(payload, &c); err != nil {
 		return nil, errors.New("jwt: 载荷解析失败")
 	}
-	if c.EXP != 0 && c.EXP < time.Now().Unix() {
-		return nil, errors.New("jwt: token 已过期")
+	// RFC 8725 §3.1：exp 必填——缺失（=0）的 token 一律拒绝，防"永不过期"的伪造载荷
+	if c.EXP == 0 || c.EXP < time.Now().Unix() {
+		return nil, errors.New("jwt: token 缺失 exp 或已过期")
 	}
 	return &c, nil
 }

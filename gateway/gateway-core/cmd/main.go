@@ -18,6 +18,22 @@ import (
 	"security-ai-gateway/gateway/mcpsec"
 )
 
+// maxRequestBodyBytes 请求体上限（4MiB）：控制面载荷极小，取保守上限（T-1 评审项）。
+const maxRequestBodyBytes = 4 << 20
+
+// limitBody 请求体限制中间件：Content-Length 超限确定性 413；chunked 越限由
+// MaxBytesReader 在读取时拦截（处理器读取失败走既有 400 fail-closed 路径）。
+func limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > maxRequestBodyBytes {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	sigKeyHex := os.Getenv("OTP_CORE_SIG_KEY")
 	if sigKeyHex == "" {
@@ -47,7 +63,16 @@ func main() {
 	srv := api.New(signer, msigner, st, authToken, rt)
 
 	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d", addr, authToken != "", rt.Version)
-	if err := http.ListenAndServe(addr, srv.Handler()); err != nil {
+	// 控制面无流式响应，全量超时；body 上限防资源耗尽（T-1 评审项）
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           limitBody(srv.Handler()),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatalf("HTTP 服务退出: %v", err)
 	}
 }

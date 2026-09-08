@@ -129,6 +129,8 @@ func main() {
 		Addr:              *addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	log.Printf("embedding-service 就绪: %s（MVP: 字符级分词 + 伪向量）", *addr)
 	if err := srv.ListenAndServe(); err != nil {
