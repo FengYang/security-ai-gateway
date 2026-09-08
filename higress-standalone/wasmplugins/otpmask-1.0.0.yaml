@@ -40,7 +40,7 @@ metadata:
   resourceVersion: "3"
 spec:
   defaultConfigDisable: false
-  failStrategy: FAIL_CLOSED
+  failStrategy: FAIL_OPEN # fake-apiserver CRD 仅接受 FAIL_OPEN；fail-closed 由插件显式逻辑承载（验证清单 §8/§12）
   priority: 100
   url: http://localhost:8002/plugins/otpmask/1.0.0/plugin.wasm
 status: {}

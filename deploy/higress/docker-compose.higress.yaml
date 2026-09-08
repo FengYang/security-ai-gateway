@@ -24,3 +24,7 @@ services:
 networks:
   default:
     name: higress-chain-nw
+    # 显式子网：mock 后端可固定 --ip 172.18.0.3，与 endpoints 快照一致，防容器重建后 IP 漂移
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
