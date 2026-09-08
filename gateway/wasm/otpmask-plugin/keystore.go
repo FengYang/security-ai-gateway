@@ -64,7 +64,6 @@ func (k *MemKeyStore) Lookup(nonceHex string) ([]byte, bool) {
 
 // Delete 删除一次性密钥（响应解密后调用）。
 func (k *MemKeyStore) Delete(nonceHex string) {
-	metricKeysDeleted.incr() // W-1：密钥删除计数（存量 = issued - deleted）
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if seed, ok := k.keys[nonceHex]; ok {
@@ -72,5 +71,6 @@ func (k *MemKeyStore) Delete(nonceHex string) {
 			seed[i] = 0
 		}
 		delete(k.keys, nonceHex)
+		metricKeysDeleted.incr() // W-1：仅实删计数（onStreamDone 幂等兜底不重复计）
 	}
 }

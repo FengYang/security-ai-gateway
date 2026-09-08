@@ -245,8 +245,8 @@ func onRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, lo
 	if pReq, err := parsePlainRequest(body); err == nil {
 		return handleVectorsRequest(ctx, config, pReq.Vectors, log)
 	}
-	log.Errorf("otpmask-plugin: 无法解析请求体（需 text 或 vectors）")
-	return types.HeaderStopAllIterationAndBuffer
+	// §8 遗留点修复：fail-closed 回显式 503（替代裸 return 挂起至 stream_idle_timeout）
+	return failClosed(log, "无法解析请求体（需 text 或 vectors）")
 }
 
 // handleVectorsRequest 向量输入：签发密钥（本地）→ 加密 → 南向协议请求。
@@ -254,8 +254,7 @@ func onRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, lo
 func handleVectorsRequest(ctx wrapper.HttpContext, config PluginConfig, vectors [][]uint64, log logs.Log) types.Action {
 	seed, nonceHex, err := KeyStore.Issue()
 	if err != nil {
-		log.Errorf("otpmask-plugin: 签发密钥失败: %v", err)
-		return types.HeaderStopAllIterationAndBuffer
+		return failClosed(log, fmt.Sprintf("签发密钥失败: %v", err))
 	}
 	defer wipe(seed)
 	// P1b 待办3：登记本请求在 KeyStore 的密钥 key，供 onStreamDone 异常中断时兜底删除。
@@ -263,8 +262,7 @@ func handleVectorsRequest(ctx wrapper.HttpContext, config PluginConfig, vectors 
 
 	cipherVecs, err := maskVectors(seed, config.MaskModulus, vectors)
 	if err != nil {
-		log.Errorf("otpmask-plugin: 加密失败: %v", err)
-		return types.HeaderStopAllIterationAndBuffer
+		return failClosed(log, fmt.Sprintf("加密失败: %v", err))
 	}
 	cipherBody, err := encodeCipherRequest(&cipherRequest{
 		CipherVectors: cipherVecs,
@@ -272,12 +270,10 @@ func handleVectorsRequest(ctx wrapper.HttpContext, config PluginConfig, vectors 
 		Model:         config.Model,
 	})
 	if err != nil {
-		log.Errorf("otpmask-plugin: %v", err)
-		return types.HeaderStopAllIterationAndBuffer
+		return failClosed(log, fmt.Sprintf("密文编码失败: %v", err))
 	}
 	if err := proxywasm.ReplaceHttpRequestBody(cipherBody); err != nil {
-		log.Errorf("otpmask-plugin: 替换请求体失败: %v", err)
-		return types.HeaderStopAllIterationAndBuffer
+		return failClosed(log, fmt.Sprintf("替换请求体失败: %v", err))
 	}
 	_ = proxywasm.ReplaceHttpRequestHeader("content-type", "application/json")
 	log.Infof("otpmask-plugin: 向量请求加密完成 vectors=%d dim=%d nonce=%s",
