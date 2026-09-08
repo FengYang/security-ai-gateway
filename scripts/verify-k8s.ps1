@@ -1,4 +1,4 @@
-﻿# verify-k8s.ps1 - M10 K8s manifests verification (single-node dev env)
+# verify-k8s.ps1 - M10 K8s manifests verification (single-node dev env)
 #
 # Validates the K8s/monitoring manifests and app images WITHOUT a cluster:
 #   1. kustomize render  (kubectl kustomize, catches structural errors)
@@ -93,10 +93,13 @@ if (-not $helmBin) {
     if ($h) { $helmBin = $h.Source } else { $helmBin = 'c:\Users\Robin\.trae-cn\work\6a93a46b2f0da2dc35a6f367\helm-bin\helm.exe' }
 }
 if (Test-Path $helmBin) {
-    $r11 = Invoke-Native $helmBin @('lint', 'deploy/helm/otpmask')
-    $r12 = Invoke-Native $helmBin @('template', 'otpmask', 'deploy/helm/otpmask')
+    # D-1：secret 必填——渲染必须显式带值（ci-values.yaml 为 CI 专用演示值）
+    $r11 = Invoke-Native $helmBin @('lint', 'deploy/helm/otpmask', '-f', 'deploy/helm/otpmask/ci-values.yaml')
+    $r12 = Invoke-Native $helmBin @('template', 'otpmask', 'deploy/helm/otpmask', '-f', 'deploy/helm/otpmask/ci-values.yaml')
+    $r13 = Invoke-Native $helmBin @('template', 'otpmask', 'deploy/helm/otpmask') # 无值必须失败（required 守卫生效）
     $ok = ($r11.Code -eq 0) -and ($r12.Code -eq 0) -and ($r12.Out -match 'kind: Deployment')
-    Check 'helm lint + template render' $ok
+    Check 'helm lint + template render (with ci-values)' $ok
+    Check 'helm template without values fails (secret required guard)' (($r13.Code -ne 0) -and ($r13.Out -match 'sigKey')) (($r13.Out -replace "`n", ' ').Trim)
 } else {
     Check 'helm lint + template (helm not found, skipped)' $true '(set $env:HELM_BIN)'
 }

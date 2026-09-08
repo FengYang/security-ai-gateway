@@ -4,10 +4,10 @@
 # 命名空间（release 所在命名空间，通常即部署目标）
 namespace: otpmask
 
-# 协议签名密钥与远程证明令牌（演示值；生产必须覆盖）
+# 协议签名密钥与远程证明令牌（D-1：无默认值，必须显式提供——防已知密钥一键安装）
 secret:
-  sigKey: "3031323334353637383961626364656630313233343536373839616263646566"
-  attestToken: "3031323334353637383961626364656630313233343536373839616263646566"
+  sigKey: "" # 必填（32 字节 hex）；或 create: false 引用既有 Secret
+  attestToken: "" # 必填；或 create: false 引用既有 Secret
   create: true # false 时引用既有 secret（名称见 secret.existingName）
 
 images:

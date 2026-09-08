@@ -1,0 +1,7 @@
+# CI 专用演示值——仅用于 verify-k8s.ps1 的 helm lint/template 渲染校验，严禁用于生产部署。
+# 生产部署必须用真实密钥：
+#   helm install otpmask deploy/helm/otpmask \
+#     --set secret.sigKey=<32字节hex> --set secret.attestToken=<32字节hex>
+secret:
+  sigKey: "3031323334353637383961626364656630313233343536373839616263646566"
+  attestToken: "3031323334353637383961626364656630313233343536373839616263646566"
