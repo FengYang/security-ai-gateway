@@ -43,8 +43,9 @@ func (k *MemKeyStore) Issue() (seed []byte, nonceHex string, err error) {
 	return seed, nonceHex, nil
 }
 
-// Store 注入外部签发的请求密钥。
+// Store 注入外部签发的请求密钥（所有密钥均经此入库，签发计数不双计）。
 func (k *MemKeyStore) Store(key string, seed []byte) {
+	metricKeysIssued.incr() // W-1：密钥签发计数
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.keys[key] = append([]byte(nil), seed...)
@@ -63,6 +64,7 @@ func (k *MemKeyStore) Lookup(nonceHex string) ([]byte, bool) {
 
 // Delete 删除一次性密钥（响应解密后调用）。
 func (k *MemKeyStore) Delete(nonceHex string) {
+	metricKeysDeleted.incr() // W-1：密钥删除计数（存量 = issued - deleted）
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if seed, ok := k.keys[nonceHex]; ok {

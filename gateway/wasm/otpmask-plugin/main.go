@@ -165,6 +165,7 @@ const ctxKeyTenantID = "otpmask-tenant-id"
 // C-6：配置 jwt_secret 时校验 Bearer token，以 tenant claim 覆盖自声明头，
 // require_auth=true 时无/无效 token → 401。
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log logs.Log) types.Action {
+	metricRequests.incr() // W-1：请求计数
 	if err := proxywasm.RemoveHttpRequestHeader("content-length"); err != nil {
 		log.Warnf("otpmask-plugin: 移除 content-length 失败: %v", err)
 	}
@@ -286,6 +287,7 @@ func handleVectorsRequest(ctx wrapper.HttpContext, config PluginConfig, vectors 
 
 // failClosed TEE 链路不可用时的默认拒绝响应（fail-closed，不降级明文）。
 func failClosed(log logs.Log, msg string) types.Action {
+	metricFailClosed.incr() // W-1：fail-closed 计数
 	log.Errorf("otpmask-plugin: fail-closed 拒绝请求: %s", msg)
 	_ = proxywasm.SendHttpResponse(503, [][2]string{{"Content-Type", "text/plain"}},
 		[]byte("otpmask: secure inference unavailable"), -1)
@@ -638,6 +640,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk
 			if err != nil {
 				st.closed = true
 				st.dec = nil
+				metricDecryptError.incr() // W-1：解密失败计数
 				log.Errorf("otpmask-plugin: SSE 流解密失败（整流拒绝）: %v", err)
 				return nil
 			}
@@ -651,6 +654,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk
 			st.dec = nil
 			// 会话密钥不同步（服务端重启等）→ 清会话触发重握手（与单响应分支一致）
 			Session.clear()
+			metricDecryptError.incr() // W-1：解密失败计数
 			log.Errorf("otpmask-plugin: SSE 流解密失败（整流拒绝）: %v", err)
 			return nil
 		}
@@ -667,7 +671,8 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk
 		return plain // 非 200/透传：原样返回（SDK 逐片替换 = 等价透传）
 	}
 	if plain == nil {
-		return nil // fail-closed：不外发可疑明文
+		metricDecryptError.incr() // W-1：解密/流校验失败（整包 fail-closed）
+		return nil                // fail-closed：不外发可疑明文
 	}
 	// 向量请求（handleVectorsRequest）不设置 pendingRequestID，须防御性截断
 	rid := pendingRequestID
