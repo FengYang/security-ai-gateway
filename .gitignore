@@ -43,11 +43,21 @@ security-ai-gateway.html
 _shared/
 assets/
 
-# ===== 核心文档例外：ai-gateway-roadmap 为根目录活文档，渲染资产需入库 =====
-!/ai-gateway-roadmap/assets/
-!/ai-gateway-roadmap/_shared/
-!/ai-gateway-roadmap/implementation-status-report/assets/
-!/ai-gateway-roadmap/implementation-status-report/_shared/
+# ===== 文档策略（2026-09-09：代码对外发布，所有文档不入库，本地保留为优质资产）=====
+# 全局忽略所有 Markdown；目录级忽略内部方案/评审/白皮书/路线图 HTML
+# 仅豁免"技术入口文档"7 份（对外发布仓库入口所需）
+*.md
+!README.md
+!docs/API-参考.md
+!docs/部署指南.md
+!docs/benchmark/
+docs/benchmark/*
+!docs/benchmark/README.md
+!deploy/higress/README.md
+!gateway/wasm/hello-plugin/README.md
+!gateway/wasm/otpmask-plugin/README.md
+ai-gateway-roadmap/
+confidential-ai-gateway-whitepaper/
 
 # ===== IDE / 编辑器 =====
 .claude/
