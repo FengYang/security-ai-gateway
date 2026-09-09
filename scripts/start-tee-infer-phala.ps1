@@ -17,8 +17,10 @@ if (-not (Test-Path $envFile)) {
 }
 
 # 解析 KEY=VALUE 配置（忽略注释与空行）
+# -Encoding UTF8：文件为 UTF-8（含中文注释）；PS 5.1 默认按 ANSI 解码，多字节
+# 序列可能吞掉行尾 CRLF 并把下一行 KEY 合并进注释行，导致密钥解析丢失
 $config = @{}
-Get-Content $envFile | ForEach-Object {
+Get-Content $envFile -Encoding UTF8 | ForEach-Object {
     $line = $_.Trim()
     if ($line -and -not $line.StartsWith("#")) {
         $k, $v = $line -split "=", 2
