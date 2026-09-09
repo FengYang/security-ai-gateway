@@ -25,6 +25,44 @@ import (
 
 const testAttest = "m9-test-attest-token"
 
+// proofWire /attest 响应中 proof 的线上格式（二进制字段 hex 编码，与插件侧解码约定一致）
+type proofWire struct {
+	Nonce        string            `json:"nonce"`
+	Platform     string            `json:"platform"`
+	ReportData   string            `json:"report_data"`
+	Measurements map[string]string `json:"measurements"`
+	SigningKey   string            `json:"signing_key"`
+	Signature    string            `json:"signature"`
+}
+
+// decodeProofWire 将线上 proof JSON 解码为 AttestationProof
+func decodeProofWire(raw json.RawMessage) (*AttestationProof, error) {
+	var pw proofWire
+	if err := json.Unmarshal(raw, &pw); err != nil {
+		return nil, err
+	}
+	nonce, err := hex.DecodeString(pw.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("proof.nonce 非 hex: %w", err)
+	}
+	rd, err := hex.DecodeString(pw.ReportData)
+	if err != nil {
+		return nil, fmt.Errorf("proof.report_data 非 hex: %w", err)
+	}
+	sk, err := hex.DecodeString(pw.SigningKey)
+	if err != nil {
+		return nil, fmt.Errorf("proof.signing_key 非 hex: %w", err)
+	}
+	sig, err := hex.DecodeString(pw.Signature)
+	if err != nil {
+		return nil, fmt.Errorf("proof.signature 非 hex: %w", err)
+	}
+	return &AttestationProof{
+		Nonce: nonce, Platform: pw.Platform, ReportData: rd,
+		Measurements: pw.Measurements, SigningKey: sk, Signature: sig,
+	}, nil
+}
+
 // TestRemoteAttestationE2E
 // 挑战-响应 → 验证链 → ECDH+HKDF 派生会话 K_sig → 会话签名推理全链路。
 func TestRemoteAttestationE2E(t *testing.T) {
@@ -42,11 +80,11 @@ func TestRemoteAttestationE2E(t *testing.T) {
 	}
 	defer attestResp.Body.Close()
 	var ar struct {
-		Status    string            `json:"status"`
-		Protocol  string            `json:"protocol"`
-		SessionID string            `json:"session_id"`
-		ServerPub string            `json:"server_pub"`
-		Proof     *AttestationProof `json:"proof"`
+		Status    string          `json:"status"`
+		Protocol  string          `json:"protocol"`
+		SessionID string          `json:"session_id"`
+		ServerPub string          `json:"server_pub"`
+		Proof     json.RawMessage `json:"proof"`
 	}
 	if err := json.NewDecoder(attestResp.Body).Decode(&ar); err != nil {
 		t.Fatalf("attest 解析失败: %v", err)
@@ -56,12 +94,16 @@ func TestRemoteAttestationE2E(t *testing.T) {
 	}
 
 	// 2. 客户验证证明链（report_data 须绑定 H(nonce ‖ server_pub)，防握手公钥替换）
+	proof, err := decodeProofWire(ar.Proof)
+	if err != nil {
+		t.Fatalf("proof 解码失败: %v", err)
+	}
 	serverPubBytes, _ := hex.DecodeString(ar.ServerPub)
 	expectedRD := reportDataBinding(nonce, serverPubBytes)
-	if err := VerifyAttestationProof(ar.Proof, expectedHash, expectedRD); err != nil {
+	if err := VerifyAttestationProof(proof, expectedHash, expectedRD); err != nil {
 		t.Fatalf("证明链验证失败: %v", err)
 	}
-	if !bytes.Equal(ar.Proof.Nonce, nonce) {
+	if !bytes.Equal(proof.Nonce, nonce) {
 		t.Fatal("nonce 回显不一致")
 	}
 
@@ -208,15 +250,19 @@ func setupTestSession(t *testing.T, ts *httptest.Server) (string, []byte, []byte
 	}
 	defer resp.Body.Close()
 	var ar struct {
-		SessionID string            `json:"session_id"`
-		ServerPub string            `json:"server_pub"`
-		Proof     *AttestationProof `json:"proof"`
+		SessionID string          `json:"session_id"`
+		ServerPub string          `json:"server_pub"`
+		Proof     json.RawMessage `json:"proof"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&ar); err != nil {
 		t.Fatal(err)
 	}
+	proof, err := decodeProofWire(ar.Proof)
+	if err != nil {
+		t.Fatalf("proof 解码失败: %v", err)
+	}
 	serverPub, _ := hex.DecodeString(ar.ServerPub)
-	if err := VerifyAttestationProof(ar.Proof, expectedHash, reportDataBinding(nonce, serverPub)); err != nil {
+	if err := VerifyAttestationProof(proof, expectedHash, reportDataBinding(nonce, serverPub)); err != nil {
 		t.Fatalf("证明链验证失败: %v", err)
 	}
 	clientPriv, _ := newClientSession()

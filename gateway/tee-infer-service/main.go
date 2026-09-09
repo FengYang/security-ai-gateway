@@ -423,6 +423,13 @@ func (s *teeServer) handleAttest(w http.ResponseWriter, r *http.Request) {
 	s.sessions[sess.ID] = sess
 	s.mu.Unlock()
 
+	// proof 二进制字段（nonce/report_data/signing_key/signature）以 hex 编码返回，
+	// 与插件侧解码约定一致（直接序列化结构体会被 Go 默认编码为 base64）
+	proofJSON, err := proof.proofJSON()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("生成证明JSON失败: %v", err), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":           "attested",
@@ -430,7 +437,7 @@ func (s *teeServer) handleAttest(w http.ResponseWriter, r *http.Request) {
 		"attest_type":      protocol.AttestTypeQuote,
 		"protocol_version": s.protoVersion,
 		"session_id":       sess.ID,
-		"proof":            proof,
+		"proof":            json.RawMessage(proofJSON),
 		"server_pub":       hex.EncodeToString(sess.ServerPub()),
 		"session_ttl":      int(sessionTTL.Seconds()),
 	})
