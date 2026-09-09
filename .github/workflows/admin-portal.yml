@@ -1,0 +1,75 @@
+# admin-portal — Higress 控制台 vendor-fork 可重建性 CI（M1 WP-C-3）
+#
+# 目的：证明 fork 定制可从上游纯净重建，防止补丁随升级漂移不可应用/不可构建。
+# 流程：clone 上游 v2.2.4（=baseline 36aa9c6）→ git apply 定制补丁
+#       （fork-patches/higress-console/higress-console-custom.patch，由
+#       scripts/fork-patch-check.ps1 生成）→ 后端 mvn compile + 前端 npm build。
+# 触发：fork-patches/** 或相关脚本/本文件变更（push main / PR）；可手动 dispatch。
+name: admin-portal
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'fork-patches/**'
+      - 'scripts/fork-patch-check.ps1'
+      - 'scripts/build-console-frontend.ps1'
+      - '.github/workflows/admin-portal.yml'
+  pull_request:
+    paths:
+      - 'fork-patches/**'
+      - 'scripts/fork-patch-check.ps1'
+      - '.github/workflows/admin-portal.yml'
+  workflow_dispatch:
+
+jobs:
+  rebuild-fork:
+    name: 从上游重建控制台 fork
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检出上游基线 v2.2.4（=36aa9c6）
+        run: |
+          git clone --depth 1 --branch v2.2.4 \
+            https://github.com/higress-group/higress-console.git /tmp/higress-console
+
+      - name: apply 定制补丁
+        run: |
+          git -C /tmp/higress-console apply --verbose \
+            "$GITHUB_WORKSPACE/fork-patches/higress-console/higress-console-custom.patch"
+          echo "--- applied customization summary ---"
+          git -C /tmp/higress-console status --short
+
+      - name: 后端编译（console+sdk，JDK17；skip npm/pmd/checkstyle/delombok）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: mvn compile console
+        run: |
+          cd /tmp/higress-console/backend
+          chmod +x mvnw
+          ./mvnw -q -pl console -am compile \
+            -Dskip.npm=true -Dskip.npx=true \
+            -Dpmd.skip=true -Dcheckstyle.skip=true -Dlombok.delombok.skip=true
+        env:
+          MAVEN_OPTS: -Dhttp.keepAlive=false
+
+      - name: 前端构建（npm ci + ice build）
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16'
+      - name: npm ci && build
+        run: |
+          cd /tmp/higress-console/frontend
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: 断言定制已编入产物
+        run: |
+          cd /tmp/higress-console/frontend/build
+          test -f index.html
+          test -f security-center.html
+          ls js/p_security-center-index-*.js >/dev/null
+          echo "PASS: security-center page chunk present in build output"
