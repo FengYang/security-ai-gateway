@@ -111,7 +111,7 @@ func (r *RemoteEngine) Predict(x []float64) int {
 
 // Generate vLLM OpenAI 兼容流式生成（/v1/chat/completions，SSE）。
 func (r *RemoteEngine) Generate(req GenerateRequest, onDelta func(delta string) error) error {
-	return StreamChat(r.client, r.baseURL+"/v1/chat/completions", nil, req, onDelta)
+	return StreamChat(r.client, r.baseURL+"/v1/chat/completions", nil, req, onDelta, nil)
 }
 
 // Close 预留（远程引擎无本地资源；真实 vLLM 场景可扩展会话管理）。
@@ -141,8 +141,11 @@ type chatStreamChunk struct {
 // 任一失败（连接/超时/非 200/JSON 解析/流中断/[DONE] 缺失）→ error，
 // 已回调的增量不回滚，由调用方 fail-closed 丢弃（不产出半截明文）。
 // extraHeaders 为引擎特定请求头（如 CmaasEngine 的 Authorization）。
+// onRespHeader 在确认 200 后、流消费前回调一次（可 nil）：CmaasEngine 据此捕获
+// Phala 密态网关的证明回执头（x-receipt-id 等，流式响应体消费后无法回读）。
 func StreamChat(client *http.Client, url string, extraHeaders [][2]string,
-	req GenerateRequest, onDelta func(delta string) error) error {
+	req GenerateRequest, onDelta func(delta string) error,
+	onRespHeader func(http.Header)) error {
 	body, err := json.Marshal(chatCompletionRequest{
 		Model: req.Model, Messages: req.Messages,
 		MaxTokens: req.MaxTokens, Stream: true,
@@ -167,6 +170,9 @@ func StreamChat(client *http.Client, url string, extraHeaders [][2]string,
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("engine: 引擎返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	if onRespHeader != nil {
+		onRespHeader(resp.Header)
 	}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)

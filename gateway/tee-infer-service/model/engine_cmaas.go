@@ -13,7 +13,9 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -96,15 +98,66 @@ func (e *CmaasEngine) Generate(req GenerateRequest, onDelta func(delta string) e
 	e.mu.Unlock()
 	// 代理地址按部署固定 base，路径为 OpenAI 兼容标准路径
 	url := e.proxyURL + "/v1/chat/completions"
-	err := StreamChat(e.client, url, headers, req, onDelta)
+	// Phala 密态网关兼容：200 后流消费前捕获证明回执头（流后无法回读）。
+	// 百炼 openai-proxy 无这些头 → receiptID 为空，走原路径不受影响。
+	var receiptID string
+	onRespHeader := func(h http.Header) {
+		receiptID = h.Get("X-Receipt-Id")
+	}
+	err := StreamChat(e.client, url, headers, req, onDelta, onRespHeader)
 	if err != nil {
 		failed = true
 		return fmt.Errorf("cmaas: %w", err)
 	}
-	// StreamChat 成功后无法回读响应头（流已消费）；证明引用经 LastAttestation
-	// 由代理侧 companion 端点或 SDK 透明度报告目录获取（开通后对齐，
-	// 见 GA-CMAAS对接设计.md §4）。
+	// Phala 证明回执（响应后审计级验证）：流式明文此时已交付，验证失败
+	// 仅落审计标记（verified=false/fetch-error），不做事后 fail-closed（无法回滚）；
+	// 流前强验证属 attest-verify 侧后续工作。
+	if receiptID != "" {
+		e.RecordAttestation(e.verifyPhalaReceipt(receiptID, apiKey))
+	}
 	return nil
+}
+
+// verifyPhalaReceipt 拉取并检查 Phala ACI 证明回执（GET /v1/aci/receipts/{id}）。
+// 判定：event_log 存在 type=upstream.verified 且 result=verified 的条目。
+// 返回审计引用串 phala-receipt:<id>:verified=<true|false|fetch-error>（永不失败中断业务）。
+func (e *CmaasEngine) verifyPhalaReceipt(receiptID, apiKey string) string {
+	ref := "phala-receipt:" + receiptID
+	req, err := http.NewRequest(http.MethodGet, e.proxyURL+"/v1/aci/receipts/"+receiptID, nil)
+	if err != nil {
+		return ref + ":fetch-error"
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return ref + ":fetch-error"
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ref + ":fetch-error"
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return ref + ":fetch-error"
+	}
+	var receipt struct {
+		EventLog []struct {
+			Type     string `json:"type"`
+			Provider string `json:"provider"`
+			Result   string `json:"result"`
+		} `json:"event_log"`
+	}
+	if json.Unmarshal(raw, &receipt) != nil {
+		return ref + ":fetch-error"
+	}
+	for _, ev := range receipt.EventLog {
+		if ev.Type == "upstream.verified" && ev.Result == "verified" {
+			return ref + ":verified=true"
+		}
+	}
+	return ref + ":verified=false"
 }
 
 // Predict C-MaaS 不支持 vectors 载荷（SDK 接口仅接受文本），一律 -1。
