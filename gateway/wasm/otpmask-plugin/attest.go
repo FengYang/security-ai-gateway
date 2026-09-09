@@ -132,9 +132,9 @@ func doAttestHandshake(config PluginConfig, log logs.Log, onDone func(id string,
 	}
 	chalBody, _ := json.Marshal(map[string]string{"nonce": hex.EncodeToString(nonce)})
 
-	client := wrapper.NewClusterClient(wrapper.DnsCluster{
-		ServiceName: config.TEEService,
-		Port:        config.TEEPort,
+	client := wrapper.NewClusterClient(wrapper.FQDNCluster{
+		FQDN: config.TEEService,
+		Port: config.TEEPort,
 	})
 	err := client.Post("/attest", [][2]string{{"Content-Type", "application/json"}}, chalBody,
 		func(statusCode int, _ http.Header, body []byte) {

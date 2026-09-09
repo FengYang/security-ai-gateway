@@ -59,7 +59,7 @@ type PluginConfig struct {
 	TEEPort          int64  `json:"tee_port"`
 	SigKeyHex        string `json:"sig_key"`           // 协议签名密钥 K_sig（32 字节 hex，M5 静态注入；token 模式用）
 	AttestToken      string `json:"attest_token"`      // 远程证明令牌（模拟凭证）
-	AttestMode       string `json:"attest_mode"`       // 远程证明模式 "token"（缺省，MVP 兼容）| "quote"（挑战-响应）
+	AttestMode       string `json:"attest_mode"`       // 远程证明模式 "quote"（缺省，挑战-响应，text 载荷必需）| "token"（MVP 兼容，显式配置）
 	ExpectedAppHash  string `json:"expected_app_hash"` // quote 模式：期望测量值 app_hash（客户策略，）
 	JWTSecretHex     string `json:"jwt_secret"`        // 租户鉴权 JWT 密钥（32 字节 hex，C-6）；空 = 不启用
 	RequireAuth      bool   `json:"require_auth"`      // true 时无有效 JWT 拒绝 401（C-6）
@@ -99,19 +99,19 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 		config.MaskModulus = defaultMaskModulus
 	}
 	if config.AttestMode == "" {
-		config.AttestMode = "token"
+		config.AttestMode = "quote" // 缺省 quote：text 载荷引擎（tee_gpu/cmaas）必需；token 为显式兼容项
 	}
 	if config.Model == "" {
 		config.Model = "mock"
 	}
 	if config.EmbeddingService == "" {
-		config.EmbeddingService = "embedding_service"
+		config.EmbeddingService = "embedding.higress-system.svc.cluster.local" // Higress standalone：FQDN 簇（route 引用后由 pilot 物化）
 	}
 	if config.EmbeddingPort == 0 {
 		config.EmbeddingPort = 18080
 	}
 	if config.TEEService == "" {
-		config.TEEService = "tee_infer_service"
+		config.TEEService = "tee-infer.higress-system.svc.cluster.local" // Higress standalone：FQDN 簇（route 引用后由 pilot 物化）
 	}
 	if config.TEEPort == 0 {
 		config.TEEPort = 19090
@@ -231,7 +231,7 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig, log log
 	// B1：客户端 Accept: text/event-stream 且成功响应 → text/event-stream；
 	// P1b：quote 模式成功响应总是输出 SSE 信封明文（协议路径 buildSSE）→ 一并预置。
 	// （header 阶段替换才生效，§4.3）
-	if responseStatus() == "200" && (requestWantsSSE || config.AttestMode == "quote") {
+	if responseStatus() == "200" && (requestWantsSSE || (config.AttestMode == "quote" && !pendingVectorsPlain)) {
 		_ = proxywasm.ReplaceHttpResponseHeader("content-type", "text/event-stream")
 	}
 	return types.HeaderContinue
@@ -252,6 +252,7 @@ func onRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, lo
 // handleVectorsRequest 向量输入：签发密钥（本地）→ 加密 → 南向协议请求。
 // 注：本地签发密钥与 TEE 不共享，仅用于向量输入兼容场景（M2/M3 回归）。
 func handleVectorsRequest(ctx wrapper.HttpContext, config PluginConfig, vectors [][]uint64, log logs.Log) types.Action {
+	pendingVectorsPlain = true
 	seed, nonceHex, err := KeyStore.Issue()
 	if err != nil {
 		return failClosed(log, fmt.Sprintf("签发密钥失败: %v", err))
@@ -311,6 +312,11 @@ func responseStatus() string {
 // 与 Session/KeyStore 同为包级状态，按 Envoy wasm 单请求串行回调语义使用。
 var pendingRequestID string
 
+// pendingVectorsPlain 请求级标记：向量明文直通（handleVectorsRequest 路径）。
+// quote 默认模式下，向量场景（mock JSON 响应、无信封）须绕开 quote 信封解密与 SSE 预置，
+// 否则被误判为降级攻击而 fail-closed（展示环境 2.0 兼容，§13）。
+var pendingVectorsPlain bool
+
 // requestWantsSSE 请求级标记：客户端 Accept: text/event-stream 时 mock 响应以 SSE 输出（B1）。
 var requestWantsSSE bool
 
@@ -318,6 +324,7 @@ var requestWantsSSE bool
 func handleTextRequest(ctx wrapper.HttpContext, config PluginConfig, req *textRequest, log logs.Log) types.Action {
 	requestID := newRequestID()
 	pendingRequestID = requestID
+	pendingVectorsPlain = false
 
 	// quote 模式先确保挑战-响应会话（无有效会话 → 握手 → 完成后走正常流程）
 	if config.AttestMode == "quote" {
@@ -345,9 +352,9 @@ func handleTextRequest(ctx wrapper.HttpContext, config PluginConfig, req *textRe
 // quote 模式（P1b）：请求体与响应体均整体入 K_enc 信封（段①，AAD 绑定 /key/issue）；
 // 200 响应非信封即拒绝（fail-closed，防降级攻击）。
 func proceedKeyIssue(ctx wrapper.HttpContext, config PluginConfig, req *textRequest, requestID string, log logs.Log) types.Action {
-	keyClient := wrapper.NewClusterClient(wrapper.DnsCluster{
-		ServiceName: config.TEEService,
-		Port:        config.TEEPort,
+	keyClient := wrapper.NewClusterClient(wrapper.FQDNCluster{
+		FQDN: config.TEEService,
+		Port: config.TEEPort,
 	})
 	keyBody, _ := json.Marshal(map[string]string{"model": config.Model, "request_id": requestID})
 	attestHeaders := [][2]string{{"Content-Type", "application/json"}}
@@ -441,9 +448,9 @@ func finishTextFlow(ctx wrapper.HttpContext, config PluginConfig, req *textReque
 		finishTextDirect(ctx, config, req, requestID, seed, nonceHex, log)
 		return
 	}
-	embClient := wrapper.NewClusterClient(wrapper.DnsCluster{
-		ServiceName: config.EmbeddingService,
-		Port:        config.EmbeddingPort,
+	embClient := wrapper.NewClusterClient(wrapper.FQDNCluster{
+		FQDN: config.EmbeddingService,
+		Port: config.EmbeddingPort,
 	})
 	embedBody, _ := json.Marshal(map[string]string{"text": req.Text})
 	err := embClient.Post("/embed",
@@ -702,9 +709,9 @@ func processOutputBody(config PluginConfig, body []byte, log logs.Log) ([]byte, 
 		// 非 200 错误体原样透传
 		return body, true
 	}
-	if config.AttestMode == "quote" {
+	if config.AttestMode == "quote" && !pendingVectorsPlain {
 		// quote 单信封：信封解密 → 南向协议响应（走既有验签/解密）。
-		// 明文响应拒绝（fail-closed，防降级攻击）
+		// 明文响应拒绝（fail-closed，防降级攻击）；向量明文直通请求（演示链兼容）除外。
 		pt, err := Session.openPayload(protocol.EndpointInfer, body)
 		if err != nil {
 			Session.clear()

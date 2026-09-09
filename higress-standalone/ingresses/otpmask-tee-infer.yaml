@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  labels:
+    higress.io/domain_higress-default-domain: "true"
+    higress.io/resource-definer: higress
+  name: otpmask-tee-infer
+  namespace: higress-system
+  annotations:
+    higress.io/destination: tee-infer:19090
+spec:
+  ingressClassName: higress
+  rules:
+    - http:
+        paths:
+          - backend:
+              service:
+                name: tee-infer
+                port:
+                  number: 19090
+            path: /v1/infer
+            pathType: Prefix

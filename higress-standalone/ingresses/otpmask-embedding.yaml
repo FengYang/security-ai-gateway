@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  labels:
+    higress.io/domain_higress-default-domain: "true"
+    higress.io/resource-definer: higress
+  name: otpmask-embedding
+  namespace: higress-system
+  annotations:
+    higress.io/destination: embedding:18080
+spec:
+  ingressClassName: higress
+  rules:
+    - http:
+        paths:
+          - backend:
+              service:
+                name: embedding
+                port:
+                  number: 18080
+            path: /embed-internal
+            pathType: Prefix

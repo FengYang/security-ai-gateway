@@ -28,6 +28,7 @@ metadata:
           f:higress.io/wasm-plugin-name: {}
           f:higress.io/wasm-plugin-version: {}
       f:spec:
+        f:configuration: {}
         f:defaultConfigDisable: {}
         f:failStrategy: {}
         f:priority: {}
@@ -39,6 +40,16 @@ metadata:
   namespace: higress-system
   resourceVersion: "3"
 spec:
+  configuration: |-
+    {
+      "tee_service": "host-docker-internal",
+      "tee_port": 19090,
+      "embedding_service": "host-docker-internal",
+      "embedding_port": 18080,
+      "attest_mode": "quote",
+      "model": "mock",
+      "require_auth": false
+    }
   defaultConfigDisable: false
   failStrategy: FAIL_OPEN # fake-apiserver CRD 仅接受 FAIL_OPEN；fail-closed 由插件显式逻辑承载（验证清单 §8/§12）
   priority: 100
