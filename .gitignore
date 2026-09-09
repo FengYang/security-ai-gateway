@@ -49,7 +49,7 @@ assets/
 *.md
 !README.md
 !docs/API-参考.md
-!docs/部署指南.md
+!docs/GA-部署指南.md
 !docs/benchmark/
 docs/benchmark/*
 !docs/benchmark/README.md
