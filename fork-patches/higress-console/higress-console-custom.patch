@@ -1,0 +1,535 @@
+diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtConfig.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtConfig.java
+new file mode 100644
+index 0000000..66c434c
+--- /dev/null
++++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtConfig.java
+@@ -0,0 +1,62 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：
++ * gateway-admin-service 转发配置（docs/管理门户-细化方案.md §3.1/§6）。
++ *
++ * 配置一律经环境变量注入（K8s ConfigMap/Secret），不落 application.properties：
++ *  - ADMIN_SVC_TARGET          Go 服务地址（默认 http://127.0.0.1:19095，集群内配 ClusterIP 名）
++ *  - ADMIN_SVC_JWT_SECRET      内部服务令牌共享密钥（与 Go 服务一致；必填，<16 字节拒绝服务）
++ *  - ADMIN_SVC_JWT_TTL_SECONDS 令牌有效期秒（默认 60，管理请求为短时令牌）
++ * 签发方/受众固定与 Go 端默认一致（higress-console / gateway-admin-service）。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import javax.annotation.PostConstruct;
++
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.stereotype.Component;
++
++/**
++ * @author admin-ext
++ */
++@Component
++public class AdminExtConfig {
++
++    public static final String DEFAULT_ISSUER = "higress-console";
++    public static final String DEFAULT_AUDIENCE = "gateway-admin-service";
++
++    @Value("${ADMIN_SVC_TARGET:http://127.0.0.1:19095}")
++    private String target;
++
++    @Value("${ADMIN_SVC_JWT_SECRET:}")
++    private String jwtSecret;
++
++    @Value("${ADMIN_SVC_JWT_TTL_SECONDS:60}")
++    private long jwtTtlSeconds;
++
++    private boolean ready;
++
++    @PostConstruct
++    public void init() {
++        // fail-closed：密钥缺失/过短时本转发面不可用（端点返回 503），
++        // 但不得拖垮控制台整体启动，故仅标记状态不抛异常。
++        ready = jwtSecret != null && jwtSecret.length() >= 16 && !target.isEmpty();
++    }
++
++    public boolean isReady() {
++        return ready;
++    }
++
++    public String getTarget() {
++        return target;
++    }
++
++    public byte[] getJwtSecret() {
++        return jwtSecret.getBytes(java.nio.charset.StandardCharsets.UTF_8);
++    }
++
++    public long getJwtTtlSeconds() {
++        return jwtTtlSeconds;
++    }
++}
+diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtController.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtController.java
+new file mode 100644
+index 0000000..01537b7
+--- /dev/null
++++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtController.java
+@@ -0,0 +1,27 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：
++ * 面向内部管理门户的扩展转发端点（V0 最小示例）。
++ *
++ * 设计（见 docs/管理门户-细化方案.md §3.1）：
++ *  - 前端 admin-ext 页面 → 本 controller →（内部路由/HTTP）→ gateway-admin-service(Go)
++ *  - 复用控制台既有登录/会话鉴权（不加 @AllowAnonymous），不重复建账号体系。
++ *  - V0 仅做编译级可行性验证；后续正式 controller 与业务接口在独立包内持续追加。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.GetMapping;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RestController;
++
++@RestController("AdminExtController")
++@RequestMapping("/v1/adminext")
++public class AdminExtController {
++
++    @GetMapping("/ping")
++    public ResponseEntity<String> ping() {
++        return ResponseEntity.ok("pong");
++    }
++}
+diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtJwtSigner.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtJwtSigner.java
+new file mode 100644
+index 0000000..6ab8799
+--- /dev/null
++++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtJwtSigner.java
+@@ -0,0 +1,81 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：
++ * 内部服务令牌 HS256 签发器（RFC 7515）。零第三方依赖（仅 JDK 8 标准库），
++ * 与 gateway-admin-service（Go）的校验逻辑保持同一约定：
++ *   - base64url 无 padding；
++ *   - header={"alg":"HS256","typ":"JWT"}，payload 键：sub/role/iss/aud/iat/exp；
++ *   - iat/exp 为 Unix 秒（long，纯数字序列化，避免浮点）。
++ *
++ * Go 端校验侧（gateway/gateway-admin-service/auth.go）：
++ * 过期、aud/iss（若声明）、角色白名单、sub 非空；本签发器默认带全量字段。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import java.nio.charset.StandardCharsets;
++import java.util.Base64;
++
++import javax.crypto.Mac;
++import javax.crypto.spec.SecretKeySpec;
++
++/**
++ * @author admin-ext
++ */
++public final class AdminExtJwtSigner {
++
++    private static final String ALG = "HmacSHA256";
++
++    private AdminExtJwtSigner() {
++    }
++
++    /**
++     * 签发内部服务令牌。
++     *
++     * @param secret  共享密钥（≥16 字节，由 AdminExtConfig 把关）
++     * @param sub     操作人登录名（控制台会话 user.name）
++     * @param role    管理面角色（admin/auditor；角色源待 M3 User+role 扩展落地）
++     * @param issuer  签发方（默认 higress-console）
++     * @param audience 受众（默认 gateway-admin-service）
++     * @param nowSec  当前 Unix 秒（便于单测注入固定时钟）
++     * @param ttlSec  有效期秒
++     */
++    public static String sign(byte[] secret, String sub, String role, String issuer, String audience,
++                              long nowSec, long ttlSec) {
++        String header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
++        String payload = "{\"sub\":\"" + jsonEscape(sub) + "\",\"role\":\"" + jsonEscape(role)
++                + "\",\"iss\":\"" + jsonEscape(issuer) + "\",\"aud\":\"" + jsonEscape(audience)
++                + "\",\"iat\":" + nowSec + ",\"exp\":" + (nowSec + ttlSec) + "}";
++        String signingInput = b64url(header.getBytes(StandardCharsets.UTF_8))
++                + "." + b64url(payload.getBytes(StandardCharsets.UTF_8));
++        return signingInput + "." + b64url(hmacSha256(secret, signingInput));
++    }
++
++    private static String jsonEscape(String s) {
++        // 登录名/角色/issuer/audience 为受控 ASCII 域，仅转义引号与反斜杠即可。
++        return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
++    }
++
++    private static String b64url(byte[] data) {
++        return Base64.getUrlEncoder().withoutPadding().encodeToString(data);
++    }
++
++    private static byte[] hmacSha256(byte[] secret, String input) {
++        try {
++            Mac mac = Mac.getInstance(ALG);
++            mac.init(new SecretKeySpec(secret, ALG));
++            return mac.doFinal(input.getBytes(StandardCharsets.UTF_8));
++        } catch (Exception e) {
++            throw new IllegalStateException("HMAC-SHA256 不可用", e);
++        }
++    }
++
++    /**
++     * 辅助：便捷签发（缺省时钟）。供 controller 调用。
++     */
++    public static String signNow(byte[] secret, String sub, String role, long ttlSec) {
++        long now = System.currentTimeMillis() / 1000;
++        return sign(secret, sub, role, AdminExtConfig.DEFAULT_ISSUER, AdminExtConfig.DEFAULT_AUDIENCE,
++                now, ttlSec);
++    }
++}
+diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtProxyController.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtProxyController.java
+new file mode 100644
+index 0000000..6f1ed6e
+--- /dev/null
++++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtProxyController.java
+@@ -0,0 +1,153 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：
++ * /v1/adminext/** 通用转发端点（docs/管理门户-细化方案.md §3.1/§3.2）。
++ *
++ * 设计：
++ *  - 本 controller 不加 @AllowAnonymous → 由 ApiStandardizationAspect 强制控制台登录会话
++ *    （validateSession 通过后 SessionUserHelper 注入当前用户），不重复建账号体系；
++ *  - 转发路径 = 目标前缀(ADMIN_SVC_TARGET) + 原始 URI（含 query），保留 /v1/adminext 前缀，
++ *    gateway-admin-service 侧同一前缀路由；
++ *  - 内部令牌：以共享密钥签发 HS256 JWT（sub=会话登录名），Go 侧校验签名/过期/aud-iss/角色；
++ *    role 暂固定 admin（控制台 User 模型无角色字段，User+role 扩展在 M3 落地后改为会话角色，
++ *    见 docs/管理门户-细化方案.md §7.4 F2）；
++ *  - 敏感头（Cookie/Authorization 等）不转发，仅注入自签 Bearer，防会话泄露/头注入。
++ *
++ * 语义说明：控制台 ApiStandardizationAspect 对 DELETE 统一强制 204（上游行为），
++ * 故转发 DELETE 亦无响应体语义（管理面 M1 无删除端点，不影响）。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import java.io.ByteArrayOutputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.net.HttpURLConnection;
++import java.net.URL;
++import java.util.Arrays;
++import java.util.HashSet;
++import java.util.Set;
++
++import javax.annotation.Resource;
++import javax.servlet.http.HttpServletRequest;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.http.HttpHeaders;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.MediaType;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RestController;
++
++import com.alibaba.higress.console.model.User;
++import com.alibaba.higress.console.service.SessionUserHelper;
++
++/**
++ * @author admin-ext
++ */
++@RestController
++@RequestMapping("/v1/adminext")
++public class AdminExtProxyController {
++
++    private static final Logger log = LoggerFactory.getLogger(AdminExtProxyController.class);
++
++    /** 管理面角色：M3 前控制台无角色源，内部管理面会话一律按 admin 签发。 */
++    private static final String ROLE_ADMIN = "admin";
++
++    private static final Set<String> FORWARDABLE_METHODS =
++            new HashSet<>(Arrays.asList("GET", "POST", "PUT", "PATCH", "DELETE"));
++
++    private static final int MAX_BODY_BYTES = 10 * 1024 * 1024;
++
++    @Resource
++    private AdminExtConfig config;
++
++    @RequestMapping(path = "/**")
++    public ResponseEntity<byte[]> forward(HttpServletRequest request) throws IOException {
++        User user = SessionUserHelper.getCurrentUser();
++        if (user == null || user.getName() == null) {
++            // 理论不可达（aspect 已强制登录），防御性兜底。
++            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
++        }
++        if (!config.isReady()) {
++            log.error("[admin-ext] 转发配置未就绪（ADMIN_SVC_JWT_SECRET 缺失/过短或目标为空），fail-closed 拒绝");
++            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
++                    .body("gateway-admin-service 转发配置未就绪".getBytes(java.nio.charset.StandardCharsets.UTF_8));
++        }
++
++        String method = request.getMethod();
++        if (!FORWARDABLE_METHODS.contains(method)) {
++            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
++                    .body(("不支持的转发方法: " + method).getBytes(java.nio.charset.StandardCharsets.UTF_8));
++        }
++
++        String token = AdminExtJwtSigner.signNow(config.getJwtSecret(), user.getName(), ROLE_ADMIN,
++                config.getJwtTtlSeconds());
++        return proxy(request, method, token);
++    }
++
++    private ResponseEntity<byte[]> proxy(HttpServletRequest request, String method, String token)
++            throws IOException {
++        String uri = request.getRequestURI();
++        String query = request.getQueryString();
++        URL url = new URL(config.getTarget() + uri + (query == null ? "" : "?" + query));
++
++        HttpURLConnection conn = null;
++        try {
++            conn = (HttpURLConnection) url.openConnection();
++            conn.setRequestMethod(method);
++            conn.setConnectTimeout(3000);
++            conn.setReadTimeout(60000);
++            conn.setRequestProperty("Authorization", "Bearer " + token);
++            String contentType = request.getContentType();
++            if (contentType != null) {
++                conn.setRequestProperty("Content-Type", contentType);
++            }
++
++            if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
++                conn.setDoOutput(true);
++                byte[] body = readFully(request.getInputStream());
++                try (OutputStream out = conn.getOutputStream()) {
++                    out.write(body);
++                }
++            }
++
++            int code = conn.getResponseCode();
++            InputStream in = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
++            byte[] respBody = in == null ? new byte[0] : readFully(in);
++
++            HttpHeaders headers = new HttpHeaders();
++            String respType = conn.getContentType();
++            if (respType != null) {
++                try {
++                    headers.setContentType(MediaType.parseMediaType(respType));
++                } catch (RuntimeException e) {
++                    headers.setContentType(MediaType.APPLICATION_OCTET_STREAM);
++                }
++            }
++            log.info("[admin-ext] {} {} -> {} (upstream {})", method, uri, code, url);
++            return new ResponseEntity<>(respBody, headers, HttpStatus.valueOf(code));
++        } finally {
++            if (conn != null) {
++                conn.disconnect();
++            }
++        }
++    }
++
++    private static byte[] readFully(InputStream in) throws IOException {
++        ByteArrayOutputStream buf = new ByteArrayOutputStream();
++        byte[] chunk = new byte[4096];
++        int total = 0;
++        int n;
++        while ((n = in.read(chunk)) != -1) {
++            total += n;
++            if (total > MAX_BODY_BYTES) {
++                throw new IOException("管理面请求体超过上限 " + (MAX_BODY_BYTES / 1024 / 1024) + "MB");
++            }
++            buf.write(chunk, 0, n);
++        }
++        return buf.toByteArray();
++    }
++}
+diff --git a/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtJwtSignerTest.java b/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtJwtSignerTest.java
+new file mode 100644
+index 0000000..83ec1b6
+--- /dev/null
++++ b/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtJwtSignerTest.java
+@@ -0,0 +1,95 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT：AdminExtJwtSigner 单元测试。
++ * 校验 JWT 结构、载荷字段、TTL 语义与 HMAC 敏感性（与 Go 端 gateway-admin-service/auth.go
++ * 校验约定一致：base64url 无 padding / 键名 sub,role,iss,aud,iat,exp / Unix 秒）。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.nio.charset.StandardCharsets;
++import java.util.Base64;
++
++import org.junit.jupiter.api.Test;
++
++/**
++ * @author admin-ext
++ */
++class AdminExtJwtSignerTest {
++
++    private static final byte[] SECRET = "test-admin-shared-secret-0123456789".getBytes(StandardCharsets.UTF_8);
++    private static final long NOW = 1_752_000_000L;
++    private static final long TTL = 60L;
++
++    private static String[] parts(String token) {
++        String[] p = token.split("\\.");
++        assertEquals(3, p.length, "JWT 应为三段");
++        return p;
++    }
++
++    private static String decode(String segment) {
++        return new String(Base64.getUrlDecoder().decode(segment), StandardCharsets.UTF_8);
++    }
++
++    @Test
++    void signProducesWellFormedTokenWithClaims() {
++        String token = AdminExtJwtSigner.sign(SECRET, "alice", "admin",
++                AdminExtConfig.DEFAULT_ISSUER, AdminExtConfig.DEFAULT_AUDIENCE, NOW, TTL);
++        String[] p = parts(token);
++
++        String header = decode(p[0]);
++        assertTrue(header.contains("\"alg\":\"HS256\""));
++
++        String payload = decode(p[1]);
++        assertTrue(payload.contains("\"sub\":\"alice\""));
++        assertTrue(payload.contains("\"role\":\"admin\""));
++        assertTrue(payload.contains("\"iss\":\"higress-console\""));
++        assertTrue(payload.contains("\"aud\":\"gateway-admin-service\""));
++        assertTrue(payload.contains("\"iat\":" + NOW));
++        assertTrue(payload.contains("\"exp\":" + (NOW + TTL)));
++    }
++
++    @Test
++    void expEqualsIatPlusTtl() {
++        String token = AdminExtJwtSigner.sign(SECRET, "bob", "auditor",
++                AdminExtConfig.DEFAULT_ISSUER, AdminExtConfig.DEFAULT_AUDIENCE, NOW, TTL);
++        String payload = decode(parts(token)[1]);
++        assertTrue(payload.contains("\"iat\":" + NOW), payload);
++        assertTrue(payload.contains("\"exp\":" + (NOW + TTL)), payload);
++    }
++
++    @Test
++    void signatureChangesWhenPayloadOrSecretChanges() {
++        String base = AdminExtJwtSigner.sign(SECRET, "alice", "admin",
++                AdminExtConfig.DEFAULT_ISSUER, AdminExtConfig.DEFAULT_AUDIENCE, NOW, TTL);
++
++        String otherRole = AdminExtJwtSigner.sign(SECRET, "alice", "auditor",
++                AdminExtConfig.DEFAULT_ISSUER, AdminExtConfig.DEFAULT_AUDIENCE, NOW, TTL);
++        assertNotEquals(base, otherRole, "载荷变化必须改变签名");
++
++        byte[] otherSecret = "another-secret-key-0123456789abcdef".getBytes(StandardCharsets.UTF_8);
++        String otherKey = AdminExtJwtSigner.sign(otherSecret, "alice", "admin",
++                AdminExtConfig.DEFAULT_ISSUER, AdminExtConfig.DEFAULT_AUDIENCE, NOW, TTL);
++        assertNotEquals(base, otherKey, "密钥变化必须改变签名");
++    }
++
++    @Test
++    void jsonEscapesQuotesAndBackslashesInSub() {
++        String token = AdminExtJwtSigner.sign(SECRET, "a\"b\\c", "admin",
++                AdminExtConfig.DEFAULT_ISSUER, AdminExtConfig.DEFAULT_AUDIENCE, NOW, TTL);
++        String payload = decode(parts(token)[1]);
++        assertTrue(payload.contains("\"sub\":\"a\\\"b\\\\c\""), payload);
++    }
++
++    @Test
++    void signNowCarriesDefaults() {
++        String token = AdminExtJwtSigner.signNow(SECRET, "alice", "admin", TTL);
++        String payload = decode(parts(token)[1]);
++        assertTrue(payload.contains("\"iss\":\"higress-console\""));
++        assertTrue(payload.contains("\"aud\":\"gateway-admin-service\""));
++    }
++}
+diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
+index 1a41985..52b19e5 100644
+--- a/frontend/src/locales/en-US/translation.json
++++ b/frontend/src/locales/en-US/translation.json
+@@ -22,7 +22,14 @@
+     "pluginManagement": "Plugin Management",
+     "systemSettings": "System Settings",
+     "mcpManagement": "MCP Management",
+-    "mcpConfigurations": "MCP Configurations"
++    "mcpConfigurations": "MCP Configuration",
++    "adminExtSecurityCenter": "Security Center (placeholder)"
++  },
++  "adminExt": {
++    "securityCenter": {
++      "placeholder": "Security Center",
++      "placeholderDesc": "ADMIN-EXT V0 placeholder: verify minimal diff to add menu & page inside Higress Console."
++    }
+   },
+   "index": {
+     "title": "Higress Console"
+diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
+index c148f42..9a2a3ca 100644
+--- a/frontend/src/locales/zh-CN/translation.json
++++ b/frontend/src/locales/zh-CN/translation.json
+@@ -22,7 +22,14 @@
+     "pluginManagement": "插件配置",
+     "systemSettings": "系统设置",
+     "mcpManagement": "MCP管理",
+-    "mcpConfigurations": "MCP配置"
++    "mcpConfigurations": "MCP配置",
++    "adminExtSecurityCenter": "安全中心（占位）"
++  },
++  "adminExt": {
++    "securityCenter": {
++      "placeholder": "安全中心",
++      "placeholderDesc": "ADMIN-EXT V0 占位页：验证在 Higress Console 内新增菜单与页面的最小改动路径。"
++    }
+   },
+   "index": {
+     "title": "Higress Console"
+diff --git a/frontend/src/pages/_defaultProps.tsx b/frontend/src/pages/_defaultProps.tsx
+index f4c0ecb..be8e87d 100644
+--- a/frontend/src/pages/_defaultProps.tsx
++++ b/frontend/src/pages/_defaultProps.tsx
+@@ -43,6 +43,12 @@ export default {
+         path: '/dashboard',
+         icon: <DashboardOutlined />,
+       },
++      {
++        // ADMIN-EXT（自研扩展，vendor-fork 只增不减）：安全中心占位页
++        name: 'menu.adminExtSecurityCenter',
++        path: '/security-center',
++        icon: <ShieldOutlined />,
++      },
+       {
+         name: 'menu.serviceSources',
+         path: '/service-source',
+diff --git a/frontend/src/pages/security-center/index.tsx b/frontend/src/pages/security-center/index.tsx
+new file mode 100644
+index 0000000..8fb1116
+--- /dev/null
++++ b/frontend/src/pages/security-center/index.tsx
+@@ -0,0 +1,24 @@
++import { PageContainer } from '@ant-design/pro-layout';
++import { Result } from 'antd';
++import React from 'react';
++import { useTranslation } from 'react-i18next';
++
++/**
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：安全中心占位页。
++ * V0 目的：验证"在 Higress Console SPA 内新增菜单+页面"的最小 diff 路径。
++ * 正式版将承载：密态会话/Guardrail/审计链/高敏变更复核等控制台不具备的能力。
++ */
++const SecurityCenter: React.FC = () => {
++  const { t } = useTranslation();
++  return (
++    <PageContainer>
++      <Result
++        status="info"
++        title={t('adminExt.securityCenter.placeholder')}
++        subTitle={t('adminExt.securityCenter.placeholderDesc')}
++      />
++    </PageContainer>
++  );
++};
++
++export default SecurityCenter;

@@ -1,0 +1,8 @@
+# Upstream files ALLOWED to be modified by the local vendor-fork.
+# One path per line (git path, forward slashes). Any other modification
+# of an upstream-tracked file is rejected by scripts/fork-patch-check.ps1.
+# Rationale: menu registration / route table / layout entry points only
+# (docs/管理门户-细化方案.md 2.2 principle 2: custom-point whitelist).
+frontend/src/pages/_defaultProps.tsx
+frontend/src/locales/en-US/translation.json
+frontend/src/locales/zh-CN/translation.json
