@@ -39,6 +39,9 @@ vllm-masked-inference-plan/
 security-ai-gateway.html
 *.html.zip
 
+# ===== 本地密钥/凭据（严禁入库） =====
+deploy/secrets/
+
 # 共享资源（HTML 报告依赖，由技能自动注入）
 _shared/
 assets/

@@ -1418,7 +1418,7 @@ func main() {
 	billingSecret := flag.String("billing-secret", "", "计费 Webhook HMAC-SHA256 签名密钥（与 billing-url 同时配置；为空 = 不签名，仅内网明文模式）")
 	engineURL := flag.String("engine-url", "", "明文域推理引擎（vLLM OpenAI 兼容地址，如 http://vllm:8000；text 载荷流式直连；为空使用本地模拟引擎）")
 	cmaasURL := flag.String("cmaas-url", "", "百炼 C-MaaS openai-proxy 地址（P5，如 http://127.0.0.1:8080；为空 = cmaas 引擎未配置，请求 fail-closed）")
-	cmaasAPIKey := flag.String("cmaas-api-key", "", "C-MaaS API Key（DASHSCOPE_API_KEY，Bearer 透传代理；可由代理侧环境变量提供）")
+	cmaasAPIKey := flag.String("cmaas-api-key", "", "C-MaaS API Key（DASHSCOPE_API_KEY，Bearer 透传代理；未指定时回退环境变量 CMAAS_API_KEY，推荐经 deploy/secrets/cmaas.env 注入）")
 	cmaasModel := flag.String("cmaas-model", "", "C-MaaS 缺省模型 code（cmaas-glm-5.2 等；请求未指定模型时使用）")
 	auditFile := flag.String("audit-file", "", "审计事件 WORM 文件路径（JSON Lines 只追加；为空 = 内存模式）")
 	auditAnchor := flag.String("audit-anchor", "", "审计锚定文件路径（链尾哈希追加；仅 audit-file 开启时生效）")
@@ -1541,7 +1541,14 @@ func main() {
 	// P5：C-MaaS 引擎（openai-proxy 对接；未配置 -cmaas-url 时 cmaas 请求 fail-closed）
 	var cmaasEng *model.CmaasEngine
 	if *cmaasURL != "" {
-		cmaasEng = model.NewCmaasEngine(*cmaasURL, *cmaasAPIKey, *cmaasModel)
+		// 密钥优先级：flag > 环境变量 CMAAS_API_KEY。密钥经配置文件/环境注入
+		// （避免出现在命令行与进程列表）；两者均缺失时以空 key 构造，
+		// 鉴权失败由上游响应 fail-closed。
+		cmaasKey := *cmaasAPIKey
+		if cmaasKey == "" {
+			cmaasKey = os.Getenv("CMAAS_API_KEY")
+		}
+		cmaasEng = model.NewCmaasEngine(*cmaasURL, cmaasKey, *cmaasModel)
 		log.Printf("推理引擎: C-MaaS openai-proxy %s（model=%s）", *cmaasURL, orDefault(*cmaasModel, "-"))
 	}
 
