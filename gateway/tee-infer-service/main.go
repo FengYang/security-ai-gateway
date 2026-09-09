@@ -983,6 +983,14 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		return
 	}
 	genReq := model.GenerateRequest{Model: req.Model, Messages: msgs, MaxTokens: req.MaxNewTokens}
+	// 模型名语义分层（cmaas）：req.Model 是南向协议层网关路由标识（插件
+	// config.model，如 "mock"），非上游模型名——透传会被 Phala 以
+	// model_not_found 拒绝。cmaas 上游模型取 -cmaas-model 缺省
+	// （CmaasEngine.Generate 内 Model=="" 时回退 e.model）；缓存键仍含
+	// req.Model（路由维度隔离），审计 Model 字段不变。
+	if _, isCMAAS := eng.(*model.CmaasEngine); isCMAAS {
+		genReq.Model = ""
+	}
 	// GF.4.1 精确缓存（演示）：键 = 租户+引擎+模型+参数+transformed_hash 哈希，
 	// 命中则跳过真实引擎推理，以缓存文本回放（replayEngine，不产出半截明文）。
 	var cacheKey string
@@ -1001,6 +1009,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	// 统一 SSE 信封流输出（seq 严格递增 + finish 分片）；stream=false 语义为单分片聚合。
 	var agg strings.Builder
 	if serr := s.streamTextInfer(w, sess, eng, genReq, &agg); serr != nil {
+		log.Printf("[tee] infer(text) 引擎失败 request=%s engine=%s err=%v", req.RequestID, engType, serr)
 		// GA-计费 P0-3/P1-3 失败路径计费口径：
 		// - 已有部分输出（客户端已收到）→ 按实收计费：输入计量保留，输出按 agg
 		//   实际累计补记，审计记 infer/engine_error 事件（带 token 数，供出账聚合）；
