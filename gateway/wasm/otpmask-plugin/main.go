@@ -160,6 +160,18 @@ var KeyStore = NewMemKeyStore()
 // header 阶段读取并保存（body 阶段 proxywasm 读不到原始请求头）。
 const ctxKeyTenantID = "otpmask-tenant-id"
 
+// ctxKeyRespStatus 响应状态码缓存键（同因：body 阶段读不到响应伪头 :status）。
+const ctxKeyRespStatus = "otpmask-resp-status"
+
+// respStatusCached 取响应状态码：优先头回调缓存；缺失时回退 header 直读
+// （缓存缺失 = 非本插件上下文路径，如预判阶段）。
+func respStatusCached(ctx wrapper.HttpContext) string {
+	if v, ok := ctx.GetContext(ctxKeyRespStatus).(string); ok {
+		return v
+	}
+	return responseStatus()
+}
+
 // onHttpRequestHeaders 请求头阶段：移除 Content-Length → chunked 传输密文；
 // 读取并保存租户标识 X-Tenant-ID（M9-1，供 /key/issue 与 TEE 侧按租户隔离）；
 // C-6：配置 jwt_secret 时校验 Bearer token，以 tenant claim 覆盖自声明头，
@@ -199,6 +211,14 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log logs
 	if t := tenantHeaderValue(ctx); t != "" {
 		_ = proxywasm.ReplaceHttpRequestHeader("X-Tenant-ID", t)
 	}
+	// P1b 修复：有请求体时持住请求头（ActionPause）——请求头在 HeaderContinue 后
+	// 即刻转发上游，body 阶段的 X-Session-ID/content-type 替换不生效（TEE 收不到
+	// 会话头 → 信封被当裸协议解码，审计表现为 decode_error/bad_signature 乱码）。
+	// 放行路径不变：body 各分支以 HeaderContinue（Envoy 数据 Continue 连带放行
+	// 被持住的头）/ ResumeHttpRequest / SendHttpResponse 收尾；无体请求直通防死等。
+	if ctx.HasRequestBody() {
+		return types.ActionPause
+	}
 	return types.HeaderContinue
 }
 
@@ -228,6 +248,8 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig, log log
 	if err := proxywasm.RemoveHttpResponseHeader("content-length"); err != nil {
 		log.Warnf("otpmask-plugin: 移除响应 content-length 失败: %v", err)
 	}
+	// body 阶段读不到响应伪头 :status → 此处缓存（SSE 增量 vs 整包路径判定依赖）。
+	ctx.SetContext(ctxKeyRespStatus, responseStatus())
 	// B1：客户端 Accept: text/event-stream 且成功响应 → text/event-stream；
 	// P1b：quote 模式成功响应总是输出 SSE 信封明文（协议路径 buildSSE）→ 一并预置。
 	// （header 阶段替换才生效，§4.3）
@@ -618,8 +640,9 @@ func getRespStream(ctx wrapper.HttpContext) *respStreamState {
 
 // looksLikeSSEEnvelope 首个非空帧判定：仅 quote 模式 200 且 body 以 "data:" 行首
 // 视为段① SSE 信封流（走增量解密）；其余（mock JSON/协议二进制/quote 单信封）走整包。
-func looksLikeSSEEnvelope(config PluginConfig, chunk []byte) bool {
-	return config.AttestMode == "quote" && responseStatus() == "200" && isSSEBody(chunk)
+// 状态码取 header 阶段缓存（body 阶段伪头 :status 不可读）。
+func looksLikeSSEEnvelope(ctx wrapper.HttpContext, config PluginConfig, chunk []byte) bool {
+	return config.AttestMode == "quote" && respStatusCached(ctx) == "200" && isSSEBody(chunk)
 }
 
 // onStreamingResponseBody 响应侧流式解密外发（P1b，取代整包 onResponseBody）：
@@ -637,7 +660,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk
 	// 路径判定：首个非空帧决定增量 vs 整包
 	if !st.first && len(chunk) > 0 {
 		st.first = true
-		if looksLikeSSEEnvelope(config, chunk) {
+		if looksLikeSSEEnvelope(ctx, config, chunk) {
 			st.dec = NewSSEStreamDecoder(pendingRequestID, config.Model)
 			out, err := st.dec.Feed(chunk, isLastChunk)
 			if err != nil {
@@ -668,7 +691,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk
 	if !isLastChunk {
 		return nil // 未收全，不外发
 	}
-	plain, passthrough := processOutputBody(config, st.buf, log)
+	plain, passthrough := processOutputBody(ctx, config, st.buf, log)
 	st.buf = nil
 	if passthrough {
 		return plain // 非 200/透传：原样返回（SDK 逐片替换 = 等价透传）
@@ -704,8 +727,8 @@ func cleanupRespKeys(st *respStreamState) {
 // processOutputBody 整包响应处理（与既有 onResponseBody 分流等价）。
 // 返回 (输出字节, passthrough)。passthrough=true 表示非 200/错误体原样透传；
 // false 且输出为 nil 表示 fail-closed（不外发）。
-func processOutputBody(config PluginConfig, body []byte, log logs.Log) ([]byte, bool) {
-	if status := responseStatus(); status != "" && status != "200" {
+func processOutputBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, log logs.Log) ([]byte, bool) {
+	if status := respStatusCached(ctx); status != "" && status != "200" {
 		// 非 200 错误体原样透传
 		return body, true
 	}
