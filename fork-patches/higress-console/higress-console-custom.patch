@@ -447,10 +447,10 @@ index 0000000..83ec1b6
 +    }
 +}
 diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
-index 1a41985..52b19e5 100644
+index 1a41985..ebb2a5d 100644
 --- a/frontend/src/locales/en-US/translation.json
 +++ b/frontend/src/locales/en-US/translation.json
-@@ -22,7 +22,14 @@
+@@ -22,7 +22,26 @@
      "pluginManagement": "Plugin Management",
      "systemSettings": "System Settings",
      "mcpManagement": "MCP Management",
@@ -462,15 +462,27 @@ index 1a41985..52b19e5 100644
 +    "securityCenter": {
 +      "placeholder": "Security Center",
 +      "placeholderDesc": "ADMIN-EXT V0 placeholder: verify minimal diff to add menu & page inside Higress Console."
++    },
++    "vendors": {
++      "guide": "Vendor activation is performed in Tech Config → AI Service Providers (key entry & token failover); this page is a read-only status summary.",
++      "empty": "No managed AI providers",
++      "protocol": "Protocol",
++      "proxyName": "Upstream",
++      "tokens": "Tokens (masked)",
++      "healthCheck": "Health check",
++      "enabled": "enabled",
++      "disabled": "disabled",
++      "failureThreshold": "failure threshold",
++      "healthCheckModel": "probe model"
 +    }
    },
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
-index c148f42..9a2a3ca 100644
+index c148f42..c8a5ec9 100644
 --- a/frontend/src/locales/zh-CN/translation.json
 +++ b/frontend/src/locales/zh-CN/translation.json
-@@ -22,7 +22,14 @@
+@@ -22,7 +22,26 @@
      "pluginManagement": "插件配置",
      "systemSettings": "系统设置",
      "mcpManagement": "MCP管理",
@@ -482,27 +494,180 @@ index c148f42..9a2a3ca 100644
 +    "securityCenter": {
 +      "placeholder": "安全中心",
 +      "placeholderDesc": "ADMIN-EXT V0 占位页：验证在 Higress Console 内新增菜单与页面的最小改动路径。"
++    },
++    "vendors": {
++      "guide": "受管厂商激活请到 技术配置 → AI 服务提供者 完成（含 Key 录入与令牌降级）；本页为只读状态汇总。",
++      "empty": "暂无受管 AI 厂商",
++      "protocol": "协议",
++      "proxyName": "上游名称",
++      "tokens": "令牌（掩码）",
++      "healthCheck": "健康探测",
++      "enabled": "已启用",
++      "disabled": "未启用",
++      "failureThreshold": "失败阈值",
++      "healthCheckModel": "探测模型"
 +    }
    },
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/pages/_defaultProps.tsx b/frontend/src/pages/_defaultProps.tsx
-index f4c0ecb..be8e87d 100644
+index f4c0ecb..15c70ae 100644
 --- a/frontend/src/pages/_defaultProps.tsx
 +++ b/frontend/src/pages/_defaultProps.tsx
-@@ -43,6 +43,12 @@ export default {
+@@ -1,4 +1,5 @@
+ import {
++  ApiOutlined,
+   DashboardOutlined,
+   DeploymentUnitOutlined,
+   FullscreenExitOutlined,
+@@ -43,6 +44,19 @@ export default {
          path: '/dashboard',
          icon: <DashboardOutlined />,
        },
 +      {
 +        // ADMIN-EXT（自研扩展，vendor-fork 只增不减）：安全中心占位页
++        // 注：V0 曾引用 @ant-design/icons 不存在的 ShieldOutlined（构建静默、菜单渲染必崩），已修为 SafetyCertificateOutlined。
 +        name: 'menu.adminExtSecurityCenter',
 +        path: '/security-center',
-+        icon: <ShieldOutlined />,
++        icon: <SafetyCertificateOutlined />,
++      },
++      {
++        // ADMIN-EXT（自研扩展，vendor-fork 只增不减）：厂商激活与状态（只读视图）
++        name: 'menu.adminExtVendors',
++        path: '/admin-ext/vendors',
++        icon: <ApiOutlined />,
 +      },
        {
          name: 'menu.serviceSources',
          path: '/service-source',
+diff --git a/frontend/src/pages/admin-ext/vendors/index.tsx b/frontend/src/pages/admin-ext/vendors/index.tsx
+new file mode 100644
+index 0000000..9e8601a
+--- /dev/null
++++ b/frontend/src/pages/admin-ext/vendors/index.tsx
+@@ -0,0 +1,122 @@
++import { Alert, Card, Descriptions, Empty, Spin, Tag } from 'antd';
++import { useEffect, useState } from 'react';
++import { PageContainer } from '@ant-design/pro-layout';
++import { useTranslation } from 'react-i18next';
++import { getLlmProviders } from '@/services/llm-provider';
++import { LlmProvider } from '@/interfaces/llm-provider';
++
++/**
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：厂商激活与状态（只读视图）。
++ *
++ * 定位（docs/管理门户-细化方案.md §5.1/F3）：激活操作复用控制台既有
++ * AI Provider 页（含完整表单/多 token/tokenFailover），本页仅做状态汇总：
++ *  - 展示受管厂商列表与降级探测配置（tokenFailover.enabled/健康阈值/探测模型）；
++ *  - tokens 一律掩码（仅示后 4 位），不在页面二次暴露明文（§6 密钥约束）；
++ *  - 运行态实时健康（吞吐/降级计数）待用量与监控接入后补齐（M2），
++ *    此处如实呈现配置态而非虚构运行态。
++ * 数据源 = 控制台既有 REST /v1/ai/providers（services/llm-provider.ts，复用不改）。
++ */
++
++const maskToken = (token: string): string => {
++  const s = token.trim();
++  return s.length > 4 ? `****${s.slice(-4)}` : '****';
++};
++
++const ProviderStatus: React.FC = () => {
++  const { t } = useTranslation();
++  const [list, setList] = useState<LlmProvider[]>([]);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  useEffect(() => {
++    let cancelled = false;
++    setLoading(true);
++    getLlmProviders()
++      .then((providers) => {
++        if (!cancelled) {
++          setList(providers || []);
++          setError(null);
++        }
++      })
++      .catch((e) => {
++        if (!cancelled) {
++          setError(String(e));
++        }
++      })
++      .finally(() => {
++        if (!cancelled) {
++          setLoading(false);
++        }
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, []);
++
++  return (
++    <PageContainer>
++      <Alert
++        type="info"
++        showIcon
++        message={t('adminExt.vendors.guide')}
++        style={{ marginBottom: 16 }}
++      />
++      {loading && (
++        <div style={{ textAlign: 'center', padding: 48 }}>
++          <Spin />
++        </div>
++      )}
++      {!loading && error && (
++        <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />
++      )}
++      {!loading && !error && list.length === 0 && (
++        <Empty description={t('adminExt.vendors.empty')} />
++      )}
++      {!loading &&
++        !error &&
++        list.map((p) => {
++          const failover = p.tokenFailoverConfig;
++          return (
++            <Card
++              key={p.name}
++              size="small"
++              style={{ marginBottom: 12 }}
++              title={
++                <span>
++                  {p.name} <Tag>{p.type}</Tag>
++                </span>
++              }
++            >
++              <Descriptions column={2} size="small">
++                <Descriptions.Item label={t('adminExt.vendors.protocol')}>
++                  {p.protocol || '-'}
++                </Descriptions.Item>
++                <Descriptions.Item label={t('adminExt.vendors.proxyName')}>
++                  {p.proxyName || '-'}
++                </Descriptions.Item>
++                <Descriptions.Item label={t('adminExt.vendors.tokens')}>
++                  {p.tokens && p.tokens.length > 0
++                    ? p.tokens.map((tk) => maskToken(tk)).join('，')
++                    : '-'}
++                </Descriptions.Item>
++                <Descriptions.Item label={t('adminExt.vendors.healthCheck')}>
++                  {failover && failover.enabled ? (
++                    <>
++                      <Tag color="green">{t('adminExt.vendors.enabled')}</Tag>
++                      {`${t('adminExt.vendors.failureThreshold')} ${failover.failureThreshold ?? '-'} / ${t(
++                        'adminExt.vendors.healthCheckModel',
++                      )} ${failover.healthCheckModel || '-'}`}
++                    </>
++                  ) : (
++                    <Tag>{t('adminExt.vendors.disabled')}</Tag>
++                  )}
++                </Descriptions.Item>
++              </Descriptions>
++            </Card>
++          );
++        })}
++    </PageContainer>
++  );
++};
++
++export default ProviderStatus;
 diff --git a/frontend/src/pages/security-center/index.tsx b/frontend/src/pages/security-center/index.tsx
 new file mode 100644
 index 0000000..8fb1116
