@@ -1,0 +1,391 @@
+# AI Provider 统一接入（GF.3.2）：厂商路由（17 条，每厂商独立 path 入口）
+#
+# 调用契约：POST /provider/<name>/v1/chat/completions（入站 OpenAI 协议，
+# ai-proxy 按 path 后缀自动检测协议：/v1/chat/completions=OpenAI、
+# /v1/messages=Claude、/v1/embeddings=向量，并自动转换为厂商协议、回转响应）。
+#
+# 路由目标：higress.io/destination 注解为准，指向 mcp-bridge-registries.yaml
+# 声明的 dns registry（格式 <name>.<type>:<port>）；spec.backend 必须用 McpBridge
+# resource 方式（同 ingress-infer.yaml 的 default ingress），resource 名 = default。
+# 勿用 service backend：name 会被展开成 <name>.<ns>.svc.cluster.local FQDN，
+# 路由不到 registry 物化的 <name>.<type> 簇 → 503 cluster_not_found
+# （本地 fake-apiserver 端到端已验证：resource+destination 200、service 500 503）。
+# 厂商上游协议改写（Host/path/Authorization）由 ai-proxy 插件按 provider type 完成，
+# 路由前缀 /provider/<name>/ 会被插件整体重写，无需 Ingress 重写注解；
+# 唯一例外 coze：protocol original 透传，前缀剥离由插件 subPath 完成（见
+# ai-proxy-providers.yaml）。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-openai
+  namespace: higress-system
+  annotations:
+    higress.io/destination: openai.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/openai/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-claude
+  namespace: higress-system
+  annotations:
+    higress.io/destination: claude.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/claude/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-gemini
+  namespace: higress-system
+  annotations:
+    higress.io/destination: gemini.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/gemini/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-qwen
+  namespace: higress-system
+  annotations:
+    higress.io/destination: qwen.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/qwen/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-deepseek
+  namespace: higress-system
+  annotations:
+    higress.io/destination: deepseek.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/deepseek/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-moonshot
+  namespace: higress-system
+  annotations:
+    higress.io/destination: moonshot.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/moonshot/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-minimax
+  namespace: higress-system
+  annotations:
+    higress.io/destination: minimax.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/minimax/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-doubao
+  namespace: higress-system
+  annotations:
+    higress.io/destination: doubao.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/doubao/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-groq
+  namespace: higress-system
+  annotations:
+    higress.io/destination: groq.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/groq/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-openrouter
+  namespace: higress-system
+  annotations:
+    higress.io/destination: openrouter.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/openrouter/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-hunyuan
+  namespace: higress-system
+  annotations:
+    higress.io/destination: hunyuan.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/hunyuan/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-ernie
+  namespace: higress-system
+  annotations:
+    higress.io/destination: ernie.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/ernie/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-spark
+  namespace: higress-system
+  annotations:
+    higress.io/destination: spark.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/spark/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-yi
+  namespace: higress-system
+  annotations:
+    higress.io/destination: yi.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/yi/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-mistral
+  namespace: higress-system
+  annotations:
+    higress.io/destination: mistral.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/mistral/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-stepfun
+  namespace: higress-system
+  annotations:
+    higress.io/destination: stepfun.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/stepfun/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+# coze：protocol original 透传（见 ai-proxy-providers.yaml），
+# 客户端按 Coze 原生契约调用 /provider/coze/<原生path>，前缀由插件 subPath 剥离
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-coze
+  namespace: higress-system
+  annotations:
+    higress.io/destination: coze.dns:443
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /provider/coze/
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default

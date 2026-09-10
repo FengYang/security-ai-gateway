@@ -1,16 +1,33 @@
 apiVersion: networking.higress.io/v1
 kind: McpBridge
 metadata:
+  creationTimestamp: "2000-01-01T00:00:00Z"
+  managedFields:
+  - apiVersion: networking.higress.io/v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:spec:
+        f:registries: {}
+    manager: Kubernetes Java Client
+    operation: Update
+    time: "2026-09-10T02:58:49Z"
   name: default
   namespace: higress-system
-  creationTimestamp: "2000-01-01T00:00:00Z"
-  resourceVersion: "1"
+  resourceVersion: "4"
 spec:
   registries:
   - domain: 127.0.0.1:8001
     name: higress-console
     port: 80
     type: static
-  # AI_REGISTRIES_START
-  # AI_REGISTRIES_END
+  - domain: 172.18.0.3:9000
+    name: ai-openai-local
+    port: 9000
+    protocol: HTTP
+    type: static
+  - domain: inference.phala.com
+    name: llm-phala.internal
+    port: 443
+    protocol: https
+    type: dns
 status: {}

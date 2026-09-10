@@ -40,17 +40,29 @@ metadata:
   namespace: higress-system
   resourceVersion: "3"
 spec:
-  configuration: |-
-    {
-      "tee_service": "host-docker-internal",
-      "tee_port": 19090,
-      "embedding_service": "host-docker-internal",
-      "embedding_port": 18080,
-      "attest_mode": "quote",
-      "model": "mock",
-      "require_auth": false
-    }
-  defaultConfigDisable: false
+  # 明文 Provider 路由豁免（GF.3.2，T1 §4.3 双轨）：密态配置仅绑定 3 条 otpmask 路由
+  # （matchRules → controller 转成 VM 配置 _rules_/_match_route_，ECDS dump 已证实该机制，
+  # 同 ai-proxy.yaml）。ai-* 等其余路由不在 _match_route_ 内 → GetMatchConfig 返回 nil → 插件跳过。
+  # 注意：本链路（fake-apiserver controller）会丢弃 spec.configuration，配置必须走 matchRules。
+  # 路由名 = Ingress 名；须与 ingresses/ 目录同步维护。
+  matchRules:
+  - ingress:
+    - otpmask-infer
+    - otpmask-tee-infer
+    - otpmask-embedding
+    config:
+      # tee/embedding 用 standalone services/ 定义的 FQDN（services/tee-infer.yaml +
+      # endpoints/tee-infer.yaml → 物化 outbound|19090||tee-infer.higress-system.svc.cluster.local，
+      # 即插件 parseConfig 缺省值）。勿写 host-docker-internal：无对应 Service 声明，
+      # wasm FQDNCluster 报 bad argument（fail-closed 503）。
+      tee_service: tee-infer.higress-system.svc.cluster.local
+      tee_port: 19090
+      embedding_service: embedding.higress-system.svc.cluster.local
+      embedding_port: 18080
+      attest_mode: quote
+      model: mock
+      require_auth: false
+  defaultConfigDisable: true
   failStrategy: FAIL_OPEN # fake-apiserver CRD 仅接受 FAIL_OPEN；fail-closed 由插件显式逻辑承载（验证清单 §8/§12）
   priority: 100
   url: http://localhost:8002/plugins/otpmask/1.0.0/plugin.wasm

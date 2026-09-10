@@ -1,0 +1,29 @@
+# 本地 ai-proxy 验证路由（GF.3.2）：openai 路由经 static registry 上游
+# （destination 格式 <name>.<type>:<port> 与生产 ingress-ai-providers.yaml 一致）。
+# 注：backend 必须用 McpBridge resource 方式（同 default.yaml），destination 注解才会
+# 被解析为 mcp service（ServiceEntry host）；service 方式的 name 会被展开成
+# <name>.<namespace>.svc.cluster.local FQDN，路由不到 registry 上游。
+# dns 上游本地改用 static：direct watcher 对 domain 强校验（static 须 IP:Port，
+# dns 须含点 FQDN，单标签 mock-infer-higress 不合法 → ServiceEntry 静默不生成）。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  labels:
+    higress.io/domain_higress-default-domain: "true"
+    higress.io/resource-definer: higress
+  name: ai-openai
+  namespace: higress-system
+  annotations:
+    higress.io/destination: ai-openai-local.static:9000
+spec:
+  ingressClassName: higress
+  rules:
+    - http:
+        paths:
+          - backend:
+              resource:
+                apiGroup: networking.higress.io
+                kind: McpBridge
+                name: default
+            path: /provider/openai/
+            pathType: Prefix

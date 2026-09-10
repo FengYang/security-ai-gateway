@@ -123,3 +123,65 @@ kubectl apply -f deploy/higress/gateway-hpa.yaml                 # 网关 HPA（
 - WAF 先 `sec_rule_engine: DetectionOnly` 影子观察，无误杀再切 `On`；推理路径 body 为段① 密文，
   WAF/Bot 仅做元数据级防护，内容安全由 tee-infer Guardrail 承担（方案 §3.10.4）。
 - OAuth/OIDC 为接入骨架，client_secret/cookie_secret 走 KMS/Vault（GF.2.5），字段按企业 IdP 填充并核验（GF.1.7）。
+
+## 9. AI Provider 统一接入（GF.3.2，10+ Provider）
+
+复用 Higress 内建 **ai-proxy** 插件（零自研代码，v2.0.1），入站统一 OpenAI messages 契约
+（对齐1）、出站标准 OpenAI SSE（对齐2）；插件按 provider type 自动做协议/鉴权/Host 改写与响应回转。
+
+> **Key 激活主路径 = Higress 控制台（界面配置，见 §9.2）**。仓库三件套为**无 key 基线**：
+> 只声明固定契约（`/provider/<name>` + provider type），不含任何厂商 API Key（真实 key 严禁入库）。
+
+### 9.1 三件套清单（无 key 基线）
+
+| 文件 | 内容 | 说明 |
+| --- | --- | --- |
+| `mcp-bridge-registries.yaml` | McpBridge `default`：17 家厂商 dns registry（上游域名/443/HTTPS） | 上游 DNS 来源 |
+| `ingress-ai-providers.yaml` | 17 条 Ingress：`/provider/<name>/` 前缀路由 | 入口路径（每厂商独立） |
+| `ai-proxy-providers.yaml` | WasmPlugin `ai-proxy`：17 条 matchRules（provider type / 协议特例，**无 apiTokens**） | 厂商转换配置（key 由控制台持有） |
+
+厂商清单（17 家）：
+- 国际 7：openai / claude / gemini / groq / openrouter / mistral / yi*
+- 国产 10：qwen / deepseek / moonshot / minimax / doubao / hunyuan / ernie（type=`baidu`）/ spark / stepfun / coze*
+- *yi 归国产（零一万物）；coze 为 `protocol: original` 透传 + `subPath` 剥离前缀特例。
+
+### 9.2 激活流程（控制台界面，推荐）
+
+1. 访问控制台 `http://<网关>:8001`（首次初始化管理员），进入 **AI 服务 → AI 服务提供者（LLM Provider）**；
+2. 点击创建，选择厂商类型（openai / claude / qwen / deepseek / spark 等内置适配），
+   填写 **API Key**（spark 按复合格式 `APIKey:APISecret`）、Endpoint/自定义 BaseURL，保存即激活
+   （配置落控制台托管的 ai-proxy 插件，热更新，无需改代码/重启网关；控制台对 key 有加密落盘与令牌降级策略）；
+3. 在 **AI 路由管理** 创建路由绑定该 Provider（按路径/模型匹配），即可经网关统一入口调用。
+   - 调用契约（对齐1）：`POST /provider/<name>/v1/chat/completions`（OpenAI messages 体）等固定路径由
+     `ingress-ai-providers.yaml` 基线声明；若控制台创建了自己的 AI 路由，以控制台路由为准。
+
+> 自动化/gitops 场景（无控制台或需版本化管理）：`kubectl apply` 三件套（无 key）后，
+> 由受控流水线/Secrets 注入 key 到**控制台托管插件或专用配置源**；**请勿**把真实 key 写回仓库清单。
+> 注意：若已由控制台启用同名 `ai-proxy` 插件，勿与本清单的 ai-proxy 重复 apply（二选一，避免双配置冲突）。
+
+### 9.3 明文/密态双轨边界（T1 §4.3）
+
+- `/provider/*` = **明文直连**：ai-proxy 注入厂商 key 后直连上游，body 不过 otpmask 段① 加密；
+- `/infer` = **密态链路**（不变）：otpmask 段① → tee-infer；
+- otpmask 作用域为白名单（仅 `infer` 路由，`otpmask-plugin.yaml` 有完整机制说明），ai-*/tee-admin 路由自动豁免。
+  勿改回 `config:{} + configDisable:true` 黑名单式豁免——wasm-go 对空配置按全局启用处理，会误拦截明文 body。
+
+### 9.4 本地端到端验证（higress-standalone，已完成）
+
+本地以 mock 上游（mock_infer.py：OpenAI/Claude 兼容端点 + 密文 homomorphic mock）验证：
+- ai-claude JSON/SSE、ai-openai JSON/SSE：4 组全部 200（协议改写、x-api-key/Bearer 注入、SSE 透传、响应回转 OpenAI 格式）；
+- `/infer` 密态回归（向量闭环保质）：输入 `[1..8]` → 掩码加密 → mock 密文域 `+7` → 解密回 `[8..15]`，200。
+- 本地 mock 对 claude 鉴权校验用 `x-api-key`（ai-proxy standard 模式注入并删除 Authorization），openai 用 Bearer。
+- 注：本地 E2E 用的是 `higress-standalone/wasmplugins/ai-proxy.yaml`（**含 mock token** 的独立副本）；
+  生产 `deploy/higress/ai-proxy-providers.yaml` 为无 key 基线，二者互不影响。
+
+### 9.5 本地（fake-apiserver / higress-standalone）已知限制（生产不受影响）
+
+1. **Ingress backend 须用 McpBridge resource 方式**（`kind: McpBridge, name: default`）+ `higress.io/destination` 注解；
+   `service` backend 会把 name 展开成 `<name>.<ns>.svc.cluster.local` FQDN，路由不到 registry 物化的 `<name>.<type>` 簇
+   → 503 cluster_not_found（本地 E2E 实证 resource=200 / service=503；生产同为该 controller 转换逻辑，已统一为 resource）。
+2. **registry domain 有强校验**：static 须 `IP:Port`；dns 须合法 FQDN（domainRegex 含点）。非法时仅 controller
+   error 日志，ServiceEntry 静默不生成（本地曾用单标签 `mock-infer-higress` 踩坑）。生产域名均合法，dns 照常。
+3. **fake-apiserver 会丢弃 WasmPlugin `spec.configuration`**（defaultConfig 不进 ECDS），配置必须走 matchRules。
+4. **wasm-go 空配置 = 全局启用**（按默认值跑）——这是 configDisable 豁免无效的根因，白名单制是正解。
+5. 生产 dns registry 443 端口必须显式 `protocol: HTTPS`（漏配 = 明文打 443，TLS 握手失败）。

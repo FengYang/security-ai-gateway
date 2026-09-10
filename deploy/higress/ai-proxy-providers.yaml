@@ -1,0 +1,143 @@
+# AI Provider 统一接入（GF.3.2）：ai-proxy 插件启用模板（17 家厂商）
+#
+# 依据 docs/T1-GF3.2-ai-proxy兼容性评估.md：复用 Higress 内建 ai-proxy 插件（零自研代码），
+# 入站对齐 OpenAI messages 契约（对齐1）、出站标准 OpenAI SSE（对齐2）已落地；
+# 插件按 provider type 自动完成协议转换（Claude 协议入站 /v1/messages 自动检测）。
+#
+# 明文/密态双轨（T1 §4.3）：/provider/* 为明文直连路径（ai-proxy 改写 Host/Authorization
+# 后直连厂商，key 在网关侧，body 不过段①加密）；密态路径 /infer（otpmask 段① →
+# tee-infer）保持不变，两条链路并行。
+#
+# Key 管理 = Higress 控制台（生产激活主路径）：登录 :8001 →「AI 服务提供者」界面 → 选择
+# 厂商类型 → 填写 API Key/Endpoint → 保存即激活（配置落控制台托管的 ai-proxy 插件，热更新，
+# key 不进 Git / 本清单；详见 deploy/higress/README.md §9）。
+# 本清单为"无 key 基线"：仅声明 17 条 /provider/<name> 固定契约的 provider type / 协议配置，
+# 不含 apiTokens——用于 gitops 基线、契约核对与本地/自动化环境；
+# 若已由控制台启用同名 ai-proxy 插件，请勿与本清单重复 apply（二选一，避免双配置冲突）。
+#
+# 协议特例（已与 ai-proxy 2.0.1 源码核对；key 在控制台 Provider 界面按 type 录入）：
+#   - hunyuan：hunyuanAuthId/Key 均留空 → 走 OpenAI 兼容模式
+#     （api.hunyuan.cloud.tencent.com + Bearer，非 TC 原生签名）；
+#   - spark：控制台需按复合格式 "APIKey:APISecret" 录入；
+#   - coze：protocol original 透传 + subPath 剥离路由前缀（Coze 原生契约）；
+#   - ernie：type 名为 baidu（非 ernie）；minimax 默认 v2 API，无需额外字段。
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-proxy
+  namespace: higress-system
+  annotations:
+    higress.io/wasm-plugin-title: AI Proxy
+    higress.io/wasm-plugin-category: api-provider
+spec:
+  url: http://localhost:8002/plugins/ai-proxy/2.0.1/plugin.wasm
+  failStrategy: FAIL_CLOSED
+  defaultConfigDisable: true
+  matchRules:
+  # ---- 国际 ----
+  - ingress:
+    - ai-openai
+    config:
+      provider:
+        type: openai
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-claude
+    config:
+      provider:
+        type: claude
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-gemini
+    config:
+      provider:
+        type: gemini
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-groq
+    config:
+      provider:
+        type: groq
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-openrouter
+    config:
+      provider:
+        type: openrouter
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-mistral
+    config:
+      provider:
+        type: mistral
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  # ---- 国产 ----
+  - ingress:
+    - ai-qwen
+    config:
+      provider:
+        type: qwen
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-deepseek
+    config:
+      provider:
+        type: deepseek
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-moonshot
+    config:
+      provider:
+        type: moonshot
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-minimax
+    config:
+      provider:
+        type: minimax
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-doubao
+    config:
+      provider:
+        type: doubao
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-hunyuan
+    config:
+      provider:
+        type: hunyuan
+        # hunyuanAuthId/Key 留空 → OpenAI 兼容模式（Bearer 直连混元兼容端点）
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-ernie
+    config:
+      provider:
+        type: baidu
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-spark
+    config:
+      provider:
+        type: spark
+        # apiTokens：由控制台「AI 服务提供者」界面录入，按复合格式 "APIKey:APISecret"
+  - ingress:
+    - ai-yi
+    config:
+      provider:
+        type: yi
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-stepfun
+    config:
+      provider:
+        type: stepfun
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线
+  - ingress:
+    - ai-coze
+    config:
+      provider:
+        type: coze
+        protocol: original
+        subPath: /provider/coze
+        # apiTokens：由控制台「AI 服务提供者」界面录入，本清单为无 key 基线

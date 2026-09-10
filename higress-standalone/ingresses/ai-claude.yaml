@@ -1,0 +1,23 @@
+# 本地 ai-proxy 验证路由（GF.3.2）：claude 路由经 mock Service 上游（本地既有声明）
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  labels:
+    higress.io/domain_higress-default-domain: "true"
+    higress.io/resource-definer: higress
+  name: ai-claude
+  namespace: higress-system
+  annotations:
+    higress.io/destination: mock-infer:9000
+spec:
+  ingressClassName: higress
+  rules:
+    - http:
+        paths:
+          - backend:
+              service:
+                name: mock-infer
+                port:
+                  number: 9000
+            path: /provider/claude/
+            pathType: Prefix

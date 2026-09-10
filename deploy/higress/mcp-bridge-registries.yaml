@@ -1,0 +1,113 @@
+# AI Provider 统一接入（GF.3.2）：McpBridge 厂商上游服务来源（17 家）
+#
+# 目的：为 ai-proxy 插件（ai-proxy-providers.yaml）声明各厂商上游，
+# 与 ingress-ai-providers.yaml（路由）、ai-proxy-providers.yaml（厂商 type 配置，无 key）
+# 组成三件套基线；厂商 API Key 由 Higress 控制台「AI 服务提供者」界面录入激活
+# （见 deploy/higress/README.md §9），key 不进入本仓库。
+#
+# 关键点：
+#   - dns 类型 registry 的 protocol 默认 HTTP，443 端口必须显式声明 HTTPS
+#     （漏配 = 明文打到 443，TLS 握手失败）；
+#   - 路由 destination 引用格式为 <registry-name>.<type>:<port>（如 openai.dns:443），
+#     见 ingress-ai-providers.yaml；
+#   - McpBridge 是 higress-system 下 name=default 的单例资源，spec.registries 为
+#     整表替换语义：首次部署（集群尚无 default McpBridge）可直接 apply；
+#     若集群已存在（如 Higress Console 创建），须先将现有 registries 条目
+#     并入本文件列表后再 apply，避免覆盖丢失。
+#
+# 厂商域名/type 已与 ai-proxy 2.0.1 provider 实现逐一核对
+# （依据见 docs/T1-GF3.2-ai-proxy兼容性评估.md）。
+apiVersion: networking.higress.io/v1
+kind: McpBridge
+metadata:
+  name: default
+  namespace: higress-system
+spec:
+  registries:
+  # ---- 国际 ----
+  - name: openai
+    domain: api.openai.com
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: claude
+    domain: api.anthropic.com
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: gemini
+    domain: generativelanguage.googleapis.com
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: groq
+    domain: api.groq.com
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: openrouter
+    domain: openrouter.ai
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: mistral
+    domain: api.mistral.ai
+    port: 443
+    type: dns
+    protocol: HTTPS
+  # ---- 国产 ----
+  - name: qwen
+    domain: dashscope.aliyuncs.com
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: deepseek
+    domain: api.deepseek.com
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: moonshot
+    domain: api.moonshot.cn
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: minimax
+    domain: api.minimax.chat
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: doubao
+    domain: ark.cn-beijing.volces.com
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: hunyuan
+    domain: api.hunyuan.cloud.tencent.com
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: ernie
+    domain: qianfan.baidubce.com
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: spark
+    domain: spark-api-open.xf-yun.com
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: yi
+    domain: api.lingyiwanwu.com
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: stepfun
+    domain: api.stepfun.com
+    port: 443
+    type: dns
+    protocol: HTTPS
+  - name: coze
+    domain: api.coze.cn
+    port: 443
+    type: dns
+    protocol: HTTPS
