@@ -20,7 +20,7 @@ metadata:
         f:system.initialized: {}
     manager: Kubernetes Java Client
     operation: Update
-    time: "2026-09-05T07:33:16Z"
+    time: "2026-09-09T17:36:45Z"
   name: higress-console
   namespace: higress-system
-  resourceVersion: "10"
+  resourceVersion: "22"
