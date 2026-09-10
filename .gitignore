@@ -62,6 +62,9 @@ docs/benchmark/*
 ai-gateway-roadmap/
 confidential-ai-gateway-whitepaper/
 
+# ===== 构建产物 =====
+dist/
+
 # ===== IDE / 编辑器 =====
 .claude/
 .vscode/
@@ -113,5 +116,15 @@ higress-standalone/_recovery/
 higress-standalone/configmaps/higress-ca-root-cert.yaml
 higress-standalone/configmaps/istio-ca-crl.yaml
 
+# console/fake-apiserver 落盘的 WasmPlugin 运行态快照（ai-proxy 系含明文 apiTokens，勿入库；
+# 入库基线以 higress-standalone/wasmplugins/ 下手工维护的 CR 为准，console 变更按升级手册回放）
+higress-standalone/wasmplugins/ai-proxy.yaml
+higress-standalone/wasmplugins/ai-proxy.yaml.bak-*
+higress-standalone/wasmplugins/ai-proxy.internal.yaml
+higress-standalone/wasmplugins/ai-statistics-*.yaml
+
 # ===== 归档的 HTML 导出快照（含大体积字体/echarts 资产，权威文本版在 docs/*.md）=====
 docs/archive/html-snapshots/
+
+# ===== 管理门户 vendor-fork 本地工具（JDK/Maven settings 等，不入库）=====
+.tools/

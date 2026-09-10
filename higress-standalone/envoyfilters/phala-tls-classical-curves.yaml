@@ -1,0 +1,38 @@
+# EnvoyFilter：outbound|443||llm-phala.internal.dns 集群显式经典 ECDH 曲线组。
+#
+# 背景（2026-09-10 厂商激活演示 D 场景排查）：
+# Envoy 1.36.4/BoringSSL 默认启用 X25519MLKEM768 混合密钥交换，ClientHello 超过常规
+# 尺寸；Phala 边缘节点（x-aci-*）对该类 ClientHello 直接回 TLS alert 40
+# (HANDSHAKE_FAILURE_ON_CLIENT_HELLO)，而宿主 Schannel/容器 OpenSSL 客户端均正常。
+# 显式限制 ecdh_curves 后 BoringSSL 不再默认附加 MLKEM 群组。
+# 验证方式：config_dump 中该集群 common_tls_context.tls_params 出现 ecdh_curves，
+# 且 /phala 直连推理由 503(TLS_error) 恢复 200。
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: phala-tls-classical-curves
+  namespace: higress-system
+spec:
+  configPatches:
+  - applyTo: CLUSTER
+    match:
+      cluster:
+        name: outbound|443||llm-phala.internal.dns
+    patch:
+      operation: MERGE
+      value:
+        name: outbound|443||llm-phala.internal.dns
+        transport_socket:
+          name: envoy.transport_sockets.tls
+          typed_config:
+            '@type': type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+            common_tls_context:
+              tls_params:
+                tls_minimum_protocol_version: TLSv1_2
+                tls_maximum_protocol_version: TLSv1_3
+                ecdh_curves:
+                - X25519
+                - P-256
+                - P-384
+              validation_context: {}
+            sni: inference.phala.com
