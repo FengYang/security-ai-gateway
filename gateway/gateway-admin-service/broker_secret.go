@@ -54,18 +54,29 @@ const reloadInterval = 10 * time.Second
 // allowBrokerHTTP 是否允许 http 上游（缺省拒；仅本地联调显式开启）。
 var allowBrokerHTTP = os.Getenv("ADMIN_BROKER_ALLOW_HTTP") == "true"
 
+// readyzFailThreshold 连续重载失败达该次数即判 not ready（M2 A-2 /readyz 三态）。
+const readyzFailThreshold = 3
+
 // brokerSecretHandler 凭据托管端点集合。
 type brokerSecretHandler struct {
 	settings *brokerSettings
 	broker   *brokerHandler
 
-	mu      sync.Mutex // 保护 lastSig（reloader goroutine 与 HTTP 写入并发访问）
-	lastSig string
+	mu         sync.Mutex // 保护 lastSig / failStreak（reloader goroutine 与 HTTP 写入并发访问）
+	lastSig    string
+	failStreak int // 连续重载失败次数（成功即清零）；≥readyzFailThreshold → /readyz 报 not ready
 }
 
 // newBrokerSecretHandler 装配凭据托管 handler。
 func newBrokerSecretHandler(s *brokerSettings, b *brokerHandler) *brokerSecretHandler {
 	return &brokerSecretHandler{settings: s, broker: b}
+}
+
+// healthy 连续重载失败未达阈值即视为健康（M2 A-2：/readyz 的 broker 维度）。
+func (h *brokerSecretHandler) healthy() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.failStreak < readyzFailThreshold
 }
 
 // ---------- 响应/请求模型 ----------
@@ -279,11 +290,27 @@ func dirSignature(dir string) (string, error) {
 
 // ---------- 热加载 ----------
 
+// markFail 记录一次重载失败（累计指标 + 连续失败计数），供 /readyz 判定。
+func (h *brokerSecretHandler) markFail() {
+	metrics.incBrokerReloadFailed()
+	h.mu.Lock()
+	h.failStreak++
+	h.mu.Unlock()
+}
+
+// markOK 标记一次重载成功（连续失败计数清零）。
+func (h *brokerSecretHandler) markOK(sig string) {
+	h.mu.Lock()
+	h.failStreak = 0
+	h.lastSig = sig
+	h.mu.Unlock()
+}
+
 // reloadNow 立即重载配置并原子切换路由表；失败时保留旧配置并计数。
 func (h *brokerSecretHandler) reloadNow() error {
 	cfg, err := loadBrokerConfigFromDir(h.settings.secretsDir)
 	if err != nil {
-		metrics.incBrokerReloadFailed()
+		h.markFail()
 		log.Printf("[broker] 配置重载失败（保留旧配置，fail-closed）：%v", err)
 		return err
 	}
@@ -291,9 +318,7 @@ func (h *brokerSecretHandler) reloadNow() error {
 
 	sig, err := dirSignature(h.settings.secretsDir)
 	if err == nil {
-		h.mu.Lock()
-		h.lastSig = sig
-		h.mu.Unlock()
+		h.markOK(sig)
 	}
 	log.Printf("[broker] 配置已重载：providers=%d", h.broker.providerCount())
 	return nil
@@ -312,7 +337,7 @@ func (h *brokerSecretHandler) startReloader() {
 		for range t.C {
 			sig, err := dirSignature(h.settings.secretsDir)
 			if err != nil {
-				metrics.incBrokerReloadFailed()
+				h.markFail() // 目录不可读同样计入连续失败（/readyz 判定依据）
 				log.Printf("[broker] 目录扫描失败（保留旧配置）：%v", err)
 				continue
 			}

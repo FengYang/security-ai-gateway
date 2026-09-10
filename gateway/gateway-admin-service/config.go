@@ -154,22 +154,33 @@ func loadBrokerConfig() (*brokerConfig, error) {
 // defaultBrokerSecretsDir 凭据文件目录缺省值（deploy/secrets/ 整目录已 gitignore）。
 const defaultBrokerSecretsDir = "deploy/secrets/broker-providers"
 
-// brokerSettings broker 文件源配置（M2 A-1）。
+// defaultBrokerListen broker 专用监听地址缺省值（M2 A-2：与管理面 :19095 分离）。
+const defaultBrokerListen = ":19096"
+
+// brokerSettings broker 凭据源与监听配置（M2 A-1 凭据源 / A-2 双 listener）。
 type brokerSettings struct {
-	secretsDir string // 凭据目录（存在即接管；目录内每 provider 一个 .env）
-	publicBase string // broker 对外基址（生成 customUrl；broker 启用时必填）
-	crFile     string // ai-proxy CR 文件路径（可选；设置后启用漂移检测）
+	secretsDir   string // 凭据目录（存在即接管；目录内每 provider 一个 .env）
+	publicBase   string // broker 对外基址（生成 customUrl；broker 启用时必填）
+	crFile       string // ai-proxy CR 文件路径（可选；设置后启用漂移检测）
+	brokerListen string // broker 专用监听地址（A-2；缺省 :19096）
+	legacyPort   bool   // 兼容期：管理面端口是否同时暴露 broker（A-2 三步收口第 1 步）
 }
 
-// loadBrokerSettings 解析 broker 文件源配置（env 注入，均带缺省）。
+// loadBrokerSettings 解析 broker 配置（env 注入，均带缺省）。
 func loadBrokerSettings() *brokerSettings {
 	s := &brokerSettings{
-		secretsDir: os.Getenv("ADMIN_BROKER_SECRETS_DIR"),
-		publicBase: strings.TrimRight(os.Getenv("ADMIN_BROKER_PUBLIC_BASE"), "/"),
-		crFile:     os.Getenv("ADMIN_BROKER_CR_FILE"),
+		secretsDir:   os.Getenv("ADMIN_BROKER_SECRETS_DIR"),
+		publicBase:   strings.TrimRight(os.Getenv("ADMIN_BROKER_PUBLIC_BASE"), "/"),
+		crFile:       os.Getenv("ADMIN_BROKER_CR_FILE"),
+		brokerListen: os.Getenv("ADMIN_SVC_BROKER_LISTEN"),
+		// 兼容期缺省 true（保持 M1 既有链路可用）；收口期显式置 ADMIN_SVC_BROKER_LEGACY_PORT=false
+		legacyPort: os.Getenv("ADMIN_SVC_BROKER_LEGACY_PORT") != "false",
 	}
 	if s.secretsDir == "" {
 		s.secretsDir = defaultBrokerSecretsDir
+	}
+	if s.brokerListen == "" {
+		s.brokerListen = defaultBrokerListen
 	}
 	return s
 }
