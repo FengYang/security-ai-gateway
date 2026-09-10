@@ -6,3 +6,12 @@
 frontend/src/pages/_defaultProps.tsx
 frontend/src/locales/en-US/translation.json
 frontend/src/locales/zh-CN/translation.json
+# Upstream-defect fix (NOT a customization point): upstream #761 bumped the main-side
+# plugin snapshot 2.0.0 -> 2.0.1 but missed two test expectations, so
+# WasmPluginServiceTest failed on a clean baseline (snapshot fixture + ai-load-balancer
+# version constant). Both aligned with the main side
+# (see the admin-portal upgrade manual, section 7).
+# NOTE: keep this file ASCII-only. PS 5.1 Get-Content reads BOM-less files as ANSI,
+# and non-ASCII bytes can merge lines and silently drop whitelist entries.
+backend/sdk/src/test/java/com/alibaba/higress/sdk/service/WasmPluginServiceTest.java
+backend/sdk/src/test/resources/plugins/plugin-snapshot.lock.json
