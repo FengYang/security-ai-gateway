@@ -51,7 +51,7 @@ type MockEnclave struct {
 }
 
 func NewMockEnclave() (*MockEnclave, error) {
-	sealKey, err := loadSealKey()
+	sealKey, err := loadSealKey(mockSealKeyEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -69,12 +69,12 @@ func NewMockEnclave() (*MockEnclave, error) {
 	}, nil
 }
 
-// loadSealKey 读取密封密钥（环境变量或随机生成）。
-func loadSealKey() ([]byte, error) {
-	if v := os.Getenv(mockSealKeyEnv); v != "" {
+// loadSealKey 读取密封密钥（按环境变量名取；空则随机生成）。
+func loadSealKey(envName string) ([]byte, error) {
+	if v := os.Getenv(envName); v != "" {
 		k, err := hex.DecodeString(v)
 		if err != nil || len(k) != 32 {
-			return nil, errors.New("enclave: OTPMASK_MOCK_SEAL_KEY 须为 32 字节 hex")
+			return nil, fmt.Errorf("enclave: %s 须为 32 字节 hex", envName)
 		}
 		return k, nil
 	}
@@ -95,10 +95,11 @@ func (e *MockEnclave) Measure() ([]byte, error) {
 	return out, nil
 }
 
-// Seal 用 AES-256-GCM 密封，context 绑定防止跨用途解封
+// gcmSeal AES-256-GCM 密封，context 绑定防止跨用途解封。
 // 输出格式：AAD(sha256(context)) || nonce(12) || ciphertext||tag
-func (e *MockEnclave) Seal(plaintext []byte, context string) ([]byte, error) {
-	block, err := aes.NewCipher(e.sealKey)
+// （mock 与 tdx 飞地共用同一密封格式，密封文件可跨实现恢复）。
+func gcmSeal(sealKey, plaintext []byte, context string) ([]byte, error) {
+	block, err := aes.NewCipher(sealKey)
 	if err != nil {
 		return nil, fmt.Errorf("enclave: AES 初始化失败: %w", err)
 	}
@@ -112,7 +113,6 @@ func (e *MockEnclave) Seal(plaintext []byte, context string) ([]byte, error) {
 	}
 	aad := contextHash(context)
 	sealed := gcm.Seal(nil, nonce, plaintext, aad)
-	// 输出：aad || nonce || sealed
 	out := make([]byte, 0, len(aad)+len(nonce)+len(sealed))
 	out = append(out, aad...)
 	out = append(out, nonce...)
@@ -120,9 +120,9 @@ func (e *MockEnclave) Seal(plaintext []byte, context string) ([]byte, error) {
 	return out, nil
 }
 
-// Unseal 解封，验证 AAD 和 GCM tag
-func (e *MockEnclave) Unseal(ciphertext []byte, context string) ([]byte, error) {
-	block, err := aes.NewCipher(e.sealKey)
+// gcmUnseal 解封，验证 AAD 和 GCM tag。
+func gcmUnseal(sealKey, ciphertext []byte, context string) ([]byte, error) {
+	block, err := aes.NewCipher(sealKey)
 	if err != nil {
 		return nil, fmt.Errorf("enclave: AES 初始化失败: %w", err)
 	}
@@ -149,6 +149,30 @@ func (e *MockEnclave) Unseal(ciphertext []byte, context string) ([]byte, error) 
 	return plain, nil
 }
 
+// Seal 用 AES-256-GCM 密封，context 绑定防止跨用途解封
+// 输出格式：AAD(sha256(context)) || nonce(12) || ciphertext||tag
+func (e *MockEnclave) Seal(plaintext []byte, context string) ([]byte, error) {
+	return gcmSeal(e.sealKey, plaintext, context)
+}
+
+// Unseal 解封，验证 AAD 和 GCM tag
+func (e *MockEnclave) Unseal(ciphertext []byte, context string) ([]byte, error) {
+	return gcmUnseal(e.sealKey, ciphertext, context)
+}
+
+// signProofBinding 证明签名（mock 与 tdx 共用）：对 (reportData ‖ signing_pub)
+// 的 sha256 做 ECDSA-P256 签名，返回公钥原始点与定长签名（r||s 各 32B）。
+func signProofBinding(signKey *ecdsa.PrivateKey, reportData []byte) (signingPub, sig []byte, err error) {
+	signingPub = elliptic.Marshal(signKey.PublicKey.Curve, signKey.PublicKey.X, signKey.PublicKey.Y)
+	toSign := append(append([]byte(nil), reportData...), signingPub...)
+	h := sha256.Sum256(toSign)
+	r, s, err := ecdsa.Sign(rand.Reader, signKey, h[:])
+	if err != nil {
+		return nil, nil, fmt.Errorf("enclave: 自签失败: %w", err)
+	}
+	return signingPub, encodeSig(r, s), nil
+}
+
 // Attest 生成模拟证明，mock 模式 Quote 为空，签名用测试私钥自签。
 // 签名覆盖 (reportData ‖ signing_key)：reportData 含 H(nonce‖server_pub)，
 // 客户端据此外验握手公钥绑定（真实 TDX 下 reportData 注入 quote REPORTDATA 字段）。
@@ -156,14 +180,10 @@ func (e *MockEnclave) Attest(challenge, reportData []byte) (*AttestationProof, e
 	if len(reportData) == 0 {
 		return nil, errors.New("enclave: report_data 为空（握手绑定材料必填）")
 	}
-	signingPub := elliptic.Marshal(e.signKey.PublicKey.Curve, e.signKey.PublicKey.X, e.signKey.PublicKey.Y)
-	toSign := append(append([]byte(nil), reportData...), signingPub...)
-	h := sha256.Sum256(toSign)
-	r, s, err := ecdsa.Sign(rand.Reader, e.signKey, h[:])
+	signingPub, sigBytes, err := signProofBinding(e.signKey, reportData)
 	if err != nil {
-		return nil, fmt.Errorf("enclave: 自签失败: %w", err)
+		return nil, err
 	}
-	sigBytes := encodeSig(r, s)
 	return &AttestationProof{
 		Nonce:      challenge,
 		Platform:   e.platform,
@@ -202,15 +222,22 @@ func encodeSig(r, s *big.Int) []byte {
 
 // ---------- 平台骨架 ----------
 
-// newPlatformEnclave 真实硬件飞地的注入点，当前未实现
+// newPlatformEnclave 真实硬件飞地的注入点。
+// tdx：阿里云机密 VM（g8i/g9i）真 TDX Quote（go-tdx-guest；构造期 fail-fast，
+// 见 enclave_tdx.go）；sgx 等其余平台待接入。
 func newPlatformEnclave(platform string) (Enclave, error) {
-	return nil, fmt.Errorf("enclave: 平台 %q 实现待硬件接入（R1）；开发期使用 mock", platform)
+	switch platform {
+	case "tdx":
+		return NewTdxEnclave()
+	default:
+		return nil, fmt.Errorf("enclave: 平台 %q 实现待硬件接入；开发期使用 mock", platform)
+	}
 }
 
 // ---------- JSON 辅助 ----------
 
 func (p *AttestationProof) proofJSON() (string, error) {
-	out, err := json.Marshal(map[string]any{
+	m := map[string]any{
 		"nonce":        hex.EncodeToString(p.Nonce),
 		"platform":     p.Platform,
 		"report_data":  hex.EncodeToString(p.ReportData),
@@ -218,7 +245,12 @@ func (p *AttestationProof) proofJSON() (string, error) {
 		"measurements": p.Measurements,
 		"signing_key":  hex.EncodeToString(p.SigningKey),
 		"signature":    hex.EncodeToString(p.Signature),
-	})
+	}
+	if len(p.Quote) > 0 {
+		// 真 TDX Quote 原文（hex；mock 为空不输出），供验证方独立验签（DCAP 链）。
+		m["quote"] = hex.EncodeToString(p.Quote)
+	}
+	out, err := json.Marshal(m)
 	if err != nil {
 		return "", err
 	}

@@ -1,0 +1,34 @@
+{
+  "_doc": "双路线路由示例（甲=自建 TDX+vLLM(tee_gpu) / 乙=Phala cmaas）。tee-infer 以 -route-config 引用本文件；模型/租户/策略均可改文件热配（重启生效）。引擎类型常量：tee_gpu / cmaas / masked_vector(路线2)。",
+  "_examples": [
+    "甲专用：把模型 engines 只留 [tee_gpu]，并给 tee-infer 配 -engine-url=<vLLM 地址>",
+    "乙专用：只留 [cmaas]，配 -cmaas-url/-cmaas-model",
+    "并存：engines 列 [tee_gpu,cmaas]，配合 policy=cost|latency|quality 或按声明序 failover",
+    "租户固定：tenant.<id>.engine 强制某租户走一侧（必须在该模型 engines 列表内）"
+  ],
+  "default_engine": "tee_gpu",
+  "policy": "",
+  "require_quote": false,
+  "model": {
+    "self-qwen2.5-7b": {
+      "engines": ["tee_gpu"],
+      "tier": "self-hosted"
+    },
+    "cmaas-llama-3.3-70b": {
+      "engines": ["cmaas"],
+      "tier": "cmaas"
+    },
+    "dual-chat": {
+      "engines": ["tee_gpu", "cmaas"],
+      "tier": "dual",
+      "costs": [
+        { "engine": "tee_gpu", "price_per_1k": 6.0, "latency_p50_ms": 60, "quality": 92 },
+        { "engine": "cmaas", "price_per_1k": 1.2, "latency_p50_ms": 180, "quality": 85 }
+      ]
+    }
+  },
+  "tenant": {
+    "high-security-tenant": { "engine": "tee_gpu" },
+    "cost-sensitive-tenant": { "engine": "cmaas" }
+  }
+}

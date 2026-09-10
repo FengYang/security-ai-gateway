@@ -108,10 +108,56 @@ func TestMockEnclaveAttest(t *testing.T) {
 	}
 }
 
-// TestNewPlatformEnclaveUnsupported 平台实现未接入时返回明确错误。
-func TestNewPlatformEnclaveUnsupported(t *testing.T) {
-	if _, err := newPlatformEnclave("tdx"); err == nil {
-		t.Fatal("tdx 平台未接入应返回错误")
+// TestNewPlatformEnclave 平台接入语义：未知/未接入平台报错；
+// tdx 已接入——无 TDX 硬件环境（开发机/CI）构造失败（fail-fast，防静默降级），
+// 真 TDX 环境构造成功且平台标识正确（真机黄金路径）。
+func TestNewPlatformEnclave(t *testing.T) {
+	if _, err := newPlatformEnclave("unknown-xyz"); err == nil {
+		t.Fatal("未知平台应返回错误")
+	}
+	if _, err := newPlatformEnclave("sgx"); err == nil {
+		t.Fatal("sgx 未接入应返回错误")
+	}
+	e, err := newPlatformEnclave("tdx")
+	if err != nil {
+		t.Logf("无 TDX 硬件环境（预期 fail-fast）: %v", err)
+		return
+	}
+	if e.Platform() != "tdx" {
+		t.Fatalf("真机平台标识应为 tdx: %q", e.Platform())
+	}
+	if m, err := e.Measure(); err != nil || len(m) != 32 {
+		t.Fatalf("真机测量值异常: %v %d", err, len(m))
+	}
+}
+
+// TestTdxReportData 绑定材料扩展：32B→64B 前缀、余零、超长截断。
+func TestTdxReportData(t *testing.T) {
+	rd32 := make([]byte, 32)
+	for i := range rd32 {
+		rd32[i] = byte(i)
+	}
+	rd := tdxReportData(rd32)
+	if !bytes.Equal(rd[:32], rd32) {
+		t.Fatal("REPORTDATA 前 32B 应为绑定材料原样")
+	}
+	for _, b := range rd[32:] {
+		if b != 0 {
+			t.Fatal("REPORTDATA 后 32B 应置零")
+		}
+	}
+	// 超长截断：只取前 32B
+	long := make([]byte, 64)
+	copy(long, rd32)
+	rd2 := tdxReportData(long)
+	if rd2 != rd {
+		t.Fatal("超长绑定材料应截断为前 32B")
+	}
+	// 短材料：前缀填充
+	short := []byte("short-binding")
+	rd3 := tdxReportData(short)
+	if !bytes.Equal(rd3[:len(short)], short) {
+		t.Fatal("短绑定材料应前缀填充")
 	}
 }
 
