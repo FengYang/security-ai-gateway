@@ -486,16 +486,17 @@ index af8233c..2b460af 100644
    }
  }
 diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
-index 1a41985..ebb2a5d 100644
+index 1a41985..f906ede 100644
 --- a/frontend/src/locales/en-US/translation.json
 +++ b/frontend/src/locales/en-US/translation.json
-@@ -22,7 +22,26 @@
+@@ -22,7 +22,59 @@
      "pluginManagement": "Plugin Management",
      "systemSettings": "System Settings",
      "mcpManagement": "MCP Management",
 -    "mcpConfigurations": "MCP Configurations"
 +    "mcpConfigurations": "MCP Configuration",
-+    "adminExtSecurityCenter": "Security Center (placeholder)"
++    "adminExtSecurityCenter": "Security Center (placeholder)",
++    "adminExtCredentials": "Credential Hosting"
 +  },
 +  "adminExt": {
 +    "securityCenter": {
@@ -513,21 +514,54 @@ index 1a41985..ebb2a5d 100644
 +      "disabled": "disabled",
 +      "failureThreshold": "failure threshold",
 +      "healthCheckModel": "probe model"
++    },
++    "credentials": {
++      "guide": "Write the vendor API key here: it is stored in the broker credential directory, so the WasmPlugin CR holds no plaintext token. After saving, copy the generated customUrl into Tech Config → AI Service Providers (leave tokens empty).",
++      "empty": "No hosted credentials",
++      "hosted": "hosted",
++      "add": "Add credential",
++      "rotate": "Rotate key",
++      "delete": "Delete",
++      "deleteConfirm": "Delete this hosted credential?",
++      "deleteWarning": "After deletion, providers still pointing at this endpoint will fail with 404; disable them on the provider page as well.",
++      "deleted": "Deleted",
++      "refresh": "Refresh",
++      "upstream": "Vendor upstream",
++      "pathCount": "Allowed paths",
++      "fingerprint": "Key fingerprint",
++      "updatedAt": "Updated at",
++      "formProvider": "Provider ID",
++      "formProviderTip": "Lowercase letters/digits/hyphens, max 32 chars; must match the console provider name.",
++      "formUpstream": "Vendor upstream URL",
++      "formKey": "API key",
++      "formKeyTip": "Not readable after submission (only an 8-char fingerprint is shown).",
++      "formPaths": "Allowed relay paths",
++      "formPathsTip": "Comma separated; leave empty to use the minimal set (chat/completions, models, embeddings).",
++      "required": "Required",
++      "submit": "Submit",
++      "copy": "Copy",
++      "copied": "Copied",
++      "saved": "Credential saved",
++      "customUrlTitle": "Provider customUrl (copy to the provider page)",
++      "customUrlTip": "When creating/editing the provider in Tech Config → AI Service Providers, put this URL into customUrl and leave tokens empty.",
++      "orphanTitle": "Configuration drift detected",
++      "orphanTip": "The following providers still point at the broker in the CR, but the broker has no credential, so their inference will fail"
 +    }
    },
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
-index c148f42..c8a5ec9 100644
+index c148f42..2083d48 100644
 --- a/frontend/src/locales/zh-CN/translation.json
 +++ b/frontend/src/locales/zh-CN/translation.json
-@@ -22,7 +22,26 @@
+@@ -22,7 +22,59 @@
      "pluginManagement": "插件配置",
      "systemSettings": "系统设置",
      "mcpManagement": "MCP管理",
 -    "mcpConfigurations": "MCP配置"
 +    "mcpConfigurations": "MCP配置",
-+    "adminExtSecurityCenter": "安全中心（占位）"
++    "adminExtSecurityCenter": "安全中心（占位）",
++    "adminExtCredentials": "凭据托管"
 +  },
 +  "adminExt": {
 +    "securityCenter": {
@@ -545,21 +579,58 @@ index c148f42..c8a5ec9 100644
 +      "disabled": "未启用",
 +      "failureThreshold": "失败阈值",
 +      "healthCheckModel": "探测模型"
++    },
++    "credentials": {
++      "guide": "在此写入厂商 API Key：凭据落 broker 凭据目录，WasmPlugin CR 不含明文令牌。写入后复制生成的 customUrl，到「技术配置 → AI 服务提供者」新建提供者（tokens 留空）。",
++      "empty": "暂无托管凭据",
++      "hosted": "托管",
++      "add": "新增凭据",
++      "rotate": "轮换密钥",
++      "delete": "删除",
++      "deleteConfirm": "确认删除该托管凭据？",
++      "deleteWarning": "删除后，CR 中仍指向该端点的提供者将无法推理（404），需到提供者页一并停用。",
++      "deleted": "已删除",
++      "refresh": "刷新",
++      "upstream": "厂商上游",
++      "pathCount": "允许路径数",
++      "fingerprint": "密钥指纹",
++      "updatedAt": "更新时间",
++      "formProvider": "提供者标识",
++      "formProviderTip": "小写字母/数字/连字符，最长 32 字符；需与控制台提供者名称对应。",
++      "formUpstream": "厂商上游地址",
++      "formKey": "API Key",
++      "formKeyTip": "提交后不可回读（仅展示 8 位指纹），请确认无误。",
++      "formPaths": "允许中转路径",
++      "formPathsTip": "逗号分隔；留空使用最小集（chat/completions、models、embeddings）。",
++      "required": "必填",
++      "submit": "提交",
++      "copy": "复制",
++      "copied": "已复制",
++      "saved": "凭据已保存",
++      "customUrlTitle": "提供者 customUrl（请复制到提供者页）",
++      "customUrlTip": "在「技术配置 → AI 服务提供者」新建/编辑提供者时，将该地址填入 customUrl，tokens 留空。",
++      "orphanTitle": "检测到配置漂移",
++      "orphanTip": "以下提供者在 CR 中仍指向 broker，但 broker 侧已无凭据，其推理将失败"
 +    }
    },
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/pages/_defaultProps.tsx b/frontend/src/pages/_defaultProps.tsx
-index f4c0ecb..15c70ae 100644
+index f4c0ecb..8d86018 100644
 --- a/frontend/src/pages/_defaultProps.tsx
 +++ b/frontend/src/pages/_defaultProps.tsx
-@@ -1,4 +1,5 @@
+@@ -1,8 +1,10 @@
  import {
 +  ApiOutlined,
    DashboardOutlined,
    DeploymentUnitOutlined,
    FullscreenExitOutlined,
-@@ -43,6 +44,19 @@ export default {
+   GlobalOutlined,
++  KeyOutlined,
+   RobotOutlined,
+   SafetyCertificateOutlined,
+   SettingOutlined,
+@@ -43,6 +45,26 @@ export default {
          path: '/dashboard',
          icon: <DashboardOutlined />,
        },
@@ -576,9 +647,306 @@ index f4c0ecb..15c70ae 100644
 +        path: '/admin-ext/vendors',
 +        icon: <ApiOutlined />,
 +      },
++      {
++        // ADMIN-EXT（自研扩展，vendor-fork 只增不减）：broker 凭据托管（M2 A-1）
++        // D-4 定案：独立入口，不改上游 ProviderForm 业务组件（白名单原则不突破）
++        name: 'menu.adminExtCredentials',
++        path: '/admin-ext/credentials',
++        icon: <KeyOutlined />,
++      },
        {
          name: 'menu.serviceSources',
          path: '/service-source',
+diff --git a/frontend/src/pages/admin-ext/credentials/index.tsx b/frontend/src/pages/admin-ext/credentials/index.tsx
+new file mode 100644
+index 0000000..dd4667d
+--- /dev/null
++++ b/frontend/src/pages/admin-ext/credentials/index.tsx
+@@ -0,0 +1,284 @@
++import {
++  CopyOutlined,
++  PlusOutlined,
++  ReloadOutlined,
++} from '@ant-design/icons';
++import { PageContainer } from '@ant-design/pro-layout';
++import {
++  Alert,
++  Button,
++  Card,
++  Descriptions,
++  Empty,
++  Form,
++  Input,
++  message,
++  Modal,
++  Popconfirm,
++  Space,
++  Spin,
++  Tag,
++  Typography,
++} from 'antd';
++import { useCallback, useEffect, useState } from 'react';
++import { useTranslation } from 'react-i18next';
++import {
++  BrokerProviderView,
++  deleteBrokerProvider,
++  listBrokerProviders,
++  upsertBrokerProvider,
++} from '@/services/admin-ext-broker';
++
++/**
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：broker 凭据托管。
++ *
++ * 定位（docs/管理门户-apiTokens-Secret化-M2细化方案.md §2.1.3，D-4 定案）：
++ * 采用 **admin-ext 独立入口**（不改控制台上游 ProviderForm 业务组件，故 fork 白名单不扩容）。
++ * 管理员在此写入/轮换厂商 Key → 落 broker 凭据目录（CR 不含 token）→ 复制生成的
++ * customUrl 到「技术配置 → AI 服务提供者」建 provider（tokens 留空）。
++ *
++ * 安全（§2.1.5/§2.4）：
++ *  - Key 一经提交即不可回读，列表仅展示 8 位不可逆指纹（用于确认轮换生效）；
++ *  - 写/删操作仅 admin 角色可用，auditor 将收到 403（后端按用户名白名单派生角色）；
++ *  - CR 漂移（CR 指向 broker 但凭据已删）在页首显式告警。
++ */
++
++const DEFAULT_PATH_PREFIXES = '/v1/chat/completions,/v1/models,/v1/embeddings';
++
++const CredentialHosting: React.FC = () => {
++  const { t } = useTranslation();
++  const [form] = Form.useForm();
++  const [list, setList] = useState<BrokerProviderView[]>([]);
++  const [orphans, setOrphans] = useState<string[]>([]);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [modalOpen, setModalOpen] = useState(false);
++  const [editing, setEditing] = useState<BrokerProviderView | null>(null);
++  const [customUrl, setCustomUrl] = useState<string>('');
++  const [submitting, setSubmitting] = useState(false);
++
++  const reload = useCallback(() => {
++    setLoading(true);
++    listBrokerProviders()
++      .then((resp) => {
++        setList(resp?.providers || []);
++        setOrphans(resp?.orphanDetected || []);
++        setError(null);
++      })
++      .catch((e) => setError(String(e)))
++      .finally(() => setLoading(false));
++  }, []);
++
++  useEffect(() => {
++    reload();
++  }, [reload]);
++
++  const openCreate = () => {
++    setEditing(null);
++    setCustomUrl('');
++    form.resetFields();
++    form.setFieldsValue({ allowPathPrefixes: DEFAULT_PATH_PREFIXES });
++    setModalOpen(true);
++  };
++
++  const openRotate = (p: BrokerProviderView) => {
++    setEditing(p);
++    setCustomUrl('');
++    form.resetFields();
++    form.setFieldsValue({ name: p.name, upstream: p.upstream });
++    setModalOpen(true);
++  };
++
++  const submit = async () => {
++    const values = await form.validateFields();
++    const paths = (values.allowPathPrefixes || '')
++      .split(',')
++      .map((s: string) => s.trim())
++      .filter((s: string) => s.length > 0);
++    setSubmitting(true);
++    try {
++      const res = await upsertBrokerProvider(values.name, {
++        upstream: values.upstream,
++        key: values.key,
++        allowPathPrefixes: paths,
++      });
++      setCustomUrl(res?.customUrl || '');
++      message.success(t('adminExt.credentials.saved'));
++      reload();
++    } catch (e) {
++      // 403 = 当前会话非管理员（后端白名单派生角色）
++      message.error(String(e));
++    } finally {
++      setSubmitting(false);
++    }
++  };
++
++  const remove = async (p: BrokerProviderView) => {
++    try {
++      const res = await deleteBrokerProvider(p.name);
++      message.warning(res?.warning || t('adminExt.credentials.deleted'));
++      reload();
++    } catch (e) {
++      message.error(String(e));
++    }
++  };
++
++  const copyCustomUrl = async (url: string) => {
++    try {
++      await navigator.clipboard.writeText(url);
++      message.success(t('adminExt.credentials.copied'));
++    } catch {
++      message.warning(url);
++    }
++  };
++
++  return (
++    <PageContainer>
++      <Alert
++        type="info"
++        showIcon
++        message={t('adminExt.credentials.guide')}
++        style={{ marginBottom: 16 }}
++      />
++      {orphans.length > 0 && (
++        <Alert
++          type="warning"
++          showIcon
++          message={t('adminExt.credentials.orphanTitle')}
++          description={`${t('adminExt.credentials.orphanTip')}：${orphans.join('，')}`}
++          style={{ marginBottom: 16 }}
++        />
++      )}
++      {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />}
++
++      <Space style={{ marginBottom: 16 }}>
++        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
++          {t('adminExt.credentials.add')}
++        </Button>
++        <Button icon={<ReloadOutlined />} onClick={reload}>
++          {t('adminExt.credentials.refresh')}
++        </Button>
++      </Space>
++
++      {loading && (
++        <div style={{ textAlign: 'center', padding: 48 }}>
++          <Spin />
++        </div>
++      )}
++      {!loading && !error && list.length === 0 && (
++        <Empty description={t('adminExt.credentials.empty')} />
++      )}
++      {!loading &&
++        list.map((p) => (
++          <Card
++            key={p.name}
++            size="small"
++            style={{ marginBottom: 12 }}
++            title={
++              <span>
++                {p.name} <Tag color="blue">{t('adminExt.credentials.hosted')}</Tag>
++              </span>
++            }
++            extra={
++              <Space>
++                <Button size="small" onClick={() => openRotate(p)}>
++                  {t('adminExt.credentials.rotate')}
++                </Button>
++                <Popconfirm
++                  title={t('adminExt.credentials.deleteConfirm')}
++                  description={t('adminExt.credentials.deleteWarning')}
++                  onConfirm={() => remove(p)}
++                  okText={t('adminExt.credentials.delete')}
++                >
++                  <Button size="small" danger>
++                    {t('adminExt.credentials.delete')}
++                  </Button>
++                </Popconfirm>
++              </Space>
++            }
++          >
++            <Descriptions column={2} size="small">
++              <Descriptions.Item label={t('adminExt.credentials.upstream')}>
++                {p.upstream}
++              </Descriptions.Item>
++              <Descriptions.Item label={t('adminExt.credentials.pathCount')}>
++                {p.pathCount}
++              </Descriptions.Item>
++              <Descriptions.Item label={t('adminExt.credentials.fingerprint')}>
++                <Typography.Text code>{p.keyFingerprint || '-'}</Typography.Text>
++              </Descriptions.Item>
++              <Descriptions.Item label={t('adminExt.credentials.updatedAt')}>
++                {p.updatedAt || '-'}
++              </Descriptions.Item>
++            </Descriptions>
++          </Card>
++        ))}
++
++      <Modal
++        open={modalOpen}
++        title={editing ? t('adminExt.credentials.rotate') : t('adminExt.credentials.add')}
++        onCancel={() => setModalOpen(false)}
++        onOk={submit}
++        confirmLoading={submitting}
++        okText={t('adminExt.credentials.submit')}
++        destroyOnClose
++      >
++        <Form form={form} layout="vertical">
++          <Form.Item
++            name="name"
++            label={t('adminExt.credentials.formProvider')}
++            extra={t('adminExt.credentials.formProviderTip')}
++            rules={[{ required: true, message: t('adminExt.credentials.required') }]}
++          >
++            <Input disabled={!!editing} placeholder="phala" />
++          </Form.Item>
++          <Form.Item
++            name="upstream"
++            label={t('adminExt.credentials.formUpstream')}
++            rules={[{ required: true, message: t('adminExt.credentials.required') }]}
++          >
++            <Input placeholder="https://inference.phala.com" />
++          </Form.Item>
++          <Form.Item
++            name="key"
++            label={t('adminExt.credentials.formKey')}
++            extra={t('adminExt.credentials.formKeyTip')}
++            rules={[{ required: true, message: t('adminExt.credentials.required') }]}
++          >
++            <Input.Password autoComplete="new-password" placeholder="sk-..." />
++          </Form.Item>
++          <Form.Item
++            name="allowPathPrefixes"
++            label={t('adminExt.credentials.formPaths')}
++            extra={t('adminExt.credentials.formPathsTip')}
++          >
++            <Input placeholder={DEFAULT_PATH_PREFIXES} />
++          </Form.Item>
++        </Form>
++
++        {customUrl && (
++          <Alert
++            type="success"
++            showIcon
++            message={t('adminExt.credentials.customUrlTitle')}
++            description={
++              <Space direction="vertical" style={{ width: '100%' }}>
++                <Typography.Text code copyable={false}>
++                  {customUrl}
++                </Typography.Text>
++                <Button size="small" icon={<CopyOutlined />} onClick={() => copyCustomUrl(customUrl)}>
++                  {t('adminExt.credentials.copy')}
++                </Button>
++                <Typography.Text type="secondary">
++                  {t('adminExt.credentials.customUrlTip')}
++                </Typography.Text>
++              </Space>
++            }
++          />
++        )}
++      </Modal>
++    </PageContainer>
++  );
++};
++
++export default CredentialHosting;
 diff --git a/frontend/src/pages/admin-ext/vendors/index.tsx b/frontend/src/pages/admin-ext/vendors/index.tsx
 new file mode 100644
 index 0000000..9e8601a
@@ -737,3 +1105,81 @@ index 0000000..8fb1116
 +};
 +
 +export default SecurityCenter;
+diff --git a/frontend/src/services/admin-ext-broker.ts b/frontend/src/services/admin-ext-broker.ts
+new file mode 100644
+index 0000000..7298b88
+--- /dev/null
++++ b/frontend/src/services/admin-ext-broker.ts
+@@ -0,0 +1,72 @@
++import request from './request';
++
++/**
++ * ADMIN-EXT（自研扩展）：broker 凭据托管 API 客户端。
++ *
++ * 设计（docs/管理门户-apiTokens-Secret化-M2细化方案.md §2.1.3/§2.1.5）：
++ * 管理员在此写入/轮换厂商 API Key → 经 admin-ext 链路落 broker 凭据目录
++ * → CR 中 provider 恒为「无 token + customUrl 指向 broker」形态。
++ *
++ * 后端：gateway-admin-service /v1/adminext/broker-providers（Go），
++ * 经控制台 Java AdminExtProxyController 通用转发（会话校验 + 内部 JWT）。
++ * 安全：读写响应**均不回显 Key**（仅 8 位不可逆指纹）；写操作仅 admin 角色可用，
++ * auditor 调用将收到 403（后端以用户名白名单派生角色，不采信 JWT 声明）。
++ */
++
++/** 托管凭据视图（**不含 Key**）。 */
++export interface BrokerProviderView {
++  name: string;
++  upstream: string;
++  pathCount: number;
++  /** SHA-256 前 8 位十六进制，用于确认轮换是否生效（不可逆推） */
++  keyFingerprint: string;
++  updatedAt?: string;
++}
++
++/** 列表响应（含 CR 漂移告警）。 */
++export interface BrokerProviderList {
++  providers: BrokerProviderView[];
++  /** CR 中仍指向 broker 但 broker 侧已无凭据的 provider */
++  orphanDetected?: string[];
++}
++
++/** 写入/轮换请求体。 */
++export interface BrokerProviderUpsert {
++  upstream: string;
++  key: string;
++  allowPathPrefixes?: string[];
++}
++
++/** 写入响应（返回 customUrl 供粘贴到 Provider 页；**不回显 Key**）。 */
++export interface BrokerProviderUpsertResult {
++  name: string;
++  customUrl: string;
++}
++
++/** 删除响应（含 CR 联动告警）。 */
++export interface BrokerProviderDeleteResult {
++  name: string;
++  affectedProviders: string[];
++  warning: string;
++}
++
++const BASE = '/v1/adminext/broker-providers';
++
++export const listBrokerProviders = (): Promise<BrokerProviderList> => {
++  return request.get<any, BrokerProviderList>(BASE);
++};
++
++export const getBrokerProvider = (name: string): Promise<BrokerProviderView> => {
++  return request.get<any, BrokerProviderView>(`${BASE}/${name}`);
++};
++
++export const upsertBrokerProvider = (
++  name: string,
++  payload: BrokerProviderUpsert,
++): Promise<BrokerProviderUpsertResult> => {
++  return request.post<any, BrokerProviderUpsertResult>(`${BASE}/${name}`, payload);
++};
++
++export const deleteBrokerProvider = (name: string): Promise<BrokerProviderDeleteResult> => {
++  return request.delete<any, BrokerProviderDeleteResult>(`${BASE}/${name}`);
++};
