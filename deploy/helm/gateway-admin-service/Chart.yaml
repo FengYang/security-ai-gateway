@@ -1,0 +1,6 @@
+apiVersion: v2
+name: gateway-admin-service
+description: 管理门户业务服务 + 内部凭据 broker（apiTokens Secret 化 M2 A-2：双 listener + NetworkPolicy）
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

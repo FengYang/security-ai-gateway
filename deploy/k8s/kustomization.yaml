@@ -6,6 +6,7 @@ resources:
 - secret.yaml
 - embedding-service.yaml
 - tee-infer-service.yaml
+- gateway-admin-service.yaml
 - envoy-gateway.yaml
 - hpa.yaml
 - pdb.yaml

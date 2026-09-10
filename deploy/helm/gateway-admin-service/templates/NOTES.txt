@@ -1,0 +1,26 @@
+gateway-admin-service 已部署（M2 A-2：双 listener + NetworkPolicy）。
+
+管理面（仅供控制台/监控）：
+  {{ include "gateway-admin-service.fullname" . }}:{{ .Values.admin.port }}
+  - /healthz  /readyz  /metrics  /v1/adminext/**（含凭据托管端点）
+
+{{- if .Values.broker.enabled }}
+broker 中转（仅供 Higress 数据面）：
+  {{ include "gateway-admin-service.fullname" . }}-broker:{{ .Values.broker.port }}
+  - /llm-broker/{provider}/**   兼容期 legacyPortEnabled={{ .Values.broker.legacyPortEnabled }}
+    （true 时管理面端口亦暴露 broker，收口期置 false）
+
+provider customUrl 基址：{{ include "gateway-admin-service.publicBase" . }}
+{{- end }}
+
+凭据写权限白名单（ADMIN_SVC_ROLE_ADMINS）：
+{{- if .Values.auth.adminUsers }}
+  {{ join ", " .Values.auth.adminUsers }}
+{{- else }}
+  （空 —— 无人可写，凭据端点写操作一律 403；fail-closed 预期行为）
+{{- end }}
+
+备注：
+  - 凭据目录由 brokerSecrets.existingSecret 提供（每 provider 一个 key）；
+    未配置则回落 ADMIN_BROKER_PROVIDERS_JSON 环境变量路径。
+  - 存量明文 provider 迁移见 docs/管理门户-升级操作手册.md（B-1）。

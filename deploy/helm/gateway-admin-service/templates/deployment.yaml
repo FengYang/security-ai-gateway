@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gateway-admin-service.fullname" . }}
+  labels:
+    {{- include "gateway-admin-service.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "gateway-admin-service.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "gateway-admin-service.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        {{- toYaml .Values.podAnnotations | nindent 8 }}
+        prometheus.io/port: {{ .Values.admin.port | quote }}
+    spec:
+      serviceAccountName: {{ include "gateway-admin-service.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+      - name: gateway-admin-service
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env:
+        # ---- 管理面 ----
+        - name: ADMIN_SVC_LISTEN
+          value: ":{{ .Values.admin.port }}"
+        - name: ADMIN_SVC_JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "gateway-admin-service.jwtSecretName" . }}
+              key: {{ .Values.jwt.existingSecretKey }}
+        # 最小角色控制（M2 §2.4）：写权限用户名白名单；空 = 无人可写（fail-closed）
+        - name: ADMIN_SVC_ROLE_ADMINS
+          value: {{ join "," .Values.auth.adminUsers | quote }}
+        # ---- broker listener（A-2）----
+        {{- if .Values.broker.enabled }}
+        - name: ADMIN_SVC_BROKER_LISTEN
+          value: ":{{ .Values.broker.port }}"
+        # 兼容期开关：true = 管理面端口同时暴露 broker；收口期置 "false"
+        - name: ADMIN_SVC_BROKER_LEGACY_PORT
+          value: {{ .Values.broker.legacyPortEnabled | quote }}
+        - name: ADMIN_BROKER_SECRETS_DIR
+          value: {{ .Values.broker.secretsDir | quote }}
+        - name: ADMIN_BROKER_PUBLIC_BASE
+          value: {{ include "gateway-admin-service.publicBase" . | quote }}
+        {{- if .Values.broker.crFile }}
+        - name: ADMIN_BROKER_CR_FILE
+          value: {{ .Values.broker.crFile | quote }}
+        {{- end }}
+        {{- end }}
+        {{- range .Values.broker.extraEnv }}
+        - name: {{ .name }}
+          value: {{ .value | quote }}
+        {{- end }}
+        ports:
+        - name: http-admin
+          containerPort: {{ .Values.admin.port }}
+          protocol: TCP
+        {{- if .Values.broker.enabled }}
+        - name: http-broker
+          containerPort: {{ .Values.broker.port }}
+          protocol: TCP
+        {{- end }}
+        {{- if and .Values.broker.enabled .Values.brokerSecrets.existingSecret }}
+        volumeMounts:
+        - name: broker-secrets
+          mountPath: {{ .Values.broker.secretsDir }}
+          readOnly: true
+        {{- end }}
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        # /readyz 三态：broker 未启用 → 200；正常 → 200；连续重载失败 ≥3 → 503
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http-admin
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http-admin
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+      {{- if and .Values.broker.enabled .Values.brokerSecrets.existingSecret }}
+      volumes:
+      # 凭据目录（每 provider 一个 key，值 = 凭据文件内容）；目录缺失即回落环境变量路径
+      - name: broker-secrets
+        secret:
+          secretName: {{ .Values.brokerSecrets.existingSecret }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

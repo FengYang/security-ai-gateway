@@ -1,0 +1,205 @@
+# gateway-admin-service：管理门户业务服务 + 内部凭据 broker（M2 A-2）
+#
+# 双 listener 网络隔离（docs/管理门户-apiTokens-Secret化-M2细化方案.md §2.2）：
+#   管理面 :19095  /healthz /readyz /metrics /v1/adminext/*（含凭据托管端点）
+#   broker :19096  /llm-broker/{provider}/**（仅数据面可达）
+#
+# 兼容期（三步收口第 1 步）：ADMIN_SVC_BROKER_LEGACY_PORT 缺省 true，
+# 管理面端口同时暴露 broker，保持既有链路可用；收口期置 "false" 后仅 :19096 提供服务。
+#
+# 密钥来源：otpmask-keys Secret（jwt-secret / broker-key-*）；凭据目录经
+# readonly 卷挂载（deploy/secrets/broker-providers → /var/run/broker-secrets）。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway-admin-service
+  namespace: otpmask
+  labels:
+    app: gateway-admin-service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-admin-service
+  namespace: otpmask
+  labels:
+    app: gateway-admin-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gateway-admin-service
+  template:
+    metadata:
+      labels:
+        app: gateway-admin-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "19095"
+    spec:
+      serviceAccountName: gateway-admin-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+      - name: gateway-admin-service
+        image: security-ai-gateway/gateway-admin-service:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        # ---- 管理面 ----
+        - name: ADMIN_SVC_LISTEN
+          value: ":19095"
+        - name: ADMIN_SVC_JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-keys
+              key: jwt-secret
+        # 最小角色控制（M2 §2.4）：写权限用户名白名单；未配置 = 无人可写（fail-closed）
+        - name: ADMIN_SVC_ROLE_ADMINS
+          value: "adminExtSmoke"
+        # ---- broker 监听（A-2）----
+        - name: ADMIN_SVC_BROKER_LISTEN
+          value: ":19096"
+        # 兼容期开关：true = 管理面端口同时暴露 broker；收口期改 "false"
+        - name: ADMIN_SVC_BROKER_LEGACY_PORT
+          value: "true"
+        - name: ADMIN_BROKER_SECRETS_DIR
+          value: "/var/run/broker-secrets"
+        - name: ADMIN_BROKER_PUBLIC_BASE
+          value: "http://gateway-admin-service.otpmask.svc.cluster.local:19096"
+        ports:
+        - name: http-admin
+          containerPort: 19095
+          protocol: TCP
+        - name: http-broker
+          containerPort: 19096
+          protocol: TCP
+        volumeMounts:
+        - name: broker-secrets
+          mountPath: /var/run/broker-secrets
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        # /readyz 三态：broker 未启用 → 200；正常 → 200；连续重载失败 ≥3 → 503
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http-admin
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http-admin
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+      volumes:
+      # 凭据目录（文件 Secret 源）。生产以 Secret 卷或宿主受控目录挂载；目录缺失即回落
+      # ADMIN_BROKER_PROVIDERS_JSON 环境变量路径（M1 兼容）。
+      - name: broker-secrets
+        secret:
+          secretName: broker-providers
+          optional: true
+---
+# 管理面 Service：仅控制台与监控可达（见 NetworkPolicy）
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-admin-service
+  namespace: otpmask
+  labels:
+    app: gateway-admin-service
+spec:
+  type: ClusterIP
+  selector:
+    app: gateway-admin-service
+  ports:
+  - name: http-admin
+    port: 19095
+    targetPort: http-admin
+---
+# broker Service：仅数据面（higress）可达
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-admin-broker
+  namespace: otpmask
+  labels:
+    app: gateway-admin-service
+    role: broker
+spec:
+  type: ClusterIP
+  selector:
+    app: gateway-admin-service
+  ports:
+  - name: http-broker
+    port: 19096
+    targetPort: http-broker
+---
+# NetworkPolicy（评审 O-2：四向规则明确化）
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-admin-service
+  namespace: otpmask
+spec:
+  podSelector:
+    matchLabels:
+      app: gateway-admin-service
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # 管理面：仅控制台命名空间（admin-ext 转发）与监控命名空间（指标抓取）
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: higress-system
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    ports:
+    - port: 19095
+      protocol: TCP
+  # broker：仅 Higress 数据面（ai-proxy 中转）
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: higress-system
+    ports:
+    - port: 19096
+      protocol: TCP
+  egress:
+  # DNS（管理面与 broker 均需要）
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  # broker 出公网访问厂商端点：仅 https，且排除集群内网段（收紧至具体 CIDR 由灰度网络策略承担）
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+    ports:
+    - port: 443
+      protocol: TCP

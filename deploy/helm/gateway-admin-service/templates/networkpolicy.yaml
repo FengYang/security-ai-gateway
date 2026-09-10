@@ -1,0 +1,60 @@
+{{- if .Values.broker.networkPolicy.enabled }}
+# NetworkPolicy（评审 O-2：四向规则明确化）
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gateway-admin-service.fullname" . }}
+  labels:
+    {{- include "gateway-admin-service.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "gateway-admin-service.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # 管理面：控制台命名空间（admin-ext 转发）+ 监控命名空间（指标抓取）
+  - from:
+    {{- range .Values.broker.networkPolicy.adminIngressNamespaces }}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ . }}
+    {{- end }}
+    ports:
+    - port: {{ .Values.admin.port }}
+      protocol: TCP
+  {{- if .Values.broker.enabled }}
+  # broker：仅 Higress 数据面（ai-proxy 中转）
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .Values.broker.networkPolicy.ingressFromNamespace }}
+    ports:
+    - port: {{ .Values.broker.port }}
+      protocol: TCP
+  {{- end }}
+  egress:
+  # DNS（管理面与 broker 均需要）
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  {{- if and .Values.broker.enabled .Values.broker.networkPolicy.egressAllowCIDRs }}
+  # broker 出公网访问厂商端点（仅 https；生产请收紧至厂商具体地址段）
+  - to:
+    {{- range .Values.broker.networkPolicy.egressAllowCIDRs }}
+    - ipBlock:
+        cidr: {{ . }}
+    {{- end }}
+    ports:
+    - port: 443
+      protocol: TCP
+  {{- end }}
+{{- end }}

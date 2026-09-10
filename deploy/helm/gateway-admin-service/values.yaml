@@ -1,0 +1,78 @@
+# gateway-admin-service Helm values（M2 A-2）
+# 参数化对齐 docs/管理门户-apiTokens-Secret化-M2细化方案.md §2.2.5。
+
+replicaCount: 2
+
+image:
+  repository: security-ai-gateway/gateway-admin-service
+  tag: latest
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+# 管理面 listener（凭据端点 / 指标 / 探针）
+admin:
+  port: 19095
+
+# broker listener（中转端点；与管理面网络隔离）
+broker:
+  enabled: true
+  port: 19096
+  # 兼容期（三步收口第 1 步）：管理面端口同时暴露 broker，保持既有链路可用。
+  # 收口期置 false（仅 :19096 提供服务）。
+  legacyPortEnabled: true
+  # 凭据目录（文件 Secret 源）。为空则回落 ADMIN_BROKER_PROVIDERS_JSON 环境变量路径。
+  secretsDir: /var/run/broker-secrets
+  # 生成 provider customUrl 的对外基址（broker 启用时必填）
+  publicBase: ""
+  # ai-proxy CR 文件路径（可选；设置后启用 CR 漂移检测 orphanDetected）
+  crFile: ""
+  # 透传的额外环境变量（如 ADMIN_BROKER_ALLOW_HTTP=true 仅限本地联调）
+  extraEnv: []
+  networkPolicy:
+    enabled: true
+    # 允许访问 broker 端口的来源命名空间（Higress 数据面）
+    ingressFromNamespace: higress-system
+    # 允许访问管理面的来源命名空间（控制台 + 监控）
+    adminIngressNamespaces:
+      - higress-system
+      - monitoring
+    # broker 出公网允许的 CIDR（缺省空 = 仅 DNS）；生产请收紧至厂商具体地址段
+    egressAllowCIDRs: []
+
+# 最小角色控制（M2 §2.4）：写权限用户名白名单；空 = 无人可写（fail-closed）
+auth:
+  adminUsers: []
+
+# 内部令牌共享密钥（与 Java 控制台 admin-ext 一致）
+jwt:
+  # 直接给定明文（仅本地联调）；生产建议 existingSecret
+  secret: ""
+  existingSecret: ""
+  existingSecretKey: jwt-secret
+
+# 凭据目录的 Secret 卷（每 provider 一个 key，值 = 凭据文件内容）。
+# 留空则不挂载（此时须以 extraEnv 提供 ADMIN_BROKER_PROVIDERS_JSON 路径）。
+brokerSecrets:
+  existingSecret: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/path: "/metrics"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

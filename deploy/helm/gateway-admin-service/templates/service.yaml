@@ -1,0 +1,36 @@
+# 管理面 Service：仅控制台与监控可达（见 NetworkPolicy）
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gateway-admin-service.fullname" . }}
+  labels:
+    {{- include "gateway-admin-service.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "gateway-admin-service.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+  - name: http-admin
+    port: {{ .Values.admin.port }}
+    targetPort: http-admin
+{{- if .Values.broker.enabled }}
+---
+# broker Service：仅数据面可达
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gateway-admin-service.fullname" . }}-broker
+  labels:
+    {{- include "gateway-admin-service.labels" . | nindent 4 }}
+    role: broker
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "gateway-admin-service.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+  - name: http-broker
+    port: {{ .Values.broker.port }}
+    targetPort: http-broker
+{{- end }}
