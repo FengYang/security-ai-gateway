@@ -10,10 +10,10 @@ metadata:
         f:registries: {}
     manager: Kubernetes Java Client
     operation: Update
-    time: "2026-09-10T02:58:49Z"
+    time: "2026-09-10T10:57:05Z"
   name: default
   namespace: higress-system
-  resourceVersion: "4"
+  resourceVersion: "11"
 spec:
   registries:
   - domain: 127.0.0.1:8001
@@ -29,5 +29,10 @@ spec:
     name: llm-phala.internal
     port: 443
     protocol: https
+    type: dns
+  - domain: host.docker.internal
+    name: llm-phala-broker.internal
+    port: 19095
+    protocol: http
     type: dns
 status: {}

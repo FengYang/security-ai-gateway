@@ -42,14 +42,18 @@ metadata:
         f:url: {}
     manager: Kubernetes Java Client
     operation: Update
-    time: "2026-09-10T03:14:26Z"
+    time: "2026-09-10T10:57:06Z"
   name: key-auth.internal
   namespace: higress-system
-  resourceVersion: "8"
+  resourceVersion: "27"
 spec:
   defaultConfigDisable: true
   failStrategy: FAIL_OPEN
   matchRules:
+  - config: {}
+    configDisable: true
+    ingress:
+    - ai-route-phala-broker-demo.internal
   - config: {}
     configDisable: true
     ingress:
