@@ -69,6 +69,7 @@ type adminAuditEvent struct {
 	KeyFingerprint string `json:"key_fingerprint,omitempty"` // SHA-256 前 8 位（不可逆推）
 	Tenant         string `json:"tenant,omitempty"`          // quota_set 用
 	MaxTokens      int64  `json:"max_tokens,omitempty"`      // quota_set 用
+	Target         string `json:"target,omitempty"`          // 目标资源名（M3-A 账号管理：目标账号；其余动作为空）
 	RequestID      string `json:"request_id"`
 	Result         string `json:"result"` // 恒 "ok"（失败路径不落链）
 	PrevHash       string `json:"prev_hash"`
@@ -93,6 +94,11 @@ func (e *adminAuditEvent) hash() string {
 	writeLP(e.KeyFingerprint)
 	writeLP(e.Tenant)
 	writeLP(fmt.Sprint(e.MaxTokens))
+	// Target 条件编码（M3-A）：空时不进哈希——既有事件（无此字段）哈希不变，
+	// 重启恢复时旧链校验不受影响；新事件带值才写入。长度前缀已消除拼接歧义。
+	if e.Target != "" {
+		writeLP(e.Target)
+	}
 	writeLP(e.RequestID)
 	writeLP(e.Result)
 	return hex.EncodeToString(h.Sum(nil))

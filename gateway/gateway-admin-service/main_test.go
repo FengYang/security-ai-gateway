@@ -15,7 +15,7 @@ import (
 
 // newTestServer 组装管理面测试路由（与 main 同构；broker 未启用、无兼容期中转）。
 func newTestServer(cfg *config) *http.ServeMux {
-	return buildAdminMux(cfg, nil, nil, nil, nil, false)
+	return buildAdminMux(cfg, nil, nil, nil, nil, nil, false)
 }
 
 // bearerToken 构造合法内部令牌（sub/role/iss/aud 齐全）。
@@ -227,7 +227,7 @@ func TestListenerRouteIsolation(t *testing.T) {
 	})
 
 	t.Run("管理面 listener（收口期 legacy=false）：不含中转端点", func(t *testing.T) {
-		adminMux := buildAdminMux(cfg, sh, bh, nil, nil, false)
+		adminMux := buildAdminMux(cfg, sh, bh, nil, nil, nil, false)
 
 		rec := httptest.NewRecorder()
 		adminMux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/llm-broker/phala/v1/__probe", nil))
@@ -252,7 +252,7 @@ func TestListenerRouteIsolation(t *testing.T) {
 	})
 
 	t.Run("管理面 listener（兼容期 legacy=true）：同时暴露中转端点", func(t *testing.T) {
-		adminMux := buildAdminMux(cfg, sh, bh, nil, nil, true)
+		adminMux := buildAdminMux(cfg, sh, bh, nil, nil, nil, true)
 
 		rec := httptest.NewRecorder()
 		adminMux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/llm-broker/phala/v1/__probe", nil))
@@ -262,7 +262,7 @@ func TestListenerRouteIsolation(t *testing.T) {
 	})
 
 	t.Run("broker 未启用：管理面无凭据端点且 readyz 正常", func(t *testing.T) {
-		adminMux := buildAdminMux(cfg, nil, nil, nil, nil, true)
+		adminMux := buildAdminMux(cfg, nil, nil, nil, nil, nil, true)
 
 		rec := httptest.NewRecorder()
 		adminMux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, brokerAPIBase, nil))

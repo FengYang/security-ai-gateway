@@ -2,8 +2,8 @@
 //
 // 本服务只校验不签发（签发方 = Java 控制台），测试内联 testSignToken 构造令牌。
 //
-// M2 §2.4 起：授权角色由本服务白名单（ADMIN_SVC_ROLE_ADMINS）派生，
-// **不采信令牌内 role 声明**，故用例断言"派生角色"而非"令牌角色"。
+// M3-A 起：授权角色 = 令牌内 role 声明（Java 控制台账号表派生）；
+// ADMIN_SVC_ROLE_ADMINS 仅作运维层强制加成（白名单内恒 admin，覆盖令牌声明）。
 package main
 
 import (
@@ -63,8 +63,9 @@ func TestVerifyInternalToken(t *testing.T) {
 		wantRole string // 期望**派生**角色（wantErr=false 时校验）
 	}{
 		{"合法令牌（白名单内 → admin）", nil, nil, false, roleAdmin},
-		{"白名单外用户 → auditor", func(c *claims) { c.Sub = "bob" }, nil, false, roleAuditor},
-		{"令牌自称 auditor 但白名单内 → 仍派生 admin（不采信 JWT role）", func(c *claims) { c.Role = roleAuditor }, nil, false, roleAdmin},
+		{"白名单外 + 令牌 admin → 采信 admin（M3-A）", func(c *claims) { c.Sub = "bob" }, nil, false, roleAdmin},
+		{"白名单外 + 令牌 auditor → auditor", func(c *claims) { c.Sub = "bob"; c.Role = roleAuditor }, nil, false, roleAuditor},
+		{"令牌自称 auditor 但白名单内 → 加成 admin（白名单优先）", func(c *claims) { c.Role = roleAuditor }, nil, false, roleAdmin},
 		{"未声明 iss/aud 兼容", func(c *claims) { c.Iss, c.Aud = "", "" }, nil, false, roleAdmin},
 		{"过期令牌", func(c *claims) { c.EXP = time.Now().Unix() - 60 }, nil, true, ""},
 		{"未知角色（格式校验）", func(c *claims) { c.Role = "superuser" }, nil, true, ""},
@@ -103,7 +104,7 @@ func TestVerifyInternalToken(t *testing.T) {
 				t.Fatalf("sub 回读不一致：got %q want %q", got.Sub, c.Sub)
 			}
 			if got.Role != tc.wantRole {
-				t.Fatalf("派生角色不符：got %q want %q（授权依据 = 本服务白名单）", got.Role, tc.wantRole)
+				t.Fatalf("派生角色不符：got %q want %q（M3-A：采信令牌 role + 白名单加成）", got.Role, tc.wantRole)
 			}
 		})
 	}
@@ -122,23 +123,24 @@ func TestVerifyInternalTokenSignatureTamper(t *testing.T) {
 	}
 }
 
-// TestResolveRoleEmptyAllowlistFailClosed 白名单未配置 → 全员 auditor（无人可写）。
-func TestResolveRoleEmptyAllowlistFailClosed(t *testing.T) {
+// TestResolveRoleOverride 运维白名单强制加成语义（M3-A）：
+// 白名单内恒 admin（覆盖令牌声明）；白名单外采信令牌角色；解析保留空白项忽略行为。
+func TestResolveRoleOverride(t *testing.T) {
 	cfg := &config{roleAdmins: parseRoleAdmins("")}
-	if got := cfg.resolveRole("anyone"); got != roleAuditor {
-		t.Fatalf("未配置白名单时角色应为 auditor，实际 %q", got)
+	if got := cfg.resolveRole("anyone", roleAuditor); got != roleAuditor {
+		t.Fatalf("未配置白名单时应采信令牌角色，实际 %q", got)
 	}
 	cfg2 := &config{roleAdmins: parseRoleAdmins(" alice , bob ,, ")}
-	if got := cfg2.resolveRole("bob"); got != roleAdmin {
-		t.Fatalf("白名单解析（空白项忽略）后 bob 应为 admin，实际 %q", got)
+	if got := cfg2.resolveRole("bob", roleAuditor); got != roleAdmin {
+		t.Fatalf("白名单内 auditor 声明应被加成为 admin，实际 %q", got)
 	}
-	if got := cfg2.resolveRole("carol"); got != roleAuditor {
-		t.Fatalf("白名单外 carol 应为 auditor，实际 %q", got)
+	if got := cfg2.resolveRole("carol", roleAuditor); got != roleAuditor {
+		t.Fatalf("白名单外应采信令牌角色，实际 %q", got)
 	}
 }
 
-// TestRequireRoleRejectsAuditor 写操作授权：auditor → 403；admin → 放行。
-// 关键断言：令牌自称 role=admin 但 sub 不在白名单，仍须 403（不采信 JWT role）。
+// TestRequireRoleRejectsAuditor 写操作授权：auditor → 403；admin → 放行（M3-A：采信令牌角色）。
+// 第三断言验证白名单加成：alice 在白名单内，即使令牌声明 auditor 也放行。
 func TestRequireRoleRejectsAuditor(t *testing.T) {
 	cfg := testCfg()
 	protected := authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
@@ -148,10 +150,10 @@ func TestRequireRoleRejectsAuditor(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	call := func(t *testing.T, sub string) int {
+	call := func(t *testing.T, sub, role string) int {
 		t.Helper()
 		token := testSignToken(t, testSecret, claims{
-			Sub: sub, Role: roleAdmin, Iss: defaultIssuer, Aud: defaultAudience,
+			Sub: sub, Role: role, Iss: defaultIssuer, Aud: defaultAudience,
 		})
 		req := httptest.NewRequest(http.MethodPost, "/v1/adminext/broker-providers/x", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -160,11 +162,14 @@ func TestRequireRoleRejectsAuditor(t *testing.T) {
 		return rec.Code
 	}
 
-	if got := call(t, "bob"); got != http.StatusForbidden {
-		t.Fatalf("白名单外用户写操作应 403（令牌自称 admin 亦不可信），实际 %d", got)
+	if got := call(t, "bob", roleAuditor); got != http.StatusForbidden {
+		t.Fatalf("auditor 写操作应 403，实际 %d", got)
 	}
-	if got := call(t, testAdminUser); got != http.StatusOK {
-		t.Fatalf("管理员写操作应放行，实际 %d", got)
+	if got := call(t, "bob", roleAdmin); got != http.StatusOK {
+		t.Fatalf("令牌 role=admin（账号表派生）应放行，实际 %d", got)
+	}
+	if got := call(t, testAdminUser, roleAuditor); got != http.StatusOK {
+		t.Fatalf("白名单内用户应被加成为 admin 放行（令牌声明不影响），实际 %d", got)
 	}
 }
 

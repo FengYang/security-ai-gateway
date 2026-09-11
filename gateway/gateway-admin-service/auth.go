@@ -7,11 +7,14 @@
 // 复用 auth-service/jwt.go 的手写 HS256 风格（RFC 7515，base64url 无 padding，零依赖）；
 // 因各服务为独立 main 包，此处按本服务 claims 独立实现。
 //
-// 最小角色控制（M2 §2.4，S-1 定案）：
-//   - 授权依据 = 本服务配置的管理员白名单（ADMIN_SVC_ROLE_ADMINS），**不采信 JWT 内 role 声明**
-//     （Java 侧对全部会话恒签发 role=admin，作为授权依据无意义）；
-//   - 写端点（凭据下发/删除）要求 role=admin，读端点允许 role=auditor；
-//   - 白名单未配置 → 全部按 auditor（无人可写，fail-closed）。
+// 最小角色控制（M3-A 修订，取代 M2 §2.4 的 S-1 全量派生）：
+//   - 授权依据 = JWT 内 role 声明。M2 不采信的理由（Java 恒签发 admin，声明无意义）
+//     已被 M3-A 消除：Java 侧 AdminExtSessionService 按账号表派生真实角色签发；
+//   - ADMIN_SVC_ROLE_ADMINS 降级为**运维层强制加成**：白名单内 sub 恒 admin
+//     （优先于 JWT role）。定位 = K8s/账号表故障时的最后防线（集群运维通道，
+//     不依赖账号 Secret 可读），向后兼容 M2 既有部署配置；
+//   - 写端点要求 role=admin，读端点允许 role=auditor；
+//   - 白名单未配置 → 全按 JWT role（原"无人可写 fail-closed"改由 Java 会话 + 账号表承担）。
 package main
 
 import (
@@ -50,12 +53,15 @@ func validRole(role string) bool {
 	return role == roleAdmin || role == roleAuditor
 }
 
-// resolveRole 由本服务配置的管理员白名单派生角色（唯一授权依据，M2 §2.4）。
-func (cfg *config) resolveRole(sub string) string {
+// resolveRole 派生授权角色（M3-A）：JWT role 为授权依据，运维白名单强制加成。
+//
+// 白名单命中 → 恒 admin（优先于令牌声明；定位 = 运维层最后防线，不依赖账号表）；
+// 未命中 → 采信令牌内角色（Java 侧账号表派生，签发受内部签名密钥保护）。
+func (cfg *config) resolveRole(sub, tokenRole string) string {
 	if _, ok := cfg.roleAdmins[sub]; ok {
 		return roleAdmin
 	}
-	return roleAuditor
+	return tokenRole
 }
 
 // verifyInternalToken 校验内部 JWT：签名 → 过期 → 受众/签发方（若带）→ 角色/主体非空。
@@ -105,8 +111,8 @@ func verifyInternalToken(token string, cfg *config) (*claims, error) {
 		return nil, errors.New("auth: 主体（sub）为空，无法留痕到人")
 	}
 
-	// 最小角色控制：丢弃令牌内角色，改由本服务白名单派生（M2 §2.4）。
-	c.Role = cfg.resolveRole(c.Sub)
+	// 角色派生（M3-A）：采信令牌内角色，运维白名单强制加成（覆盖令牌声明）。
+	c.Role = cfg.resolveRole(c.Sub, c.Role)
 	return &c, nil
 }
 

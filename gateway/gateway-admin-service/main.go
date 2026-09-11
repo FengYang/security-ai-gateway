@@ -19,9 +19,10 @@
 //	GET  /readyz                                 就绪探针（三态，见 handleReadyz）
 //	GET  /metrics                                Prometheus 文本指标
 //	GET  /v1/adminext/echo                       受保护示例端点（回显令牌内 sub/role）
-//	GET  /v1/adminext/models                      模型目录只读列表（M2 A-1'；已认证可读）
-//	GET  /v1/adminext/usage                       用量查询（M2 A-2'；auditor 可读；代理 tee-infer）
-//	POST /v1/adminext/usage/quota                  配额设置（M2 A-2'；**admin**；落审计链）
+//	GET  /v1/adminext/models                     模型目录只读列表（M2 A-1'；已认证可读）
+//	GET  /v1/adminext/usage                      用量查询（M2 A-2'；auditor 可读；代理 tee-infer）
+//	POST /v1/adminext/usage/quota                 配额设置（M2 A-2'；**admin**；落审计链）
+//	POST /v1/adminext/audit-events                账号管理审计投递（M3-A；**admin**；落审计链，action 白名单）
 //	GET  /v1/adminext/broker-providers           托管凭据列表（已认证可读）
 //	GET  /v1/adminext/broker-providers/{name}    托管凭据详情（已认证可读）
 //	POST /v1/adminext/broker-providers/{name}    写入/轮换凭据（**admin**；返回 customUrl）
@@ -32,7 +33,8 @@
 //
 // 运行：go run ./gateway/gateway-admin-service
 // 配置：环境变量 ADMIN_SVC_*（见 config.go），其中 ADMIN_SVC_JWT_SECRET 必填；
-// 写权限白名单 ADMIN_SVC_ROLE_ADMINS（未配置 = 无人可写，fail-closed）；
+// 角色控制（M3-A）：授权依据 = JWT role（Java 控制台账号表派生）；
+// ADMIN_SVC_ROLE_ADMINS 仅作运维层强制加成（白名单内恒 admin，未配置 = 不加成）；
 // broker：ADMIN_BROKER_SECRETS_DIR / ADMIN_BROKER_PUBLIC_BASE / ADMIN_BROKER_CR_FILE /
 // ADMIN_SVC_BROKER_LISTEN / ADMIN_SVC_BROKER_LEGACY_PORT（同文件）；
 // 模型目录：ADMIN_BROKER_CR_FILE（与漂移检测同源）/ ADMIN_SVC_AI_ROUTES_DIR（model_catalog.go）；
@@ -112,8 +114,9 @@ func handleEcho(w http.ResponseWriter, r *http.Request) {
 // sh / bh 为 nil 表示 broker 未启用（特性关闭：既不注册凭据端点，也不注册中转路径）。
 // mh 为模型目录 handler（M2 A-1'，只读特性，恒注册；数据源缺失返回空列表）。
 // uh 为用量代理 handler（M2 A-2'，恒注册；数据源未配置时端点返回 503）。
+// ah 为账号管理审计投递 handler（M3-A，恒注册；审计链未启用时端点返回 503）。
 // legacyBroker 为兼容期开关：true 时管理面端口同时暴露 broker 中转（三步收口第 1 步）。
-func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *modelCatalogHandler, uh *usageHandler, legacyBroker bool) *http.ServeMux {
+func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *modelCatalogHandler, uh *usageHandler, ah *auditEventHandler, legacyBroker bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/metrics", handleMetrics)
@@ -125,6 +128,9 @@ func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *
 	if uh != nil {
 		mux.HandleFunc(usageAPIBase, authMiddleware(cfg, uh.handleUsage))
 		mux.HandleFunc(usageQuotaPath, authMiddleware(cfg, uh.handleQuota))
+	}
+	if ah != nil {
+		mux.HandleFunc(auditEventsPath, authMiddleware(cfg, ah.handle))
 	}
 
 	var brokerHealthy func() bool
@@ -171,7 +177,7 @@ func main() {
 		log.Fatalf("配置加载失败（fail-closed）：%v", err)
 	}
 	if len(cfg.roleAdmins) == 0 {
-		log.Printf("警告：ADMIN_SVC_ROLE_ADMINS 未配置——全部会话按 auditor 处理，凭据写操作将一律 403（fail-closed）")
+		log.Printf("提示：ADMIN_SVC_ROLE_ADMINS 未配置——角色全按 JWT 声明（M3-A：Java 控制台账号表派生）；该白名单仅作运维层强制加成")
 	}
 
 	// broker 可选启用：凭据目录存在即接管（含空目录 = 0 provider），否则回落环境变量路径；
@@ -210,7 +216,9 @@ func main() {
 	mh := newModelCatalogHandler(loadModelCatalogSettings())
 	// 用量代理（M2 A-2'）：恒注册；数据源未配置时端点返回 503（不静默返回空数据）。
 	uh := newUsageHandler(loadUsageSettings(), auditChain)
-	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, bs.legacyPort)
+	// 账号管理审计投递（M3-A）：恒注册；审计链未启用时端点返回 503。
+	ah := &auditEventHandler{chain: auditChain}
+	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, ah, bs.legacyPort)
 
 	if bh != nil {
 		if bs.brokerListen == cfg.listen {

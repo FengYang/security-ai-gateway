@@ -53,6 +53,12 @@ func newTestSecretMux(cfg *config, bs *brokerSettings, bc *brokerConfig) (*http.
 // doSecret 以指定用户令牌发起请求。
 func doSecret(t *testing.T, mux *http.ServeMux, sub, method, target string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
+	return doSecretAs(t, mux, sub, roleAdmin, method, target, body)
+}
+
+// doSecretAs 以指定用户与**令牌声明角色**发起请求（M3-A：授权依据 = 令牌 role）。
+func doSecretAs(t *testing.T, mux *http.ServeMux, sub, role, method, target string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
 	var reader *strings.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -65,7 +71,7 @@ func doSecret(t *testing.T, mux *http.ServeMux, sub, method, target string, body
 	}
 	req := httptest.NewRequest(method, target, reader)
 	req.Header.Set("Authorization", "Bearer "+testSignToken(t, testSecret, claims{
-		Sub: sub, Role: roleAdmin, Iss: defaultIssuer, Aud: defaultAudience,
+		Sub: sub, Role: role, Iss: defaultIssuer, Aud: defaultAudience,
 	}))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -326,8 +332,8 @@ func TestSecretEndpointsRoleAuthorization(t *testing.T) {
 	bs := testSettings(t)
 	mux, _ := newTestSecretMux(testCfg(), bs, &brokerConfig{providers: map[string]*brokerProvider{}})
 
-	// auditor（白名单外）写 → 403，且不得落盘
-	rec := doSecret(t, mux, "bob", http.MethodPost, brokerAPIBase+"/phala", map[string]interface{}{
+	// auditor（令牌声明 role=auditor）写 → 403，且不得落盘（M3-A：授权依据 = 令牌角色）
+	rec := doSecretAs(t, mux, "bob", roleAuditor, http.MethodPost, brokerAPIBase+"/phala", map[string]interface{}{
 		"upstream": "https://inference.phala.com",
 		"key":      testKey,
 	})
@@ -339,15 +345,24 @@ func TestSecretEndpointsRoleAuthorization(t *testing.T) {
 	}
 
 	// auditor 读 → 放行
-	rec = doSecret(t, mux, "bob", http.MethodGet, brokerAPIBase, nil)
+	rec = doSecretAs(t, mux, "bob", roleAuditor, http.MethodGet, brokerAPIBase, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("auditor 读取应放行，实际 %d", rec.Code)
 	}
 
 	// auditor 删除 → 403
-	rec = doSecret(t, mux, "bob", http.MethodDelete, brokerAPIBase+"/phala", nil)
+	rec = doSecretAs(t, mux, "bob", roleAuditor, http.MethodDelete, brokerAPIBase+"/phala", nil)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("auditor 删除应 403，实际 %d", rec.Code)
+	}
+
+	// 令牌 role=admin（白名单外 bob）写 → 200（M3-A：采信令牌角色，白名单仅加成不限制）
+	rec = doSecretAs(t, mux, "bob", roleAdmin, http.MethodPost, brokerAPIBase+"/phala", map[string]interface{}{
+		"upstream": "https://inference.phala.com",
+		"key":      testKey,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("令牌 role=admin（账号表派生）写入应放行，实际 %d", rec.Code)
 	}
 }
 
