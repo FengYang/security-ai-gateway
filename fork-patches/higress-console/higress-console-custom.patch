@@ -2122,11 +2122,42 @@ index af8233c..2b460af 100644
      }
    }
  }
+diff --git a/frontend/src/components/AdminExtBadge/index.tsx b/frontend/src/components/AdminExtBadge/index.tsx
+new file mode 100644
+index 0000000..9c5f80a
+--- /dev/null
++++ b/frontend/src/components/AdminExtBadge/index.tsx
+@@ -0,0 +1,25 @@
++import { ExperimentOutlined } from '@ant-design/icons';
++import { Tag, Tooltip } from 'antd';
++import { useTranslation } from 'react-i18next';
++
++/**
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：自研页统一角标（常显）。
++ *
++ * 用途：让「自研扩展页」与 Higress 上游页面在 UI 上可一眼区分（配置见 docs/管理门户-细化方案.md）。
++ * 适用范围：仅 pages/admin-ext/** 与 pages/security-center/** 这 7 个自研页；
++ * 上游业务页面一律不引用本组件，避免污染 fork 白名单。
++ */
++const AdminExtBadge = () => {
++  const { t } = useTranslation();
++  return (
++    <div style={{ marginBottom: 12 }}>
++      <Tooltip title={t('adminExt.badgeTip')}>
++        <Tag icon={<ExperimentOutlined />} color="geekblue">
++          {t('adminExt.badge')}
++        </Tag>
++      </Tooltip>
++    </div>
++  );
++};
++
++export default AdminExtBadge;
 diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
-index 1a41985..fedc6bf 100644
+index 1a41985..b247585 100644
 --- a/frontend/src/locales/en-US/translation.json
 +++ b/frontend/src/locales/en-US/translation.json
-@@ -22,7 +22,221 @@
+@@ -22,7 +22,224 @@
      "pluginManagement": "Plugin Management",
      "systemSettings": "System Settings",
      "mcpManagement": "MCP Management",
@@ -2137,9 +2168,12 @@ index 1a41985..fedc6bf 100644
 +    "adminExtModels": "Model Catalog",
 +    "adminExtUsage": "Usage Dashboard",
 +    "adminExtAccounts": "Accounts & Roles",
-+    "adminExtChanges": "High-risk Change Review"
++    "adminExtChanges": "High-risk Change Review",
++    "adminExtVendors": "Vendor Activation & Status"
 +  },
 +  "adminExt": {
++    "badge": "Self-developed",
++    "badgeTip": "This page is an OTP-Mask ADMIN-EXT addition, not an upstream Higress feature.",
 +    "security": {
 +      "teeStatus": "Confidential Link Status",
 +      "refresh": "Refresh",
@@ -2350,10 +2384,10 @@ index 1a41985..fedc6bf 100644
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
-index c148f42..2c83b20 100644
+index c148f42..42f7286 100644
 --- a/frontend/src/locales/zh-CN/translation.json
 +++ b/frontend/src/locales/zh-CN/translation.json
-@@ -22,7 +22,221 @@
+@@ -22,7 +22,224 @@
      "pluginManagement": "插件配置",
      "systemSettings": "系统设置",
      "mcpManagement": "MCP管理",
@@ -2364,9 +2398,12 @@ index c148f42..2c83b20 100644
 +    "adminExtModels": "模型目录",
 +    "adminExtUsage": "用量看板",
 +    "adminExtAccounts": "账号与角色",
-+    "adminExtChanges": "高敏变更复核"
++    "adminExtChanges": "高敏变更复核",
++    "adminExtVendors": "厂商激活与状态"
 +  },
 +  "adminExt": {
++    "badge": "自研扩展",
++    "badgeTip": "本页由 OTP-Mask 自研扩展提供（ADMIN-EXT），非 Higress 上游功能。",
 +    "security": {
 +      "teeStatus": "密态链路状态",
 +      "refresh": "刷新",
@@ -2577,7 +2614,7 @@ index c148f42..2c83b20 100644
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/pages/_defaultProps.tsx b/frontend/src/pages/_defaultProps.tsx
-index f4c0ecb..2df46aa 100644
+index f4c0ecb..111d28a 100644
 --- a/frontend/src/pages/_defaultProps.tsx
 +++ b/frontend/src/pages/_defaultProps.tsx
 @@ -1,11 +1,17 @@
@@ -2598,7 +2635,7 @@ index f4c0ecb..2df46aa 100644
    UnorderedListOutlined,
    UserOutlined,
    WindowsOutlined,
-@@ -43,6 +49,48 @@ export default {
+@@ -43,6 +49,57 @@ export default {
          path: '/dashboard',
          icon: <DashboardOutlined />,
        },
@@ -2629,6 +2666,15 @@ index f4c0ecb..2df46aa 100644
 +        icon: <AppstoreOutlined />,
 +      },
 +      {
++        // ADMIN-EXT（自研扩展，vendor-fork 只增不减）：用量看板（M2 A-2）
++        // 2026-09-11 补注册：此前该页未挂菜单（locales 已有 menu.adminExtUsage 键
++        // 但无引用），属孤儿页只能直链访问。与厂商状态页内联的"运行态累计计量"
++        // 互补——本页提供用量/配额明细视图。
++        name: 'menu.adminExtUsage',
++        path: '/admin-ext/usage',
++        icon: <BarChartOutlined />,
++      },
++      {
 +        // ADMIN-EXT（自研扩展，vendor-fork 只增不减）：账号与角色管理（M3-A-2）
 +        // D10：服务端强制 admin 角色；auditor 访问被后端拒绝（菜单不按角色隐藏——
 +        // 当前会话 API 无角色声明，前端隐藏仅体验层且无角色依据，如实保留入口）。
@@ -2649,10 +2695,10 @@ index f4c0ecb..2df46aa 100644
          path: '/service-source',
 diff --git a/frontend/src/pages/admin-ext/accounts/index.tsx b/frontend/src/pages/admin-ext/accounts/index.tsx
 new file mode 100644
-index 0000000..5e12517
+index 0000000..fde0707
 --- /dev/null
 +++ b/frontend/src/pages/admin-ext/accounts/index.tsx
-@@ -0,0 +1,337 @@
+@@ -0,0 +1,339 @@
 +import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 +import { PageContainer } from '@ant-design/pro-layout';
 +import {
@@ -2672,6 +2718,7 @@ index 0000000..5e12517
 +} from 'antd';
 +import { useCallback, useEffect, useState } from 'react';
 +import { useTranslation } from 'react-i18next';
++import AdminExtBadge from '@/components/AdminExtBadge';
 +import {
 +  AdminExtAccountView,
 +  createAccount,
@@ -2835,6 +2882,7 @@ index 0000000..5e12517
 +
 +  return (
 +    <PageContainer>
++      <AdminExtBadge />
 +      <Alert
 +        type="info"
 +        showIcon
@@ -2992,10 +3040,10 @@ index 0000000..5e12517
 +export default AccountManagement;
 diff --git a/frontend/src/pages/admin-ext/changes/index.tsx b/frontend/src/pages/admin-ext/changes/index.tsx
 new file mode 100644
-index 0000000..a67059b
+index 0000000..894a4d6
 --- /dev/null
 +++ b/frontend/src/pages/admin-ext/changes/index.tsx
-@@ -0,0 +1,372 @@
+@@ -0,0 +1,374 @@
 +import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 +import { PageContainer } from '@ant-design/pro-layout';
 +import {
@@ -3013,6 +3061,7 @@ index 0000000..a67059b
 +} from 'antd';
 +import { useCallback, useEffect, useState } from 'react';
 +import { useTranslation } from 'react-i18next';
++import AdminExtBadge from '@/components/AdminExtBadge';
 +import {
 +  ChangeItem,
 +  ChangeSubmit,
@@ -3203,6 +3252,7 @@ index 0000000..a67059b
 +
 +  return (
 +    <PageContainer>
++      <AdminExtBadge />
 +      <Alert
 +        type="info"
 +        showIcon
@@ -3370,10 +3420,10 @@ index 0000000..a67059b
 +export default ChangeReview;
 diff --git a/frontend/src/pages/admin-ext/credentials/index.tsx b/frontend/src/pages/admin-ext/credentials/index.tsx
 new file mode 100644
-index 0000000..15e7adf
+index 0000000..50c08c2
 --- /dev/null
 +++ b/frontend/src/pages/admin-ext/credentials/index.tsx
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,313 @@
 +import {
 +  CopyOutlined,
 +  PlusOutlined,
@@ -3398,6 +3448,7 @@ index 0000000..15e7adf
 +} from 'antd';
 +import { useCallback, useEffect, useState } from 'react';
 +import { useTranslation } from 'react-i18next';
++import AdminExtBadge from '@/components/AdminExtBadge';
 +import {
 +  BrokerProviderView,
 +  deleteBrokerProvider,
@@ -3528,6 +3579,7 @@ index 0000000..15e7adf
 +
 +  return (
 +    <PageContainer>
++      <AdminExtBadge />
 +      <Alert
 +        type="info"
 +        showIcon
@@ -3685,17 +3737,18 @@ index 0000000..15e7adf
 +};
 +
 +export default CredentialHosting;
-diff --git a/frontend/src/pages/admin-ext/models/index.tsx b/frontend/src/pages/admin-ext/models/index.tsx
+diff --git a/frontend/src/pages/admin-ext/models.tsx b/frontend/src/pages/admin-ext/models.tsx
 new file mode 100644
-index 0000000..61e1764
+index 0000000..55f1e40
 --- /dev/null
-+++ b/frontend/src/pages/admin-ext/models/index.tsx
-@@ -0,0 +1,183 @@
++++ b/frontend/src/pages/admin-ext/models.tsx
+@@ -0,0 +1,185 @@
 +import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 +import { PageContainer } from '@ant-design/pro-layout';
 +import { Alert, Button, Input, Space, Table, Tag, Typography } from 'antd';
 +import { useCallback, useEffect, useMemo, useState } from 'react';
 +import { useTranslation } from 'react-i18next';
++import AdminExtBadge from '@/components/AdminExtBadge';
 +import { listModels, ModelRouteEntry } from '@/services/admin-ext-models';
 +
 +/**
@@ -3836,6 +3889,7 @@ index 0000000..61e1764
 +
 +  return (
 +    <PageContainer>
++      <AdminExtBadge />
 +      <Alert
 +        type="info"
 +        showIcon
@@ -3876,10 +3930,10 @@ index 0000000..61e1764
 +export default ModelCatalogPage;
 diff --git a/frontend/src/pages/admin-ext/usage/index.tsx b/frontend/src/pages/admin-ext/usage/index.tsx
 new file mode 100644
-index 0000000..d860c97
+index 0000000..89de2cb
 --- /dev/null
 +++ b/frontend/src/pages/admin-ext/usage/index.tsx
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,362 @@
 +import { ReloadOutlined } from '@ant-design/icons';
 +import { Line } from '@ant-design/charts';
 +import { PageContainer } from '@ant-design/pro-layout';
@@ -3903,6 +3957,7 @@ index 0000000..d860c97
 +} from 'antd';
 +import { useCallback, useEffect, useMemo, useState } from 'react';
 +import { useTranslation } from 'react-i18next';
++import AdminExtBadge from '@/components/AdminExtBadge';
 +import {
 +  getUsage,
 +  setQuota,
@@ -4117,6 +4172,7 @@ index 0000000..d860c97
 +
 +  return (
 +    <PageContainer>
++      <AdminExtBadge />
 +      <Alert
 +        type="info"
 +        showIcon
@@ -4242,14 +4298,15 @@ index 0000000..d860c97
 +export default UsageDashboardPage;
 diff --git a/frontend/src/pages/admin-ext/vendors/index.tsx b/frontend/src/pages/admin-ext/vendors/index.tsx
 new file mode 100644
-index 0000000..f16c07f
+index 0000000..01bde01
 --- /dev/null
 +++ b/frontend/src/pages/admin-ext/vendors/index.tsx
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,210 @@
 +import { Alert, Card, Col, Descriptions, Empty, Row, Spin, Statistic, Tag } from 'antd';
 +import { useEffect, useState } from 'react';
 +import { PageContainer } from '@ant-design/pro-layout';
 +import { useTranslation } from 'react-i18next';
++import AdminExtBadge from '@/components/AdminExtBadge';
 +import { getLlmProviders } from '@/services/llm-provider';
 +import { LlmProvider } from '@/interfaces/llm-provider';
 +import { getUsageCumulative, UsageCumulative } from '@/services/admin-ext-usage';
@@ -4353,6 +4410,7 @@ index 0000000..f16c07f
 +
 +  return (
 +    <PageContainer>
++      <AdminExtBadge />
 +      <Alert
 +        type="info"
 +        showIcon
@@ -4456,14 +4514,15 @@ index 0000000..f16c07f
 +export default ProviderStatus;
 diff --git a/frontend/src/pages/security-center/index.tsx b/frontend/src/pages/security-center/index.tsx
 new file mode 100644
-index 0000000..6ed35b0
+index 0000000..6750e75
 --- /dev/null
 +++ b/frontend/src/pages/security-center/index.tsx
-@@ -0,0 +1,305 @@
+@@ -0,0 +1,307 @@
 +import { PageContainer } from '@ant-design/pro-layout';
 +import { Alert, Button, Card, Descriptions, message, Space, Spin, Table, Tag } from 'antd';
 +import { useCallback, useEffect, useState } from 'react';
 +import { useTranslation } from 'react-i18next';
++import AdminExtBadge from '@/components/AdminExtBadge';
 +import {
 +  AuditChainEvent,
 +  AuditChainQuery,
@@ -4600,6 +4659,7 @@ index 0000000..6ed35b0
 +
 +  return (
 +    <PageContainer>
++      <AdminExtBadge />
 +      {statusErr && (
 +        <Alert type="warning" showIcon message={statusErr} style={{ marginBottom: 16 }} />
 +      )}
