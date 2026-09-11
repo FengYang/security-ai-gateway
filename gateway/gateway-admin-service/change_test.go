@@ -64,22 +64,30 @@ func changeReq(t *testing.T, mux *http.ServeMux, cfg *config, sub, method, targe
 	return rec
 }
 
-// newChangeTeeStub 假 tee-infer：记录收到的 pii_mode。
-func newChangeTeeStub(t *testing.T, got *string) *httptest.Server {
+// teeCall 记录假 tee-infer 收到的变更调用（模式 + 执行人留痕）。
+type teeCall struct {
+	mode  string
+	actor string
+}
+
+// newChangeTeeStub 假 tee-infer：记录收到的 pii_mode 与 X-Admin-Actor。
+func newChangeTeeStub(t *testing.T) (*httptest.Server, *teeCall) {
 	t.Helper()
+	call := &teeCall{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/config/guardrail", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			PIIMode string `json:"pii_mode"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		*got = body.PIIMode
+		call.mode = body.PIIMode
+		call.actor = r.Header.Get("X-Admin-Actor")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"pii_mode":"` + body.PIIMode + `","status":"applied"}`))
 	})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	return ts
+	return ts, call
 }
 
 func TestChangeSubmitValidation(t *testing.T) {
@@ -103,8 +111,7 @@ func TestChangeSubmitValidation(t *testing.T) {
 
 func TestChangeSelfReviewForbiddenAndExecute(t *testing.T) {
 	cfg := testCfg()
-	var applied string
-	ts := newChangeTeeStub(t, &applied)
+	ts, call := newChangeTeeStub(t)
 	cs, _, chain := newChangeTestStore(t, &brokerConfig{providers: map[string]*brokerProvider{}}, ts.URL, "tok")
 	mux := newChangeTestMux(cfg, cs, nil)
 
@@ -137,8 +144,12 @@ func TestChangeSelfReviewForbiddenAndExecute(t *testing.T) {
 	if done.Status != changeStatusExecuted || done.Reviewer != "bob" {
 		t.Fatalf("应为 executed/bob，实际 %s/%s", done.Status, done.Reviewer)
 	}
-	if applied != "mask" {
-		t.Fatalf("tee-infer 应收到 mask，实际 %q", applied)
+	if call.mode != "mask" {
+		t.Fatalf("tee-infer 应收到 mask，实际 %q", call.mode)
+	}
+	// 回归：执行留痕人必须是复核人（曾因赋值顺序在 execute 之后导致为空）。
+	if call.actor != "bob" {
+		t.Fatalf("执行留痕人应为复核人 bob，实际 %q", call.actor)
 	}
 
 	// 重复复核 → 409

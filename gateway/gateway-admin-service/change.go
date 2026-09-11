@@ -369,6 +369,10 @@ func (s *changeStore) approve(w http.ResponseWriter, r *http.Request, id string)
 		writeError(w, http.StatusForbidden, "发起人不得复核本人提交的变更（submitter≠reviewer）")
 		return
 	}
+	// 执行前先记录复核人：执行器以其身份对外留痕（tee-infer 侧 X-Admin-Actor）。
+	// 注意必须在 execute 之前赋值，否则执行留痕 actor 为空（曾实测踩到）。
+	c.Reviewer = reviewer
+	c.DecidedAt = time.Now().UnixNano()
 	s.mu.Unlock()
 
 	// 执行（不加锁：执行含外部 IO；状态变更再取锁）。
