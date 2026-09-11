@@ -58,7 +58,13 @@ func TestGuardrailBench(t *testing.T) {
 	path := filepath.FromSlash(benchCorpusRelPath)
 	f, err := os.Open(path)
 	if err != nil {
-		t.Skipf("基准语料未生成，先运行 scripts/build-guardrail-bench.ps1（期望文件：%s）", path)
+		// fail-closed：缺语料 = 门禁未执行，不得静默变绿。
+		// 逃生阀仅用于无网/临时环境，不得用于发布门禁。
+		if strings.EqualFold(os.Getenv("GUARDRAIL_BENCH"), "skip") {
+			t.Skipf("GUARDRAIL_BENCH=skip：显式跳过基准门禁（语料未生成，期望文件：%s）", path)
+		}
+		t.Fatalf("基准语料缺失，门禁未执行：%s\n标准做法：先运行 scripts/build-guardrail-bench.ps1 生成语料（公开集部分需联网）；"+
+			"无网/临时环境可用 GUARDRAIL_BENCH=skip 显式跳过。", path)
 	}
 	defer f.Close()
 

@@ -27,6 +27,16 @@ Guardrail 基准集（Phase 2 门禁 #1「Guardrail 检出 ≥95%」）
 公开集部分需联网（HF datasets-server，脚本内置重试）；网络不可达时公开集取不到，
 合成族（rule / benign / known_fp）仍会生成，门禁①②照常生效。
 
+门禁语义（fail-closed）
+----------------------
+语料未生成时，基准测试**默认 Fail**（缺语料 = 门禁未执行，不应静默变绿）：
+
+    go test -mod=mod ./gateway/tee-infer-service/ -run TestGuardrailBench -v
+
+标准做法：先跑生成脚本再跑测试。无网/临时环境可用逃生阀显式跳过（不得用于发布门禁）：
+
+    $env:GUARDRAIL_BENCH = 'skip'
+
 单行格式
 --------
   {"id","source","category","scope","expect","variant","text","note"[,"known_fp":true]}
