@@ -19,6 +19,9 @@
 //	GET  /readyz                                 就绪探针（三态，见 handleReadyz）
 //	GET  /metrics                                Prometheus 文本指标
 //	GET  /v1/adminext/echo                       受保护示例端点（回显令牌内 sub/role）
+//	GET  /v1/adminext/models                      模型目录只读列表（M2 A-1'；已认证可读）
+//	GET  /v1/adminext/usage                       用量查询（M2 A-2'；auditor 可读；代理 tee-infer）
+//	POST /v1/adminext/usage/quota                  配额设置（M2 A-2'；**admin**；落审计链）
 //	GET  /v1/adminext/broker-providers           托管凭据列表（已认证可读）
 //	GET  /v1/adminext/broker-providers/{name}    托管凭据详情（已认证可读）
 //	POST /v1/adminext/broker-providers/{name}    写入/轮换凭据（**admin**；返回 customUrl）
@@ -31,7 +34,10 @@
 // 配置：环境变量 ADMIN_SVC_*（见 config.go），其中 ADMIN_SVC_JWT_SECRET 必填；
 // 写权限白名单 ADMIN_SVC_ROLE_ADMINS（未配置 = 无人可写，fail-closed）；
 // broker：ADMIN_BROKER_SECRETS_DIR / ADMIN_BROKER_PUBLIC_BASE / ADMIN_BROKER_CR_FILE /
-// ADMIN_SVC_BROKER_LISTEN / ADMIN_SVC_BROKER_LEGACY_PORT（同文件）。
+// ADMIN_SVC_BROKER_LISTEN / ADMIN_SVC_BROKER_LEGACY_PORT（同文件）；
+// 模型目录：ADMIN_BROKER_CR_FILE（与漂移检测同源）/ ADMIN_SVC_AI_ROUTES_DIR（model_catalog.go）；
+// 审计链（G1）：ADMIN_AUDIT_FILE（未配置 = 关闭）/ ADMIN_AUDIT_ANCHOR_FILE（audit.go）；
+// 用量代理（A-2'）：ADMIN_TEE_INFER_URL（未配置 = 端点 503）/ ADMIN_TEE_INFER_TOKEN（usage.go）。
 package main
 
 import (
@@ -104,13 +110,22 @@ func handleEcho(w http.ResponseWriter, r *http.Request) {
 // buildAdminMux 构造管理面路由。
 //
 // sh / bh 为 nil 表示 broker 未启用（特性关闭：既不注册凭据端点，也不注册中转路径）。
+// mh 为模型目录 handler（M2 A-1'，只读特性，恒注册；数据源缺失返回空列表）。
+// uh 为用量代理 handler（M2 A-2'，恒注册；数据源未配置时端点返回 503）。
 // legacyBroker 为兼容期开关：true 时管理面端口同时暴露 broker 中转（三步收口第 1 步）。
-func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, legacyBroker bool) *http.ServeMux {
+func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *modelCatalogHandler, uh *usageHandler, legacyBroker bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/metrics", handleMetrics)
 	// 受保护端点挂鉴权中间件；角色授权在 handler 内按方法校验（auth.go requireRole）。
 	mux.HandleFunc("/v1/adminext/echo", authMiddleware(cfg, handleEcho))
+	if mh != nil {
+		mux.HandleFunc(modelsAPIBase, authMiddleware(cfg, mh.handleModels))
+	}
+	if uh != nil {
+		mux.HandleFunc(usageAPIBase, authMiddleware(cfg, uh.handleUsage))
+		mux.HandleFunc(usageQuotaPath, authMiddleware(cfg, uh.handleQuota))
+	}
 
 	var brokerHealthy func() bool
 	if sh != nil {
@@ -167,6 +182,17 @@ func main() {
 		log.Fatalf("broker 配置加载失败（fail-closed）：%v", err)
 	}
 
+	// G1 审计链（B-3 §5）：ADMIN_AUDIT_FILE 未配置 = 关闭（写操作不落链，日志明示）；
+	// 已配置但打开/恢复失败 = 拒绝启动（fail-closed：宁可不起，不起一条无审计校验的写路径）。
+	as := loadAuditSettings()
+	auditChain, err := newAdminAuditChain(as.file, as.anchorFile)
+	if err != nil {
+		log.Fatalf("审计链初始化失败（fail-closed）：%v", err)
+	}
+	if auditChain == nil {
+		log.Printf("审计链未启用（ADMIN_AUDIT_FILE 未配置）：凭据/配额写操作将不落审计链")
+	}
+
 	var bh *brokerHandler
 	var sh *brokerSecretHandler
 	if bc != nil {
@@ -174,13 +200,17 @@ func main() {
 			log.Fatalf("配置缺失：ADMIN_BROKER_PUBLIC_BASE 未设置（broker 已启用，无法生成 provider customUrl，fail-closed）")
 		}
 		bh = newBrokerHandler(bc)
-		sh = newBrokerSecretHandler(bs, bh)
+		sh = newBrokerSecretHandler(bs, bh, auditChain)
 		if fromDir {
 			sh.startReloader()
 		}
 	}
 
-	adminMux := buildAdminMux(cfg, sh, bh, bs.legacyPort)
+	// 模型目录（M2 A-1'）：只读特性，数据源缺失时返回空列表（不 fail-closed 启动）。
+	mh := newModelCatalogHandler(loadModelCatalogSettings())
+	// 用量代理（M2 A-2'）：恒注册；数据源未配置时端点返回 503（不静默返回空数据）。
+	uh := newUsageHandler(loadUsageSettings(), auditChain)
+	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, bs.legacyPort)
 
 	if bh != nil {
 		if bs.brokerListen == cfg.listen {

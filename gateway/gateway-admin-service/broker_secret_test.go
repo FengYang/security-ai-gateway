@@ -43,7 +43,7 @@ func testProvider(t *testing.T) *brokerProvider {
 // newTestSecretMux 组装与 main 同构的凭据端点路由。
 func newTestSecretMux(cfg *config, bs *brokerSettings, bc *brokerConfig) (*http.ServeMux, *brokerHandler) {
 	bh := newBrokerHandler(bc)
-	sh := newBrokerSecretHandler(bs, bh)
+	sh := newBrokerSecretHandler(bs, bh, nil)
 	mux := http.NewServeMux()
 	mux.HandleFunc(brokerAPIBase, authMiddleware(cfg, sh.handleList))
 	mux.HandleFunc(brokerAPIBase+"/", authMiddleware(cfg, sh.handleItem))
@@ -453,7 +453,7 @@ func TestReloadFailureKeepsPreviousRoutes(t *testing.T) {
 	bs := testSettings(t)
 	bc := &brokerConfig{providers: map[string]*brokerProvider{"phala": testProvider(t)}}
 	bh := newBrokerHandler(bc)
-	sh := newBrokerSecretHandler(bs, bh)
+	sh := newBrokerSecretHandler(bs, bh, nil)
 
 	// 目录里放一个损坏文件 → reloadNow 必须失败且路由表不变
 	if err := os.WriteFile(providerFilePath(bs.secretsDir, "broken"), []byte(""), 0o600); err != nil {
@@ -488,7 +488,7 @@ func TestReloadFailureKeepsPreviousRoutes(t *testing.T) {
 func TestConcurrentUpsertAndReload(t *testing.T) {
 	bs := testSettings(t)
 	bh := newBrokerHandler(&brokerConfig{providers: map[string]*brokerProvider{}})
-	sh := newBrokerSecretHandler(bs, bh)
+	sh := newBrokerSecretHandler(bs, bh, nil)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {

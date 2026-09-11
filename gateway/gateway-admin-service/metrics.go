@@ -9,6 +9,8 @@
 //	（reason ∈ ok/upstream_error/path_denied/provider_unknown）
 //
 // gateway_admin_broker_config_reload_failed_total 凭据目录热加载失败计数（M2 A-1；失败保留旧配置）
+// gateway_admin_audit_events                        审计链当前事件数（G1）
+// gateway_admin_broker_audit_write_failed_total     审计链写入失败计数（G1；fail-closed 拒绝变更）
 package main
 
 import (
@@ -20,11 +22,13 @@ import (
 )
 
 type adminMetrics struct {
-	mu           sync.Mutex
-	requests     int64
-	authRejected int64
-	broker       map[string]int64 // key = provider|code|reason
-	reloadFailed int64
+	mu              sync.Mutex
+	requests        int64
+	authRejected    int64
+	broker          map[string]int64 // key = provider|code|reason
+	reloadFailed    int64
+	auditEvents     int64 // gauge：审计链当前事件数（G1）
+	auditWriteFails int64
 }
 
 var metrics = newAdminMetrics()
@@ -50,6 +54,20 @@ func (m *adminMetrics) incBrokerReloadFailed() {
 	m.mu.Unlock()
 }
 
+// setAuditEvents 更新审计链当前事件数（gauge，G1）。
+func (m *adminMetrics) setAuditEvents(n int) {
+	m.mu.Lock()
+	m.auditEvents = int64(n)
+	m.mu.Unlock()
+}
+
+// incBrokerAuditWriteFailed 记录一次审计链写入失败（G1 fail-closed：对应业务变更被拒绝）。
+func (m *adminMetrics) incBrokerAuditWriteFailed() {
+	m.mu.Lock()
+	m.auditWriteFails++
+	m.mu.Unlock()
+}
+
 // brokerRequest broker 中转计数。provider 仅接受配置内名称或常量 "_unknown"
 // （外部输入不得直接作 label，防基数爆炸）。
 func (m *adminMetrics) brokerRequest(provider, code, reason string) {
@@ -67,6 +85,10 @@ func (m *adminMetrics) render(w io.Writer) {
 	fmt.Fprintf(w, "gateway_admin_auth_rejected_total %d\n", m.authRejected)
 	fmt.Fprintf(w, "# HELP gateway_admin_broker_config_reload_failed_total 凭据目录热加载失败计数（失败保留旧配置）\n# TYPE gateway_admin_broker_config_reload_failed_total counter\n")
 	fmt.Fprintf(w, "gateway_admin_broker_config_reload_failed_total %d\n", m.reloadFailed)
+	fmt.Fprintf(w, "# HELP gateway_admin_audit_events 审计链当前事件数\n# TYPE gateway_admin_audit_events gauge\n")
+	fmt.Fprintf(w, "gateway_admin_audit_events %d\n", m.auditEvents)
+	fmt.Fprintf(w, "# HELP gateway_admin_broker_audit_write_failed_total 审计链写入失败计数（fail-closed 拒绝变更）\n# TYPE gateway_admin_broker_audit_write_failed_total counter\n")
+	fmt.Fprintf(w, "gateway_admin_broker_audit_write_failed_total %d\n", m.auditWriteFails)
 
 	fmt.Fprintf(w, "# HELP gateway_admin_broker_requests_total broker 中转请求计数（按 provider/code/reason）\n# TYPE gateway_admin_broker_requests_total counter\n")
 	keys := make([]string, 0, len(m.broker))

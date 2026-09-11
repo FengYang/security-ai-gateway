@@ -15,7 +15,7 @@ import (
 
 // newTestServer 组装管理面测试路由（与 main 同构；broker 未启用、无兼容期中转）。
 func newTestServer(cfg *config) *http.ServeMux {
-	return buildAdminMux(cfg, nil, nil, false)
+	return buildAdminMux(cfg, nil, nil, nil, nil, false)
 }
 
 // bearerToken 构造合法内部令牌（sub/role/iss/aud 齐全）。
@@ -53,6 +53,8 @@ func TestEndpoints(t *testing.T) {
 			"gateway_admin_requests_total",
 			"gateway_admin_auth_rejected_total",
 			"gateway_admin_broker_config_reload_failed_total",
+			"gateway_admin_audit_events",
+			"gateway_admin_broker_audit_write_failed_total",
 		} {
 			if !bytes.Contains(buf.Bytes(), []byte(want)) {
 				t.Fatalf("metrics 缺族 %q", want)
@@ -138,7 +140,7 @@ func TestReadyzThreeStates(t *testing.T) {
 
 	t.Run("broker 正常 → ready", func(t *testing.T) {
 		bs := testSettings(t)
-		sh := newBrokerSecretHandler(bs, newBrokerHandler(&brokerConfig{providers: map[string]*brokerProvider{}}))
+		sh := newBrokerSecretHandler(bs, newBrokerHandler(&brokerConfig{providers: map[string]*brokerProvider{}}), nil)
 		rec := httptest.NewRecorder()
 		handleReadyz(sh.healthy)(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 		if rec.Code != http.StatusOK {
@@ -148,7 +150,7 @@ func TestReadyzThreeStates(t *testing.T) {
 
 	t.Run("broker 连续重载失败超阈值 → 503", func(t *testing.T) {
 		bs := testSettings(t)
-		sh := newBrokerSecretHandler(bs, newBrokerHandler(&brokerConfig{providers: map[string]*brokerProvider{}}))
+		sh := newBrokerSecretHandler(bs, newBrokerHandler(&brokerConfig{providers: map[string]*brokerProvider{}}), nil)
 
 		// 未达阈值（2 次）仍 ready
 		sh.markFail()
@@ -170,7 +172,7 @@ func TestReadyzThreeStates(t *testing.T) {
 
 	t.Run("重载成功清零连续失败", func(t *testing.T) {
 		bs := testSettings(t)
-		sh := newBrokerSecretHandler(bs, newBrokerHandler(&brokerConfig{providers: map[string]*brokerProvider{}}))
+		sh := newBrokerSecretHandler(bs, newBrokerHandler(&brokerConfig{providers: map[string]*brokerProvider{}}), nil)
 		sh.markFail()
 		sh.markFail()
 		sh.markFail()
@@ -199,7 +201,7 @@ func TestListenerRouteIsolation(t *testing.T) {
 	cfg := testCfg()
 	bc := &brokerConfig{providers: map[string]*brokerProvider{"phala": testProvider(t)}}
 	bh := newBrokerHandler(bc)
-	sh := newBrokerSecretHandler(bs, bh)
+	sh := newBrokerSecretHandler(bs, bh, nil)
 
 	t.Run("broker 专用 listener：仅中转端点可达", func(t *testing.T) {
 		brokerMux := buildBrokerMux(bh)
@@ -225,7 +227,7 @@ func TestListenerRouteIsolation(t *testing.T) {
 	})
 
 	t.Run("管理面 listener（收口期 legacy=false）：不含中转端点", func(t *testing.T) {
-		adminMux := buildAdminMux(cfg, sh, bh, false)
+		adminMux := buildAdminMux(cfg, sh, bh, nil, nil, false)
 
 		rec := httptest.NewRecorder()
 		adminMux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/llm-broker/phala/v1/__probe", nil))
@@ -250,7 +252,7 @@ func TestListenerRouteIsolation(t *testing.T) {
 	})
 
 	t.Run("管理面 listener（兼容期 legacy=true）：同时暴露中转端点", func(t *testing.T) {
-		adminMux := buildAdminMux(cfg, sh, bh, true)
+		adminMux := buildAdminMux(cfg, sh, bh, nil, nil, true)
 
 		rec := httptest.NewRecorder()
 		adminMux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/llm-broker/phala/v1/__probe", nil))
@@ -260,7 +262,7 @@ func TestListenerRouteIsolation(t *testing.T) {
 	})
 
 	t.Run("broker 未启用：管理面无凭据端点且 readyz 正常", func(t *testing.T) {
-		adminMux := buildAdminMux(cfg, nil, nil, true)
+		adminMux := buildAdminMux(cfg, nil, nil, nil, nil, true)
 
 		rec := httptest.NewRecorder()
 		adminMux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, brokerAPIBase, nil))

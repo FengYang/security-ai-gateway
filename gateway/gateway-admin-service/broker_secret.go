@@ -61,6 +61,7 @@ const readyzFailThreshold = 3
 type brokerSecretHandler struct {
 	settings *brokerSettings
 	broker   *brokerHandler
+	audit    *adminAuditChain // G1 审计链（nil = 未启用，写操作不落链）
 
 	mu         sync.Mutex // 保护 lastSig / failStreak（reloader goroutine 与 HTTP 写入并发访问）
 	lastSig    string
@@ -68,8 +69,23 @@ type brokerSecretHandler struct {
 }
 
 // newBrokerSecretHandler 装配凭据托管 handler。
-func newBrokerSecretHandler(s *brokerSettings, b *brokerHandler) *brokerSecretHandler {
-	return &brokerSecretHandler{settings: s, broker: b}
+// audit 为 nil 表示审计链未启用（ADMIN_AUDIT_FILE 未配置），凭据写操作不落链。
+func newBrokerSecretHandler(s *brokerSettings, b *brokerHandler, audit *adminAuditChain) *brokerSecretHandler {
+	return &brokerSecretHandler{settings: s, broker: b, audit: audit}
+}
+
+// auditAppend 落链凭据变更事件（G1 fail-closed：写失败返回 false，调用方须拒绝 2xx）。
+func (h *brokerSecretHandler) auditAppend(e adminAuditEvent) bool {
+	if h.audit == nil {
+		return true
+	}
+	if err := h.audit.append(e); err != nil {
+		metrics.incBrokerAuditWriteFailed()
+		log.Printf("[audit] 审计链写入失败（fail-closed，变更将被拒绝）action=%s provider=%s rid=%s: %v",
+			e.Action, e.Provider, e.RequestID, err)
+		return false
+	}
+	return true
 }
 
 // healthy 连续重载失败未达阈值即视为健康（M2 A-2：/readyz 的 broker 维度）。
@@ -525,6 +541,20 @@ func (h *brokerSecretHandler) upsert(w http.ResponseWriter, r *http.Request, nam
 	}
 
 	sub := operationSub(r)
+	// G1 审计落链（B-3 §5：先落审计再返回 2xx）。凭据已落盘且 reload 成功，此处
+	// 审计写失败无法回滚凭据 → 拒绝确认（500），错误信息明示人工核查（fail-closed）。
+	if !h.auditAppend(adminAuditEvent{
+		Actor:          sub,
+		Action:         auditActionCredentialUpsert,
+		Provider:       name,
+		KeyFingerprint: keyFingerprint([]byte(req.Key)),
+		RequestID:      r.Header.Get("X-Request-ID"),
+		Result:         "ok",
+	}) {
+		writeError(w, http.StatusInternalServerError,
+			"凭据已落盘但审计链写入失败（fail-closed；请人工核查审计文件后再决定是否重试）")
+		return
+	}
 	log.Printf("[adminext] 凭据写入 ok provider=%s sub=%s fingerprint=%s rid=%s",
 		name, sub, keyFingerprint([]byte(req.Key)), r.Header.Get("X-Request-ID"))
 	writeJSON(w, http.StatusOK, upsertResponse{Name: name, CustomURL: h.customURL(name)})
@@ -560,6 +590,18 @@ func (h *brokerSecretHandler) remove(w http.ResponseWriter, r *http.Request, nam
 		Name:              name,
 		AffectedProviders: affected,
 		Warning:           "CR 中仍有 provider 指向本托管端点，删除后其推理将返回 404；请在控制台一并停用或改回直连",
+	}
+	// G1 审计落链（先落审计再返回 2xx）：删除已生效，审计写失败 → 拒绝确认（fail-closed）。
+	if !h.auditAppend(adminAuditEvent{
+		Actor:     operationSub(r),
+		Action:    auditActionCredentialDelete,
+		Provider:  name,
+		RequestID: r.Header.Get("X-Request-ID"),
+		Result:    "ok",
+	}) {
+		writeError(w, http.StatusInternalServerError,
+			"凭据已删除但审计链写入失败（fail-closed；请人工核查审计文件后再决定是否重试）")
+		return
 	}
 	log.Printf("[adminext] 凭据删除 ok provider=%s sub=%s affected=%v rid=%s",
 		name, operationSub(r), affected, r.Header.Get("X-Request-ID"))
