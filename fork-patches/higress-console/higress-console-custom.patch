@@ -486,17 +486,19 @@ index af8233c..2b460af 100644
    }
  }
 diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
-index 1a41985..f906ede 100644
+index 1a41985..f00c331 100644
 --- a/frontend/src/locales/en-US/translation.json
 +++ b/frontend/src/locales/en-US/translation.json
-@@ -22,7 +22,59 @@
+@@ -22,7 +22,80 @@
      "pluginManagement": "Plugin Management",
      "systemSettings": "System Settings",
      "mcpManagement": "MCP Management",
 -    "mcpConfigurations": "MCP Configurations"
 +    "mcpConfigurations": "MCP Configuration",
 +    "adminExtSecurityCenter": "Security Center (placeholder)",
-+    "adminExtCredentials": "Credential Hosting"
++    "adminExtCredentials": "Credential Hosting",
++    "adminExtModels": "Model Catalog",
++    "adminExtUsage": "Usage Dashboard"
 +  },
 +  "adminExt": {
 +    "securityCenter": {
@@ -518,7 +520,7 @@ index 1a41985..f906ede 100644
 +    "credentials": {
 +      "guide": "Write the vendor API key here: it is stored in the broker credential directory, so the WasmPlugin CR holds no plaintext token. After saving, copy the generated customUrl into Tech Config → AI Service Providers (leave tokens empty).",
 +      "empty": "No hosted credentials",
-+      "hosted": "hosted",
++      "hosted": "Hosted mode",
 +      "add": "Add credential",
 +      "rotate": "Rotate key",
 +      "delete": "Delete",
@@ -545,23 +547,44 @@ index 1a41985..f906ede 100644
 +      "customUrlTitle": "Provider customUrl (copy to the provider page)",
 +      "customUrlTip": "When creating/editing the provider in Tech Config → AI Service Providers, put this URL into customUrl and leave tokens empty.",
 +      "orphanTitle": "Configuration drift detected",
-+      "orphanTip": "The following providers still point at the broker in the CR, but the broker has no credential, so their inference will fail"
++      "orphanTip": "The following providers still point at the broker in the CR, but the broker has no credential, so their inference will fail",
++      "plaintextTitle": "Plaintext mode (migration pending)",
++      "plaintextTip": "The following providers are still referenced by AI routes with plaintext keys; migrate them to hosting on this page"
++    },
++    "models": {
++      "guide": "Read-only catalog: models are routed to providers via AI routes (ai-route, incl. model mapping and weight); change configs in Tech Config → AI Routes / AI Service Providers.",
++      "empty": "No model catalog (no ai-route or CR data source found)",
++      "filterPlaceholder": "Search route / path / model / provider",
++      "refresh": "Refresh",
++      "route": "Route",
++      "path": "Path prefix",
++      "models": "Models",
++      "unrestricted": "All models",
++      "defaultMapping": "Default mapping",
++      "provider": "Vendor / Provider",
++      "mode": "Link mode",
++      "modeBroker": "Hosted (broker)",
++      "modePlaintext": "Plaintext key",
++      "modeDirect": "Direct",
++      "weight": "Weight"
 +    }
    },
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
-index c148f42..2083d48 100644
+index c148f42..88ed60b 100644
 --- a/frontend/src/locales/zh-CN/translation.json
 +++ b/frontend/src/locales/zh-CN/translation.json
-@@ -22,7 +22,59 @@
+@@ -22,7 +22,103 @@
      "pluginManagement": "插件配置",
      "systemSettings": "系统设置",
      "mcpManagement": "MCP管理",
 -    "mcpConfigurations": "MCP配置"
 +    "mcpConfigurations": "MCP配置",
 +    "adminExtSecurityCenter": "安全中心（占位）",
-+    "adminExtCredentials": "凭据托管"
++    "adminExtCredentials": "凭据托管",
++    "adminExtModels": "模型目录",
++    "adminExtUsage": "用量看板"
 +  },
 +  "adminExt": {
 +    "securityCenter": {
@@ -583,7 +606,7 @@ index c148f42..2083d48 100644
 +    "credentials": {
 +      "guide": "在此写入厂商 API Key：凭据落 broker 凭据目录，WasmPlugin CR 不含明文令牌。写入后复制生成的 customUrl，到「技术配置 → AI 服务提供者」新建提供者（tokens 留空）。",
 +      "empty": "暂无托管凭据",
-+      "hosted": "托管",
++      "hosted": "托管模式",
 +      "add": "新增凭据",
 +      "rotate": "轮换密钥",
 +      "delete": "删除",
@@ -610,18 +633,62 @@ index c148f42..2083d48 100644
 +      "customUrlTitle": "提供者 customUrl（请复制到提供者页）",
 +      "customUrlTip": "在「技术配置 → AI 服务提供者」新建/编辑提供者时，将该地址填入 customUrl，tokens 留空。",
 +      "orphanTitle": "检测到配置漂移",
-+      "orphanTip": "以下提供者在 CR 中仍指向 broker，但 broker 侧已无凭据，其推理将失败"
++      "orphanTip": "以下提供者在 CR 中仍指向 broker，但 broker 侧已无凭据，其推理将失败",
++      "plaintextTitle": "明文模式（待迁移）",
++      "plaintextTip": "以下 provider 仍以明文 Key 被 AI 路由引用，建议在本页托管迁移"
++    },
++    "models": {
++      "guide": "本页为只读目录：模型经 AI 路由（ai-route）指向 provider（含模型映射与权重）；配置变更请到 技术配置 → AI 路由 / AI 服务提供者 完成。",
++      "empty": "暂无模型目录（未发现 ai-route 或 CR 数据源）",
++      "filterPlaceholder": "搜索路由 / 路径 / 模型 / 厂商",
++      "refresh": "刷新",
++      "route": "路由",
++      "path": "路径前缀",
++      "models": "模型",
++      "unrestricted": "不限模型",
++      "defaultMapping": "默认映射",
++      "provider": "厂商 / Provider",
++      "mode": "链路形态",
++      "modeBroker": "密态托管",
++      "modePlaintext": "明文 Key",
++      "modeDirect": "直连",
++      "weight": "权重"
++    },
++    "usage": {
++      "guide": "计量数据来自密态推理链路（tee-infer 审计链增量聚合，区间左闭右开）；明文直连链路不计量。金额暂不展示（无单价表）。",
++      "empty": "区间内无计量数据",
++      "refresh": "刷新",
++      "range24h": "近 24 小时",
++      "range7d": "近 7 天",
++      "range30d": "近 30 天",
++      "tenantFilterPlaceholder": "按租户过滤（可输入）",
++      "totalRequests": "请求总数",
++      "tokensIn": "输入 Token",
++      "tokensOut": "输出 Token",
++      "requests": "请求数",
++      "trend": "用量趋势",
++      "tenantTable": "租户用量",
++      "tenant": "租户",
++      "model": "模型",
++      "quotaTitle": "配额设置",
++      "quotaGuide": "设置租户 token 配额上限（admin 权限；写操作将落审计链）。max_tokens ≤ 0 表示解除限制。",
++      "quotaTenantPlaceholder": "租户标识（如 acme）",
++      "quotaTenantRequired": "请输入租户标识",
++      "quotaSubmit": "设置配额",
++      "quotaSetOk": "配额已生效"
 +    }
    },
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/pages/_defaultProps.tsx b/frontend/src/pages/_defaultProps.tsx
-index f4c0ecb..8d86018 100644
+index f4c0ecb..5171165 100644
 --- a/frontend/src/pages/_defaultProps.tsx
 +++ b/frontend/src/pages/_defaultProps.tsx
-@@ -1,8 +1,10 @@
+@@ -1,8 +1,12 @@
  import {
 +  ApiOutlined,
++  AppstoreOutlined,
++  BarChartOutlined,
    DashboardOutlined,
    DeploymentUnitOutlined,
    FullscreenExitOutlined,
@@ -630,7 +697,7 @@ index f4c0ecb..8d86018 100644
    RobotOutlined,
    SafetyCertificateOutlined,
    SettingOutlined,
-@@ -43,6 +45,26 @@ export default {
+@@ -43,6 +47,32 @@ export default {
          path: '/dashboard',
          icon: <DashboardOutlined />,
        },
@@ -654,15 +721,21 @@ index f4c0ecb..8d86018 100644
 +        path: '/admin-ext/credentials',
 +        icon: <KeyOutlined />,
 +      },
++      {
++        // ADMIN-EXT（自研扩展，vendor-fork 只增不减）：模型目录只读（M2 A-1'）
++        name: 'menu.adminExtModels',
++        path: '/admin-ext/models',
++        icon: <AppstoreOutlined />,
++      },
        {
          name: 'menu.serviceSources',
          path: '/service-source',
 diff --git a/frontend/src/pages/admin-ext/credentials/index.tsx b/frontend/src/pages/admin-ext/credentials/index.tsx
 new file mode 100644
-index 0000000..dd4667d
+index 0000000..15e7adf
 --- /dev/null
 +++ b/frontend/src/pages/admin-ext/credentials/index.tsx
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,311 @@
 +import {
 +  CopyOutlined,
 +  PlusOutlined,
@@ -693,6 +766,7 @@ index 0000000..dd4667d
 +  listBrokerProviders,
 +  upsertBrokerProvider,
 +} from '@/services/admin-ext-broker';
++import { listModels, ModelCatalog } from '@/services/admin-ext-models';
 +
 +/**
 + * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：broker 凭据托管。
@@ -706,6 +780,10 @@ index 0000000..dd4667d
 + *  - Key 一经提交即不可回读，列表仅展示 8 位不可逆指纹（用于确认轮换生效）；
 + *  - 写/删操作仅 admin 角色可用，auditor 将收到 403（后端按用户名白名单派生角色）；
 + *  - CR 漂移（CR 指向 broker 但凭据已删）在页首显式告警。
++ *
++ * B-2（决策门 #6 最小补齐）：列表项标注**托管模式**；并以 **明文模式** 告警列出
++ * 仍被 AI 路由引用的明文 Key provider（数据源 = A-1' models 端点的 hasPlaintextToken），
++ * 提示迁移到本页托管。后端零改动（复用既有两端点）。
 + */
 +
 +const DEFAULT_PATH_PREFIXES = '/v1/chat/completions,/v1/models,/v1/embeddings';
@@ -715,6 +793,7 @@ index 0000000..dd4667d
 +  const [form] = Form.useForm();
 +  const [list, setList] = useState<BrokerProviderView[]>([]);
 +  const [orphans, setOrphans] = useState<string[]>([]);
++  const [plaintextProviders, setPlaintextProviders] = useState<string[]>([]);
 +  const [loading, setLoading] = useState(false);
 +  const [error, setError] = useState<string | null>(null);
 +  const [modalOpen, setModalOpen] = useState(false);
@@ -724,10 +803,22 @@ index 0000000..dd4667d
 +
 +  const reload = useCallback(() => {
 +    setLoading(true);
-+    listBrokerProviders()
-+      .then((resp) => {
++    // models 端点仅用于明文模式标注：取数失败不影响本页主功能（降级为空，不臆造）
++    Promise.all([
++      listBrokerProviders(),
++      listModels().catch((): ModelCatalog => ({ routes: [] })),
++    ])
++      .then(([resp, catalog]) => {
 +        setList(resp?.providers || []);
 +        setOrphans(resp?.orphanDetected || []);
++        const plain = Array.from(
++          new Set(
++            (catalog?.routes || [])
++              .filter((r) => r.hasPlaintextToken)
++              .map((r) => r.provider),
++          ),
++        ).sort();
++        setPlaintextProviders(plain);
 +        setError(null);
 +      })
 +      .catch((e) => setError(String(e)))
@@ -811,6 +902,15 @@ index 0000000..dd4667d
 +          showIcon
 +          message={t('adminExt.credentials.orphanTitle')}
 +          description={`${t('adminExt.credentials.orphanTip')}：${orphans.join('，')}`}
++          style={{ marginBottom: 16 }}
++        />
++      )}
++      {plaintextProviders.length > 0 && (
++        <Alert
++          type="warning"
++          showIcon
++          message={`${t('adminExt.credentials.plaintextTitle')}（${plaintextProviders.length}）`}
++          description={`${t('adminExt.credentials.plaintextTip')}：${plaintextProviders.join('，')}`}
 +          style={{ marginBottom: 16 }}
 +        />
 +      )}
@@ -947,6 +1047,561 @@ index 0000000..dd4667d
 +};
 +
 +export default CredentialHosting;
+diff --git a/frontend/src/pages/admin-ext/models/index.tsx b/frontend/src/pages/admin-ext/models/index.tsx
+new file mode 100644
+index 0000000..61e1764
+--- /dev/null
++++ b/frontend/src/pages/admin-ext/models/index.tsx
+@@ -0,0 +1,183 @@
++import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
++import { PageContainer } from '@ant-design/pro-layout';
++import { Alert, Button, Input, Space, Table, Tag, Typography } from 'antd';
++import { useCallback, useEffect, useMemo, useState } from 'react';
++import { useTranslation } from 'react-i18next';
++import { listModels, ModelRouteEntry } from '@/services/admin-ext-models';
++
++/**
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：模型目录（M2 A-1'，只读）。
++ *
++ * 展示「可用模型 + 默认映射 + 所属厂商/provider」（重排计划 §3 A-1'）：
++ *  - 一行 = 一条 ai-route 上游（route × provider 绑定，含权重）；
++ *  - 链路形态标注：密态托管（经 broker）/ 明文 Key（CR 仍存 apiTokens，待迁移）/ 直连；
++ *  - 配置变更入口在控制台 技术配置 → AI 路由 / AI 服务提供者，本页不做写操作。
++ * 数据源 = gateway-admin-service GET /v1/adminext/models（无数据源时返回空列表）。
++ */
++
++const ModelCatalogPage: React.FC = () => {
++  const { t } = useTranslation();
++  const [list, setList] = useState<ModelRouteEntry[]>([]);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [keyword, setKeyword] = useState('');
++
++  const reload = useCallback(() => {
++    setLoading(true);
++    listModels()
++      .then((resp) => {
++        setList(resp?.routes || []);
++        setError(null);
++      })
++      .catch((e) => setError(String(e)))
++      .finally(() => setLoading(false));
++  }, []);
++
++  useEffect(() => {
++    reload();
++  }, [reload]);
++
++  // 客户端过滤（目录体量小）：路由 / 路径 / 模型 / 厂商
++  const filtered = useMemo(() => {
++    const kw = keyword.trim().toLowerCase();
++    if (!kw) {
++      return list;
++    }
++    return list.filter((r) =>
++      [r.route, r.path, r.provider, ...(r.models || [])].some((v) =>
++        (v || '').toLowerCase().includes(kw)),
++      );
++  }, [list, keyword]);
++
++  const columns = [
++    {
++      title: t('adminExt.models.route'),
++      dataIndex: 'route',
++      key: 'route',
++      width: 180,
++      ellipsis: true,
++    },
++    {
++      title: t('adminExt.models.path'),
++      dataIndex: 'path',
++      key: 'path',
++      width: 160,
++      render: (value: string) => (
++        <Typography.Text code>{value || '-'}</Typography.Text>
++      ),
++    },
++    {
++      title: t('adminExt.models.models'),
++      dataIndex: 'models',
++      key: 'models',
++      render: (value: string[]) =>
++        value && value.length > 0 ? (
++          <Space wrap size={4}>
++            {value.map((m) => (
++              <Tag key={m}>{m}</Tag>
++            ))}
++          </Space>
++        ) : (
++          <Tag>{t('adminExt.models.unrestricted')}</Tag>
++        ),
++    },
++    {
++      title: t('adminExt.models.defaultMapping'),
++      dataIndex: 'defaultMapping',
++      key: 'defaultMapping',
++      render: (value: Record<string, string> | null | undefined) => {
++        const entries = Object.entries(value || {});
++        if (entries.length === 0) {
++          return '-';
++        }
++        return (
++          <Space direction="vertical" size={0}>
++            {entries.map(([from, to]) => (
++              <Typography.Text key={from} code>
++                {from} → {to}
++              </Typography.Text>
++            ))}
++          </Space>
++        );
++      },
++    },
++    {
++      title: t('adminExt.models.provider'),
++      dataIndex: 'provider',
++      key: 'provider',
++      render: (_, record: ModelRouteEntry) => (
++        <Space direction="vertical" size={0}>
++          <span>{record.provider}</span>
++          {(record.providerType || record.providerProtocol) && (
++            <Typography.Text type="secondary">
++              {[record.providerType, record.providerProtocol]
++                .filter(Boolean)
++                .join(' / ')}
++            </Typography.Text>
++          )}
++        </Space>
++      ),
++    },
++    {
++      title: t('adminExt.models.mode'),
++      key: 'mode',
++      width: 110,
++      render: (_, record: ModelRouteEntry) => {
++        if (record.viaBroker) {
++          return <Tag color="green">{t('adminExt.models.modeBroker')}</Tag>;
++        }
++        if (record.hasPlaintextToken) {
++          return <Tag color="red">{t('adminExt.models.modePlaintext')}</Tag>;
++        }
++        return <Tag>{t('adminExt.models.modeDirect')}</Tag>;
++      },
++    },
++    {
++      title: t('adminExt.models.weight'),
++      dataIndex: 'weight',
++      key: 'weight',
++      width: 80,
++      align: 'center' as const,
++    },
++  ];
++
++  return (
++    <PageContainer>
++      <Alert
++        type="info"
++        showIcon
++        message={t('adminExt.models.guide')}
++        style={{ marginBottom: 16 }}
++      />
++      {error && (
++        <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />
++      )}
++
++      <Space style={{ marginBottom: 16 }}>
++        <Input
++          allowClear
++          prefix={<SearchOutlined />}
++          style={{ width: 280 }}
++          placeholder={t('adminExt.models.filterPlaceholder') as string}
++          value={keyword}
++          onChange={(e) => setKeyword(e.target.value)}
++        />
++        <Button icon={<ReloadOutlined />} onClick={reload}>
++          {t('adminExt.models.refresh')}
++        </Button>
++      </Space>
++
++      <Table
++        rowKey={(r: ModelRouteEntry) => `${r.route}/${r.provider}`}
++        size="middle"
++        loading={loading}
++        dataSource={filtered}
++        columns={columns}
++        locale={{ emptyText: t('adminExt.models.empty') }}
++        pagination={{ pageSize: 20, hideOnSinglePage: true }}
++      />
++    </PageContainer>
++  );
++};
++
++export default ModelCatalogPage;
+diff --git a/frontend/src/pages/admin-ext/usage/index.tsx b/frontend/src/pages/admin-ext/usage/index.tsx
+new file mode 100644
+index 0000000..d860c97
+--- /dev/null
++++ b/frontend/src/pages/admin-ext/usage/index.tsx
+@@ -0,0 +1,360 @@
++import { ReloadOutlined } from '@ant-design/icons';
++import { Line } from '@ant-design/charts';
++import { PageContainer } from '@ant-design/pro-layout';
++import {
++  Alert,
++  AutoComplete,
++  Button,
++  Card,
++  Col,
++  Form,
++  InputNumber,
++  message,
++  Row,
++  Select,
++  Space,
++  Statistic,
++  Table,
++  TableColumnsType,
++  Tag,
++  Typography,
++} from 'antd';
++import { useCallback, useEffect, useMemo, useState } from 'react';
++import { useTranslation } from 'react-i18next';
++import {
++  getUsage,
++  setQuota,
++  TenantUsage,
++  UsageResponse,
++} from '@/services/admin-ext-usage';
++
++/**
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：用量看板与配额（M2 A-2'）。
++ *
++ * 数据源 = tee-infer 审计链增量聚合（计量唯一真源），经 gateway-admin-service 代理：
++ *  - 看板：时间范围 × 租户过滤 的 请求/token 计量（表格 + 按时间桶趋势）；
++ *  - 配额：租户维度 max_tokens 设置（admin 写操作，后端落审计链）；
++ *  - 金额列不出现（现仅计量无单价，项目硬约束）；
++ *  - 明文直连 /provider/* 链路不计量（V 点①定案）。
++ * 趋势实现：tee-infer /usage 仅有区间聚合接口，前端按时间桶并发查询后拼接
++ * （每桶一次 [from, to) 增量，数字与真源逐项一致）。
++ */
++
++type RangeKey = '24h' | '7d' | '30d';
++
++interface RangeOption {
++  key: RangeKey;
++  /** 窗口总时长（小时） */
++  hours: number;
++  /** 趋势桶数 */
++  buckets: number;
++  labelKey: string;
++}
++
++const RANGE_OPTIONS: RangeOption[] = [
++  { key: '24h', hours: 24, buckets: 24, labelKey: 'adminExt.usage.range24h' },
++  { key: '7d', hours: 24 * 7, buckets: 7, labelKey: 'adminExt.usage.range7d' },
++  { key: '30d', hours: 24 * 30, buckets: 30, labelKey: 'adminExt.usage.range30d' },
++];
++
++/** 趋势桶（一次 [from, to) 增量查询的载体）。 */
++interface TrendBucket {
++  label: string;
++  from: string;
++  to: string;
++  tokensIn: number;
++  tokensOut: number;
++  requests: number;
++}
++
++/** 表格行：租户 × 用量。 */
++interface TenantRow extends TenantUsage {
++  name: string;
++}
++
++const pad2 = (n: number) => String(n).padStart(2, '0');
++
++/** 桶标签：24h 窗口用 HH:mm，按日窗口用 MM-DD。 */
++const bucketLabel = (d: Date, range: RangeOption): string => {
++  if (range.key === '24h') {
++    return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
++  }
++  return `${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
++};
++
++const buildBuckets = (range: RangeOption): TrendBucket[] => {
++  const now = Date.now();
++  const spanMs = range.hours * 3600_000;
++  const bucketMs = spanMs / range.buckets;
++  const start = now - spanMs;
++  return Array.from({ length: range.buckets }, (_, i) => {
++    const from = new Date(start + i * bucketMs);
++    const to = new Date(start + (i + 1) * bucketMs);
++    return {
++      label: bucketLabel(from, range),
++      from: from.toISOString(),
++      to: to.toISOString(),
++      tokensIn: 0,
++      tokensOut: 0,
++      requests: 0,
++    };
++  });
++};
++
++/** 区间内全部租户用量加总。 */
++const sumTenants = (resp: UsageResponse): { tokensIn: number; tokensOut: number; requests: number } => {
++  let tokensIn = 0;
++  let tokensOut = 0;
++  let requests = 0;
++  Object.values(resp?.tenants || {}).forEach((t) => {
++    tokensIn += t.tokens_in || 0;
++    tokensOut += t.tokens_out || 0;
++    requests += t.requests || 0;
++  });
++  return { tokensIn, tokensOut, requests };
++};
++
++const UsageDashboardPage: React.FC = () => {
++  const { t } = useTranslation();
++  const [rangeKey, setRangeKey] = useState<RangeKey>('7d');
++  const [tenant, setTenant] = useState<string>('');
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [tenants, setTenants] = useState<Record<string, TenantUsage>>({});
++  const [trend, setTrend] = useState<TrendBucket[]>([]);
++  const [quotaSubmitting, setQuotaSubmitting] = useState(false);
++  const [quotaForm] = Form.useForm();
++
++  const range = useMemo(
++    () => RANGE_OPTIONS.find((r) => r.key === rangeKey) || RANGE_OPTIONS[1],
++    [rangeKey],
++  );
++
++  const reload = useCallback(() => {
++    const r = RANGE_OPTIONS.find((x) => x.key === rangeKey) || RANGE_OPTIONS[1];
++    setLoading(true);
++    setError(null);
++
++    // 主区间查询（表格 + 统计卡 + 租户候选）
++    const from = new Date(Date.now() - r.hours * 3600_000).toISOString();
++    const to = new Date().toISOString();
++    const query: { from: string; to: string; tenant?: string } = { from, to };
++    if (tenant.trim()) {
++      query.tenant = tenant.trim();
++    }
++
++    // 趋势：按时间桶并发增量查询（每桶 [from, to) 与真源同口径）
++    const buckets = buildBuckets(r);
++    const trendQuery = (b: TrendBucket) => {
++      const q: { from: string; to: string; tenant?: string } = { from: b.from, to: b.to };
++      if (tenant.trim()) {
++        q.tenant = tenant.trim();
++      }
++      return q;
++    };
++
++    Promise.all([
++      getUsage(query),
++      ...buckets.map((b) => getUsage(trendQuery(b))),
++    ])
++      .then((results) => {
++        const main = results[0];
++        setTenants(main?.tenants || {});
++        setTrend(
++          buckets.map((b, i) => {
++            const s = sumTenants(results[i + 1]);
++            return { ...b, tokensIn: s.tokensIn, tokensOut: s.tokensOut, requests: s.requests };
++          }),
++        );
++      })
++      .catch((e) => setError(String(e)))
++      .finally(() => setLoading(false));
++  }, [rangeKey, tenant]);
++
++  useEffect(() => {
++    reload();
++  }, [reload]);
++
++  const total = useMemo(() => sumTenants({ tenants }), [tenants]);
++
++  const rows = useMemo<TenantRow[]>(
++    () => Object.entries(tenants).map(([name, u]) => ({ name, ...u })),
++    [tenants],
++  );
++
++  const trendData = useMemo(
++    () =>
++      trend.flatMap((b) => [
++        { label: b.label, type: t('adminExt.usage.tokensIn') as string, value: b.tokensIn },
++        { label: b.label, type: t('adminExt.usage.tokensOut') as string, value: b.tokensOut },
++      ]),
++    [trend, t],
++  );
++
++  const columns: TableColumnsType<TenantRow> = [
++    { title: t('adminExt.usage.tenant'), dataIndex: 'name', key: 'name', width: 180, ellipsis: true },
++    {
++      title: t('adminExt.usage.requests'),
++      dataIndex: 'requests',
++      key: 'requests',
++      width: 110,
++      align: 'right' as const,
++      sorter: (a, b) => a.requests - b.requests,
++    },
++    {
++      title: t('adminExt.usage.tokensIn'),
++      dataIndex: 'tokens_in',
++      key: 'tokens_in',
++      width: 130,
++      align: 'right' as const,
++      sorter: (a, b) => a.tokens_in - b.tokens_in,
++    },
++    {
++      title: t('adminExt.usage.tokensOut'),
++      dataIndex: 'tokens_out',
++      key: 'tokens_out',
++      width: 130,
++      align: 'right' as const,
++      sorter: (a, b) => a.tokens_out - b.tokens_out,
++    },
++  ];
++
++  const onSubmitQuota = (values: { tenant: string; max_tokens: number }) => {
++    setQuotaSubmitting(true);
++    setQuota({ tenant: values.tenant.trim(), max_tokens: values.max_tokens })
++      .then((resp) => {
++        message.success(
++          `${t('adminExt.usage.quotaSetOk')}: ${resp?.tenant} = ${resp?.quota}`,
++        );
++      })
++      .catch(() => {
++        // 全局拦截器已弹错误框（403 越权 / 503 数据源 / 500 审计 fail-closed）
++      })
++      .finally(() => setQuotaSubmitting(false));
++  };
++
++  return (
++    <PageContainer>
++      <Alert
++        type="info"
++        showIcon
++        message={t('adminExt.usage.guide')}
++        style={{ marginBottom: 16 }}
++      />
++      {error && (
++        <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />
++      )}
++
++      <Space style={{ marginBottom: 16 }}>
++        <Select<RangeKey>
++          value={rangeKey}
++          style={{ width: 160 }}
++          onChange={(v) => setRangeKey(v)}
++          options={RANGE_OPTIONS.map((r) => ({ value: r.key, label: t(r.labelKey) }))}
++        />
++        <AutoComplete
++          value={tenant}
++          style={{ width: 240 }}
++          allowClear
++          options={rows.map((r) => ({ value: r.name }))}
++          placeholder={t('adminExt.usage.tenantFilterPlaceholder') as string}
++          onChange={(v: string) => setTenant(v)}
++        />
++        <Button icon={<ReloadOutlined />} onClick={reload} loading={loading}>
++          {t('adminExt.usage.refresh')}
++        </Button>
++      </Space>
++
++      <Row gutter={16} style={{ marginBottom: 16 }}>
++        <Col span={8}>
++          <Card size="small">
++            <Statistic title={t('adminExt.usage.totalRequests')} value={total.requests} />
++          </Card>
++        </Col>
++        <Col span={8}>
++          <Card size="small">
++            <Statistic title={t('adminExt.usage.tokensIn')} value={total.tokensIn} />
++          </Card>
++        </Col>
++        <Col span={8}>
++          <Card size="small">
++            <Statistic title={t('adminExt.usage.tokensOut')} value={total.tokensOut} />
++          </Card>
++        </Col>
++      </Row>
++
++      <Card size="small" title={t('adminExt.usage.trend')} style={{ marginBottom: 16 }}>
++        <Line
++          height={260}
++          data={trendData}
++          xField="label"
++          yField="value"
++          seriesField="type"
++          smooth
++        />
++      </Card>
++
++      <Card size="small" title={t('adminExt.usage.tenantTable')} style={{ marginBottom: 16 }}>
++        <Table
++          rowKey="name"
++          size="middle"
++          loading={loading}
++          dataSource={rows}
++          columns={columns}
++          locale={{ emptyText: t('adminExt.usage.empty') }}
++          pagination={{ pageSize: 20, hideOnSinglePage: true }}
++          expandable={{
++            rowExpandable: (r) => Object.keys(r.by_model || {}).length > 0,
++            expandedRowRender: (r) => (
++              <Table
++                rowKey={(m) => m.model}
++                size="small"
++                pagination={false}
++                dataSource={Object.entries(r.by_model || {}).map(([m, u]) => ({ model: m, ...u }))}
++                columns={[
++                  {
++                    title: t('adminExt.usage.model'),
++                    dataIndex: 'model',
++                    key: 'model',
++                    render: (v: string) => <Tag>{v}</Tag>,
++                  },
++                  { title: t('adminExt.usage.requests'), dataIndex: 'requests', key: 'requests', align: 'right' as const },
++                  { title: t('adminExt.usage.tokensIn'), dataIndex: 'tokens_in', key: 'tokens_in', align: 'right' as const },
++                  { title: t('adminExt.usage.tokensOut'), dataIndex: 'tokens_out', key: 'tokens_out', align: 'right' as const },
++                ]}
++              />
++            ),
++          }}
++        />
++      </Card>
++
++      <Card size="small" title={t('adminExt.usage.quotaTitle')}>
++        <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
++          {t('adminExt.usage.quotaGuide')}
++        </Typography.Paragraph>
++        <Form form={quotaForm} layout="inline" onFinish={onSubmitQuota} initialValues={{ max_tokens: 1000000 }}>
++          <Form.Item
++            name="tenant"
++            rules={[{ required: true, message: t('adminExt.usage.quotaTenantRequired') as string }]}
++          >
++            <AutoComplete
++              style={{ width: 240 }}
++              options={rows.map((r) => ({ value: r.name }))}
++              placeholder={t('adminExt.usage.quotaTenantPlaceholder') as string}
++            />
++          </Form.Item>
++          <Form.Item name="max_tokens" rules={[{ required: true }]}>
++            <InputNumber min={0} step={100000} style={{ width: 200 }} placeholder="max_tokens" />
++          </Form.Item>
++          <Form.Item>
++            <Button type="primary" htmlType="submit" loading={quotaSubmitting}>
++              {t('adminExt.usage.quotaSubmit')}
++            </Button>
++          </Form.Item>
++        </Form>
++      </Card>
++    </PageContainer>
++  );
++};
++
++export default UsageDashboardPage;
 diff --git a/frontend/src/pages/admin-ext/vendors/index.tsx b/frontend/src/pages/admin-ext/vendors/index.tsx
 new file mode 100644
 index 0000000..9e8601a
@@ -1182,4 +1837,114 @@ index 0000000..7298b88
 +
 +export const deleteBrokerProvider = (name: string): Promise<BrokerProviderDeleteResult> => {
 +  return request.delete<any, BrokerProviderDeleteResult>(`${BASE}/${name}`);
++};
+diff --git a/frontend/src/services/admin-ext-models.ts b/frontend/src/services/admin-ext-models.ts
+new file mode 100644
+index 0000000..0002266
+--- /dev/null
++++ b/frontend/src/services/admin-ext-models.ts
+@@ -0,0 +1,45 @@
++import request from './request';
++
++/**
++ * ADMIN-EXT（自研扩展）：模型目录只读 API 客户端（M2 A-1'）。
++ *
++ * 数据源 = 控制面实时运行态（ai-proxy CR providers × ai-route ConfigMap），
++ * 由 gateway-admin-service 聚合为「一条 ai-route 上游 = 一行目录」。
++ * 后端：GET /v1/adminext/models（Go，经控制台 AdminExtProxyController 通用转发）。
++ * 只读：任意已认证会话（auditor）可访问；数据源缺失返回空列表而非报错。
++ */
++
++/** 模型目录行：一条 ai-route 上游（route × provider 绑定）。 */
++export interface ModelRouteEntry {
++  /** ai-route 名称 */
++  route: string;
++  /** 路径前缀（PRE 谓词值） */
++  path: string;
++  /** 模型谓词值（空数组 = 不限模型） */
++  models: string[];
++  /** 上游模型映射（原样展示；可能为 null） */
++  defaultMapping?: Record<string, string> | null;
++  /** 上游 provider id */
++  provider: string;
++  /** ai-proxy CR 声明的 type（provider 不在 CR 中时为空串） */
++  providerType?: string;
++  /** ai-proxy CR 声明的 protocol（同上） */
++  providerProtocol?: string;
++  /** customUrl 指向 /llm-broker/（密态托管链路） */
++  viaBroker: boolean;
++  /** CR 仍存明文 apiTokens（迁移前形态，应尽快经凭据托管迁移） */
++  hasPlaintextToken: boolean;
++  /** 上游权重（多上游 failover） */
++  weight: number;
++}
++
++/** 模型目录响应。 */
++export interface ModelCatalog {
++  routes: ModelRouteEntry[];
++}
++
++const BASE = '/v1/adminext/models';
++
++export const listModels = (): Promise<ModelCatalog> => {
++  return request.get<any, ModelCatalog>(BASE);
++};
+diff --git a/frontend/src/services/admin-ext-usage.ts b/frontend/src/services/admin-ext-usage.ts
+new file mode 100644
+index 0000000..f14f75f
+--- /dev/null
++++ b/frontend/src/services/admin-ext-usage.ts
+@@ -0,0 +1,53 @@
++import request from './request';
++
++/**
++ * ADMIN-EXT（自研扩展）：用量看板与配额 API 客户端（M2 A-2'）。
++ *
++ * 计量唯一真源 = tee-infer 审计链（Higress 只见密文无法计量）；
++ * 由 gateway-admin-service 代理（GET /v1/adminext/usage → tee-infer GET /usage，
++ * 服务间令牌注入，前端不可见）。
++ * 503 语义：数据源未配置/不可达时后端返回 503（不静默返回空数据）。
++ * 明文直连 /provider/* 链路不计量（V 点①定案）。
++ */
++
++/** 单模型维度用量。 */
++export interface ModelUsageStat {
++  tokens_in: number;
++  tokens_out: number;
++  requests: number;
++}
++
++/** 单租户用量（区间增量聚合）。 */
++export interface TenantUsage extends ModelUsageStat {
++  by_model?: Record<string, ModelUsageStat> | null;
++}
++
++/** 用量查询响应（增量模式，[from, to) 左闭右开）。 */
++export interface UsageResponse {
++  from?: string;
++  to?: string;
++  window_semantics?: string;
++  tenants: Record<string, TenantUsage>;
++}
++
++/** 配额设置响应（tee-infer 返回当前生效配额）。 */
++export interface QuotaResponse {
++  tenant: string;
++  quota: number;
++}
++
++const BASE = '/v1/adminext/usage';
++
++export interface UsageQuery {
++  from?: string;
++  to?: string;
++  tenant?: string;
++}
++
++export const getUsage = (params: UsageQuery): Promise<UsageResponse> => {
++  return request.get<any, UsageResponse>(BASE, { params });
++};
++
++export const setQuota = (data: { tenant: string; max_tokens: number }): Promise<QuotaResponse> => {
++  return request.post<any, QuotaResponse>(`${BASE}/quota`, data);
 +};
