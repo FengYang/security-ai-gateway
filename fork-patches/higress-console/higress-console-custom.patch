@@ -2123,10 +2123,10 @@ index af8233c..2b460af 100644
    }
  }
 diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
-index 1a41985..8e5d301 100644
+index 1a41985..01ca12d 100644
 --- a/frontend/src/locales/en-US/translation.json
 +++ b/frontend/src/locales/en-US/translation.json
-@@ -22,7 +22,107 @@
+@@ -22,7 +22,136 @@
      "pluginManagement": "Plugin Management",
      "systemSettings": "System Settings",
      "mcpManagement": "MCP Management",
@@ -2135,7 +2135,8 @@ index 1a41985..8e5d301 100644
 +    "adminExtSecurityCenter": "Security Center (placeholder)",
 +    "adminExtCredentials": "Credential Hosting",
 +    "adminExtModels": "Model Catalog",
-+    "adminExtUsage": "Usage Dashboard"
++    "adminExtUsage": "Usage Dashboard",
++    "adminExtAccounts": "Accounts & Roles"
 +  },
 +  "adminExt": {
 +    "securityCenter": {
@@ -2231,15 +2232,43 @@ index 1a41985..8e5d301 100644
 +      "quotaTenantRequired": "Tenant ID is required",
 +      "quotaSubmit": "Set quota",
 +      "quotaSetOk": "Quota is in effect"
++    },
++    "accounts": {
++      "guide": "Self-managed accounts (independent Secret store): admin has full access, auditor is read-only. All write operations are audit-chained (G1; auto rollback on delivery failure); passwords stored as SHA-256(salt+password); 5 failed logins lock the account for 15 minutes.",
++      "empty": "No self-managed accounts (the native admin account is not listed; sign in with the console-initialized account)",
++      "refresh": "Refresh",
++      "add": "Create Account",
++      "reset": "Reset Password",
++      "delete": "Delete",
++      "deleteConfirm": "Delete this account?",
++      "deleteWarning": "Server-enforced: cannot delete the currently signed-in account or the last remaining admin.",
++      "submit": "OK",
++      "created": "Account created",
++      "passwordReset": "Password has been reset",
++      "deleted": "Account deleted",
++      "required": "Required",
++      "colUsername": "Username",
++      "usernameTip": "3-32 chars; letters, digits, underscore and hyphen only",
++      "usernameRule": "Username must be 3-32 chars (letters, digits, underscore, hyphen)",
++      "colDisplayName": "Display Name",
++      "colRole": "Role",
++      "roleAdmin": "Administrator",
++      "roleAuditor": "Auditor (read-only)",
++      "colActions": "Actions",
++      "password": "Password",
++      "passwordTip": "At least 8 chars with both letters and digits",
++      "passwordRule": "Password must be at least 8 chars with both letters and digits",
++      "confirm": "Confirm Password",
++      "passwordMismatch": "The two passwords do not match"
 +    }
    },
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
-index c148f42..8133156 100644
+index c148f42..cfffac8 100644
 --- a/frontend/src/locales/zh-CN/translation.json
 +++ b/frontend/src/locales/zh-CN/translation.json
-@@ -22,7 +22,107 @@
+@@ -22,7 +22,136 @@
      "pluginManagement": "插件配置",
      "systemSettings": "系统设置",
      "mcpManagement": "MCP管理",
@@ -2248,7 +2277,8 @@ index c148f42..8133156 100644
 +    "adminExtSecurityCenter": "安全中心（占位）",
 +    "adminExtCredentials": "凭据托管",
 +    "adminExtModels": "模型目录",
-+    "adminExtUsage": "用量看板"
++    "adminExtUsage": "用量看板",
++    "adminExtAccounts": "账号与角色"
 +  },
 +  "adminExt": {
 +    "securityCenter": {
@@ -2344,15 +2374,43 @@ index c148f42..8133156 100644
 +      "quotaTenantRequired": "请输入租户标识",
 +      "quotaSubmit": "设置配额",
 +      "quotaSetOk": "配额已生效"
++    },
++    "accounts": {
++      "guide": "自研账号（独立 Secret 账号表）：admin 全功能，auditor 只读。所有写操作落审计链（G1，投递失败自动回滚）；密码为 SHA-256(salt+password) 存储，登录失败 5 次锁定 15 分钟。",
++      "empty": "暂无自研账号（原生 admin 账号不在此列，凭控制台初始化账号登录）",
++      "refresh": "刷新",
++      "add": "创建账号",
++      "reset": "重置密码",
++      "delete": "删除",
++      "deleteConfirm": "确认删除该账号？",
++      "deleteWarning": "服务端强制：不得删除当前登录账号、不得删除最后一个 admin。",
++      "submit": "确定",
++      "created": "账号已创建",
++      "passwordReset": "密码已重置",
++      "deleted": "账号已删除",
++      "required": "必填",
++      "colUsername": "用户名",
++      "usernameTip": "3-32 位，仅字母/数字/下划线/连字符",
++      "usernameRule": "用户名须 3-32 位，仅字母/数字/下划线/连字符",
++      "colDisplayName": "显示名",
++      "colRole": "角色",
++      "roleAdmin": "管理员",
++      "roleAuditor": "审计员（只读）",
++      "colActions": "操作",
++      "password": "密码",
++      "passwordTip": "至少 8 位且同时含字母与数字",
++      "passwordRule": "密码至少 8 位且同时含字母与数字",
++      "confirm": "确认密码",
++      "passwordMismatch": "两次输入的密码不一致"
 +    }
    },
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/pages/_defaultProps.tsx b/frontend/src/pages/_defaultProps.tsx
-index f4c0ecb..5171165 100644
+index f4c0ecb..7337877 100644
 --- a/frontend/src/pages/_defaultProps.tsx
 +++ b/frontend/src/pages/_defaultProps.tsx
-@@ -1,8 +1,12 @@
+@@ -1,11 +1,16 @@
  import {
 +  ApiOutlined,
 +  AppstoreOutlined,
@@ -2365,7 +2423,11 @@ index f4c0ecb..5171165 100644
    RobotOutlined,
    SafetyCertificateOutlined,
    SettingOutlined,
-@@ -43,6 +47,32 @@ export default {
++  TeamOutlined,
+   UnorderedListOutlined,
+   UserOutlined,
+   WindowsOutlined,
+@@ -43,6 +48,40 @@ export default {
          path: '/dashboard',
          icon: <DashboardOutlined />,
        },
@@ -2395,9 +2457,354 @@ index f4c0ecb..5171165 100644
 +        path: '/admin-ext/models',
 +        icon: <AppstoreOutlined />,
 +      },
++      {
++        // ADMIN-EXT（自研扩展，vendor-fork 只增不减）：账号与角色管理（M3-A-2）
++        // D10：服务端强制 admin 角色；auditor 访问被后端拒绝（菜单不按角色隐藏——
++        // 当前会话 API 无角色声明，前端隐藏仅体验层且无角色依据，如实保留入口）。
++        name: 'menu.adminExtAccounts',
++        path: '/admin-ext/accounts',
++        icon: <TeamOutlined />,
++      },
        {
          name: 'menu.serviceSources',
          path: '/service-source',
+diff --git a/frontend/src/pages/admin-ext/accounts/index.tsx b/frontend/src/pages/admin-ext/accounts/index.tsx
+new file mode 100644
+index 0000000..69ddaf4
+--- /dev/null
++++ b/frontend/src/pages/admin-ext/accounts/index.tsx
+@@ -0,0 +1,331 @@
++import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
++import { PageContainer } from '@ant-design/pro-layout';
++import {
++  Alert,
++  Button,
++  Empty,
++  Form,
++  Input,
++  message,
++  Modal,
++  Popconfirm,
++  Select,
++  Space,
++  Spin,
++  Table,
++  Tag,
++} from 'antd';
++import { useCallback, useEffect, useState } from 'react';
++import { useTranslation } from 'react-i18next';
++import {
++  AdminExtAccountView,
++  createAccount,
++  deleteAccount,
++  listAccounts,
++  resetAccountPassword,
++} from '@/services/admin-ext-accounts';
++
++/**
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：账号与角色管理（M3-A-2）。
++ *
++ * 定位（docs/管理门户-细化方案.md §5「系统 → 账号与角色 [新/最小]」）：
++ * 自研账号（独立 K8s Secret 账号表）的列表/创建/重置密码/删除。
++ *
++ * 安全边界（§4，D10）：
++ *  - 全部端点服务端强制 admin 角色，auditor 访问本页将收到后端拒绝（前端隐藏入口
++ *    仅为体验手段、不承担安全职责；当前会话 API 无角色声明，故菜单不按角色隐藏）；
++ *  - 服务端硬约束（前端仅提示，不重复实现）：不得删除当前登录账号、
++ *    不得删除最后一个 admin（防运维自锁）、密码强度 ≥8 位含字母+数字；
++ *  - 密码二次确认缓解输错风险（登录失败 5 次锁定 15 分钟，输错代价高）；
++ *  - 所有写操作落审计链（G1，fail-closed）。
++ */
++
++const AccountManagement: React.FC = () => {
++  const { t } = useTranslation();
++  const [createForm] = Form.useForm();
++  const [resetForm] = Form.useForm();
++  const [list, setList] = useState<AdminExtAccountView[]>([]);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [createOpen, setCreateOpen] = useState(false);
++  const [resetTarget, setResetTarget] = useState<AdminExtAccountView | null>(null);
++  const [submitting, setSubmitting] = useState(false);
++
++  const reload = useCallback(() => {
++    setLoading(true);
++    listAccounts()
++      .then((resp) => {
++        setList(resp || []);
++        setError(null);
++      })
++      .catch((e) => setError(String(e)))
++      .finally(() => setLoading(false));
++  }, []);
++
++  useEffect(() => {
++    reload();
++  }, [reload]);
++
++  const openCreate = () => {
++    createForm.resetFields();
++    setCreateOpen(true);
++  };
++
++  const openReset = (u: AdminExtAccountView) => {
++    resetForm.resetFields();
++    setResetTarget(u);
++  };
++
++  const submitCreate = async () => {
++    const values = await createForm.validateFields();
++    setSubmitting(true);
++    try {
++      await createAccount({
++        username: values.username,
++        displayName: values.displayName,
++        role: values.role,
++        password: values.password,
++      });
++      message.success(t('adminExt.accounts.created'));
++      setCreateOpen(false);
++      reload();
++    } catch (e) {
++      message.error(String(e));
++    } finally {
++      setSubmitting(false);
++    }
++  };
++
++  const submitReset = async () => {
++    if (!resetTarget) {
++      return;
++    }
++    const values = await resetForm.validateFields();
++    setSubmitting(true);
++    try {
++      await resetAccountPassword(resetTarget.username, values.password);
++      message.success(t('adminExt.accounts.passwordReset'));
++      setResetTarget(null);
++      reload();
++    } catch (e) {
++      message.error(String(e));
++    } finally {
++      setSubmitting(false);
++    }
++  };
++
++  const remove = async (u: AdminExtAccountView) => {
++    try {
++      await deleteAccount(u.username);
++      message.success(t('adminExt.accounts.deleted'));
++      reload();
++    } catch (e) {
++      message.error(String(e));
++    }
++  };
++
++  const passwordRules = [
++    { required: true, message: t('adminExt.accounts.required') },
++    {
++      pattern: /^(?=.*[A-Za-z])(?=.*\d).{8,}$/,
++      message: t('adminExt.accounts.passwordRule'),
++    },
++  ];
++
++  const columns = [
++    {
++      title: t('adminExt.accounts.colUsername'),
++      dataIndex: 'username',
++      key: 'username',
++    },
++    {
++      title: t('adminExt.accounts.colDisplayName'),
++      dataIndex: 'displayName',
++      key: 'displayName',
++      render: (v: string) => v || '-',
++    },
++    {
++      title: t('adminExt.accounts.colRole'),
++      dataIndex: 'role',
++      key: 'role',
++      render: (v: string) =>
++        v === 'admin' ? (
++          <Tag color="geekblue">{t('adminExt.accounts.roleAdmin')}</Tag>
++        ) : (
++          <Tag color="orange">{t('adminExt.accounts.roleAuditor')}</Tag>
++        ),
++    },
++    {
++      title: t('adminExt.accounts.colActions'),
++      key: 'actions',
++      render: (_: unknown, u: AdminExtAccountView) => (
++        <Space>
++          <Button size="small" onClick={() => openReset(u)}>
++            {t('adminExt.accounts.reset')}
++          </Button>
++          <Popconfirm
++            title={t('adminExt.accounts.deleteConfirm')}
++            description={t('adminExt.accounts.deleteWarning')}
++            onConfirm={() => remove(u)}
++            okText={t('adminExt.accounts.delete')}
++          >
++            <Button size="small" danger>
++              {t('adminExt.accounts.delete')}
++            </Button>
++          </Popconfirm>
++        </Space>
++      ),
++    },
++  ];
++
++  return (
++    <PageContainer>
++      <Alert
++        type="info"
++        showIcon
++        message={t('adminExt.accounts.guide')}
++        style={{ marginBottom: 16 }}
++      />
++      {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />}
++
++      <Space style={{ marginBottom: 16 }}>
++        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
++          {t('adminExt.accounts.add')}
++        </Button>
++        <Button icon={<ReloadOutlined />} onClick={reload}>
++          {t('adminExt.accounts.refresh')}
++        </Button>
++      </Space>
++
++      {loading && (
++        <div style={{ textAlign: 'center', padding: 48 }}>
++          <Spin />
++        </div>
++      )}
++      {!loading && !error && list.length === 0 && (
++        <Empty description={t('adminExt.accounts.empty')} />
++      )}
++      {!loading && list.length > 0 && (
++        <Table
++          rowKey="username"
++          columns={columns}
++          dataSource={list}
++          pagination={false}
++          size="middle"
++        />
++      )}
++
++      <Modal
++        open={createOpen}
++        title={t('adminExt.accounts.add')}
++        onCancel={() => setCreateOpen(false)}
++        onOk={submitCreate}
++        confirmLoading={submitting}
++        okText={t('adminExt.accounts.submit')}
++        destroyOnClose
++      >
++        <Form form={createForm} layout="vertical">
++          <Form.Item
++            name="username"
++            label={t('adminExt.accounts.colUsername')}
++            extra={t('adminExt.accounts.usernameTip')}
++            rules={[
++              { required: true, message: t('adminExt.accounts.required') },
++              {
++                pattern: /^[A-Za-z0-9_-]{3,32}$/,
++                message: t('adminExt.accounts.usernameRule'),
++              },
++            ]}
++          >
++            <Input placeholder="auditor01" autoComplete="off" />
++          </Form.Item>
++          <Form.Item
++            name="displayName"
++            label={t('adminExt.accounts.colDisplayName')}
++          >
++            <Input placeholder="审计员" />
++          </Form.Item>
++          <Form.Item
++            name="role"
++            label={t('adminExt.accounts.colRole')}
++            rules={[{ required: true, message: t('adminExt.accounts.required') }]}
++          >
++            <Select>
++              <Select.Option value="admin">{t('adminExt.accounts.roleAdmin')}</Select.Option>
++              <Select.Option value="auditor">
++                {t('adminExt.accounts.roleAuditor')}
++              </Select.Option>
++            </Select>
++          </Form.Item>
++          <Form.Item
++            name="password"
++            label={t('adminExt.accounts.password')}
++            extra={t('adminExt.accounts.passwordTip')}
++            rules={passwordRules}
++          >
++            <Input.Password autoComplete="new-password" />
++          </Form.Item>
++          <Form.Item
++            name="confirm"
++            label={t('adminExt.accounts.confirm')}
++            dependencies={['password']}
++            rules={[
++              { required: true, message: t('adminExt.accounts.required') },
++              ({ getFieldValue }) => ({
++                validator(_, value) {
++                  if (!value || getFieldValue('password') === value) {
++                    return Promise.resolve();
++                  }
++                  return Promise.reject(new Error(t('adminExt.accounts.passwordMismatch')));
++                },
++              }),
++            ]}
++          >
++            <Input.Password autoComplete="new-password" />
++          </Form.Item>
++        </Form>
++      </Modal>
++
++      <Modal
++        open={!!resetTarget}
++        title={`${t('adminExt.accounts.reset')}：${resetTarget?.username || ''}`}
++        onCancel={() => setResetTarget(null)}
++        onOk={submitReset}
++        confirmLoading={submitting}
++        okText={t('adminExt.accounts.submit')}
++        destroyOnClose
++      >
++        <Form form={resetForm} layout="vertical">
++          <Form.Item
++            name="password"
++            label={t('adminExt.accounts.password')}
++            extra={t('adminExt.accounts.passwordTip')}
++            rules={passwordRules}
++          >
++            <Input.Password autoComplete="new-password" />
++          </Form.Item>
++          <Form.Item
++            name="confirm"
++            label={t('adminExt.accounts.confirm')}
++            dependencies={['password']}
++            rules={[
++              { required: true, message: t('adminExt.accounts.required') },
++              ({ getFieldValue }) => ({
++                validator(_, value) {
++                  if (!value || getFieldValue('password') === value) {
++                    return Promise.resolve();
++                  }
++                  return Promise.reject(new Error(t('adminExt.accounts.passwordMismatch')));
++                },
++              }),
++            ]}
++          >
++            <Input.Password autoComplete="new-password" />
++          </Form.Item>
++        </Form>
++      </Modal>
++    </PageContainer>
++  );
++};
++
++export default AccountManagement;
 diff --git a/frontend/src/pages/admin-ext/credentials/index.tsx b/frontend/src/pages/admin-ext/credentials/index.tsx
 new file mode 100644
 index 0000000..15e7adf
@@ -3514,6 +3921,61 @@ index 0000000..8fb1116
 +};
 +
 +export default SecurityCenter;
+diff --git a/frontend/src/services/admin-ext-accounts.ts b/frontend/src/services/admin-ext-accounts.ts
+new file mode 100644
+index 0000000..1947ffe
+--- /dev/null
++++ b/frontend/src/services/admin-ext-accounts.ts
+@@ -0,0 +1,49 @@
++import request from './request';
++
++/**
++ * ADMIN-EXT（自研扩展）：账号与角色管理 API 客户端（M3-A-2）。
++ *
++ * 后端：控制台 Java AdminExtAccountController /adminext-accounts
++ * （账号表 = 控制台自研独立 K8s Secret，不经 /v1/adminext/** 转发）。
++ *
++ * 安全（docs/管理门户-细化方案.md §4，D10）：
++ *  - 全部端点服务端强制 admin 角色（auditor 调用收到校验错误）；
++ *  - 列表响应经后端 sanitize（不含密码哈希/盐）；
++ *  - 服务端硬约束：不得删除当前登录账号、不得删除最后一个 admin（防运维自锁）；
++ *  - 所有写操作经审计投递落 G1 链（fail-closed：投递失败自动回滚并报错）。
++ */
++
++/** 账号视图（已脱敏，不含凭据字段）。 */
++export interface AdminExtAccountView {
++  username: string;
++  displayName?: string;
++  /** admin | auditor */
++  role: string;
++}
++
++/** 创建账号请求体。 */
++export interface AdminExtAccountCreate {
++  username: string;
++  displayName?: string;
++  /** admin | auditor */
++  role: string;
++  password: string;
++}
++
++const BASE = '/adminext-accounts';
++
++export const listAccounts = (): Promise<AdminExtAccountView[]> => {
++  return request.get<any, AdminExtAccountView[]>(BASE);
++};
++
++export const createAccount = (payload: AdminExtAccountCreate): Promise<void> => {
++  return request.post<any, void>(BASE, payload);
++};
++
++export const resetAccountPassword = (username: string, password: string): Promise<void> => {
++  return request.put<any, void>(`${BASE}/${username}/password`, { password });
++};
++
++export const deleteAccount = (username: string): Promise<void> => {
++  return request.delete<any, void>(`${BASE}/${username}`);
++};
 diff --git a/frontend/src/services/admin-ext-broker.ts b/frontend/src/services/admin-ext-broker.ts
 new file mode 100644
 index 0000000..7298b88
