@@ -207,6 +207,37 @@ func (c *adminAuditChain) append(e adminAuditEvent) error {
 	return nil
 }
 
+// list 返回事件分页副本（**倒序：最新在前**）与总数（M3-B 安全中心审计链查询）。
+func (c *adminAuditChain) list(limit, offset int) ([]adminAuditEvent, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	total := len(c.events)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= total || limit <= 0 {
+		return []adminAuditEvent{}, total
+	}
+	// 实际取用条数（容量按需分配，避免大 limit 触发巨额预分配）。
+	n := total - offset
+	if n > limit {
+		n = limit
+	}
+	// 倒序：内存链按追加序存储，反向切片取 [offset, offset+n)
+	out := make([]adminAuditEvent, 0, n)
+	for i := total - 1 - offset; i >= 0 && len(out) < n; i-- {
+		out = append(out, c.events[i])
+	}
+	return out, total
+}
+
+// lastHash 返回当前链尾哈希（空链 = 空串）。导出/状态视图用。
+func (c *adminAuditChain) lastHash() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastHex
+}
+
 // writeAnchorLocked 将当前链尾哈希追加写入锚定文件（须持锁调用）。
 // 锚定失败仅告警 + 指标，不阻断主链（B-3 定案：锚定是增强手段）。
 func (c *adminAuditChain) writeAnchorLocked() {

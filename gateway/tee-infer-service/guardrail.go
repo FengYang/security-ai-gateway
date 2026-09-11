@@ -31,6 +31,7 @@ type guardrail struct {
 	piiPatterns []*regexp.Regexp
 	sqlPatterns []*regexp.Regexp
 	classifier  model.Classifier // GF.4.3：语义分类器（nil = 关闭；现以关键词规则占位）
+	injTerms    []string         // 注入关键词（快照展示用；检测经 classifier）
 }
 
 // newGuardrail 构造 guardrail；正则编译失败 panic（服务拒绝启动，符合 fail-closed）。
@@ -73,7 +74,36 @@ func newGuardrail() *guardrail {
 		rules = append(rules, [2]string{"prompt_injection", term})
 	}
 	g.classifier = model.NewKeywordClassifier(rules...)
+	g.injTerms = injTerms
 	return g
+}
+
+// guardrailSnapshot Guardrail 规则快照（M3-B 安全中心只读展示）。
+//
+// 安全取舍（最小披露）：只暴露**类别与规则条数**，不返回正则/关键词原文——
+// 原文等同绕过手册（管理面虽受 admin 令牌保护，仍按最小披露原则）；
+// 完整性核对（规则是否被改动）由类别与条数承担，明细留在 TEE 内。
+type guardrailSnapshot struct {
+	Enabled          bool   `json:"enabled"` // 恒 true（fail-closed 设计，无关闭开关）
+	PIICategories    string `json:"pii_categories"`
+	SQLCategories    string `json:"sql_categories"`
+	PIIRules         int    `json:"pii_rules"`
+	SQLRules         int    `json:"sql_rules"`
+	InjectionTerms   int    `json:"injection_terms"`
+	PromptClassifier bool   `json:"prompt_classifier"`
+}
+
+// snapshot 返回规则快照（类别 + 条数；供 /config 端点展示）。
+func (g *guardrail) snapshot() guardrailSnapshot {
+	return guardrailSnapshot{
+		Enabled:          true,
+		PIICategories:    "手机号/身份证/邮箱/银行卡",
+		SQLCategories:    "select-from/union/drop/insert/delete/update/恒真式/注释",
+		PIIRules:         len(g.piiPatterns),
+		SQLRules:         len(g.sqlPatterns),
+		InjectionTerms:   len(g.injTerms),
+		PromptClassifier: g.classifier != nil,
+	}
 }
 
 // check 检测文本；命中返回第一个命中项（确定性顺序），否则 nil。

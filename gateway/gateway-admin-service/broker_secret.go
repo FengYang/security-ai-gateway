@@ -506,6 +506,24 @@ func (h *brokerSecretHandler) getOne(w http.ResponseWriter, name string) {
 	writeJSON(w, http.StatusOK, v)
 }
 
+// applyProvider 内部应用 provider 凭据（写 .env + 重载），供高敏变更执行器复用（M3-C）。
+//
+// 与 upsert 的差异：不做请求/角色解析、**不落审计**——审计由变更链以 change_execute
+// 承担（同一变更不双链重复留痕）；参数校验由变更执行器在提交阶段完成。
+func (h *brokerSecretHandler) applyProvider(name, upstream, key string, prefixes []string) error {
+	if len(prefixes) == 0 {
+		prefixes = defaultBrokerPathPrefixes
+	}
+	if err := writeProviderFile(h.settings.secretsDir, name, upstream, key, prefixes); err != nil {
+		log.Printf("[broker] 凭据写入失败 provider=%s（错误不含 Key）: %v", name, err)
+		return fmt.Errorf("凭据写入失败")
+	}
+	if err := h.reloadNow(); err != nil {
+		return fmt.Errorf("凭据已落盘但配置重载失败（旧配置仍生效，请检查目录内容）")
+	}
+	return nil
+}
+
 // upsert 新建或全量更新 provider 凭据（写操作，仅 admin）。
 func (h *brokerSecretHandler) upsert(w http.ResponseWriter, r *http.Request, name string) {
 	var req upsertRequest

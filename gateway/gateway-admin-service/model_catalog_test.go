@@ -185,7 +185,7 @@ func TestLoadAIRoutes(t *testing.T) {
 // newTestModelsMux 组装带模型目录端点的管理面路由（与 main 同构）。
 func newTestModelsMux(t *testing.T, s *modelCatalogSettings) *http.ServeMux {
 	t.Helper()
-	return buildAdminMux(testCfg(), nil, nil, newModelCatalogHandler(s), nil, nil, false)
+	return buildAdminMux(testCfg(), nil, nil, newModelCatalogHandler(s), nil, nil, nil, nil, false)
 }
 
 // testModelCatalogSettings 生成指向临时 CR 文件 + ai-route 目录的配置并落盘夹具。

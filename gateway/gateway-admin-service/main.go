@@ -47,6 +47,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -115,8 +116,10 @@ func handleEcho(w http.ResponseWriter, r *http.Request) {
 // mh 为模型目录 handler（M2 A-1'，只读特性，恒注册；数据源缺失返回空列表）。
 // uh 为用量代理 handler（M2 A-2'，恒注册；数据源未配置时端点返回 503）。
 // ah 为账号管理审计投递 handler（M3-A，恒注册；审计链未启用时端点返回 503）。
+// sch 为安全中心数据 handler（M3-B，恒注册；G1 链/tee-infer 数据源缺失时按 503 语义返回）。
+// cs 为高敏变更复核 handler（M3-C，nil = 特性关闭；启用后强制 submitter≠reviewer）。
 // legacyBroker 为兼容期开关：true 时管理面端口同时暴露 broker 中转（三步收口第 1 步）。
-func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *modelCatalogHandler, uh *usageHandler, ah *auditEventHandler, legacyBroker bool) *http.ServeMux {
+func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *modelCatalogHandler, uh *usageHandler, ah *auditEventHandler, sch *secCenterHandler, cs *changeStore, legacyBroker bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/metrics", handleMetrics)
@@ -131,6 +134,17 @@ func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *
 	}
 	if ah != nil {
 		mux.HandleFunc(auditEventsPath, authMiddleware(cfg, ah.handle))
+	}
+	if sch != nil {
+		mux.HandleFunc(secStatusPath, authMiddleware(cfg, sch.handleSecStatus))
+		mux.HandleFunc(auditChainPath, authMiddleware(cfg, sch.handleAuditChain))
+		mux.HandleFunc(auditChainVerifyPath, authMiddleware(cfg, sch.handleAuditChainVerify))
+		mux.HandleFunc(auditChainExportPath, authMiddleware(cfg, sch.handleAuditChainExport))
+		mux.HandleFunc(teeAuditPath, authMiddleware(cfg, sch.handleTeeAudit))
+	}
+	if cs != nil {
+		mux.HandleFunc(changeAPIBase, authMiddleware(cfg, cs.handleList))
+		mux.HandleFunc(changeAPIBase+"/", authMiddleware(cfg, cs.handleItem))
 	}
 
 	var brokerHealthy func() bool
@@ -215,10 +229,22 @@ func main() {
 	// 模型目录（M2 A-1'）：只读特性，数据源缺失时返回空列表（不 fail-closed 启动）。
 	mh := newModelCatalogHandler(loadModelCatalogSettings())
 	// 用量代理（M2 A-2'）：恒注册；数据源未配置时端点返回 503（不静默返回空数据）。
-	uh := newUsageHandler(loadUsageSettings(), auditChain)
+	us := loadUsageSettings()
+	uh := newUsageHandler(us, auditChain)
 	// 账号管理审计投递（M3-A）：恒注册；审计链未启用时端点返回 503。
 	ah := &auditEventHandler{chain: auditChain}
-	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, ah, bs.legacyPort)
+	// 安全中心数据端点（M3-B）：恒注册；G1 链/tee-infer 数据源缺失时按 503 语义返回。
+	sch := newSecCenterHandler(auditChain, us)
+	// 高敏变更复核（M3-C）：ADMIN_CHANGES_FILE 未配置 = 特性关闭（变更端点不注册）；
+	// 启用后强制 submitter≠reviewer，凭据类动作明文走 0600 暂存文件（不入变更单）。
+	cs, err := newChangeStore(os.Getenv("ADMIN_CHANGES_FILE"), auditChain, sh, us.url, us.token)
+	if err != nil {
+		log.Fatalf("变更单存储初始化失败（fail-closed）：%v", err)
+	}
+	if cs == nil {
+		log.Printf("提示：高敏变更复核未启用（ADMIN_CHANGES_FILE 未配置），变更端点不注册")
+	}
+	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, ah, sch, cs, bs.legacyPort)
 
 	if bh != nil {
 		if bs.brokerListen == cfg.listen {

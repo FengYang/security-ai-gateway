@@ -17,6 +17,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"security-ai-gateway/cipher/mask"
@@ -125,25 +126,30 @@ type teeServer struct {
 	protoVersion  string             // 南向协议版本声明（C-4：默认 protocol.Version，部署/测试可覆盖）
 	// P2a：PII 处理模式（block = 拦截（默认，fail-closed）/ mask = 脱敏替换后放行）；
 	// SQL 注入/提示注入在任何模式下均拦截。
-	piiMode         string
-	systemPrompt    string                  // 提示词装饰：非空时插入 system 消息（记录于 transformed_hash）
-	usage           map[string]*usageRecord // 租户用量
-	quota           map[string]int64        // 租户 token 配额上限（累计输入+输出；<=0 = 不限，P1）
-	quotaDefault    int64                   // 未单独配置租户的默认配额（<=0 = 不限）
-	audit           *auditChain             // 审计哈希链
-	guard           *guardrail              // 内容安全检测（M9-4）
-	metrics         *otpmaskMetrics         // Prometheus 指标
-	seen            map[string]bool
-	seenAt          map[string]int64       // request_id -> 首见时间戳（TTL 清理用）
-	sessions        map[string]*teeSession // 挑战-响应会话（session_id -> 会话）
-	recomputeStates *recomputeStates       // 补算层序状态机（会话级）
-	weightProvider  LayerWeightProvider    // 层权重提供器（掩码像计算）
-	route           *RouteConfig           // 双路线路由配置
-	tokenizer       Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
-	cache           model.SemanticCache    // GF.4.1 精确缓存（演示实现；nil = 关闭）
-	billing         *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
-	meterToken      string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
-	mu              sync.Mutex
+	piiMode string
+	// M3-B：Guardrail 运行时降级（高敏变更复核通过后写入；空 = 沿用启动参数）。
+	// 只允许在 block/mask 之间切换，不提供"关闭 Guardrail"开关（安全边界）。
+	piiModeOverride atomic.Value
+	// M3-B：Guardrail 运行时配置持久化文件（-guardrail-config；空 = 不持久化）。
+	guardrailCfgPath string
+	systemPrompt     string                  // 提示词装饰：非空时插入 system 消息（记录于 transformed_hash）
+	usage            map[string]*usageRecord // 租户用量
+	quota            map[string]int64        // 租户 token 配额上限（累计输入+输出；<=0 = 不限，P1）
+	quotaDefault     int64                   // 未单独配置租户的默认配额（<=0 = 不限）
+	audit            *auditChain             // 审计哈希链
+	guard            *guardrail              // 内容安全检测（M9-4）
+	metrics          *otpmaskMetrics         // Prometheus 指标
+	seen             map[string]bool
+	seenAt           map[string]int64       // request_id -> 首见时间戳（TTL 清理用）
+	sessions         map[string]*teeSession // 挑战-响应会话（session_id -> 会话）
+	recomputeStates  *recomputeStates       // 补算层序状态机（会话级）
+	weightProvider   LayerWeightProvider    // 层权重提供器（掩码像计算）
+	route            *RouteConfig           // 双路线路由配置
+	tokenizer        Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
+	cache            model.SemanticCache    // GF.4.1 精确缓存（演示实现；nil = 关闭）
+	billing          *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
+	meterToken       string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
+	mu               sync.Mutex
 }
 
 // usageRecord 租户用量计量（token 级）。
@@ -921,7 +927,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	inputText := strings.Builder{}
 	for i := range msgs {
 		if hit := s.guard.check(msgs[i].Content); hit != nil {
-			if hit.Category == "pii" && s.piiMode == "mask" {
+			if hit.Category == "pii" && s.currentPiiMode() == "mask" {
 				masked, n := s.guard.maskPII(msgs[i].Content)
 				if n > 0 {
 					msgs[i].Content = masked
@@ -1166,6 +1172,161 @@ func (s *teeServer) hasValidSession() bool {
 	}
 	return false
 }
+
+// currentPiiMode 当前生效的 PII 模式：运行时覆盖（高敏复核后写入）优先，否则启动参数。
+func (s *teeServer) currentPiiMode() string {
+	if v, ok := s.piiModeOverride.Load().(string); ok && v != "" {
+		return v
+	}
+	return s.piiMode
+}
+
+// secConfigView 安全配置只读快照（M3-B 安全中心「密态链路状态 / Guardrail 策略」数据源）。
+type secConfigView struct {
+	ProtocolVersion  string            `json:"protocol_version"`
+	RequireAttest    bool              `json:"require_attest"`
+	AdminAuthEnabled bool              `json:"admin_auth_enabled"`
+	PIIMode          string            `json:"pii_mode"`
+	PIIModeSource    string            `json:"pii_mode_source"` // startup | runtime
+	SystemPromptSet  bool              `json:"system_prompt_set"`
+	AuditEnabled     bool              `json:"audit_enabled"`
+	Guardrail        guardrailSnapshot `json:"guardrail"`
+}
+
+// handleConfig 安全配置只读查询：GET /config（管理令牌，M3-B）。
+//
+// 定位：安全中心展示的数据源。**只读**——Guardrail 变更不在此端点，
+// 须经门户高敏变更复核（submitter≠reviewer）后由门户执行器调用
+// POST /config/guardrail（方案 §3.2/§5.3）。
+func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAdmin(r) {
+		http.Error(w, "管理认证失败", http.StatusUnauthorized)
+		return
+	}
+	view := secConfigView{
+		ProtocolVersion:  s.protoVersion,
+		RequireAttest:    s.requireAttest,
+		AdminAuthEnabled: s.adminToken != "",
+		PIIMode:          s.currentPiiMode(),
+		PIIModeSource:    "startup",
+		SystemPromptSet:  s.systemPrompt != "",
+		AuditEnabled:     s.audit != nil,
+	}
+	if v, ok := s.piiModeOverride.Load().(string); ok && v != "" {
+		view.PIIModeSource = "runtime"
+	}
+	if s.guard != nil {
+		view.Guardrail = s.guard.snapshot()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(view)
+}
+
+// guardrailConfigRequest Guardrail 运行时变更请求体（M3-B）。
+type guardrailConfigRequest struct {
+	PIIMode string `json:"pii_mode"` // block | mask
+}
+
+// guardrailConfigRecord 运行时 Guardrail 配置持久化记录。
+type guardrailConfigRecord struct {
+	PIIMode   string `json:"pii_mode"`
+	Actor     string `json:"actor"` // 复核通过后的执行人（门户透传，留痕）
+	RequestID string `json:"request_id"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+// handleGuardrailConfig Guardrail 运行时降级：POST /config/guardrail（管理令牌，M3-B）。
+//
+// 语义与边界：
+//   - 仅允许 pii_mode 在 block/mask 间切换（数据保护强度档位）；**不提供关闭开关**
+//     （SQL 注入/提示注入恒拦截、PII 至少脱敏——安全边界内不放开关）；
+//   - 治理链在 gateway-admin-service（高敏变更单 submitter≠reviewer 复核通过后执行）；
+//     本端点只做"配置生效 + 持久化 + 落 tee-infer 审计链"；
+//   - 持久化文件由 -guardrail-config 指定；未指定则仅进程内生效（重启回退启动参数）；
+//   - 审计落链沿用 tee-infer 既有语义（写失败仅告警，数据面可用性优先）；
+//     治理级 fail-closed 由门户侧 G1 链承担（见 gateway-admin-service change.go）。
+func (s *teeServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAdmin(r) {
+		http.Error(w, "管理认证失败", http.StatusUnauthorized)
+		return
+	}
+	var req guardrailConfigRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "请求体须为 JSON", http.StatusBadRequest)
+		return
+	}
+	if req.PIIMode != "block" && req.PIIMode != "mask" {
+		http.Error(w, "pii_mode 仅允许 block|mask（不提供 Guardrail 关闭开关）", http.StatusBadRequest)
+		return
+	}
+	actor := r.Header.Get("X-Admin-Actor")
+	reqID := r.Header.Get("X-Request-ID")
+
+	// 持久化（可选）：未配置路径则仅进程内生效。
+	if s.guardrailCfgPath != "" {
+		rec := guardrailConfigRecord{
+			PIIMode: req.PIIMode, Actor: actor, RequestID: reqID, UpdatedAt: time.Now().UnixNano(),
+		}
+		raw, err := json.Marshal(rec)
+		if err != nil {
+			http.Error(w, "配置序列化失败", http.StatusInternalServerError)
+			return
+		}
+		if err := os.WriteFile(s.guardrailCfgPath, append(raw, '\n'), 0o600); err != nil {
+			http.Error(w, "配置持久化失败", http.StatusInternalServerError)
+			return
+		}
+	}
+	s.piiModeOverride.Store(req.PIIMode)
+	if s.audit != nil {
+		s.audit.append(AuditEvent{
+			TenantID:        "-",
+			UserID:          actor,
+			RequestID:       reqID,
+			Action:          "guardrail_config",
+			Result:          "ok",
+			PayloadSHA:      fmt.Sprintf("%x", sha256.Sum256([]byte("pii_mode="+req.PIIMode))),
+			TransformedHash: "pii_mode=" + req.PIIMode,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"pii_mode": req.PIIMode, "status": "applied"})
+}
+
+// loadGuardrailOverride 启动时恢复运行时 Guardrail 配置（M3-B）。
+//
+// 语义：文件存在且合法 → 覆盖启动参数（复核结果须跨重启保持，否则降级会被重启
+// "悄悄回滚"）；文件缺失/解析失败/取值非法 → 沿用启动参数（不阻断启动，
+// 由 /config 的 pii_mode_source=startup 如实体现）。
+func (s *teeServer) loadGuardrailOverride() {
+	if s.guardrailCfgPath == "" {
+		return
+	}
+	raw, err := os.ReadFile(s.guardrailCfgPath)
+	if err != nil {
+		return
+	}
+	var rec guardrailConfigRecord
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &rec); err != nil {
+		log.Printf("[tee] Guardrail 运行时配置解析失败（沿用启动参数）：%v", err)
+		return
+	}
+	if rec.PIIMode != "block" && rec.PIIMode != "mask" {
+		log.Printf("[tee] Guardrail 运行时配置 pii_mode=%q 非法（沿用启动参数）", rec.PIIMode)
+		return
+	}
+	s.piiModeOverride.Store(rec.PIIMode)
+	log.Printf("[tee] Guardrail 运行时配置已恢复：pii_mode=%s actor=%s", rec.PIIMode, rec.Actor)
+}
+
 func (s *teeServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if !s.checkAdmin(r) {
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
@@ -1447,6 +1608,7 @@ func main() {
 	piiMode := flag.String("pii-mode", "block", "PII 处理模式：block（拦截，默认，fail-closed）| mask（脱敏替换后放行，P2a）；SQL 注入/提示注入任何模式均拦截")
 	systemPrompt := flag.String("system-prompt", "", "提示词装饰：非空时在 text 载荷 messages 头部插入 system 消息（P2a，记录于审计 transformed_hash）")
 	protoVersion := flag.String("protocol-version", protocol.Version, "南向协议版本声明（C-4 版本一致性；默认 protocol.Version）")
+	guardrailCfg := flag.String("guardrail-config", "", "Guardrail 运行时配置持久化文件（M3-B：高敏复核写入的 pii_mode）；为空 = 仅进程内生效，重启回退 -pii-mode")
 	flag.Parse()
 
 	// 双路线路由配置
@@ -1599,32 +1761,35 @@ func main() {
 
 	srv := &teeServer{
 		km: km, kSig: kSig, attest: *attestToken,
-		enclave:         encl,
-		requireAttest:   *requireAttest,
-		adminToken:      *adminToken,
-		meterToken:      *meterToken,                                    // GA-计费 P1-2：独立只读计量令牌（/usage 最小权限）
-		billing:         newBillingWebhook(*billingURL, *billingSecret), // GA-计费 P1-1：nil = 推送关闭（拉取为主）
-		model:           eng,
-		cmaasEngine:     cmaasEng,
-		protoVersion:    *protoVersion,
-		piiMode:         *piiMode,
-		systemPrompt:    *systemPrompt,
-		seen:            make(map[string]bool),
-		seenAt:          make(map[string]int64),
-		sessions:        make(map[string]*teeSession),
-		recomputeStates: newRecomputeStates(),
-		weightProvider:  NewMockWeightProvider(32),
-		route:           routeCfg,
-		tokenizer:       nil,                       // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
-		cache:           model.NewExactCache(1024), // GF.4.1：精确缓存演示（LRU 1024）；真机替换为语义缓存
-		tenants:         make(map[string]*teecore.KeyManager),
-		usage:           make(map[string]*usageRecord),
-		quota:           make(map[string]int64),
-		quotaDefault:    *tokenQuota,
-		audit:           audit,
-		guard:           newGuardrail(),
-		metrics:         newMetrics(),
+		enclave:          encl,
+		requireAttest:    *requireAttest,
+		adminToken:       *adminToken,
+		meterToken:       *meterToken,                                    // GA-计费 P1-2：独立只读计量令牌（/usage 最小权限）
+		billing:          newBillingWebhook(*billingURL, *billingSecret), // GA-计费 P1-1：nil = 推送关闭（拉取为主）
+		model:            eng,
+		cmaasEngine:      cmaasEng,
+		protoVersion:     *protoVersion,
+		piiMode:          *piiMode,
+		guardrailCfgPath: *guardrailCfg,
+		systemPrompt:     *systemPrompt,
+		seen:             make(map[string]bool),
+		seenAt:           make(map[string]int64),
+		sessions:         make(map[string]*teeSession),
+		recomputeStates:  newRecomputeStates(),
+		weightProvider:   NewMockWeightProvider(32),
+		route:            routeCfg,
+		tokenizer:        nil,                       // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
+		cache:            model.NewExactCache(1024), // GF.4.1：精确缓存演示（LRU 1024）；真机替换为语义缓存
+		tenants:          make(map[string]*teecore.KeyManager),
+		usage:            make(map[string]*usageRecord),
+		quota:            make(map[string]int64),
+		quotaDefault:     *tokenQuota,
+		audit:            audit,
+		guard:            newGuardrail(),
+		metrics:          newMetrics(),
 	}
+	// M3-B：恢复运行时 Guardrail 配置（高敏复核写入的 pii_mode，跨重启保持）。
+	srv.loadGuardrailOverride()
 	go srv.seenCleanup()                                           // 防重放集合 TTL 清理
 	go srv.sessionCleanup()                                        // 远程证明会话 TTL 清理
 	go newReconciler(audit, srv.usage, &srv.mu, srv.metrics).run() // 审计-计费对账
@@ -1633,16 +1798,18 @@ func main() {
 	mux.HandleFunc("/attest/complete", srv.handleAttestComplete)
 	mux.HandleFunc("/key/issue", srv.handleKeyIssue)
 	mux.HandleFunc("/v1/infer", srv.handleInfer)
-	mux.HandleFunc("/v1/recompute", srv.handleRecompute)   // 路线 2 非线性补算
-	mux.HandleFunc("/infer", srv.handleInfer)              // 网关路由别名
-	mux.HandleFunc("/usage", srv.handleUsage)              // M9-2 用量
-	mux.HandleFunc("/usage/quota", srv.handleQuota)        // P1 配额设置
-	mux.HandleFunc("/audit", srv.handleAudit)              // M9-3 审计
-	mux.HandleFunc("/audit/verify", srv.handleAuditVerify) // M9-3 哈希链校验
-	mux.HandleFunc("/audit/anchor", srv.handleAuditAnchor) // C-5 审计锚定
-	mux.HandleFunc("/metrics", srv.handleMetrics)          // M10 可观测性
-	mux.HandleFunc("/healthz", srv.handleHealthz)          // 探针与证明状态联动
-	mux.HandleFunc("/healthz/live", srv.handleHealthz)     // liveness
+	mux.HandleFunc("/v1/recompute", srv.handleRecompute)           // 路线 2 非线性补算
+	mux.HandleFunc("/infer", srv.handleInfer)                      // 网关路由别名
+	mux.HandleFunc("/usage", srv.handleUsage)                      // M9-2 用量
+	mux.HandleFunc("/usage/quota", srv.handleQuota)                // P1 配额设置
+	mux.HandleFunc("/audit", srv.handleAudit)                      // M9-3 审计
+	mux.HandleFunc("/audit/verify", srv.handleAuditVerify)         // M9-3 哈希链校验
+	mux.HandleFunc("/audit/anchor", srv.handleAuditAnchor)         // C-5 审计锚定
+	mux.HandleFunc("/metrics", srv.handleMetrics)                  // M10 可观测性
+	mux.HandleFunc("/config", srv.handleConfig)                    // M3-B 安全中心：配置只读快照
+	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig) // M3-B 高敏复核：Guardrail 降级生效点
+	mux.HandleFunc("/healthz", srv.handleHealthz)                  // 探针与证明状态联动
+	mux.HandleFunc("/healthz/live", srv.handleHealthz)             // liveness
 
 	defer audit.Close() // WORM 模式落盘文件随进程退出关闭
 

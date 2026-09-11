@@ -123,6 +123,10 @@ higress-standalone/wasmplugins/ai-proxy.yaml.bak-*
 higress-standalone/wasmplugins/ai-proxy.internal.yaml
 higress-standalone/wasmplugins/ai-statistics-*.yaml
 
+# 自研账号表 Secret（M3-A：含 serverKey 与密码哈希，运行时由控制台生成，勿入库；
+# 账号基线由门户「账号与角色」页维护，展示环境按需重建）
+higress-standalone/secrets/higress-console-adminext-users.yaml
+
 # ===== 归档的 HTML 导出快照（含大体积字体/echarts 资产，权威文本版在 docs/*.md）=====
 docs/archive/html-snapshots/
 
