@@ -132,3 +132,8 @@ docs/archive/html-snapshots/
 
 # ===== 管理门户 vendor-fork 本地工具（JDK/Maven settings 等，不入库）=====
 .tools/
+
+# ===== Guardrail 基准语料（生成物，不入库）=====
+# corpus.jsonl 由 scripts/build-guardrail-bench.ps1 生成（含第三方数据集内容 + 体积），
+# 入库的是「生成脚本 + sources.json 清单 + README」，复现步骤见该目录 README。
+gateway/tee-infer-service/testdata/guardrail-bench/corpus.jsonl

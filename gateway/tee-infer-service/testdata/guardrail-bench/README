@@ -1,0 +1,68 @@
+Guardrail 基准集（Phase 2 门禁 #1「Guardrail 检出 ≥95%」）
+=========================================================
+
+用途
+----
+把「Guardrail 检出率」从"规则+单测有、无可量化基准"变成可取数、可复跑、可断言的指标，
+并给出当前实现（关键词占位分类器）的真实能力基线，作为 GF.4.3 分类器选型的输入。
+
+门禁口径（与 guardrail_bench_test.go 一致）
+------------------------------------------
+  门禁①  规则目标检出率 = (scope=rule 且 expect=block 的命中数) / (同集合总数)   ≥ 95%
+  门禁②  合成负样本误报率 = (scope=benign 且 expect=allow 且非 known_fp 的被拦数) / (同集合总数) ≤ 2%
+  仅报告  scope=semantic（公开集语义越狱）、scope=benign_public（公开集正常样本）、known_fp（已识别固有误报）
+
+为什么分 scope 卡阈值：公开集越狱样本多为**语义**越狱（角色扮演/DAN 变体等），当前实现是
+19 个关键词占位，天然覆盖不到；若把它们并入 ≥95% 门禁，门禁会长期常红而失去信号价值。
+故公开集样本只报告、不卡阈值，如实呈现"能力缺口 vs 规则覆盖"两件不同的事。
+
+语料为什么不入库
+----------------
+语料含第三方数据集内容且有体积，故**不入库**；入库的是「生成脚本 + sources.json 清单」，
+可离线复跑重建：
+
+    powershell -ExecutionPolicy Bypass -File scripts\build-guardrail-bench.ps1
+
+产出：testdata/guardrail-bench/corpus.jsonl（约 267 行，JSONL，一行一案）。
+公开集部分需联网（HF datasets-server，脚本内置重试）；网络不可达时公开集取不到，
+合成族（rule / benign / known_fp）仍会生成，门禁①②照常生效。
+
+单行格式
+--------
+  {"id","source","category","scope","expect","variant","text","note"[,"known_fp":true]}
+  source: synthetic | <hf dataset id>@<sha12>
+  scope : rule | benign | semantic | benign_public
+  expect: block | allow
+
+当前基线（2026-09-11，语料 267 行）
+-----------------------------------
+  门禁①  61/61   = 100%    （pii 21/21、sql_injection 18/18、prompt_injection 22/22）
+  门禁②  0/40    = 0%
+  仅报告  公开集语义越狱检出率 12/100 = 12%   ← 关键缺口，分类器选型依据
+  仅报告  公开集正常样本误报率 1/60  = 1.67%
+  仅报告  已知固有误报命中 6/6（16-19 位数字 / `--` 分隔 / "请忽略"过宽 / SQL 语法讲解）
+
+已知规则缺陷（known_fp 族，6 条，均为真误报，已量化未修）
+--------------------------------------------------------
+  1. 16-19 位纯数字被判银行卡：订单号/时间戳/长编号（无 Luhn 校验）
+  2. 字母前缀 + 16 位数字（如 A1234567890123456）
+  3. `--` 规则过宽：Markdown 表格分隔符 `|---|---|` 即命中
+  4. 关键词"请忽略"过宽：正常语句"请忽略我的笔误"被拦
+  5. SQL 规则过宽：正常提问中的"select 字段 from 表"讲解被拦
+  上述未纳入门禁②（否则门禁天生红），单列统计作为**规则改进水位**；修一条即应移除对应 known_fp 标记。
+
+更新流程
+--------
+  1. 调整语料：改 scripts/build-guardrail-bench.ps1 内的合成族，或调 -AttackPerSet/-BenignPerSet
+  2. 重跑生成脚本 → 记录新的 corpus 行数与 sha256 → 更新 sources.json 的 baseline 字段
+  3. go test -mod=mod ./gateway/tee-infer-service/ -run TestGuardrailBench -v
+  4. 更换语义分类器（GF.4.3）后：scope=semantic 的检出率应显著上升，
+     此时可考虑把 semantic 纳入阈值门禁（本文件与测试同步改）
+
+许可与合规
+----------
+  - deepset/prompt-injections、jackhhao/jailbreak-classification：apache-2.0（HF API 核实）
+  - 候选未启用：swisskyrepo/PayloadsAllTheThings（MIT）、verazuo/jailbreak_llms（MIT）
+  - 排除：lmsys/toxic-chat（cc-by-nc-4.0，非商用）、ai4privacy/pii-masking-200k（含真实 PII，红线）
+  - PII 族与易误报负样本族**全部合成**，不含任何真实个人信息
+  - 详见 sources.json
