@@ -486,10 +486,10 @@ index af8233c..2b460af 100644
    }
  }
 diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
-index 1a41985..f00c331 100644
+index 1a41985..8e5d301 100644
 --- a/frontend/src/locales/en-US/translation.json
 +++ b/frontend/src/locales/en-US/translation.json
-@@ -22,7 +22,80 @@
+@@ -22,7 +22,107 @@
      "pluginManagement": "Plugin Management",
      "systemSettings": "System Settings",
      "mcpManagement": "MCP Management",
@@ -515,7 +515,11 @@ index 1a41985..f00c331 100644
 +      "enabled": "enabled",
 +      "disabled": "disabled",
 +      "failureThreshold": "failure threshold",
-+      "healthCheckModel": "probe model"
++      "healthCheckModel": "probe model",
++      "runtimeTitle": "Runtime (secure-link metering)",
++      "runtimeDenied": "Denied (deny)",
++      "runtimeGuide": "Metering scope = secure link (tee-infer audit chain, cumulative); plaintext direct /provider/* is not metered; no provider dimension in metering, so per-provider aggregation is not shown; failover downgrade events have no collection point yet and are not displayed.",
++      "runtimeUnavailable": "Usage data source not configured or unreachable (runtime metering unavailable, not zero-filled)"
 +    },
 +    "credentials": {
 +      "guide": "Write the vendor API key here: it is stored in the broker credential directory, so the WasmPlugin CR holds no plaintext token. After saving, copy the generated customUrl into Tech Config → AI Service Providers (leave tokens empty).",
@@ -567,15 +571,38 @@ index 1a41985..f00c331 100644
 +      "modePlaintext": "Plaintext key",
 +      "modeDirect": "Direct",
 +      "weight": "Weight"
++    },
++    "usage": {
++      "guide": "Metering comes from the secure inference link (tee-infer audit chain, incremental aggregation over [from, to)); plaintext direct links are not metered. Amounts are not shown (no price table yet).",
++      "empty": "No metering data in this window",
++      "refresh": "Refresh",
++      "range24h": "Last 24 hours",
++      "range7d": "Last 7 days",
++      "range30d": "Last 30 days",
++      "tenantFilterPlaceholder": "Filter by tenant (editable)",
++      "totalRequests": "Total requests",
++      "tokensIn": "Input tokens",
++      "tokensOut": "Output tokens",
++      "requests": "Requests",
++      "trend": "Usage trend",
++      "tenantTable": "Tenant usage",
++      "tenant": "Tenant",
++      "model": "Model",
++      "quotaTitle": "Quota settings",
++      "quotaGuide": "Set the tenant token quota cap (admin only; writes are audit-logged). max_tokens <= 0 removes the limit.",
++      "quotaTenantPlaceholder": "Tenant ID (e.g. acme)",
++      "quotaTenantRequired": "Tenant ID is required",
++      "quotaSubmit": "Set quota",
++      "quotaSetOk": "Quota is in effect"
 +    }
    },
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
-index c148f42..88ed60b 100644
+index c148f42..8133156 100644
 --- a/frontend/src/locales/zh-CN/translation.json
 +++ b/frontend/src/locales/zh-CN/translation.json
-@@ -22,7 +22,103 @@
+@@ -22,7 +22,107 @@
      "pluginManagement": "插件配置",
      "systemSettings": "系统设置",
      "mcpManagement": "MCP管理",
@@ -601,7 +628,11 @@ index c148f42..88ed60b 100644
 +      "enabled": "已启用",
 +      "disabled": "未启用",
 +      "failureThreshold": "失败阈值",
-+      "healthCheckModel": "探测模型"
++      "healthCheckModel": "探测模型",
++      "runtimeTitle": "运行态（密态链路计量）",
++      "runtimeDenied": "拒绝数（deny）",
++      "runtimeGuide": "计量口径 = 密态链路（tee-infer 审计链累计）；明文直连 /provider/* 不计量；计量无厂商维度故不做按厂商聚合；降级事件暂无采集点，暂不展示。",
++      "runtimeUnavailable": "用量数据源未接入或不可达（运行态计量暂缺，非空数据）"
 +    },
 +    "credentials": {
 +      "guide": "在此写入厂商 API Key：凭据落 broker 凭据目录，WasmPlugin CR 不含明文令牌。写入后复制生成的 customUrl，到「技术配置 → AI 服务提供者」新建提供者（tokens 留空）。",
@@ -1604,16 +1635,17 @@ index 0000000..d860c97
 +export default UsageDashboardPage;
 diff --git a/frontend/src/pages/admin-ext/vendors/index.tsx b/frontend/src/pages/admin-ext/vendors/index.tsx
 new file mode 100644
-index 0000000..9e8601a
+index 0000000..f16c07f
 --- /dev/null
 +++ b/frontend/src/pages/admin-ext/vendors/index.tsx
-@@ -0,0 +1,122 @@
-+import { Alert, Card, Descriptions, Empty, Spin, Tag } from 'antd';
+@@ -0,0 +1,208 @@
++import { Alert, Card, Col, Descriptions, Empty, Row, Spin, Statistic, Tag } from 'antd';
 +import { useEffect, useState } from 'react';
 +import { PageContainer } from '@ant-design/pro-layout';
 +import { useTranslation } from 'react-i18next';
 +import { getLlmProviders } from '@/services/llm-provider';
 +import { LlmProvider } from '@/interfaces/llm-provider';
++import { getUsageCumulative, UsageCumulative } from '@/services/admin-ext-usage';
 +
 +/**
 + * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：厂商激活与状态（只读视图）。
@@ -1622,9 +1654,12 @@ index 0000000..9e8601a
 + * AI Provider 页（含完整表单/多 token/tokenFailover），本页仅做状态汇总：
 + *  - 展示受管厂商列表与降级探测配置（tokenFailover.enabled/健康阈值/探测模型）；
 + *  - tokens 一律掩码（仅示后 4 位），不在页面二次暴露明文（§6 密钥约束）；
-+ *  - 运行态实时健康（吞吐/降级计数）待用量与监控接入后补齐（M2），
-+ *    此处如实呈现配置态而非虚构运行态。
-+ * 数据源 = 控制台既有 REST /v1/ai/providers（services/llm-provider.ts，复用不改）。
++ *  - 运行态（M2 收口）：密态链路累计计量摘要（tee-infer 审计链，经
++ *    gateway-admin-service 代理）。口径如实标注：明文直连 /provider/* 不计量
++ *    （V 点①定案）；计量无 provider 维度 → 不做按厂商聚合；降级事件无采集点 →
++ *    不展示降级计数（不虚构运行态）。
++ * 数据源 = 控制台既有 REST /v1/ai/providers（services/llm-provider.ts，复用不改）
++ *        + /v1/adminext/usage 累计口径（services/admin-ext-usage.ts，复用不改）。
 + */
 +
 +const maskToken = (token: string): string => {
@@ -1632,11 +1667,29 @@ index 0000000..9e8601a
 +  return s.length > 4 ? `****${s.slice(-4)}` : '****';
 +};
 +
++/** 累计口径全租户加总（数据源 = tee-infer 审计链，免疫重启丢失）。 */
++const sumCumulative = (u: UsageCumulative) => {
++  let tokensIn = 0;
++  let tokensOut = 0;
++  let requests = 0;
++  let denies = 0;
++  Object.values(u || {}).forEach((t) => {
++    tokensIn += t.tokens_in || 0;
++    tokensOut += t.tokens_out || 0;
++    requests += t.requests || 0;
++    denies += t.denies || 0;
++  });
++  return { tokensIn, tokensOut, requests, denies };
++};
++
 +const ProviderStatus: React.FC = () => {
 +  const { t } = useTranslation();
 +  const [list, setList] = useState<LlmProvider[]>([]);
 +  const [loading, setLoading] = useState(false);
 +  const [error, setError] = useState<string | null>(null);
++  const [runtime, setRuntime] = useState<UsageCumulative>({});
++  const [runtimeLoading, setRuntimeLoading] = useState(false);
++  const [runtimeError, setRuntimeError] = useState(false);
 +
 +  useEffect(() => {
 +    let cancelled = false;
@@ -1662,6 +1715,34 @@ index 0000000..9e8601a
 +      cancelled = true;
 +    };
 +  }, []);
++
++  useEffect(() => {
++    let cancelled = false;
++    setRuntimeLoading(true);
++    getUsageCumulative()
++      .then((u) => {
++        if (!cancelled) {
++          setRuntime(u || {});
++          setRuntimeError(false);
++        }
++      })
++      .catch(() => {
++        // 503（数据源未配置/不可达）等：页面内如实提示，全局拦截器已弹错误框
++        if (!cancelled) {
++          setRuntimeError(true);
++        }
++      })
++      .finally(() => {
++        if (!cancelled) {
++          setRuntimeLoading(false);
++        }
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, []);
++
++  const runtimeTotal = sumCumulative(runtime);
 +
 +  return (
 +    <PageContainer>
@@ -1725,6 +1806,42 @@ index 0000000..9e8601a
 +            </Card>
 +          );
 +        })}
++
++      <Card size="small" title={t('adminExt.vendors.runtimeTitle')} style={{ marginTop: 16 }}>
++        {runtimeError ? (
++          <Alert type="warning" showIcon message={t('adminExt.vendors.runtimeUnavailable')} />
++        ) : runtimeLoading ? (
++          <div style={{ textAlign: 'center', padding: 24 }}>
++            <Spin />
++          </div>
++        ) : (
++          <>
++            <Row gutter={16}>
++              <Col span={6}>
++                <Statistic title={t('adminExt.usage.requests')} value={runtimeTotal.requests} />
++              </Col>
++              <Col span={6}>
++                <Statistic title={t('adminExt.usage.tokensIn')} value={runtimeTotal.tokensIn} />
++              </Col>
++              <Col span={6}>
++                <Statistic title={t('adminExt.usage.tokensOut')} value={runtimeTotal.tokensOut} />
++              </Col>
++              <Col span={6}>
++                <Statistic
++                  title={t('adminExt.vendors.runtimeDenied')}
++                  value={runtimeTotal.denies}
++                />
++              </Col>
++            </Row>
++            <Alert
++              type="info"
++              showIcon
++              message={t('adminExt.vendors.runtimeGuide')}
++              style={{ marginTop: 12 }}
++            />
++          </>
++        )}
++      </Card>
 +    </PageContainer>
 +  );
 +};
@@ -1891,10 +2008,10 @@ index 0000000..0002266
 +};
 diff --git a/frontend/src/services/admin-ext-usage.ts b/frontend/src/services/admin-ext-usage.ts
 new file mode 100644
-index 0000000..f14f75f
+index 0000000..16ac0a7
 --- /dev/null
 +++ b/frontend/src/services/admin-ext-usage.ts
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,69 @@
 +import request from './request';
 +
 +/**
@@ -1917,6 +2034,12 @@ index 0000000..f14f75f
 +/** 单租户用量（区间增量聚合）。 */
 +export interface TenantUsage extends ModelUsageStat {
 +  by_model?: Record<string, ModelUsageStat> | null;
++  /** deny 次数（仅累计口径返回；增量聚合 deny 不计费不入）。 */
++  denies?: number;
++  /** 配额上限（累计 token，<=0 = 不限；仅累计口径返回）。 */
++  quota?: number;
++  /** 累计消耗 token（输入+输出；仅累计口径返回）。 */
++  used_tokens?: number;
 +}
 +
 +/** 用量查询响应（增量模式，[from, to) 左闭右开）。 */
@@ -1925,6 +2048,11 @@ index 0000000..f14f75f
 +  to?: string;
 +  window_semantics?: string;
 +  tenants: Record<string, TenantUsage>;
++}
++
++/** 用量查询响应（累计口径，无 from/to：外层直接是 租户 → 用量 map）。 */
++export interface UsageCumulative {
++  [tenant: string]: TenantUsage;
 +}
 +
 +/** 配额设置响应（tee-infer 返回当前生效配额）。 */
@@ -1943,6 +2071,11 @@ index 0000000..f14f75f
 +
 +export const getUsage = (params: UsageQuery): Promise<UsageResponse> => {
 +  return request.get<any, UsageResponse>(BASE, { params });
++};
++
++/** 累计口径查询（无 from/to：含 denies/quota/used_tokens，免疫增量口径丢 deny）。 */
++export const getUsageCumulative = (): Promise<UsageCumulative> => {
++  return request.get<any, UsageCumulative>(BASE);
 +};
 +
 +export const setQuota = (data: { tenant: string; max_tokens: number }): Promise<QuotaResponse> => {
