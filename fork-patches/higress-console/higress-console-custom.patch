@@ -1,3 +1,357 @@
+diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtAccountController.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtAccountController.java
+new file mode 100644
+index 0000000..015d72a
+--- /dev/null
++++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtAccountController.java
+@@ -0,0 +1,228 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：
++ * 账号管理端点（M3-A，docs/管理门户-细化方案.md §4 User+role 扩展）。
++ *
++ * 路径说明：账号表是 Java 控制台自研存储（独立 K8s Secret），不经 /v1/adminext/**
++ * 转发（该前缀整体转发到 gateway-admin-service），故本 controller 挂 /adminext-accounts。
++ *
++ * 写路径统一语义（fail-closed，与 G1 凭据写同款）：
++ *   校验 → 读快照 → 变更 → 写 Secret → 投递审计 → 失败则回滚 Secret 并 500。
++ *   绝不允许"变更生效但无审计"的窗口。
++ *
++ * 安全约束：
++ *  - 端点受 ApiStandardizationAspect 会话强制（已登录）；写权限由操作发起方（控制台
++ *    管理员界面）与后续 M3-A-2 的既有页 aspect 共同收口，本端点为管理面专用；
++ *  - 不得删最后一个 admin（防运维自锁）；不得删自己（防误删当前会话）；
++ *  - 密码强度 ≥8 位含字母+数字（AdminExtUserRecord.validatePassword）。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import java.security.SecureRandom;
++import java.util.ArrayList;
++import java.util.List;
++
++import javax.annotation.Resource;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.PathVariable;
++import org.springframework.web.bind.annotation.RequestBody;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RequestMethod;
++import org.springframework.web.bind.annotation.RestController;
++
++import com.alibaba.higress.console.model.User;
++import com.alibaba.higress.console.service.SessionUserHelper;
++import com.alibaba.higress.sdk.exception.BusinessException;
++import com.alibaba.higress.sdk.exception.ValidationException;
++
++/**
++ * @author admin-ext
++ */
++@RestController
++@RequestMapping("/adminext-accounts")
++public class AdminExtAccountController {
++
++    private static final Logger log = LoggerFactory.getLogger(AdminExtAccountController.class);
++
++    @Resource
++    private AdminExtUserStore userStore;
++
++    @Resource
++    private AdminExtAuditForwarder auditForwarder;
++
++    private final SecureRandom random = new SecureRandom();
++
++    @RequestMapping(method = RequestMethod.GET)
++    public ResponseEntity<List<AdminExtUserRecord>> list() {
++        requireSession();
++        return ResponseEntity.ok(AdminExtUserStore.sanitize(userStore.listUsers()));
++    }
++
++    @RequestMapping(method = RequestMethod.POST)
++    public ResponseEntity<Void> create(@RequestBody CreateAccountRequest req) {
++        User current = requireSession();
++        validateUsername(req.getUsername());
++        String weak = AdminExtUserRecord.validatePassword(req.getPassword());
++        if (weak != null) {
++            throw new ValidationException(weak);
++        }
++        if (!AdminExtRole.isValid(req.getRole())) {
++            throw new ValidationException("角色须为 admin 或 auditor");
++        }
++
++        AdminExtUserStore.Snapshot snapshot = userStore.readFresh();
++        List<AdminExtUserRecord> before = new ArrayList<>(snapshot.getUsers());
++        for (AdminExtUserRecord u : before) {
++            if (u.getUsername().equals(req.getUsername())) {
++                throw new ValidationException("账号已存在: " + req.getUsername());
++            }
++        }
++        String salt = AdminExtUserRecord.newSalt(random);
++        // readFresh 返回不可变列表（读路径保护），写路径显式工作副本后再变更
++        List<AdminExtUserRecord> updated = new ArrayList<>(before);
++        updated.add(new AdminExtUserRecord(
++            req.getUsername(), req.getDisplayName(), req.getRole(),
++            AdminExtUserRecord.hashPassword(salt, req.getPassword()), salt));
++        userStore.writeUsers(snapshot, updated);
++
++        try {
++            auditForwarder.forward(AdminExtAuditForwarder.ACTION_ACCOUNT_CREATE,
++                req.getUsername(), current.getName());
++        } catch (RuntimeException e) {
++            rollback(snapshot, before);
++            throw e;
++        }
++        return ResponseEntity.status(HttpStatus.CREATED).build();
++    }
++
++    @RequestMapping(value = "/{name}/password", method = RequestMethod.PUT)
++    public ResponseEntity<Void> resetPassword(@PathVariable String name, @RequestBody ResetPasswordRequest req) {
++        User current = requireSession();
++        String weak = AdminExtUserRecord.validatePassword(req.getPassword());
++        if (weak != null) {
++            throw new ValidationException(weak);
++        }
++
++        AdminExtUserStore.Snapshot snapshot = userStore.readFresh();
++        List<AdminExtUserRecord> before = new ArrayList<>(snapshot.getUsers());
++        AdminExtUserRecord target = findOrFail(snapshot, name);
++        // before 中 target 存深拷贝：密码字段回滚不受本次原地变更影响
++        before.set(before.indexOf(target), new AdminExtUserRecord(
++            target.getUsername(), target.getDisplayName(), target.getRole(),
++            target.getPasswordHash(), target.getSalt()));
++        String salt = AdminExtUserRecord.newSalt(random);
++        target.setSalt(salt);
++        target.setPasswordHash(AdminExtUserRecord.hashPassword(salt, req.getPassword()));
++        userStore.writeUsers(snapshot, snapshot.getUsers());
++
++        try {
++            auditForwarder.forward(AdminExtAuditForwarder.ACTION_ACCOUNT_PASSWORD_RESET,
++                name, current.getName());
++        } catch (RuntimeException e) {
++            rollback(snapshot, before);
++            throw e;
++        }
++        return ResponseEntity.noContent().build();
++    }
++
++    @RequestMapping(value = "/{name}", method = RequestMethod.DELETE)
++    public ResponseEntity<Void> delete(@PathVariable String name) {
++        User current = requireSession();
++        if (name.equals(current.getName())) {
++            throw new ValidationException("不得删除当前登录账号");
++        }
++
++        AdminExtUserStore.Snapshot snapshot = userStore.readFresh();
++        List<AdminExtUserRecord> before = new ArrayList<>(snapshot.getUsers());
++        AdminExtUserRecord target = findOrFail(snapshot, name);
++        long adminCount = snapshot.getUsers().stream()
++            .filter(u -> AdminExtRole.ADMIN.equals(u.getRole())).count();
++        if (adminCount <= 1 && AdminExtRole.ADMIN.equals(target.getRole())) {
++            throw new ValidationException("不得删除最后一个 admin 账号（防运维自锁）");
++        }
++        List<AdminExtUserRecord> updated = new ArrayList<>(before);
++        updated.removeIf(u -> u.getUsername().equals(name));
++        userStore.writeUsers(snapshot, updated);
++
++        try {
++            auditForwarder.forward(AdminExtAuditForwarder.ACTION_ACCOUNT_DELETE,
++                name, current.getName());
++        } catch (RuntimeException e) {
++            rollback(snapshot, before);
++            throw e;
++        }
++        return ResponseEntity.noContent().build();
++    }
++
++    /** 会话 + admin 角色校验（M3-A：角色源 = AdminExtUserStore.resolveRole）。 */
++    private User requireSession() {
++        User user = SessionUserHelper.getCurrentUser();
++        if (user == null || user.getName() == null) {
++            throw new BusinessException("会话缺失（理论不可达，aspect 已强制登录）");
++        }
++        if (!AdminExtRole.ADMIN.equals(userStore.resolveRole(user.getName()))) {
++            throw new ValidationException("需要 admin 角色");
++        }
++        return user;
++    }
++
++    /** 审计投递失败后的回滚（回滚失败 = 双重故障，明示人工核查）。 */
++    private void rollback(AdminExtUserStore.Snapshot snapshot, List<AdminExtUserRecord> before) {
++        try {
++            userStore.writeUsers(snapshot, before);
++            log.warn("[admin-ext] 审计投递失败，账号变更已回滚");
++        } catch (RuntimeException e) {
++            log.error("[admin-ext] 审计投递失败且回滚失败（双重故障，须人工核查账号 Secret 与审计链）", e);
++            throw new BusinessException("账号变更与回滚均失败（须人工核查），详见服务日志");
++        }
++    }
++
++    private static AdminExtUserRecord findOrFail(AdminExtUserStore.Snapshot snapshot, String name) {
++        return snapshot.getUsers().stream().filter(u -> u.getUsername().equals(name)).findFirst()
++            .orElseThrow(() -> new ValidationException("账号不存在: " + name));
++    }
++
++    private static void validateUsername(String name) {
++        if (name == null || name.length() < 3 || name.length() > 32) {
++            throw new ValidationException("用户名长度须 3-32");
++        }
++        for (int i = 0; i < name.length(); i++) {
++            char c = name.charAt(i);
++            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
++                || (c >= '0' && c <= '9') || c == '_' || c == '-';
++            if (!ok) {
++                throw new ValidationException("用户名仅允许字母/数字/下划线/连字符");
++            }
++        }
++    }
++
++    // ---- 请求体（极简 POJO）----
++
++    public static class CreateAccountRequest {
++        private String username;
++        private String displayName;
++        private String role;
++        private String password;
++
++        public String getUsername() { return username; }
++        public void setUsername(String v) { username = v; }
++        public String getDisplayName() { return displayName; }
++        public void setDisplayName(String v) { displayName = v; }
++        public String getRole() { return role; }
++        public void setRole(String v) { role = v; }
++        public String getPassword() { return password; }
++        public void setPassword(String v) { password = v; }
++    }
++
++    public static class ResetPasswordRequest {
++        private String password;
++
++        public String getPassword() { return password; }
++        public void setPassword(String v) { password = v; }
++    }
++}
+diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtAuditForwarder.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtAuditForwarder.java
+new file mode 100644
+index 0000000..ed75834
+--- /dev/null
++++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtAuditForwarder.java
+@@ -0,0 +1,114 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：
++ * 账号管理审计投递器（M3-A）。账号表写操作（AdminExtAccountController）成功后，
++ * 经内部令牌调 gateway-admin-service 的 POST /v1/adminext/audit-events 落 G1 哈希链。
++ *
++ * fail-closed（与凭据/配额写同款语义）：投递失败 → 调用方必须回滚该次账号变更并 500，
++ * 绝不允许"变更生效但无审计"的窗口。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import java.io.ByteArrayOutputStream;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.net.HttpURLConnection;
++import java.net.URL;
++import java.nio.charset.StandardCharsets;
++
++import javax.annotation.Resource;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.stereotype.Component;
++
++import com.alibaba.higress.sdk.exception.BusinessException;
++
++/**
++ * @author admin-ext
++ */
++@Component
++public class AdminExtAuditForwarder {
++
++    private static final Logger log = LoggerFactory.getLogger(AdminExtAuditForwarder.class);
++
++    private static final int HTTP_NO_CONTENT = 204;
++
++    /** 审计动作常量（与 gateway-admin-service/audit_events.go 白名单一一对应）。 */
++    public static final String ACTION_ACCOUNT_CREATE = "account_create";
++    public static final String ACTION_ACCOUNT_UPDATE = "account_update";
++    public static final String ACTION_ACCOUNT_PASSWORD_RESET = "account_password_reset";
++    public static final String ACTION_ACCOUNT_DELETE = "account_delete";
++
++    @Resource
++    private AdminExtConfig config;
++
++    /**
++     * 投递一条账号管理审计事件（仅管理端点触达，内部令牌恒签 admin——Go 侧 admin only）。
++     *
++     * @param action 审计动作（Go 侧白名单：account_create/update/password_reset/delete）
++     * @param target 目标账号名
++     * @param sub    操作人（会话登录名）
++     */
++    public void forward(String action, String target, String sub) {
++        if (!config.isReady()) {
++            throw new BusinessException("审计投递配置未就绪（ADMIN_SVC_TARGET/ADMIN_SVC_JWT_SECRET），账号变更拒绝（fail-closed）");
++        }
++        String token = AdminExtJwtSigner.signNow(config.getJwtSecret(), sub, AdminExtRole.ADMIN,
++            config.getJwtTtlSeconds());
++        String body = "{\"action\":\"" + jsonEscape(action) + "\",\"target\":\"" + jsonEscape(target) + "\"}";
++
++        HttpURLConnection conn = null;
++        try {
++            conn = (HttpURLConnection) new URL(
++                config.getTarget() + "/v1/adminext/audit-events").openConnection();
++            conn.setRequestMethod("POST");
++            conn.setConnectTimeout(3000);
++            conn.setReadTimeout(10000);
++            conn.setDoOutput(true);
++            conn.setRequestProperty("Authorization", "Bearer " + token);
++            conn.setRequestProperty("Content-Type", "application/json");
++            byte[] payload = body.getBytes(StandardCharsets.UTF_8);
++            conn.setFixedLengthStreamingMode(payload.length);
++            try (OutputStream out = conn.getOutputStream()) {
++                out.write(payload);
++            }
++            int code = conn.getResponseCode();
++            if (code != HTTP_NO_CONTENT) {
++                InputStream err = conn.getErrorStream();
++                String detail = err == null ? "" : readFully(err);
++                log.warn("[admin-ext] 审计投递失败 action={} target={} code={} detail={}",
++                    action, target, code, detail);
++                throw new BusinessException("审计链投递失败（HTTP " + code + "），账号变更须回滚");
++            }
++            log.info("[admin-ext] 审计事件落链：action={} target={} sub={}", action, target, sub);
++        } catch (BusinessException e) {
++            throw e;
++        } catch (Exception e) {
++            throw new BusinessException("审计链投递失败（连接异常），账号变更须回滚", e);
++        } finally {
++            if (conn != null) {
++                conn.disconnect();
++            }
++        }
++    }
++
++    private static String jsonEscape(String s) {
++        return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
++    }
++
++    private static String readFully(InputStream in) {
++        try (InputStream input = in) {
++            ByteArrayOutputStream buf = new ByteArrayOutputStream();
++            byte[] chunk = new byte[1024];
++            int n;
++            while ((n = input.read(chunk)) != -1) {
++                buf.write(chunk, 0, n);
++            }
++            return buf.toString("UTF-8");
++        } catch (Exception e) {
++            return "";
++        }
++    }
++}
 diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtConfig.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtConfig.java
 new file mode 100644
 index 0000000..66c434c
@@ -186,12 +540,111 @@ index 0000000..6ab8799
 +                now, ttlSec);
 +    }
 +}
+diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtLoginGuard.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtLoginGuard.java
+new file mode 100644
+index 0000000..4f4dce5
+--- /dev/null
++++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtLoginGuard.java
+@@ -0,0 +1,93 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：
++ * 登录失败锁定器（M3-A，docs/管理门户-细化方案.md §5.4"密码强度校验与登录失败锁定"）。
++ *
++ * 策略（M3-A 定案默认值）：
++ *  - 同一用户名在滑动窗口（5 分钟）内连续失败 ≥5 次 → 锁定 15 分钟；
++ *  - 成功登录立即清零计数；
++ *  - 内存实现（进程重启清零）：锁定是防爆破的减速带而非安全边界，
++ *    安全边界仍是密码哈希 + 会话令牌签名。对原生 admin 与自研账号统一生效。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++
++import org.springframework.stereotype.Component;
++
++/**
++ * @author admin-ext
++ */
++@Component
++public class AdminExtLoginGuard {
++
++    /** 锁定异常（携带剩余锁定毫秒，供上层友好提示）。 */
++    public static class LockedException extends RuntimeException {
++        public LockedException(long remainingMs) {
++            super("账号已锁定，请 " + Math.max(remainingMs / 60_000 + 1, 1) + " 分钟后重试");
++        }
++    }
++
++    /** 滑动窗口长度（毫秒）。 */
++    private static final long WINDOW_MS = 5 * 60_000L;
++    /** 窗口内最大失败次数。 */
++    private static final int MAX_FAILURES = 5;
++    /** 触发后的锁定时长（毫秒）。 */
++    private static final long LOCKOUT_MS = 15 * 60_000L;
++
++    private final Map<String, FailureState> states = new ConcurrentHashMap<>();
++
++    /** 校验是否处于锁定态；锁定则抛 LockedException，否则放行。 */
++    public void checkNotLocked(String username) {
++        if (username == null || username.isEmpty()) {
++            return;
++        }
++        FailureState state = states.get(username);
++        if (state == null) {
++            return;
++        }
++        long now = System.currentTimeMillis();
++        synchronized (state) {
++            if (state.lockedUntil > now) {
++                throw new LockedException(state.lockedUntil - now);
++            }
++        }
++    }
++
++    /** 记录一次失败；达到阈值即进入锁定态。 */
++    public void recordFailure(String username) {
++        if (username == null || username.isEmpty()) {
++            return;
++        }
++        long now = System.currentTimeMillis();
++        FailureState state = states.computeIfAbsent(username, k -> new FailureState());
++        synchronized (state) {
++            // 窗口外的旧失败不计数（重置窗口起点）。
++            if (now - state.windowStart > WINDOW_MS) {
++                state.windowStart = now;
++                state.failures = 0;
++                state.lockedUntil = 0;
++            }
++            state.failures++;
++            if (state.failures >= MAX_FAILURES) {
++                state.lockedUntil = now + LOCKOUT_MS;
++            }
++        }
++    }
++
++    /** 记录成功登录（清零计数与锁定态）。 */
++    public void recordSuccess(String username) {
++        if (username == null || username.isEmpty()) {
++            return;
++        }
++        states.remove(username);
++    }
++
++    private static final class FailureState {
++        private long windowStart;
++        private int failures;
++        private long lockedUntil;
++    }
++}
 diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtProxyController.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtProxyController.java
 new file mode 100644
-index 0000000..6f1ed6e
+index 0000000..4695ba2
 --- /dev/null
 +++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtProxyController.java
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,155 @@
 +/*
 + * Copyright (c) 2026
 + *
@@ -204,8 +657,8 @@ index 0000000..6f1ed6e
 + *  - 转发路径 = 目标前缀(ADMIN_SVC_TARGET) + 原始 URI（含 query），保留 /v1/adminext 前缀，
 + *    gateway-admin-service 侧同一前缀路由；
 + *  - 内部令牌：以共享密钥签发 HS256 JWT（sub=会话登录名），Go 侧校验签名/过期/aud-iss/角色；
-+ *    role 暂固定 admin（控制台 User 模型无角色字段，User+role 扩展在 M3 落地后改为会话角色，
-+ *    见 docs/管理门户-细化方案.md §7.4 F2）；
++ *    role = AdminExtUserStore.resolveRole（M3-A：账号表派生；未命中=原生 admin 兜底；
++ *    账号表不可达 = auditor 降级只读，运维白名单为最后防线）；
 + *  - 敏感头（Cookie/Authorization 等）不转发，仅注入自签 Bearer，防会话泄露/头注入。
 + *
 + * 语义说明：控制台 ApiStandardizationAspect 对 DELETE 统一强制 204（上游行为），
@@ -247,9 +700,6 @@ index 0000000..6f1ed6e
 +
 +    private static final Logger log = LoggerFactory.getLogger(AdminExtProxyController.class);
 +
-+    /** 管理面角色：M3 前控制台无角色源，内部管理面会话一律按 admin 签发。 */
-+    private static final String ROLE_ADMIN = "admin";
-+
 +    private static final Set<String> FORWARDABLE_METHODS =
 +            new HashSet<>(Arrays.asList("GET", "POST", "PUT", "PATCH", "DELETE"));
 +
@@ -257,6 +707,9 @@ index 0000000..6f1ed6e
 +
 +    @Resource
 +    private AdminExtConfig config;
++
++    @Resource
++    private AdminExtUserStore userStore;
 +
 +    @RequestMapping(path = "/**")
 +    public ResponseEntity<byte[]> forward(HttpServletRequest request) throws IOException {
@@ -277,7 +730,9 @@ index 0000000..6f1ed6e
 +                    .body(("不支持的转发方法: " + method).getBytes(java.nio.charset.StandardCharsets.UTF_8));
 +        }
 +
-+        String token = AdminExtJwtSigner.signNow(config.getJwtSecret(), user.getName(), ROLE_ADMIN,
++        // M3-A：role 按账号表解析（未命中 = 原生 admin；账号表不可达 = auditor 降级只读）。
++        String role = userStore.resolveRole(user.getName());
++        String token = AdminExtJwtSigner.signNow(config.getJwtSecret(), user.getName(), role,
 +                config.getJwtTtlSeconds());
 +        return proxy(request, method, token);
 +    }
@@ -343,6 +798,890 @@ index 0000000..6f1ed6e
 +            buf.write(chunk, 0, n);
 +        }
 +        return buf.toByteArray();
++    }
++}
+diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtRole.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtRole.java
+new file mode 100644
+index 0000000..ec5d7cd
+--- /dev/null
++++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtRole.java
+@@ -0,0 +1,28 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：
++ * 管理面角色常量（M3-A 账号角色扩展，docs/管理门户-细化方案.md §4 D6）。
++ *
++ * 两角色起步：admin（读写）/ auditor（只读审计）。
++ * 角色持久化于账号表（AdminExtUserStore，独立 K8s Secret）；
++ * 授权消费方 = gateway-admin-service（JWT role 采信 + 运维白名单加成）。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++/**
++ * @author admin-ext
++ */
++public final class AdminExtRole {
++
++    public static final String ADMIN = "admin";
++
++    public static final String AUDITOR = "auditor";
++
++    private AdminExtRole() {
++    }
++
++    public static boolean isValid(String role) {
++        return ADMIN.equals(role) || AUDITOR.equals(role);
++    }
++}
+diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtSessionService.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtSessionService.java
+new file mode 100644
+index 0000000..e50229b
+--- /dev/null
++++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtSessionService.java
+@@ -0,0 +1,289 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：
++ * 多账号会话服务（M3-A，docs/管理门户-细化方案.md §4 User+role 扩展）。
++ *
++ * 接管方式（上游零改动）：@Primary 覆盖 SessionService 接口注入点——
++ * 上游 SessionController / ApiStandardizationAspect 注入的均为接口，
++ * Spring 装配层择优选中本实现；本实现委托原生 SessionServiceImpl（原生 admin 账号
++ * 行为不变），自研账号（AdminExtUserStore 账号表）走独立校验与令牌。
++ *
++ * 自研会话令牌（与原生 AES token 并存于同一 cookie，前缀区分）：
++ *   admext1.<b64url(username)>.<expiryMillis>.<b64url(HMAC-SHA256(serverKey, username.expiryMs))>
++ *   - 无状态签名令牌（不存服务端），serverKey 持久化于账号 Secret；
++ *   - 有效期 = cookie maxAge（与原生行为一致，persistent 决定 cookie 是否持久）；
++ *   - validateSession 回查账号表：账号被删/角色变更后，令牌在有效期内仍会因
++ *     账号消失而失效（角色变更经 30s 缓存 + JWT 60s TTL 生效，M3-A 定案）。
++ *
++ * 锁定（§5.4）：原生与自研账号统一经 AdminExtLoginGuard 计数（失败/成功双路挂钩）。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import java.nio.charset.StandardCharsets;
++import java.util.Arrays;
++import java.util.Base64;
++import java.util.List;
++
++import javax.annotation.Resource;
++import javax.crypto.Mac;
++import javax.crypto.spec.SecretKeySpec;
++import javax.servlet.http.Cookie;
++import javax.servlet.http.HttpServletRequest;
++import javax.servlet.http.HttpServletResponse;
++
++import org.apache.commons.lang3.StringUtils;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.context.annotation.Primary;
++import org.springframework.stereotype.Service;
++
++import com.alibaba.higress.console.constant.SystemConfigKey;
++import com.alibaba.higress.console.model.User;
++import com.alibaba.higress.console.service.SessionService;
++import com.alibaba.higress.console.service.SessionServiceImpl;
++import com.alibaba.higress.sdk.exception.BusinessException;
++import com.alibaba.higress.sdk.exception.ValidationException;
++
++/**
++ * @author admin-ext
++ */
++@Service
++@Primary
++public class AdminExtSessionService implements SessionService {
++
++    private static final Logger log = LoggerFactory.getLogger(AdminExtSessionService.class);
++
++    /** 自研令牌版本前缀（与原生 AES 密文格式区分）。 */
++    private static final String TOKEN_PREFIX = "admext1.";
++    /** 令牌段分隔符。 */
++    private static final String TOKEN_SEPARATOR = ".";
++    /** HMAC 算法。 */
++    private static final String HMAC_ALG = "HmacSHA256";
++
++    private static final java.security.SecureRandom SECURE_RANDOM = new java.security.SecureRandom();
++
++    @Value("${" + SystemConfigKey.ADMIN_COOKIE_NAME_KEY + ":" + SystemConfigKey.ADMIN_COOKIE_NAME_DEFAULT + "}")
++    private String cookieName = SystemConfigKey.ADMIN_COOKIE_NAME_DEFAULT;
++
++    @Value("${" + SystemConfigKey.ADMIN_COOKIE_MAX_AGE_KEY + ":" + SystemConfigKey.ADMIN_COOKIE_MAX_AGE_DEFAULT + "}")
++    private int cookieMaxAge = SystemConfigKey.ADMIN_COOKIE_MAX_AGE_DEFAULT;
++
++    @Resource
++    private SessionServiceImpl delegate;
++
++    @Resource
++    private AdminExtUserStore userStore;
++
++    @Resource
++    private AdminExtLoginGuard loginGuard;
++
++    @Override
++    public boolean isAdminInitialized() {
++        return delegate.isAdminInitialized();
++    }
++
++    @Override
++    public void initializeAdmin(User user) {
++        delegate.initializeAdmin(user);
++    }
++
++    @Override
++    public User login(String username, String password) {
++        loginGuard.checkNotLocked(username);
++
++        AdminExtUserRecord record = tryFindRecord(username);
++        if (record != null) {
++            if (!record.matchesPassword(password)) {
++                loginGuard.recordFailure(username);
++                return null;
++            }
++            loginGuard.recordSuccess(username);
++            return toUser(record);
++        }
++
++        // 未命中自研账号 → 原生 admin 流程（行为不变，锁定器统一挂钩）。
++        User user = delegate.login(username, password);
++        if (user != null) {
++            loginGuard.recordSuccess(username);
++        } else {
++            loginGuard.recordFailure(username);
++        }
++        return user;
++    }
++
++    @Override
++    public void saveSession(HttpServletResponse response, User user, boolean persistent) {
++        AdminExtUserRecord record = tryFindRecord(user.getName());
++        if (record == null) {
++            delegate.saveSession(response, user, persistent);
++            return;
++        }
++        String token = generateExtToken(record.getUsername());
++        Cookie cookie = buildCookie(token);
++        if (persistent) {
++            cookie.setMaxAge(cookieMaxAge);
++        }
++        response.addCookie(cookie);
++    }
++
++    @Override
++    public void clearSession(HttpServletResponse response) {
++        delegate.clearSession(response);
++    }
++
++    @Override
++    public User validateSession(HttpServletRequest request) {
++        Cookie[] cookies = request.getCookies();
++        if (cookies != null) {
++            String token = Arrays.stream(cookies).filter(c -> cookieName.equals(c.getName()))
++                .map(Cookie::getValue).findFirst().orElse(null);
++            if (StringUtils.isNotEmpty(token) && token.startsWith(TOKEN_PREFIX)) {
++                return validateExtToken(token.substring(TOKEN_PREFIX.length()));
++            }
++        }
++        // 非 self token（原生 AES cookie / Basic auth）→ 原生流程。
++        return delegate.validateSession(request);
++    }
++
++    @Override
++    public void changePassword(String username, String oldPassword, String newPassword) {
++        AdminExtUserRecord record = tryFindRecord(username);
++        if (record == null) {
++            delegate.changePassword(username, oldPassword, newPassword);
++            return;
++        }
++        if (!record.matchesPassword(oldPassword)) {
++            throw new ValidationException("Incorrect old password.");
++        }
++        String weak = AdminExtUserRecord.validatePassword(newPassword);
++        if (weak != null) {
++            throw new ValidationException(weak);
++        }
++        AdminExtUserStore.Snapshot snapshot = userStore.readFresh();
++        String salt = AdminExtUserRecord.newSalt(SECURE_RANDOM);
++        for (AdminExtUserRecord u : snapshot.getUsers()) {
++            if (u.getUsername().equals(username)) {
++                u.setSalt(salt);
++                u.setPasswordHash(AdminExtUserRecord.hashPassword(salt, newPassword));
++            }
++        }
++        userStore.writeUsers(snapshot, snapshot.getUsers());
++    }
++
++    private User validateExtToken(String body) {
++        String[] parts = body.split("\\" + TOKEN_SEPARATOR, -1);
++        if (parts.length != 3) {
++            return null;
++        }
++        // HMAC 输入 = 原始编码段（与 generateExtToken 的 payload 完全一致，先验签后解码）。
++        String payload = parts[0] + TOKEN_SEPARATOR + parts[1];
++        String username;
++        long expiryMs;
++        try {
++            expiryMs = Long.parseLong(parts[1]);
++        } catch (IllegalArgumentException e) {
++            return null;
++        }
++        if (expiryMs <= System.currentTimeMillis()) {
++            return null;
++        }
++        AdminExtUserStore.Snapshot snapshot;
++        try {
++            // 会话校验需要真实角色与账号存在性，绕过 30s 缓存更安全；开销可控（K8s 读有本地 client 池）。
++            snapshot = userStore.readFresh();
++        } catch (RuntimeException e) {
++            log.warn("[admin-ext] 会话校验读账号表失败（fail-closed 视为失效）: {}", e.getMessage());
++            return null;
++        }
++        if (snapshot.getServerKey() == null) {
++            return null;
++        }
++        String expected = hmac(snapshot.getServerKey(), payload);
++        // 令牌第 3 段 = b64url(hmacHex)，先解码再恒时比对（与 generateExtToken 编码口径一致）
++        String provided;
++        try {
++            provided = new String(Base64.getUrlDecoder().decode(parts[2]), StandardCharsets.UTF_8);
++        } catch (IllegalArgumentException e) {
++            return null;
++        }
++        if (!constantTimeEquals(expected, provided)) {
++            return null;
++        }
++        try {
++            username = new String(Base64.getUrlDecoder().decode(parts[0]), StandardCharsets.UTF_8);
++        } catch (IllegalArgumentException e) {
++            return null;
++        }
++        AdminExtUserRecord record = snapshot.getUsers().stream()
++            .filter(u -> u.getUsername().equals(username)).findFirst().orElse(null);
++        if (record == null) {
++            return null; // 账号已删除 → 会话失效
++        }
++        return toUser(record);
++    }
++
++    private String generateExtToken(String username) {
++        String serverKey = userStore.serverKey();
++        if (serverKey == null) {
++            throw new BusinessException("账号表 serverKey 缺失（账号 Secret 未初始化）");
++        }
++        long expiryMs = System.currentTimeMillis() + cookieMaxAge * 1000L;
++        String body = Base64.getUrlEncoder().withoutPadding()
++            .encodeToString(username.getBytes(StandardCharsets.UTF_8));
++        String payload = body + TOKEN_SEPARATOR + expiryMs;
++        return TOKEN_PREFIX + payload + TOKEN_SEPARATOR
++            + Base64.getUrlEncoder().withoutPadding()
++                .encodeToString(hmac(serverKey, payload).getBytes(StandardCharsets.UTF_8));
++    }
++
++    private AdminExtUserRecord tryFindRecord(String username) {
++        try {
++            return userStore.findByUsername(username);
++        } catch (RuntimeException e) {
++            // 账号表不可达 → 原生 admin 流程兜底（原生配置独立缓存；锁定器仍生效）。
++            log.warn("[admin-ext] 账号表读取失败，回落原生登录流程: {}", e.getMessage());
++            return null;
++        }
++    }
++
++    private Cookie buildCookie(String value) {
++        Cookie cookie = new Cookie(cookieName, value);
++        cookie.setPath("/");
++        cookie.setHttpOnly(true);
++        return cookie;
++    }
++
++    private static User toUser(AdminExtUserRecord record) {
++        User user = new User();
++        user.setName(record.getUsername());
++        user.setDisplayName(record.getDisplayName());
++        return user;
++    }
++
++    private static String hmac(String serverKey, String input) {
++        try {
++            Mac mac = Mac.getInstance(HMAC_ALG);
++            mac.init(new SecretKeySpec(serverKey.getBytes(StandardCharsets.UTF_8), HMAC_ALG));
++            byte[] out = mac.doFinal(input.getBytes(StandardCharsets.UTF_8));
++            StringBuilder sb = new StringBuilder(out.length * 2);
++            for (byte b : out) {
++                sb.append(String.format("%02x", b));
++            }
++            return sb.toString();
++        } catch (Exception e) {
++            throw new IllegalStateException("HMAC-SHA256 不可用", e);
++        }
++    }
++
++    private static boolean constantTimeEquals(String a, String b) {
++        return java.security.MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8),
++            b.getBytes(StandardCharsets.UTF_8));
++    }
++
++    /** 供测试/审计读取当前账号全量（脱敏）。 */
++    public List<AdminExtUserRecord> sanitizedUsers() {
++        return AdminExtUserStore.sanitize(userStore.listUsers());
++    }
++}
+diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtUserRecord.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtUserRecord.java
+new file mode 100644
+index 0000000..119c090
+--- /dev/null
++++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtUserRecord.java
+@@ -0,0 +1,102 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：
++ * 账号表记录（M3-A）。持久化于独立 K8s Secret 的 users.json（AdminExtUserStore）。
++ *
++ * 安全约束：
++ *  - 绝不存明文密码：仅存 passwordHash = SHA-256(salt + password) 与随机盐；
++ *  - 列表/日志输出一律走脱敏视图（AdminExtUserStore#sanitize），hash/salt 不出 store。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++import java.util.stream.Collectors;
++import java.util.stream.IntStream;
++
++import lombok.AllArgsConstructor;
++import lombok.Data;
++import lombok.NoArgsConstructor;
++
++/**
++ * @author admin-ext
++ */
++@Data
++@NoArgsConstructor
++@AllArgsConstructor
++public class AdminExtUserRecord {
++
++    private static final char[] HEX = "0123456789abcdef".toCharArray();
++
++    private String username;
++
++    private String displayName;
++
++    /** 固定角色：AdminExtRole.ADMIN / AdminExtRole.AUDITOR。 */
++    private String role;
++
++    /** SHA-256(salt + password) 的 hex（64 字符）。 */
++    private String passwordHash;
++
++    /** 随机盐 hex（32 字符）。 */
++    private String salt;
++
++    /** 计算密码哈希（与持久化口径一致）。 */
++    public static String hashPassword(String salt, String password) {
++        MessageDigest digest;
++        try {
++            digest = MessageDigest.getInstance("SHA-256");
++        } catch (NoSuchAlgorithmException e) {
++            throw new IllegalStateException("SHA-256 不可用", e);
++        }
++        byte[] hashed = digest.digest((salt + password).getBytes(StandardCharsets.UTF_8));
++        StringBuilder sb = new StringBuilder(hashed.length * 2);
++        for (byte b : hashed) {
++            sb.append(HEX[(b >> 4) & 0xf]).append(HEX[b & 0xf]);
++        }
++        return sb.toString();
++    }
++
++    /** 校验密码（常数不确定时间足够账号管理场景；哈希比对用恒时比较防计时侧信道）。 */
++    public boolean matchesPassword(String password) {
++        return constantTimeEquals(passwordHash, hashPassword(salt, password));
++    }
++
++    private static boolean constantTimeEquals(String a, String b) {
++        return MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8));
++    }
++
++    /** 生成随机盐（32 hex 字符，SecureRandom 由调用方注入值）。 */
++    public static String newSalt(java.security.SecureRandom random) {
++        byte[] raw = new byte[16];
++        random.nextBytes(raw);
++        return IntStream.range(0, raw.length).mapToObj(i -> String.format("%02x", raw[i]))
++            .collect(Collectors.joining());
++    }
++
++    /**
++     * 密码强度校验（M3-A 定案：≥8 位且同时含字母与数字）。
++     * 会话改密码与账号管理端点共用同一规则。
++     */
++    public static String validatePassword(String password) {
++        if (password == null || password.length() < 8) {
++            return "密码长度须 ≥8 位";
++        }
++        boolean hasLetter = false;
++        boolean hasDigit = false;
++        for (int i = 0; i < password.length(); i++) {
++            char c = password.charAt(i);
++            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
++                hasLetter = true;
++            } else if (c >= '0' && c <= '9') {
++                hasDigit = true;
++            }
++        }
++        if (!hasLetter || !hasDigit) {
++            return "密码须同时包含字母与数字";
++        }
++        return null;
++    }
++}
+diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtUserStore.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtUserStore.java
+new file mode 100644
+index 0000000..f992eed
+--- /dev/null
++++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtUserStore.java
+@@ -0,0 +1,239 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：
++ * 自研账号表存储（M3-A，docs/管理门户-细化方案.md §4 User+role 扩展）。
++ *
++ * 持久化：独立 K8s Secret（higress-console-adminext-users），与原生 admin secret 分离：
++ *   data["users.json"] = JSON 数组 [{username, displayName, role, passwordHash, salt}]
++ *   data["serverKey"]  = 随机 hex 64 字符（自研会话令牌的 HMAC 密钥，首次写入时生成）
++ *
++ * 职责边界（单一真源）：
++ *   - 写操作仅经本类（AdminExtAccountController 编排，admin only，写后投递 G1 审计链）；
++ *   - 读消费方 = 本类缓存（登录校验/角色解析，TTL 30s——角色变更生效延迟 ≤30s+JWT TTL）；
++ *   - gateway-admin-service 不接触账号数据（凭据 Secret 的只读卷模式不适用于动态写）。
++ *
++ * 失败语义（fail-closed 降级）：
++ *   - 读失败且有旧缓存 → 回落旧缓存（最老 30s 偏差可接受，登录可用性优先）；
++ *   - 读失败且无缓存 → 抛 BusinessException（登录/角色解析 fail-closed，不静默放行）。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import java.nio.charset.StandardCharsets;
++import java.security.SecureRandom;
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.stream.Collectors;
++
++import javax.annotation.Resource;
++
++import org.springframework.stereotype.Component;
++
++import com.alibaba.higress.sdk.exception.BusinessException;
++import com.alibaba.higress.sdk.service.kubernetes.KubernetesClientService;
++import com.fasterxml.jackson.core.type.TypeReference;
++import com.fasterxml.jackson.databind.ObjectMapper;
++
++import io.kubernetes.client.openapi.models.V1Secret;
++import lombok.Data;
++
++/**
++ * @author admin-ext
++ */
++@Component
++public class AdminExtUserStore {
++
++    /** 账号 Secret 名（console namespace 内，与原生 admin secret 分离）。 */
++    public static final String SECRET_NAME = "higress-console-adminext-users";
++
++    private static final String USERS_JSON_KEY = "users.json";
++    private static final String SERVER_KEY_KEY = "serverKey";
++    /** 缓存 TTL（毫秒）：角色/账号变更生效延迟上限 = TTL + JWT TTL。 */
++    private static final long CACHE_TTL_MS = 30_000L;
++    /** serverKey 长度（hex 字符）。 */
++    private static final int SERVER_KEY_HEX_LEN = 64;
++
++    private static final ObjectMapper MAPPER = new ObjectMapper();
++    private static final SecureRandom RANDOM = new SecureRandom();
++
++    @Resource
++    private KubernetesClientService kubernetesClientService;
++
++    private final AtomicReference<CachedUsers> cache = new AtomicReference<>();
++
++    /** 新鲜读快照（写路径用：绕过缓存，含原始 data 供回滚）。 */
++    @Data
++    public static class Snapshot {
++        private Map<String, byte[]> data;
++        private List<AdminExtUserRecord> users;
++        private String serverKey;
++    }
++
++    /** 缓存条目。 */
++    private static final class CachedUsers {
++        private final List<AdminExtUserRecord> users;
++        private final String serverKey;
++        private final long loadedAt;
++
++        private CachedUsers(List<AdminExtUserRecord> users, String serverKey, long loadedAt) {
++            this.users = users;
++            this.serverKey = serverKey;
++            this.loadedAt = loadedAt;
++        }
++    }
++
++    /**
++     * 查询账号（缓存）。读失败回落旧缓存；无缓存时抛 BusinessException（fail-closed）。
++     *
++     * @return 无该账号返回 null（区别于原生 admin 账号——由调用方兜底判定角色）
++     */
++    public AdminExtUserRecord findByUsername(String username) {
++        for (AdminExtUserRecord record : listUsers()) {
++            if (record.getUsername().equals(username)) {
++                return record;
++            }
++        }
++        return null;
++    }
++
++    /** 全量账号（缓存，脱敏副本；写路径须走 {@link #readFresh}）。 */
++    public List<AdminExtUserRecord> listUsers() {
++        CachedUsers cached = cache.get();
++        if (cached != null && System.currentTimeMillis() - cached.loadedAt < CACHE_TTL_MS) {
++            return cached.users;
++        }
++        Snapshot snapshot = readFresh();
++        cache.set(new CachedUsers(snapshot.getUsers(), snapshot.getServerKey(), System.currentTimeMillis()));
++        return snapshot.getUsers();
++    }
++
++    /** 当前（缓存内）serverKey；无缓存时新鲜读。供会话令牌签名使用。 */
++    public String serverKey() {
++        CachedUsers cached = cache.get();
++        if (cached != null && System.currentTimeMillis() - cached.loadedAt < CACHE_TTL_MS) {
++            return cached.serverKey;
++        }
++        Snapshot snapshot = readFresh();
++        cache.set(new CachedUsers(snapshot.getUsers(), snapshot.getServerKey(), System.currentTimeMillis()));
++        return snapshot.getServerKey();
++    }
++
++    /**
++     * 新鲜读（绕过缓存）。Secret 不存在 → 空表 + null serverKey（由写路径首次创建生成）。
++     * 非 404 读失败 → BusinessException（fail-closed，不静默放行）。
++     */
++    public Snapshot readFresh() {
++        V1Secret secret;
++        try {
++            secret = kubernetesClientService.readSecret(SECRET_NAME);
++        } catch (Exception e) {
++            CachedUsers cached = cache.get();
++            if (cached != null) {
++                return snapshotFrom(cached.users, cached.serverKey, emptyData());
++            }
++            throw new BusinessException("账号表读取失败（K8s Secret 不可达，fail-closed）", e);
++        }
++        if (secret == null || secret.getData() == null || secret.getData().isEmpty()) {
++            return snapshotFrom(Collections.emptyList(), null, null);
++        }
++        Map<String, byte[]> data = new HashMap<>(secret.getData());
++        List<AdminExtUserRecord> users = parseUsers(data.get(USERS_JSON_KEY));
++        String serverKey = data.get(SERVER_KEY_KEY) == null ? null
++            : new String(data.get(SERVER_KEY_KEY), StandardCharsets.UTF_8);
++        return snapshotFrom(users, serverKey, data);
++    }
++
++    /**
++     * 以 base 为基准写回账号表（含 serverKey 原样保留；base.data 为 null 表示首次创建）。
++     * 写后失效缓存（下一次读即最新）。调用方负责先投递审计、失败时用 base 回滚。
++     */
++    public void writeUsers(Snapshot base, List<AdminExtUserRecord> users) {
++        Map<String, byte[]> data = base.getData() == null ? new HashMap<>() : new HashMap<>(base.getData());
++        try {
++            data.put(USERS_JSON_KEY, MAPPER.writeValueAsBytes(users));
++            if (data.get(SERVER_KEY_KEY) == null) {
++                data.put(SERVER_KEY_KEY, newServerKey().getBytes(StandardCharsets.UTF_8));
++            }
++        } catch (Exception e) {
++            throw new BusinessException("账号表序列化失败", e);
++        }
++        V1Secret secret = new V1Secret();
++        io.kubernetes.client.openapi.models.V1ObjectMeta meta =
++            new io.kubernetes.client.openapi.models.V1ObjectMeta();
++        meta.setName(SECRET_NAME);
++        secret.setMetadata(meta);
++        secret.setData(data);
++        try {
++            if (base.getData() == null) {
++                kubernetesClientService.createSecret(secret);
++            } else {
++                kubernetesClientService.replaceSecret(secret);
++            }
++        } catch (io.kubernetes.client.openapi.ApiException e) {
++            throw new BusinessException("账号表写入失败（K8s）", e);
++        }
++        cache.set(null);
++    }
++
++    /** 失效缓存（运维/测试用）。 */
++    public void invalidate() {
++        cache.set(null);
++    }
++
++    /**
++     * 角色解析（单一真源，M3-A；AdminExtProxyController / AdminExtAccountController 共用）：
++     * 账号表命中 → 其角色；未命中 → 原生 admin 兜底（原生账号恒为管理员）；
++     * 读失败（无缓存且 K8s 不可达）→ auditor 降级（只读，fail-closed）——
++     * 集群运维层的 ADMIN_SVC_ROLE_ADMINS 白名单是此时唯一的管理员通道。
++     */
++    public String resolveRole(String username) {
++        try {
++            AdminExtUserRecord record = findByUsername(username);
++            return record != null ? record.getRole() : AdminExtRole.ADMIN;
++        } catch (RuntimeException e) {
++            return AdminExtRole.AUDITOR;
++        }
++    }
++
++    private static Snapshot snapshotFrom(List<AdminExtUserRecord> users, String serverKey, Map<String, byte[]> data) {
++        Snapshot snapshot = new Snapshot();
++        snapshot.setUsers(users);
++        snapshot.setServerKey(serverKey);
++        snapshot.setData(data);
++        return snapshot;
++    }
++
++    private static Map<String, byte[]> emptyData() {
++        return new HashMap<>();
++    }
++
++    private static List<AdminExtUserRecord> parseUsers(byte[] raw) {
++        if (raw == null || raw.length == 0) {
++            return Collections.emptyList();
++        }
++        try {
++            List<AdminExtUserRecord> users =
++                MAPPER.readValue(raw, new TypeReference<List<AdminExtUserRecord>>() {});
++            return Collections.unmodifiableList(users);
++        } catch (Exception e) {
++            throw new BusinessException("账号表解析失败（users.json 损坏，fail-closed）", e);
++        }
++    }
++
++    private static String newServerKey() {
++        StringBuilder sb = new StringBuilder(SERVER_KEY_HEX_LEN);
++        for (int i = 0; i < SERVER_KEY_HEX_LEN / 2; i++) {
++            sb.append(String.format("%02x", RANDOM.nextInt(256)));
++        }
++        return sb.toString();
++    }
++
++    /** 脱敏视图（列表/日志输出用；hash/salt 不出 store）。 */
++    public static List<AdminExtUserRecord> sanitize(List<AdminExtUserRecord> users) {
++        return users.stream().map(u -> new AdminExtUserRecord(u.getUsername(), u.getDisplayName(), u.getRole(),
++            null, null)).collect(Collectors.toList());
++    }
++}
+diff --git a/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtAccountControllerTest.java b/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtAccountControllerTest.java
+new file mode 100644
+index 0000000..cab6eee
+--- /dev/null
++++ b/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtAccountControllerTest.java
+@@ -0,0 +1,196 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展）单测：账号管理端点（M3-A）。
++ *
++ * 覆盖：admin 角色拦截 / 创建校验（重名/强度/角色）/ 审计投递失败回滚 /
++ * 删除保护（自删、最后一个 admin）。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.doNothing;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.times;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++import java.security.SecureRandom;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.mockito.ArgumentCaptor;
++import org.springframework.test.util.ReflectionTestUtils;
++
++import com.alibaba.higress.console.model.User;
++import com.alibaba.higress.console.service.SessionUserHelper;
++import com.alibaba.higress.sdk.exception.BusinessException;
++import com.alibaba.higress.sdk.exception.ValidationException;
++
++/**
++ * @author admin-ext
++ */
++class AdminExtAccountControllerTest {
++
++    private AdminExtUserStore userStore;
++    private AdminExtAuditForwarder forwarder;
++    private AdminExtAccountController controller;
++
++    @BeforeEach
++    void setUp() {
++        userStore = mock(AdminExtUserStore.class);
++        forwarder = mock(AdminExtAuditForwarder.class);
++        controller = new AdminExtAccountController();
++        ReflectionTestUtils.setField(controller, "userStore", userStore);
++        ReflectionTestUtils.setField(controller, "auditForwarder", forwarder);
++        SessionUserHelper.setCurrentUser(User.builder().name("root-admin").build());
++    }
++
++    @AfterEach
++    void tearDown() {
++        SessionUserHelper.clearCurrentUser();
++    }
++
++    private AdminExtUserRecord record(String name, String role) {
++        String salt = AdminExtUserRecord.newSalt(new SecureRandom());
++        return new AdminExtUserRecord(name, name, role,
++            AdminExtUserRecord.hashPassword(salt, "passw0rdA"), salt);
++    }
++
++    private static AdminExtUserStore.Snapshot snapshot(AdminExtUserRecord... users) {
++        AdminExtUserStore.Snapshot snapshot = new AdminExtUserStore.Snapshot();
++        snapshot.setUsers(new ArrayList<>());
++        for (AdminExtUserRecord u : users) {
++            snapshot.getUsers().add(u);
++        }
++        snapshot.setServerKey(new String(new char[64]).replace('\0', 'k'));
++        snapshot.setData(new java.util.HashMap<>());
++        return snapshot;
++    }
++
++    private AdminExtAccountController.CreateAccountRequest createReq(String name, String role, String password) {
++        AdminExtAccountController.CreateAccountRequest req = new AdminExtAccountController.CreateAccountRequest();
++        req.setUsername(name);
++        req.setRole(role);
++        req.setPassword(password);
++        return req;
++    }
++
++    @Test
++    void auditorCannotManageAccounts() {
++        when(userStore.resolveRole("auditor-u")).thenReturn(AdminExtRole.AUDITOR);
++        SessionUserHelper.setCurrentUser(User.builder().name("auditor-u").build());
++        assertThrows(ValidationException.class, () -> controller.list());
++        assertThrows(ValidationException.class,
++            () -> controller.create(createReq("new-user", AdminExtRole.AUDITOR, "passw0rdA")));
++        assertThrows(ValidationException.class, () -> controller.delete("bob"));
++    }
++
++    @Test
++    void createRejectsDuplicateWeakPasswordAndBadRole() {
++        when(userStore.resolveRole("root-admin")).thenReturn(AdminExtRole.ADMIN);
++        when(userStore.readFresh()).thenReturn(snapshot(record("existing", AdminExtRole.AUDITOR)));
++
++        assertThrows(ValidationException.class,
++            () -> controller.create(createReq("existing", AdminExtRole.AUDITOR, "passw0rdA")));
++        assertThrows(ValidationException.class,
++            () -> controller.create(createReq("new-user", AdminExtRole.AUDITOR, "short")));
++        assertThrows(ValidationException.class,
++            () -> controller.create(createReq("new-user", "superuser", "passw0rdA")));
++        verify(userStore, never()).writeUsers(any(), any());
++    }
++
++    @Test
++    void createWritesAndForwardsAudit() {
++        when(userStore.resolveRole("root-admin")).thenReturn(AdminExtRole.ADMIN);
++        when(userStore.readFresh()).thenReturn(snapshot());
++        doNothing().when(forwarder).forward(anyString(), anyString(), anyString());
++
++        assertEquals(201, controller.create(createReq("new-user", AdminExtRole.AUDITOR, "passw0rdA"))
++            .getStatusCodeValue());
++
++        @SuppressWarnings("unchecked")
++        ArgumentCaptor<List<AdminExtUserRecord>> captor = ArgumentCaptor.forClass(List.class);
++        verify(userStore).writeUsers(any(), captor.capture());
++        assertEquals(1, captor.getValue().size());
++        assertEquals("new-user", captor.getValue().get(0).getUsername());
++        verify(forwarder).forward(eq(AdminExtAuditForwarder.ACTION_ACCOUNT_CREATE),
++            eq("new-user"), eq("root-admin"));
++    }
++
++    @Test
++    void auditFailureRollsBackSecretWrite() {
++        when(userStore.resolveRole("root-admin")).thenReturn(AdminExtRole.ADMIN);
++        AdminExtUserRecord bob = record("bob", AdminExtRole.AUDITOR);
++        when(userStore.readFresh()).thenReturn(snapshot(bob));
++        doThrow(new BusinessException("审计链投递失败")).when(forwarder)
++            .forward(eq(AdminExtAuditForwarder.ACTION_ACCOUNT_CREATE), eq("new-user"), anyString());
++
++        assertThrows(BusinessException.class,
++            () -> controller.create(createReq("new-user", AdminExtRole.AUDITOR, "passw0rdA")));
++
++        // 回滚：writeUsers 第二次调用以变更前快照（仅 bob）回写
++        verify(userStore).writeUsers(any(), eq(new ArrayList<>(Collections.singletonList(bob))));
++    }
++
++    @Test
++    void passwordResetAuditFailureRollsBackOldHash() {
++        when(userStore.resolveRole("root-admin")).thenReturn(AdminExtRole.ADMIN);
++        AdminExtUserRecord bob = record("bob", AdminExtRole.AUDITOR);
++        String oldHash = bob.getPasswordHash();
++        when(userStore.readFresh()).thenReturn(snapshot(bob));
++        doThrow(new BusinessException("审计链投递失败")).when(forwarder)
++            .forward(eq(AdminExtAuditForwarder.ACTION_ACCOUNT_PASSWORD_RESET), eq("bob"), anyString());
++
++        AdminExtAccountController.ResetPasswordRequest req = new AdminExtAccountController.ResetPasswordRequest();
++        req.setPassword("new-pass99");
++        assertThrows(BusinessException.class, () -> controller.resetPassword("bob", req));
++
++        // 深拷贝回滚：第二次 writeUsers 写回旧 hash（而非已变更的新 hash）
++        @SuppressWarnings("unchecked")
++        ArgumentCaptor<List<AdminExtUserRecord>> captor = ArgumentCaptor.forClass(List.class);
++        verify(userStore, times(2)).writeUsers(any(), captor.capture());
++        assertEquals(oldHash, captor.getAllValues().get(1).get(0).getPasswordHash());
++    }
++
++    @Test
++    void deleteProtectsSelfAndLastAdmin() {
++        when(userStore.resolveRole("root-admin")).thenReturn(AdminExtRole.ADMIN);
++        when(userStore.readFresh())
++            .thenReturn(snapshot(record("root-admin", AdminExtRole.ADMIN), record("bob", AdminExtRole.AUDITOR)));
++
++        assertThrows(ValidationException.class, () -> controller.delete("root-admin")); // 自删
++        assertThrows(ValidationException.class, () -> controller.delete("no-such")); // 不存在
++
++        // 最后一个 admin（表中仅 1 个）→ 拒绝
++        when(userStore.readFresh())
++            .thenReturn(snapshot(record("bob", AdminExtRole.AUDITOR), record("chief", AdminExtRole.ADMIN)));
++        assertThrows(ValidationException.class, () -> controller.delete("chief"));
++    }
++
++    @Test
++    void deleteSucceedsForAuditorAccount() {
++        when(userStore.resolveRole("root-admin")).thenReturn(AdminExtRole.ADMIN);
++        when(userStore.readFresh())
++            .thenReturn(snapshot(record("bob", AdminExtRole.AUDITOR), record("chief", AdminExtRole.ADMIN)));
++        doNothing().when(forwarder).forward(anyString(), anyString(), anyString());
++
++        assertEquals(204, controller.delete("bob").getStatusCodeValue());
++        @SuppressWarnings("unchecked")
++        ArgumentCaptor<List<AdminExtUserRecord>> captor = ArgumentCaptor.forClass(List.class);
++        verify(userStore).writeUsers(any(), captor.capture());
++        assertTrue(captor.getValue().stream().noneMatch(u -> "bob".equals(u.getUsername())));
++        verify(forwarder).forward(eq(AdminExtAuditForwarder.ACTION_ACCOUNT_DELETE), eq("bob"), eq("root-admin"));
 +    }
 +}
 diff --git a/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtJwtSignerTest.java b/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtJwtSignerTest.java
@@ -444,6 +1783,304 @@ index 0000000..83ec1b6
 +        String payload = decode(parts(token)[1]);
 +        assertTrue(payload.contains("\"iss\":\"higress-console\""));
 +        assertTrue(payload.contains("\"aud\":\"gateway-admin-service\""));
++    }
++}
+diff --git a/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtSessionServiceTest.java b/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtSessionServiceTest.java
+new file mode 100644
+index 0000000..4179bbc
+--- /dev/null
++++ b/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtSessionServiceTest.java
+@@ -0,0 +1,209 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展）单测：多账号会话服务（M3-A @Primary 接管）。
++ *
++ * 覆盖核心闭环（delegate / userStore 用 Mockito 桩）：
++ *   - 自研账号登录（成功/失败计数/锁定）与原生兜底；
++ *   - 自研令牌 saveSession → validateSession 往返；
++ *   - 篡改/过期/账号已删 → 会话失效；
++ *   - 原生账号走委托；changePassword 路由与强度校验。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++import java.security.SecureRandom;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++
++import javax.servlet.http.Cookie;
++import javax.servlet.http.HttpServletRequest;
++import javax.servlet.http.HttpServletResponse;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.mockito.ArgumentCaptor;
++import org.springframework.test.util.ReflectionTestUtils;
++
++import com.alibaba.higress.console.model.User;
++import com.alibaba.higress.console.service.SessionServiceImpl;
++import com.alibaba.higress.sdk.exception.BusinessException;
++import com.alibaba.higress.sdk.exception.ValidationException;
++
++/**
++ * @author admin-ext
++ */
++class AdminExtSessionServiceTest {
++
++    private static final String SERVER_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
++
++    private SessionServiceImpl delegate;
++    private AdminExtUserStore userStore;
++    private AdminExtLoginGuard loginGuard;
++    private AdminExtSessionService service;
++
++    @BeforeEach
++    void setUp() {
++        delegate = mock(SessionServiceImpl.class);
++        userStore = mock(AdminExtUserStore.class);
++        loginGuard = new AdminExtLoginGuard();
++        service = new AdminExtSessionService();
++        ReflectionTestUtils.setField(service, "delegate", delegate);
++        ReflectionTestUtils.setField(service, "userStore", userStore);
++        ReflectionTestUtils.setField(service, "loginGuard", loginGuard);
++        ReflectionTestUtils.setField(service, "cookieName", "_hi_sess");
++        ReflectionTestUtils.setField(service, "cookieMaxAge", 3600);
++    }
++
++    private AdminExtUserRecord record(String name, String password, String role) {
++        String salt = AdminExtUserRecord.newSalt(new SecureRandom());
++        return new AdminExtUserRecord(name, name, role,
++            AdminExtUserRecord.hashPassword(salt, password), salt);
++    }
++
++    private static AdminExtUserStore.Snapshot snapshot(List<AdminExtUserRecord> users) {
++        AdminExtUserStore.Snapshot snapshot = new AdminExtUserStore.Snapshot();
++        snapshot.setUsers(new ArrayList<>(users));
++        snapshot.setServerKey(SERVER_KEY);
++        snapshot.setData(Collections.emptyMap());
++        return snapshot;
++    }
++
++    @Test
++    void extAccountLoginSuccess() {
++        when(userStore.findByUsername("bob")).thenReturn(record("bob", "passw0rdA", AdminExtRole.AUDITOR));
++        User user = service.login("bob", "passw0rdA");
++        assertNotNull(user);
++        assertEquals("bob", user.getName());
++        assertEquals("bob", user.getDisplayName());
++        verify(delegate, never()).login(anyString(), anyString());
++    }
++
++    @Test
++    void extAccountWrongPasswordFallsBackToDelegateAndCountsFailure() {
++        when(userStore.findByUsername("bob")).thenReturn(record("bob", "passw0rdA", AdminExtRole.AUDITOR));
++        when(delegate.login("bob", "wrong-pass")).thenReturn(null);
++        assertNull(service.login("bob", "wrong-pass"));
++        // 4 次失败后第 5 次命中锁定 → 直接拒绝且不再触达原生流程
++        for (int i = 0; i < 4; i++) {
++            assertNull(service.login("bob", "wrong-pass"));
++        }
++        assertThrows(AdminExtLoginGuard.LockedException.class, () -> service.login("bob", "passw0rdA"));
++        verify(delegate, never()).login(eq("bob"), eq("passw0rdA"));
++    }
++
++    @Test
++    void nativeAdminLoginDelegatesWhenNotInExtStore() {
++        when(userStore.findByUsername("admin")).thenReturn(null);
++        User expected = new User();
++        expected.setName("admin");
++        when(delegate.login("admin", "pw123456")).thenReturn(expected);
++        assertEquals(expected, service.login("admin", "pw123456"));
++    }
++
++    @Test
++    void storeFailureFallsBackToNativeLogin() {
++        when(userStore.findByUsername("admin")).thenThrow(new BusinessException("账号表读取失败"));
++        User expected = new User();
++        expected.setName("admin");
++        when(delegate.login("admin", "pw123456")).thenReturn(expected);
++        assertEquals(expected, service.login("admin", "pw123456"));
++    }
++
++    @Test
++    void saveSessionRoundTripForExtAccount() {
++        when(userStore.findByUsername("bob")).thenReturn(record("bob", "passw0rdA", AdminExtRole.AUDITOR));
++        when(userStore.serverKey()).thenReturn(SERVER_KEY);
++
++        HttpServletResponse response = mock(HttpServletResponse.class);
++        ArgumentCaptor<Cookie> cookieCaptor = ArgumentCaptor.forClass(Cookie.class);
++        service.saveSession(response, User.builder().name("bob").build(), false);
++        verify(response).addCookie(cookieCaptor.capture());
++        Cookie cookie = cookieCaptor.getValue();
++        assertEquals("_hi_sess", cookie.getName());
++        assertTrue(cookie.getValue().startsWith("admext1."));
++
++        // 往返：validateSession 回读账号表（readFresh）应还原用户
++        when(userStore.readFresh()).thenReturn(snapshot(
++            Collections.singletonList(record("bob", "passw0rdA", AdminExtRole.AUDITOR))));
++        HttpServletRequest request = mock(HttpServletRequest.class);
++        when(request.getCookies()).thenReturn(new Cookie[] {cookie});
++        User user = service.validateSession(request);
++        assertNotNull(user);
++        assertEquals("bob", user.getName());
++    }
++
++    @Test
++    void tamperedTokenRejected() {
++        when(userStore.findByUsername("bob")).thenReturn(record("bob", "passw0rdA", AdminExtRole.AUDITOR));
++        when(userStore.serverKey()).thenReturn(SERVER_KEY);
++        HttpServletResponse response = mock(HttpServletResponse.class);
++        ArgumentCaptor<Cookie> cookieCaptor = ArgumentCaptor.forClass(Cookie.class);
++        service.saveSession(response, User.builder().name("bob").build(), false);
++        verify(response).addCookie(cookieCaptor.capture());
++
++        Cookie tampered = new Cookie("_hi_sess", cookieCaptor.getValue().getValue() + "x");
++        when(userStore.readFresh()).thenReturn(snapshot(
++            Collections.singletonList(record("bob", "passw0rdA", AdminExtRole.AUDITOR))));
++        HttpServletRequest request = mock(HttpServletRequest.class);
++        when(request.getCookies()).thenReturn(new Cookie[] {tampered});
++        assertNull(service.validateSession(request));
++    }
++
++    @Test
++    void deletedAccountInvalidatesToken() {
++        when(userStore.findByUsername("bob")).thenReturn(record("bob", "passw0rdA", AdminExtRole.AUDITOR));
++        when(userStore.serverKey()).thenReturn(SERVER_KEY);
++        HttpServletResponse response = mock(HttpServletResponse.class);
++        ArgumentCaptor<Cookie> cookieCaptor = ArgumentCaptor.forClass(Cookie.class);
++        service.saveSession(response, User.builder().name("bob").build(), false);
++        verify(response).addCookie(cookieCaptor.capture());
++
++        // 账号表为空（账号已删）→ 会话失效
++        when(userStore.readFresh()).thenReturn(snapshot(Collections.emptyList()));
++        HttpServletRequest request = mock(HttpServletRequest.class);
++        when(request.getCookies()).thenReturn(new Cookie[] {cookieCaptor.getValue()});
++        assertNull(service.validateSession(request));
++    }
++
++    @Test
++    void changePasswordRoutesBetweenExtAndNative() {
++        AdminExtUserRecord bob = record("bob", "old-pass1", AdminExtRole.AUDITOR);
++        when(userStore.findByUsername("bob")).thenReturn(bob);
++        when(userStore.readFresh()).thenReturn(snapshot(Collections.singletonList(bob)));
++        doThrow(new BusinessException("native-only")).when(delegate)
++            .changePassword(eq("bob"), anyString(), anyString());
++
++        // 错旧密码 → ValidationException（不触达原生）
++        assertThrows(ValidationException.class, () -> service.changePassword("bob", "wrong-old", "new-pass99"));
++        verify(delegate, never()).changePassword(anyString(), anyString(), anyString());
++
++        // 弱新密码 → ValidationException
++        assertThrows(ValidationException.class, () -> service.changePassword("bob", "old-pass1", "short"));
++        verify(delegate, never()).changePassword(anyString(), anyString(), anyString());
++
++        // 正确路径 → 写回账号表且新密码可校验
++        service.changePassword("bob", "old-pass1", "new-pass99");
++        verify(userStore).writeUsers(any(), any());
++        assertTrue(bob.matchesPassword("new-pass99"));
++
++        // 原生账号 → 委托
++        when(userStore.findByUsername("admin")).thenReturn(null);
++        service.changePassword("admin", "old", "new");
++        verify(delegate).changePassword("admin", "old", "new");
++    }
++}
+diff --git a/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtUserRecordTest.java b/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtUserRecordTest.java
+new file mode 100644
+index 0000000..257cc96
+--- /dev/null
++++ b/backend/console/src/test/java/com/alibaba/higress/console/controller/admin/AdminExtUserRecordTest.java
+@@ -0,0 +1,77 @@
++/*
++ * Copyright (c) 2026
++ *
++ * ADMIN-EXT（自研扩展）单测：账号记录（哈希/强度校验）与登录锁定器（M3-A）。
++ */
++package com.alibaba.higress.console.controller.admin;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.security.SecureRandom;
++
++import org.junit.jupiter.api.Test;
++
++/**
++ * @author admin-ext
++ */
++class AdminExtUserRecordTest {
++
++    @Test
++    void hashPasswordRoundTripAndUniqueness() {
++        String salt = AdminExtUserRecord.newSalt(new SecureRandom());
++        String hash = AdminExtUserRecord.hashPassword(salt, "passw0rd!");
++        assertEquals(64, hash.length());
++        AdminExtUserRecord record = new AdminExtUserRecord("bob", "Bob", AdminExtRole.AUDITOR, hash, salt);
++        assertTrue(record.matchesPassword("passw0rd!"));
++        assertFalse(record.matchesPassword("passw0rd?"));
++        assertFalse(record.matchesPassword(null));
++    }
++
++    @Test
++    void saltedHashDiffersForSamePassword() {
++        String s1 = AdminExtUserRecord.newSalt(new SecureRandom());
++        String s2 = AdminExtUserRecord.newSalt(new SecureRandom());
++        assertNotEquals(AdminExtUserRecord.hashPassword(s1, "same-password1"),
++            AdminExtUserRecord.hashPassword(s2, "same-password1"));
++    }
++
++    @Test
++    void passwordStrengthRules() {
++        assertNull(AdminExtUserRecord.validatePassword("abcd1234"));
++        assertNotNull(AdminExtUserRecord.validatePassword(null));
++        assertNotNull(AdminExtUserRecord.validatePassword("abc12"));
++        assertNotNull(AdminExtUserRecord.validatePassword("abcdefgh"));
++        assertNotNull(AdminExtUserRecord.validatePassword("12345678"));
++    }
++
++    @Test
++    void loginGuardLocksAfterFiveFailuresAndUnlocksOnSuccess() {
++        AdminExtLoginGuard guard = new AdminExtLoginGuard();
++        guard.checkNotLocked("alice"); // 未失败不锁
++        for (int i = 0; i < 4; i++) {
++            guard.recordFailure("alice");
++        }
++        guard.checkNotLocked("alice"); // 4 次 < 5 不锁
++        guard.recordFailure("alice");
++        assertThrows(AdminExtLoginGuard.LockedException.class, () -> guard.checkNotLocked("alice"));
++
++        guard.recordSuccess("alice");
++        guard.checkNotLocked("alice"); // 成功登录解锁
++    }
++
++    @Test
++    void loginGuardIsolatedPerUser() {
++        AdminExtLoginGuard guard = new AdminExtLoginGuard();
++        for (int i = 0; i < 5; i++) {
++            guard.recordFailure("bob");
++        }
++        guard.checkNotLocked("carol");
++        assertThrows(AdminExtLoginGuard.LockedException.class, () -> guard.checkNotLocked("bob"));
 +    }
 +}
 diff --git a/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/WasmPluginServiceTest.java b/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/WasmPluginServiceTest.java
