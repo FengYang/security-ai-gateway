@@ -130,9 +130,14 @@ foreach ($f in @('index.html', 'security-center.html')) {
     if (-not (Test-Path (Join-Path $out $f))) { Fail "构建产物缺少 $f（$out）" }
     Write-Output "OK  $f"
 }
-$chunk = Get-ChildItem (Join-Path $out 'js') -Filter 'p_security-center-index-*.js' -ErrorAction SilentlyContinue
-if (-not $chunk) { Fail "构建产物缺少 p_security-center-index chunk（定制页面未编入）" }
-Write-Output "OK  $($chunk[0].Name)"
+$chunkPatterns = @('p_security-center-index-*.js', 'p_admin-ext-models-*.js')
+# p_admin-ext-models 专项：@ice/plugin-store 会把 **/models/** 当作 store 忽略模式传给路由扫描，
+# 页面目录若命名为 models 会被静默排除（无 chunk、菜单点进去空白），故固化此断言防复发。
+foreach ($pattern in $chunkPatterns) {
+    $chunk = Get-ChildItem (Join-Path $out 'js') -Filter $pattern -ErrorAction SilentlyContinue
+    if (-not $chunk) { Fail "构建产物缺少 $pattern chunk（定制页面未编入）" }
+    Write-Output "OK  $($chunk[0].Name)"
+}
 
 Write-Output ''
 Write-Output 'PASS: fork 可从上游纯净重建（apply 补丁 → 后端编译+单测 → 前端 npm ci+build → chunk 断言）'
