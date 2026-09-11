@@ -2123,25 +2123,66 @@ index af8233c..2b460af 100644
    }
  }
 diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
-index 1a41985..01ca12d 100644
+index 1a41985..fedc6bf 100644
 --- a/frontend/src/locales/en-US/translation.json
 +++ b/frontend/src/locales/en-US/translation.json
-@@ -22,7 +22,136 @@
+@@ -22,7 +22,221 @@
      "pluginManagement": "Plugin Management",
      "systemSettings": "System Settings",
      "mcpManagement": "MCP Management",
 -    "mcpConfigurations": "MCP Configurations"
 +    "mcpConfigurations": "MCP Configuration",
-+    "adminExtSecurityCenter": "Security Center (placeholder)",
++    "adminExtSecurityCenter": "Security Center",
 +    "adminExtCredentials": "Credential Hosting",
 +    "adminExtModels": "Model Catalog",
 +    "adminExtUsage": "Usage Dashboard",
-+    "adminExtAccounts": "Accounts & Roles"
++    "adminExtAccounts": "Accounts & Roles",
++    "adminExtChanges": "High-risk Change Review"
 +  },
 +  "adminExt": {
-+    "securityCenter": {
-+      "placeholder": "Security Center",
-+      "placeholderDesc": "ADMIN-EXT V0 placeholder: verify minimal diff to add menu & page inside Higress Console."
++    "security": {
++      "teeStatus": "Confidential Link Status",
++      "refresh": "Refresh",
++      "teeUrl": "TEE Address",
++      "teeHealth": "Link Health",
++      "healthOk": "Healthy",
++      "healthAttest": "Attestation required (no valid session)",
++      "healthUnreachable": "Unreachable",
++      "protocolVersion": "Protocol Version",
++      "requireAttest": "Require Attestation",
++      "on": "Enabled",
++      "off": "Disabled",
++      "piiMode": "PII Handling Mode",
++      "piiModeRuntime": "applied at runtime",
++      "auditEnabled": "Data-plane Audit Chain",
++      "guardrail": "Guardrail Policy",
++      "guardrailHint": "This page shows a read-only summary of effective rules (rule source is not exposed to avoid providing a bypass guide). Changes must go through High-risk Change Review (requester != reviewer) and are executed by the portal, not on this page.",
++      "guardrailEnabled": "Content Safety Detection",
++      "injectionTerms": "Prompt-injection Terms",
++      "piiCategories": "PII Categories",
++      "piiRules": "PII Rules",
++      "sqlCategories": "SQL-injection Categories",
++      "sqlRules": "SQL Rules",
++      "noTeeConfig": "TEE config unavailable (tee-infer not configured or unreachable)",
++      "auditChain": "Audit Chain",
++      "verifyG1": "Verify Management Chain",
++      "exportG1": "Export Management Chain",
++      "verifyTee": "Verify Data-plane Chain",
++      "chainVerifyOk": "Management audit chain integrity verified",
++      "chainVerifyFail": "Management audit chain verification failed (history may be tampered)",
++      "chainEvents": "{{count}} events in total",
++      "teeQueryOk": "Data-plane audit chain verification completed",
++      "teeQueryResult": "Data-plane audit chain verification result",
++      "chainTotal": "Events on Chain",
++      "chainVerified": "Integrity",
++      "chainIntact": "Intact",
++      "chainBroken": "Broken",
++      "chainLastHash": "Chain Tail Hash (first 8 chars)",
++      "colTime": "Time",
++      "colActor": "Actor",
++      "colAction": "Action",
++      "colTarget": "Target",
++      "colPrevHash": "Prev Hash"
 +    },
 +    "vendors": {
 +      "guide": "Vendor activation is performed in Tech Config → AI Service Providers (key entry & token failover); this page is a read-only status summary.",
@@ -2235,6 +2276,7 @@ index 1a41985..01ca12d 100644
 +    },
 +    "accounts": {
 +      "guide": "Self-managed accounts (independent Secret store): admin has full access, auditor is read-only. All write operations are audit-chained (G1; auto rollback on delivery failure); passwords stored as SHA-256(salt+password); 5 failed logins lock the account for 15 minutes.",
++      "oidcReserve": "OIDC/SSO is a reserved extension point (local accounts only at this stage; no IdP integration; MFA under study).",
 +      "empty": "No self-managed accounts (the native admin account is not listed; sign in with the console-initialized account)",
 +      "refresh": "Refresh",
 +      "add": "Create Account",
@@ -2260,30 +2302,114 @@ index 1a41985..01ca12d 100644
 +      "passwordRule": "Password must be at least 8 chars with both letters and digits",
 +      "confirm": "Confirm Password",
 +      "passwordMismatch": "The two passwords do not match"
++    },
++    "changes": {
++      "guide": "High-risk changes require two-person closure (requester != reviewer, server-enforced). The new key for credential rotation is submitted once and only stored encrypted by the backend; it takes effect after approval and is never displayed. All state transitions are written to the management audit chain (queryable in Security Center).",
++      "submit": "Submit Change",
++      "refresh": "Refresh",
++      "empty": "No change requests",
++      "ok": "OK",
++      "required": "Required",
++      "colId": "Change ID",
++      "colAction": "Action",
++      "colTarget": "Target",
++      "colStatus": "Status",
++      "colSubmitter": "Requester",
++      "colReviewer": "Reviewer",
++      "colCreatedAt": "Submitted At",
++      "colActions": "Actions",
++      "approve": "Approve & Execute",
++      "reject": "Reject",
++      "detail": "Details",
++      "reason": "Reject Reason",
++      "diff": "Change Description",
++      "diffTip": "Describe the change and its impact for the reviewer",
++      "piiMode": "PII Handling Mode",
++      "piiModeTip": "mask = mask then allow; block = deny on hit (Guardrail cannot be turned off; SQL/prompt injection always blocked)",
++      "targetTip": "Managed provider name (as in the broker credential directory)",
++      "newKey": "New Key",
++      "newKeyTip": "Submitted once and only takes effect after approval; neither the change record nor the response contains plaintext",
++      "fingerprint": "New Key Fingerprint",
++      "execError": "Execution Error",
++      "submitted": "Change submitted, awaiting review",
++      "executed": "Change executed",
++      "rejected": "Change rejected",
++      "action": {
++        "guardrail_pii_mode": "Guardrail Downgrade",
++        "credential_rotate": "Provider Key Rotation",
++        "credential_delete": "Delete Provider Credential"
++      },
++      "status": {
++        "pending": "Pending Review",
++        "executed": "Executed",
++        "rejected": "Rejected",
++        "failed": "Execution Failed"
++      }
 +    }
    },
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
-index c148f42..cfffac8 100644
+index c148f42..2c83b20 100644
 --- a/frontend/src/locales/zh-CN/translation.json
 +++ b/frontend/src/locales/zh-CN/translation.json
-@@ -22,7 +22,136 @@
+@@ -22,7 +22,221 @@
      "pluginManagement": "插件配置",
      "systemSettings": "系统设置",
      "mcpManagement": "MCP管理",
 -    "mcpConfigurations": "MCP配置"
 +    "mcpConfigurations": "MCP配置",
-+    "adminExtSecurityCenter": "安全中心（占位）",
++    "adminExtSecurityCenter": "安全中心",
 +    "adminExtCredentials": "凭据托管",
 +    "adminExtModels": "模型目录",
 +    "adminExtUsage": "用量看板",
-+    "adminExtAccounts": "账号与角色"
++    "adminExtAccounts": "账号与角色",
++    "adminExtChanges": "高敏变更复核"
 +  },
 +  "adminExt": {
-+    "securityCenter": {
-+      "placeholder": "安全中心",
-+      "placeholderDesc": "ADMIN-EXT V0 占位页：验证在 Higress Console 内新增菜单与页面的最小改动路径。"
++    "security": {
++      "teeStatus": "密态链路状态",
++      "refresh": "刷新",
++      "teeUrl": "TEE 地址",
++      "teeHealth": "链路健康",
++      "healthOk": "正常",
++      "healthAttest": "待证明（无有效会话）",
++      "healthUnreachable": "不可达",
++      "protocolVersion": "协议版本",
++      "requireAttest": "强制远程证明",
++      "on": "已启用",
++      "off": "未启用",
++      "piiMode": "PII 处理模式",
++      "piiModeRuntime": "运行时生效",
++      "auditEnabled": "数据面审计链",
++      "guardrail": "Guardrail 策略",
++      "guardrailHint": "本页只读展示生效规则摘要（不展示规则原文，避免形成绕过指引）。变更须经「高敏变更复核」（发起人≠复核人）后由门户执行，不在本页直接修改。",
++      "guardrailEnabled": "内容安全检测",
++      "injectionTerms": "提示注入关键词数",
++      "piiCategories": "PII 覆盖类别",
++      "piiRules": "PII 规则数",
++      "sqlCategories": "SQL 注入覆盖类别",
++      "sqlRules": "SQL 规则数",
++      "noTeeConfig": "未获取到 TEE 配置（tee-infer 未配置或不可达）",
++      "auditChain": "审计链",
++      "verifyG1": "校验管理面链",
++      "exportG1": "导出管理面链",
++      "verifyTee": "校验数据面链",
++      "chainVerifyOk": "管理面审计链完整性校验通过",
++      "chainVerifyFail": "管理面审计链校验失败（历史可能被篡改）",
++      "chainEvents": "共 {{count}} 条事件",
++      "teeQueryOk": "数据面审计链校验完成",
++      "teeQueryResult": "数据面审计链校验结果",
++      "chainTotal": "链上事件数",
++      "chainVerified": "完整性",
++      "chainIntact": "完整",
++      "chainBroken": "断裂",
++      "chainLastHash": "链尾哈希（前 8 位）",
++      "colTime": "时间",
++      "colActor": "操作人",
++      "colAction": "动作",
++      "colTarget": "目标",
++      "colPrevHash": "前序哈希"
 +    },
 +    "vendors": {
 +      "guide": "受管厂商激活请到 技术配置 → AI 服务提供者 完成（含 Key 录入与令牌降级）；本页为只读状态汇总。",
@@ -2377,6 +2503,7 @@ index c148f42..cfffac8 100644
 +    },
 +    "accounts": {
 +      "guide": "自研账号（独立 Secret 账号表）：admin 全功能，auditor 只读。所有写操作落审计链（G1，投递失败自动回滚）；密码为 SHA-256(salt+password) 存储，登录失败 5 次锁定 15 分钟。",
++      "oidcReserve": "OIDC/SSO 为预留扩展点（本期本地账号起步，不做 IdP 对接；MFA 预研）。",
 +      "empty": "暂无自研账号（原生 admin 账号不在此列，凭控制台初始化账号登录）",
 +      "refresh": "刷新",
 +      "add": "创建账号",
@@ -2402,18 +2529,62 @@ index c148f42..cfffac8 100644
 +      "passwordRule": "密码至少 8 位且同时含字母与数字",
 +      "confirm": "确认密码",
 +      "passwordMismatch": "两次输入的密码不一致"
++    },
++    "changes": {
++      "guide": "高敏变更须双人闭环（发起人≠复核人，服务端强制）。凭证轮换的新密钥一次性提交、后端仅加密暂存，复核通过才生效，任何界面不回显；全部状态流转落管理面审计链（可在安全中心查询）。",
++      "submit": "发起变更",
++      "refresh": "刷新",
++      "empty": "暂无变更单",
++      "ok": "确定",
++      "required": "必填",
++      "colId": "变更单号",
++      "colAction": "动作",
++      "colTarget": "目标",
++      "colStatus": "状态",
++      "colSubmitter": "发起人",
++      "colReviewer": "复核人",
++      "colCreatedAt": "发起时间",
++      "colActions": "操作",
++      "approve": "复核执行",
++      "reject": "驳回",
++      "detail": "详情",
++      "reason": "驳回原因",
++      "diff": "变更说明",
++      "diffTip": "描述变更内容与影响，供复核人判断",
++      "piiMode": "PII 处理模式",
++      "piiModeTip": "mask = 脱敏后放行；block = 命中即拦截（Guardrail 不提供关闭开关，SQL/提示注入恒拦截）",
++      "targetTip": "受管 provider 名称（broker 凭据目录中的名字）",
++      "newKey": "新密钥",
++      "newKeyTip": "一次性提交，复核通过后才生效；变更单与响应均不含明文",
++      "fingerprint": "新密钥指纹",
++      "execError": "执行错误",
++      "submitted": "变更单已提交，等待复核",
++      "executed": "变更已执行",
++      "rejected": "变更已驳回",
++      "action": {
++        "guardrail_pii_mode": "Guardrail 降级",
++        "credential_rotate": "厂商密钥轮换",
++        "credential_delete": "删除厂商凭据"
++      },
++      "status": {
++        "pending": "待复核",
++        "executed": "已执行",
++        "rejected": "已驳回",
++        "failed": "执行失败"
++      }
 +    }
    },
    "index": {
      "title": "Higress Console"
 diff --git a/frontend/src/pages/_defaultProps.tsx b/frontend/src/pages/_defaultProps.tsx
-index f4c0ecb..7337877 100644
+index f4c0ecb..2df46aa 100644
 --- a/frontend/src/pages/_defaultProps.tsx
 +++ b/frontend/src/pages/_defaultProps.tsx
-@@ -1,11 +1,16 @@
+@@ -1,11 +1,17 @@
  import {
 +  ApiOutlined,
 +  AppstoreOutlined,
++  AuditOutlined,
 +  BarChartOutlined,
    DashboardOutlined,
    DeploymentUnitOutlined,
@@ -2427,7 +2598,7 @@ index f4c0ecb..7337877 100644
    UnorderedListOutlined,
    UserOutlined,
    WindowsOutlined,
-@@ -43,6 +48,40 @@ export default {
+@@ -43,6 +49,48 @@ export default {
          path: '/dashboard',
          icon: <DashboardOutlined />,
        },
@@ -2465,15 +2636,23 @@ index f4c0ecb..7337877 100644
 +        path: '/admin-ext/accounts',
 +        icon: <TeamOutlined />,
 +      },
++      {
++        // ADMIN-EXT（自研扩展，vendor-fork 只增不减）：高敏变更复核（M3-C，D8）
++        // submitter≠reviewer 由服务端强制；前端无身份信息，如实不做置灰（D10 边界）。
++        // 后端未配置 ADMIN_CHANGES_FILE 时端点不注册（页面将提示 404）。
++        name: 'menu.adminExtChanges',
++        path: '/admin-ext/changes',
++        icon: <AuditOutlined />,
++      },
        {
          name: 'menu.serviceSources',
          path: '/service-source',
 diff --git a/frontend/src/pages/admin-ext/accounts/index.tsx b/frontend/src/pages/admin-ext/accounts/index.tsx
 new file mode 100644
-index 0000000..69ddaf4
+index 0000000..5e12517
 --- /dev/null
 +++ b/frontend/src/pages/admin-ext/accounts/index.tsx
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,337 @@
 +import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 +import { PageContainer } from '@ant-design/pro-layout';
 +import {
@@ -2662,6 +2841,12 @@ index 0000000..69ddaf4
 +        message={t('adminExt.accounts.guide')}
 +        style={{ marginBottom: 16 }}
 +      />
++      <Alert
++        type="info"
++        showIcon
++        message={t('adminExt.accounts.oidcReserve')}
++        style={{ marginBottom: 16 }}
++      />
 +      {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />}
 +
 +      <Space style={{ marginBottom: 16 }}>
@@ -2805,6 +2990,384 @@ index 0000000..69ddaf4
 +};
 +
 +export default AccountManagement;
+diff --git a/frontend/src/pages/admin-ext/changes/index.tsx b/frontend/src/pages/admin-ext/changes/index.tsx
+new file mode 100644
+index 0000000..a67059b
+--- /dev/null
++++ b/frontend/src/pages/admin-ext/changes/index.tsx
+@@ -0,0 +1,372 @@
++import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
++import { PageContainer } from '@ant-design/pro-layout';
++import {
++  Alert,
++  Button,
++  Descriptions,
++  Form,
++  Input,
++  message,
++  Modal,
++  Select,
++  Space,
++  Table,
++  Tag,
++} from 'antd';
++import { useCallback, useEffect, useState } from 'react';
++import { useTranslation } from 'react-i18next';
++import {
++  ChangeItem,
++  ChangeSubmit,
++  approveChange,
++  listChanges,
++  rejectChange,
++  submitChange,
++} from '@/services/admin-ext-changes';
++
++/**
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：高敏变更复核（M3-C）。
++ *
++ * 设计（docs/管理门户-细化方案.md §5.3，D8）：状态机 草稿(提交即待复核) → 已执行/已驳回。
++ *  - 发起人 ≠ 复核人（**服务端强制**；前端不掌握当前登录名与角色，故无法置灰，
++ *    如实不做体验层拦截——安全由后端承担，见 D10 边界）；
++ *  - 凭据轮换两阶段：新 Key 一次性提交（后端 0600 暂存，复核通过才提升为正式凭据）；
++ *    本页绝不回显明文；
++ *  - 全部状态流转落 G1 管理面审计链（安全中心可查）。
++ */
++
++const ACTION_GUARDRAIL = 'guardrail_pii_mode';
++const ACTION_ROTATE = 'credential_rotate';
++const ACTION_DELETE = 'credential_delete';
++
++const statusColor = (s: string): string => {
++  switch (s) {
++    case 'pending':
++      return 'orange';
++    case 'executed':
++      return 'green';
++    case 'rejected':
++      return 'default';
++    case 'failed':
++      return 'red';
++    default:
++      return 'blue';
++  }
++};
++
++const ChangeReview: React.FC = () => {
++  const { t } = useTranslation();
++  const [form] = Form.useForm();
++  const [rejectForm] = Form.useForm();
++  const [items, setItems] = useState<ChangeItem[]>([]);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [submitOpen, setSubmitOpen] = useState(false);
++  const [rejectTarget, setRejectTarget] = useState<ChangeItem | null>(null);
++  const [detail, setDetail] = useState<ChangeItem | null>(null);
++  const [submitting, setSubmitting] = useState(false);
++  const action = Form.useWatch('action', form);
++
++  const reload = useCallback(() => {
++    setLoading(true);
++    listChanges()
++      .then((r) => {
++        setItems(r?.items || []);
++        setError(null);
++      })
++      .catch((e) => setError(String(e)))
++      .finally(() => setLoading(false));
++  }, []);
++
++  useEffect(() => {
++    reload();
++  }, [reload]);
++
++  const openSubmit = () => {
++    form.resetFields();
++    form.setFieldsValue({ action: ACTION_GUARDRAIL, payload_mode: 'mask' });
++    setSubmitOpen(true);
++  };
++
++  const doSubmit = async () => {
++    const v = await form.validateFields();
++    const payload: ChangeSubmit = {
++      action: v.action,
++      diff: v.diff,
++      target: v.target,
++    };
++    if (v.action === ACTION_GUARDRAIL) {
++      payload.target = 'guardrail';
++      payload.payload = { pii_mode: v.payload_mode };
++    }
++    if (v.action === ACTION_ROTATE) {
++      payload.secret = v.secret;
++    }
++    setSubmitting(true);
++    try {
++      await submitChange(payload);
++      message.success(t('adminExt.changes.submitted'));
++      setSubmitOpen(false);
++      reload();
++    } catch (e) {
++      message.error(String(e));
++    } finally {
++      setSubmitting(false);
++    }
++  };
++
++  const doApprove = async (c: ChangeItem) => {
++    setSubmitting(true);
++    try {
++      await approveChange(c.id);
++      message.success(t('adminExt.changes.executed'));
++      reload();
++    } catch (e) {
++      message.error(String(e));
++      reload();
++    } finally {
++      setSubmitting(false);
++    }
++  };
++
++  const doReject = async () => {
++    if (!rejectTarget) {
++      return;
++    }
++    const v = await rejectForm.validateFields();
++    setSubmitting(true);
++    try {
++      await rejectChange(rejectTarget.id, v.reason);
++      message.success(t('adminExt.changes.rejected'));
++      setRejectTarget(null);
++      reload();
++    } catch (e) {
++      message.error(String(e));
++    } finally {
++      setSubmitting(false);
++    }
++  };
++
++  const fmtTime = (ns?: number) => (ns ? new Date(ns / 1e6).toLocaleString() : '-');
++
++  const columns = [
++    { title: t('adminExt.changes.colId'), dataIndex: 'id', key: 'id' },
++    {
++      title: t('adminExt.changes.colAction'),
++      dataIndex: 'action',
++      key: 'action',
++      render: (v: string) => <Tag color="geekblue">{t(`adminExt.changes.action.${v}`) || v}</Tag>,
++    },
++    {
++      title: t('adminExt.changes.colTarget'),
++      dataIndex: 'target',
++      key: 'target',
++      render: (v: string) => v || '-',
++    },
++    {
++      title: t('adminExt.changes.colStatus'),
++      dataIndex: 'status',
++      key: 'status',
++      render: (v: string) => <Tag color={statusColor(v)}>{t(`adminExt.changes.status.${v}`) || v}</Tag>,
++    },
++    { title: t('adminExt.changes.colSubmitter'), dataIndex: 'submitter', key: 'submitter' },
++    {
++      title: t('adminExt.changes.colReviewer'),
++      dataIndex: 'reviewer',
++      key: 'reviewer',
++      render: (v: string) => v || '-',
++    },
++    {
++      title: t('adminExt.changes.colCreatedAt'),
++      dataIndex: 'created_at',
++      key: 'created_at',
++      render: fmtTime,
++    },
++    {
++      title: t('adminExt.changes.colActions'),
++      key: 'actions',
++      render: (_: unknown, c: ChangeItem) =>
++        c.status === 'pending' ? (
++          <Space>
++            <Button size="small" type="primary" onClick={() => doApprove(c)} loading={submitting}>
++              {t('adminExt.changes.approve')}
++            </Button>
++            <Button size="small" danger onClick={() => setRejectTarget(c)}>
++              {t('adminExt.changes.reject')}
++            </Button>
++          </Space>
++        ) : (
++          <Button size="small" onClick={() => setDetail(c)}>
++            {t('adminExt.changes.detail')}
++          </Button>
++        ),
++    },
++  ];
++
++  return (
++    <PageContainer>
++      <Alert
++        type="info"
++        showIcon
++        message={t('adminExt.changes.guide')}
++        style={{ marginBottom: 16 }}
++      />
++      {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />}
++
++      <Space style={{ marginBottom: 16 }}>
++        <Button type="primary" icon={<PlusOutlined />} onClick={openSubmit}>
++          {t('adminExt.changes.submit')}
++        </Button>
++        <Button icon={<ReloadOutlined />} onClick={reload}>
++          {t('adminExt.changes.refresh')}
++        </Button>
++      </Space>
++
++      <Table
++        rowKey="id"
++        size="middle"
++        loading={loading}
++        columns={columns}
++        dataSource={items}
++        pagination={{ pageSize: 20 }}
++        locale={{ emptyText: t('adminExt.changes.empty') }}
++      />
++
++      <Modal
++        open={submitOpen}
++        title={t('adminExt.changes.submit')}
++        onCancel={() => setSubmitOpen(false)}
++        onOk={doSubmit}
++        confirmLoading={submitting}
++        okText={t('adminExt.changes.ok')}
++        destroyOnClose
++      >
++        <Form form={form} layout="vertical">
++          <Form.Item
++            name="action"
++            label={t('adminExt.changes.colAction')}
++            rules={[{ required: true, message: t('adminExt.changes.required') }]}
++          >
++            <Select>
++              <Select.Option value={ACTION_GUARDRAIL}>
++                {t(`adminExt.changes.action.${ACTION_GUARDRAIL}`)}
++              </Select.Option>
++              <Select.Option value={ACTION_ROTATE}>
++                {t(`adminExt.changes.action.${ACTION_ROTATE}`)}
++              </Select.Option>
++              <Select.Option value={ACTION_DELETE}>
++                {t(`adminExt.changes.action.${ACTION_DELETE}`)}
++              </Select.Option>
++            </Select>
++          </Form.Item>
++
++          {action === ACTION_GUARDRAIL && (
++            <Form.Item
++              name="payload_mode"
++              label={t('adminExt.changes.piiMode')}
++              extra={t('adminExt.changes.piiModeTip')}
++              rules={[{ required: true, message: t('adminExt.changes.required') }]}
++            >
++              <Select>
++                <Select.Option value="mask">mask</Select.Option>
++                <Select.Option value="block">block</Select.Option>
++              </Select>
++            </Form.Item>
++          )}
++
++          {action !== ACTION_GUARDRAIL && (
++            <Form.Item
++              name="target"
++              label={t('adminExt.changes.colTarget')}
++              extra={t('adminExt.changes.targetTip')}
++              rules={[{ required: true, message: t('adminExt.changes.required') }]}
++            >
++              <Input placeholder="phala" autoComplete="off" />
++            </Form.Item>
++          )}
++
++          {action === ACTION_ROTATE && (
++            <Form.Item
++              name="secret"
++              label={t('adminExt.changes.newKey')}
++              extra={t('adminExt.changes.newKeyTip')}
++              rules={[{ required: true, message: t('adminExt.changes.required') }]}
++            >
++              <Input.Password autoComplete="new-password" />
++            </Form.Item>
++          )}
++
++          <Form.Item
++            name="diff"
++            label={t('adminExt.changes.diff')}
++            extra={t('adminExt.changes.diffTip')}
++            rules={[{ required: true, message: t('adminExt.changes.required') }]}
++          >
++            <Input.TextArea rows={3} />
++          </Form.Item>
++        </Form>
++      </Modal>
++
++      <Modal
++        open={!!rejectTarget}
++        title={`${t('adminExt.changes.reject')}：${rejectTarget?.id || ''}`}
++        onCancel={() => setRejectTarget(null)}
++        onOk={doReject}
++        confirmLoading={submitting}
++        okText={t('adminExt.changes.ok')}
++        destroyOnClose
++      >
++        <Form form={rejectForm} layout="vertical">
++          <Form.Item
++            name="reason"
++            label={t('adminExt.changes.reason')}
++            rules={[{ required: true, message: t('adminExt.changes.required') }]}
++          >
++            <Input.TextArea rows={3} />
++          </Form.Item>
++        </Form>
++      </Modal>
++
++      <Modal
++        open={!!detail}
++        title={`${t('adminExt.changes.detail')}：${detail?.id || ''}`}
++        onCancel={() => setDetail(null)}
++        footer={<Button onClick={() => setDetail(null)}>{t('adminExt.changes.ok')}</Button>}
++      >
++        {detail && (
++          <Descriptions column={1} size="small">
++            <Descriptions.Item label={t('adminExt.changes.colAction')}>
++              {t(`adminExt.changes.action.${detail.action}`) || detail.action}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.changes.colTarget')}>{detail.target}</Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.changes.diff')}>{detail.diff}</Descriptions.Item>
++            {detail.key_fingerprint && (
++              <Descriptions.Item label={t('adminExt.changes.fingerprint')}>
++                {detail.key_fingerprint}
++              </Descriptions.Item>
++            )}
++            <Descriptions.Item label={t('adminExt.changes.colSubmitter')}>{detail.submitter}</Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.changes.colReviewer')}>
++              {detail.reviewer || '-'}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.changes.colStatus')}>
++              <Tag color={statusColor(detail.status)}>
++                {t(`adminExt.changes.status.${detail.status}`) || detail.status}
++              </Tag>
++            </Descriptions.Item>
++            {detail.reject_reason && (
++              <Descriptions.Item label={t('adminExt.changes.reason')}>{detail.reject_reason}</Descriptions.Item>
++            )}
++            {detail.exec_error && (
++              <Descriptions.Item label={t('adminExt.changes.execError')}>
++                <span style={{ color: '#cf1322' }}>{detail.exec_error}</span>
++              </Descriptions.Item>
++            )}
++          </Descriptions>
++        )}
++      </Modal>
++    </PageContainer>
++  );
++};
++
++export default ChangeReview;
 diff --git a/frontend/src/pages/admin-ext/credentials/index.tsx b/frontend/src/pages/admin-ext/credentials/index.tsx
 new file mode 100644
 index 0000000..15e7adf
@@ -3893,29 +4456,310 @@ index 0000000..f16c07f
 +export default ProviderStatus;
 diff --git a/frontend/src/pages/security-center/index.tsx b/frontend/src/pages/security-center/index.tsx
 new file mode 100644
-index 0000000..8fb1116
+index 0000000..6ed35b0
 --- /dev/null
 +++ b/frontend/src/pages/security-center/index.tsx
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,305 @@
 +import { PageContainer } from '@ant-design/pro-layout';
-+import { Result } from 'antd';
-+import React from 'react';
++import { Alert, Button, Card, Descriptions, message, Space, Spin, Table, Tag } from 'antd';
++import { useCallback, useEffect, useState } from 'react';
 +import { useTranslation } from 'react-i18next';
++import {
++  AuditChainEvent,
++  AuditChainQuery,
++  AuditChainVerify,
++  SecStatus,
++  exportAuditChain,
++  getSecStatus,
++  getTeeAudit,
++  queryAuditChain,
++  verifyAuditChain,
++} from '@/services/admin-ext-security';
 +
 +/**
-+ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：安全中心占位页。
-+ * V0 目的：验证"在 Higress Console SPA 内新增菜单+页面"的最小 diff 路径。
-+ * 正式版将承载：密态会话/Guardrail/审计链/高敏变更复核等控制台不具备的能力。
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：安全中心（M3-B）。
++ *
++ * 三区块（docs/管理门户-细化方案.md §5「安全中心」）：
++ *  ① 密态链路状态：quote 会话/握手/TEE 地址健康（聚合 tee-infer /healthz + /config）；
++ *  ② Guardrail 策略：只读展示生效规则摘要（**变更走高敏变更复核**，本页不提供写入口——
++ *     Guardrail 属 tee-infer 服务内配置，按高敏变更语义处理，见 §3.2/§5.3）；
++ *  ③ 审计链：G1 管理面链查询/哈希校验/导出 + tee-infer 数据面链校验。
++ *
++ * 安全取舍（最小披露）：Guardrail 只展示类别与规则条数（不展示正则/关键词原文，
++ * 原文等同绕过手册）；链尾哈希只展示前 8 位。
++ *
++ * 只读边界（D10）：本页全部端点服务端允许 admin 与 auditor 读取；前端不区分角色。
 + */
++
++const PAGE_SIZE = 20;
++
 +const SecurityCenter: React.FC = () => {
 +  const { t } = useTranslation();
++  const [status, setStatus] = useState<SecStatus | null>(null);
++  const [statusErr, setStatusErr] = useState<string | null>(null);
++  const [loadingStatus, setLoadingStatus] = useState(false);
++
++  const [chain, setChain] = useState<AuditChainQuery | null>(null);
++  const [chainErr, setChainErr] = useState<string | null>(null);
++  const [loadingChain, setLoadingChain] = useState(false);
++  const [page, setPage] = useState(1);
++
++  const [verifyResult, setVerifyResult] = useState<AuditChainVerify | null>(null);
++  const [teeVerify, setTeeVerify] = useState<string | null>(null);
++  const [acting, setActing] = useState(false);
++
++  const loadStatus = useCallback(() => {
++    setLoadingStatus(true);
++    getSecStatus()
++      .then((s) => {
++        setStatus(s);
++        setStatusErr(null);
++      })
++      .catch((e) => setStatusErr(String(e)))
++      .finally(() => setLoadingStatus(false));
++  }, []);
++
++  const loadChain = useCallback(
++    (p: number) => {
++      setLoadingChain(true);
++      queryAuditChain(PAGE_SIZE, (p - 1) * PAGE_SIZE)
++        .then((c) => {
++          setChain(c);
++          setChainErr(null);
++        })
++        .catch((e) => setChainErr(String(e)))
++        .finally(() => setLoadingChain(false));
++    },
++    [],
++  );
++
++  useEffect(() => {
++    loadStatus();
++    loadChain(1);
++  }, [loadStatus, loadChain]);
++
++  const runVerify = async () => {
++    setActing(true);
++    try {
++      const r = await verifyAuditChain();
++      setVerifyResult(r);
++      message[r.ok ? 'success' : 'error'](
++        r.ok ? t('adminExt.security.chainVerifyOk') : t('adminExt.security.chainVerifyFail'),
++      );
++    } catch (e) {
++      message.error(String(e));
++    } finally {
++      setActing(false);
++    }
++  };
++
++  const runTeeVerify = async () => {
++    setActing(true);
++    try {
++      const r = await getTeeAudit({ verify: true });
++      setTeeVerify(JSON.stringify(r, null, 2));
++      message.success(t('adminExt.security.teeQueryOk'));
++    } catch (e) {
++      message.error(String(e));
++    } finally {
++      setActing(false);
++    }
++  };
++
++  const healthNode = (() => {
++    const h = status?.tee_health;
++    if (h === 'ok') {
++      return <Tag color="green">{t('adminExt.security.healthOk')}</Tag>;
++    }
++    if (h === 'attestation_required') {
++      return <Tag color="orange">{t('adminExt.security.healthAttest')}</Tag>;
++    }
++    return <Tag color="red">{t('adminExt.security.healthUnreachable')}</Tag>;
++  })();
++
++  const fmtTime = (ns?: number) => (ns ? new Date(ns / 1e6).toLocaleString() : '-');
++
++  const columns = [
++    { title: t('adminExt.security.colTime'), dataIndex: 'timestamp', key: 'timestamp', render: fmtTime },
++    { title: t('adminExt.security.colActor'), dataIndex: 'actor', key: 'actor' },
++    { title: t('adminExt.security.colAction'), dataIndex: 'action', key: 'action' },
++    {
++      title: t('adminExt.security.colTarget'),
++      key: 'target',
++      render: (_: unknown, r: AuditChainEvent) => r.target || r.provider || r.tenant || '-',
++    },
++    {
++      title: t('adminExt.security.colPrevHash'),
++      dataIndex: 'prev_hash',
++      key: 'prev_hash',
++      render: (v: string) => (v ? v.substring(0, 8) : 'GENESIS'),
++    },
++  ];
++
++  const guardrail = status?.tee_config?.guardrail;
++
 +  return (
 +    <PageContainer>
-+      <Result
-+        status="info"
-+        title={t('adminExt.securityCenter.placeholder')}
-+        subTitle={t('adminExt.securityCenter.placeholderDesc')}
-+      />
++      {statusErr && (
++        <Alert type="warning" showIcon message={statusErr} style={{ marginBottom: 16 }} />
++      )}
++
++      <Card
++        title={t('adminExt.security.teeStatus')}
++        extra={
++          <Button size="small" onClick={loadStatus} loading={loadingStatus}>
++            {t('adminExt.security.refresh')}
++          </Button>
++        }
++        style={{ marginBottom: 16 }}
++      >
++        {loadingStatus && !status ? (
++          <Spin />
++        ) : (
++          <Descriptions column={2} size="small">
++            <Descriptions.Item label={t('adminExt.security.teeUrl')}>
++              {status?.tee_url || '-'}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.security.teeHealth')}>{healthNode}</Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.security.protocolVersion')}>
++              {status?.tee_config?.protocol_version || '-'}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.security.requireAttest')}>
++              {status?.tee_config?.require_attest ? (
++                <Tag color="green">{t('adminExt.security.on')}</Tag>
++              ) : (
++                <Tag>{t('adminExt.security.off')}</Tag>
++              )}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.security.piiMode')}>
++              {status?.tee_config?.pii_mode || '-'}
++              {status?.tee_config?.pii_mode_source === 'runtime' && (
++                <Tag color="orange" style={{ marginLeft: 8 }}>
++                  {t('adminExt.security.piiModeRuntime')}
++                </Tag>
++              )}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.security.auditEnabled')}>
++              {status?.tee_config?.audit_enabled ? (
++                <Tag color="green">{t('adminExt.security.on')}</Tag>
++              ) : (
++                <Tag color="orange">{t('adminExt.security.off')}</Tag>
++              )}
++            </Descriptions.Item>
++          </Descriptions>
++        )}
++      </Card>
++
++      <Card title={t('adminExt.security.guardrail')} style={{ marginBottom: 16 }}>
++        <Alert
++          type="info"
++          showIcon
++          message={t('adminExt.security.guardrailHint')}
++          style={{ marginBottom: 12 }}
++        />
++        {guardrail ? (
++          <Descriptions column={2} size="small">
++            <Descriptions.Item label={t('adminExt.security.guardrailEnabled')}>
++              {guardrail.enabled ? (
++                <Tag color="green">{t('adminExt.security.on')}</Tag>
++              ) : (
++                <Tag color="red">{t('adminExt.security.off')}</Tag>
++              )}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.security.injectionTerms')}>
++              {guardrail.injection_terms}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.security.piiCategories')}>
++              {guardrail.pii_categories}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.security.piiRules')}>
++              {guardrail.pii_rules}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.security.sqlCategories')}>
++              {guardrail.sql_categories}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.security.sqlRules')}>
++              {guardrail.sql_rules}
++            </Descriptions.Item>
++          </Descriptions>
++        ) : (
++          <Alert type="warning" showIcon message={t('adminExt.security.noTeeConfig')} />
++        )}
++      </Card>
++
++      <Card
++        title={t('adminExt.security.auditChain')}
++        extra={
++          <Space>
++            <Button size="small" onClick={runVerify} loading={acting}>
++              {t('adminExt.security.verifyG1')}
++            </Button>
++            <Button size="small" onClick={exportAuditChain}>
++              {t('adminExt.security.exportG1')}
++            </Button>
++            <Button size="small" onClick={runTeeVerify} loading={acting}>
++              {t('adminExt.security.verifyTee')}
++            </Button>
++          </Space>
++        }
++      >
++        {verifyResult && (
++          <Alert
++            type={verifyResult.ok ? 'success' : 'error'}
++            showIcon
++            style={{ marginBottom: 12 }}
++            message={
++              verifyResult.ok
++                ? t('adminExt.security.chainVerifyOk')
++                : `${t('adminExt.security.chainVerifyFail')} (broken_at=${verifyResult.broken_at})`
++            }
++            description={t('adminExt.security.chainEvents', { count: verifyResult.events })}
++          />
++        )}
++        {teeVerify && (
++          <Alert
++            type="success"
++            showIcon
++            style={{ marginBottom: 12 }}
++            message={t('adminExt.security.teeQueryResult')}
++            description={<pre style={{ margin: 0 }}>{teeVerify}</pre>}
++          />
++        )}
++        {chainErr && <Alert type="warning" showIcon message={chainErr} style={{ marginBottom: 12 }} />}
++        {status && (
++          <Descriptions column={3} size="small" style={{ marginBottom: 12 }}>
++            <Descriptions.Item label={t('adminExt.security.chainTotal')}>
++              {status.audit_chain.events}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.security.chainVerified')}>
++              {status.audit_chain.verified ? (
++                <Tag color="green">{t('adminExt.security.chainIntact')}</Tag>
++              ) : (
++                <Tag color="red">{t('adminExt.security.chainBroken')}</Tag>
++              )}
++            </Descriptions.Item>
++            <Descriptions.Item label={t('adminExt.security.chainLastHash')}>
++              {status.audit_chain.last_hash || '-'}
++            </Descriptions.Item>
++          </Descriptions>
++        )}
++        <Table
++          rowKey="event_id"
++          size="small"
++          loading={loadingChain}
++          columns={columns}
++          dataSource={chain?.events || []}
++          pagination={{
++            current: page,
++            pageSize: PAGE_SIZE,
++            total: chain?.total || 0,
++            onChange: (p) => {
++              setPage(p);
++              loadChain(p);
++            },
++          }}
++        />
++      </Card>
 +    </PageContainer>
 +  );
 +};
@@ -4054,6 +4898,80 @@ index 0000000..7298b88
 +export const deleteBrokerProvider = (name: string): Promise<BrokerProviderDeleteResult> => {
 +  return request.delete<any, BrokerProviderDeleteResult>(`${BASE}/${name}`);
 +};
+diff --git a/frontend/src/services/admin-ext-changes.ts b/frontend/src/services/admin-ext-changes.ts
+new file mode 100644
+index 0000000..c110871
+--- /dev/null
++++ b/frontend/src/services/admin-ext-changes.ts
+@@ -0,0 +1,68 @@
++import request from './request';
++
++/**
++ * ADMIN-EXT（自研扩展）：高敏变更复核 API 客户端（M3-C）。
++ *
++ * 设计：docs/管理门户-细化方案.md §5.3（D8 状态机：草稿 → 待复核 → 已执行/已驳回）。
++ *
++ * 服务端硬约束（前端不承担安全职责，仅提示）：
++ *  - submitter ≠ reviewer：发起人不得复核本人提交的变更；
++ *  - 凭据轮换的新 Key 一次性提交（后端落 0600 暂存，复核通过才提升为正式凭据），
++ *    响应与变更单均不含明文；
++ *  - 全部状态流转落 G1 管理面审计链。
++ *
++ * 特性开关：后端未配置 ADMIN_CHANGES_FILE 时端点不注册（404）。
++ */
++
++/** 变更单状态：pending 待复核 / executed 已执行 / rejected 已驳回 / failed 执行失败。 */
++export type ChangeStatus = 'pending' | 'executed' | 'rejected' | 'failed';
++
++/** 本期可执行的高敏动作。 */
++export type ChangeAction =
++  | 'guardrail_pii_mode'
++  | 'credential_rotate'
++  | 'credential_delete';
++
++export interface ChangeItem {
++  id: string;
++  action: ChangeAction | string;
++  target: string;
++  diff: string;
++  payload?: Record<string, string>;
++  key_fingerprint?: string;
++  status: ChangeStatus | string;
++  submitter: string;
++  reviewer?: string;
++  reject_reason?: string;
++  created_at: number;
++  decided_at?: number;
++  executed_at?: number;
++  exec_error?: string;
++}
++
++export interface ChangeSubmit {
++  action: ChangeAction;
++  target?: string;
++  diff: string;
++  payload?: Record<string, string>;
++  /** 仅 credential_rotate：新 Key 明文，一次性提交（不入变更单/日志） */
++  secret?: string;
++}
++
++const BASE = '/v1/adminext/changes';
++
++export const listChanges = (): Promise<{ items: ChangeItem[]; total: number }> => {
++  return request.get<any, { items: ChangeItem[]; total: number }>(BASE);
++};
++
++export const submitChange = (data: ChangeSubmit): Promise<ChangeItem> => {
++  return request.post<any, ChangeItem>(BASE, data);
++};
++
++export const approveChange = (id: string): Promise<ChangeItem> => {
++  return request.post<any, ChangeItem>(`${BASE}/${id}/approve`, {});
++};
++
++export const rejectChange = (id: string, reason: string): Promise<ChangeItem> => {
++  return request.post<any, ChangeItem>(`${BASE}/${id}/reject`, { reason });
++};
 diff --git a/frontend/src/services/admin-ext-models.ts b/frontend/src/services/admin-ext-models.ts
 new file mode 100644
 index 0000000..0002266
@@ -4104,6 +5022,129 @@ index 0000000..0002266
 +
 +export const listModels = (): Promise<ModelCatalog> => {
 +  return request.get<any, ModelCatalog>(BASE);
++};
+diff --git a/frontend/src/services/admin-ext-security.ts b/frontend/src/services/admin-ext-security.ts
+new file mode 100644
+index 0000000..4086360
+--- /dev/null
++++ b/frontend/src/services/admin-ext-security.ts
+@@ -0,0 +1,117 @@
++import request from './request';
++
++/**
++ * ADMIN-EXT（自研扩展）：安全中心 API 客户端（M3-B）。
++ *
++ * 数据源分层：
++ *  - 密态链路状态 / Guardrail 策略 → gateway-admin-service GET /v1/adminext/sec-status
++ *    （内部聚合 tee-infer /healthz 与 /config，服务间令牌注入，前端不可见）；
++ *  - G1 管理面审计链 → /v1/adminext/audit-chain（查询/校验/导出）；
++ *  - tee-infer 数据面审计链 → /v1/adminext/audit-tee（代理）。
++ *
++ * 最小披露：Guardrail 只返回类别与规则条数，链尾哈希只给前 8 位（规则原文不出 TEE）。
++ * 503 语义：G1 链未启用 / tee-infer 未配置时后端返回 503（不静默给空数据）。
++ * 只读边界（D10）：本页全部端点允许 admin 与 auditor 读取。
++ */
++
++/** G1 审计事件（字段随事件类型可选）。 */
++export interface AuditChainEvent {
++  event_id: string;
++  timestamp: number;
++  actor: string;
++  action: string;
++  provider?: string;
++  key_fingerprint?: string;
++  tenant?: string;
++  max_tokens?: number;
++  target?: string;
++  request_id: string;
++  result: string;
++  prev_hash: string;
++}
++
++/** G1 链分页查询响应（events 为倒序：最新在前）。 */
++export interface AuditChainQuery {
++  events: AuditChainEvent[];
++  total: number;
++  limit: number;
++  offset: number;
++}
++
++/** G1 链完整性校验结果。 */
++export interface AuditChainVerify {
++  ok: boolean;
++  events: number;
++  broken_at?: number;
++}
++
++/** Guardrail 规则摘要（类别 + 条数，不含规则原文）。 */
++export interface GuardrailSnapshot {
++  enabled: boolean;
++  pii_categories: string;
++  sql_categories: string;
++  pii_rules: number;
++  sql_rules: number;
++  injection_terms: number;
++  prompt_classifier: boolean;
++}
++
++/** tee-infer 配置快照（/config）。 */
++export interface TeeConfig {
++  protocol_version: string;
++  require_attest: boolean;
++  admin_auth_enabled: boolean;
++  pii_mode: string;
++  /** startup = 启动参数生效；runtime = 高敏复核后运行时降级生效 */
++  pii_mode_source: string;
++  system_prompt_set: boolean;
++  audit_enabled: boolean;
++  guardrail: GuardrailSnapshot;
++}
++
++/** 密态链路状态聚合视图。 */
++export interface SecStatus {
++  tee_url: string;
++  /** ok | attestation_required | unreachable */
++  tee_health: string;
++  tee_http_status: number;
++  tee_config?: TeeConfig;
++  audit_chain: {
++    enabled: boolean;
++    events: number;
++    verified: boolean;
++    last_hash: string;
++  };
++  fetched_at: number;
++}
++
++const BASE = '/v1/adminext';
++
++export const getSecStatus = (): Promise<SecStatus> => {
++  return request.get<any, SecStatus>(`${BASE}/sec-status`);
++};
++
++export const queryAuditChain = (limit: number, offset: number): Promise<AuditChainQuery> => {
++  return request.get<any, AuditChainQuery>(`${BASE}/audit-chain`, { params: { limit, offset } });
++};
++
++export const verifyAuditChain = (): Promise<AuditChainVerify> => {
++  return request.get<any, AuditChainVerify>(`${BASE}/audit-chain/verify`);
++};
++
++/** G1 链导出（JSONL 附件，浏览器直接下载，走同源会话认证）。 */
++export const exportAuditChain = (): void => {
++  window.open(`${BASE}/audit-chain/export`, '_blank');
++};
++
++/** tee-infer 数据面审计链查询（verify=true 走 /audit/verify 校验）。 */
++export const getTeeAudit = (params: { tenant?: string; verify?: boolean }): Promise<any> => {
++  const q: Record<string, string> = {};
++  if (params.tenant) {
++    q.tenant = params.tenant;
++  }
++  if (params.verify) {
++    q.verify = '1';
++  }
++  return request.get<any, any>(`${BASE}/audit-tee`, { params: q });
 +};
 diff --git a/frontend/src/services/admin-ext-usage.ts b/frontend/src/services/admin-ext-usage.ts
 new file mode 100644
