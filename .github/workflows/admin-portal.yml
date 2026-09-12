@@ -6,8 +6,8 @@
 #       scripts/fork-patch-check.ps1 生成）→ 后端 mvn compile + 前端 npm build。
 # 触发：fork-patches/** 或相关脚本/本文件变更（push main / PR）；可手动 dispatch。
 #
-# 现状（2026-09-10）：本仓库未配置 git remote，本 workflow 无法触发（故未"首跑"）；
-# 且触发分支写的是 main，而本地分支为 master。本地等价门禁见
+# 现状（2026-09-12 更新）：触发分支已由 [main] 补为 [main, master]（本地分支实为 master）；
+# 但本仓库仍未配置 git remote，故 workflow 依旧无法触发（未"首跑"）。本地等价门禁见
 # scripts/verify-fork-rebuild.ps1（clean-room 全链：克隆上游 → apply 补丁 → mvn compile+test
 # → npm ci+build → 产物 chunk 断言），已于 2026-09-10 端到端通过。
 # 接入远端后建议把下方 compile 步骤升级为 test，与本地门禁保持一致。
@@ -15,7 +15,7 @@ name: admin-portal
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
     paths:
       - 'fork-patches/**'
       - 'scripts/fork-patch-check.ps1'

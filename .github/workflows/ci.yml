@@ -4,7 +4,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
 
 jobs:
@@ -24,9 +24,9 @@ jobs:
 
       # 1. 静态与单元
       - name: go vet
-        run: go vet ./...
+        run: go vet -mod=mod ./...
       - name: unit tests
-        run: go test ./...
+        run: go test -mod=mod ./...
 
       # 2. 供应链漏洞扫描（TH-12 缓解）
       - name: govulncheck
@@ -40,13 +40,20 @@ jobs:
       - name: decision gate PoC
         run: go run ./gateway/poc/linear-mask-poc
 
-      # 5. wasm 插件构建（Go 1.25 原生 wasm；国密库 gmsm 要求 1.25+）
+      # 5. Higress 插件版本门禁（防“版本漂移 → 插件 URL 404 → wasm 加载失败 → FAIL_OPEN 静默放行”）
+      #    仅校验“仓库 ↔ plugin-versions.lock”（不传 -Container），故不依赖 Docker
+      - name: higress plugin version gate
+        run: pwsh -NoProfile -File scripts/check-higress-plugin-versions.ps1
+
+      # 6. wasm 插件构建（Go 1.25 原生 wasm；国密库 gmsm 要求 1.25+）
       - name: build wasm plugin
         run: |
-          GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared \
+          GOOS=wasip1 GOARCH=wasm go build -mod=mod -buildmode=c-shared \
             -o gateway/wasm/otpmask-plugin/main.wasm ./gateway/wasm/otpmask-plugin
 
-      # 6. 端到端 + 治理 + 渗透（Docker Compose 环境）
+      # 7. 端到端 + 治理 + 渗透（Docker Compose 环境）
+      #    注意：本步与 K8s 步依赖本地 compose 容器/集群，托管 runner 不具备；
+      #    接入自托管 runner 后再纳入 CI 必过项（当前保留，失败即暴露环境缺失）。
       - name: e2e & governance suite
         run: pwsh -NoProfile -File scripts/verify-all.ps1
         env:
@@ -55,11 +62,11 @@ jobs:
       - name: penetration tests
         run: python scripts/pen_test.py
 
-      # 7. K8s 清单校验（kustomize 渲染 + YAML 语法；无集群执行 dry-run 跳过）
+      # 8. K8s 清单校验（kustomize 渲染 + YAML 语法；无集群执行 dry-run 跳过）
       - name: K8s manifests
         run: pwsh -NoProfile -File scripts/verify-k8s.ps1
 
-      # 8. Linux 一键脚本语法 + 脚本集校验
+      # 9. Linux 一键脚本语法 + 脚本集校验
       - name: Linux scripts syntax
         run: |
           bash -n scripts/setup-env.sh
