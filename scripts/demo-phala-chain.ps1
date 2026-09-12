@@ -81,6 +81,25 @@ function Get-Content([string]$body) {
     return $sb.ToString()
 }
 
+# 会话预热：TEE 重启/换版后，插件侧会话失效，而 Envoy 并发度 = wasm VM 实例数
+# （本环境 --concurrency 16），每个 worker 各持一份失效会话 → 各需一次 fail-closed
+# 503 触发重握手。故预热次数与并发度同阶（实测需 11+ 次），不能只试 2-3 次。
+function Wait-Warm([string]$label, [int]$MaxAttempts = 24, [int]$NeedConsecutive = 3) {
+    $streak = 0
+    $codes = @()
+    for ($i = 1; $i -le $MaxAttempts; $i++) {
+        $r = Send-Infer "$label 预热第 $i 次"
+        $codes += $r.Code
+        if ($r.Code -eq '200') { $streak++ } else { $streak = 0 }
+        if ($streak -ge $NeedConsecutive) {
+            Write-Host "    预热收敛：第 $i 次请求后连续 $NeedConsecutive 次 200" -ForegroundColor DarkGray
+            return $i
+        }
+    }
+    Write-Host "    预热未收敛（$MaxAttempts 次内未达连续 $NeedConsecutive 次 200）：$($codes -join ' ')" -ForegroundColor DarkYellow
+    return -1
+}
+
 Write-Host '===== 展示环境2.0 · Phala 密态推理链演示验证 =====' -ForegroundColor Cyan
 Write-Host "Higress=$BaseUrl  TEE=$tee  Rounds=$Rounds"
 $failCount = 0
@@ -97,6 +116,10 @@ if (-not $SkipPreflight) {
         exit 1
     }
 }
+
+# ---------- 会话预热（冷启动/重启后逐 worker 重握手） ----------
+Write-Host "`n[预热] 会话握手收敛（Envoy 并发 worker 逐个重建）" -ForegroundColor Yellow
+[void](Wait-Warm '初始')
 
 # D 基线：engine_error 拒绝计数（本次运行前）
 $engBase = Get-EngineErrorCount
@@ -174,15 +197,9 @@ if ($RunFailClosed) {
     }
     Check 'E2 tee-infer 恢复就绪' $ready
     if ($ready) {
-        # TEE 重启后插件旧会话已失效：首个请求触发握手重建，窗口内可能 503 →
-        # 带预热重试（演示场景容忍，最长约 10s）。
-        Start-Sleep -Seconds 2
-        $rr = $null
-        for ($i = 1; $i -le 5; $i++) {
-            $rr = Send-Infer '服务恢复后请再回答：用一句话介绍机密计算'
-            if ($rr.Code -eq '200') { break }
-            Start-Sleep -Seconds 2
-        }
+        # TEE 重启后插件旧会话已失效：须逐 worker 重握手（见 Wait-Warm 说明）
+        [void](Wait-Warm '恢复后')
+        $rr = Send-Infer '服务恢复后请再回答：用一句话介绍机密计算'
         $rc = if ($rr) { Get-Content $rr.Body } else { '' }
         Check 'E3 恢复后推理 200' ($null -ne $rr -and $rr.Code -eq '200') "(code=$($rr.Code))"
         Check 'E4 恢复后明文解密成功' ($rc -ne '')

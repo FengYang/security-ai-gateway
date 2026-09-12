@@ -37,7 +37,8 @@ $env:CMAAS_API_KEY = $config["CMAAS_API_KEY"]
 Write-Host ("[start] CMAAS_URL=" + $config["CMAAS_URL"] + "  CMAAS_MODEL=" + $config["CMAAS_MODEL"] + "  API_KEY=***" + $config["CMAAS_API_KEY"].Substring([Math]::Max(0, $config["CMAAS_API_KEY"].Length - 4)))
 
 $goArgs = @(
-    "run", "./gateway/tee-infer-service",
+    # -mod=mod：仓库 vendor/ 缺 modules.txt，缺省会报 inconsistent vendoring 而拒绝启动
+    "run", "-mod=mod", "./gateway/tee-infer-service",
     "-listen", ":$Port",
     "-cmaas-url", $config["CMAAS_URL"],
     "-cmaas-model", $config["CMAAS_MODEL"]
