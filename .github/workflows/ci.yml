@@ -15,7 +15,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache: true
 
       - uses: actions/setup-python@v5
@@ -40,7 +40,7 @@ jobs:
       - name: decision gate PoC
         run: go run ./gateway/poc/linear-mask-poc
 
-      # 5. wasm 插件构建（Go 1.24 原生 wasm）
+      # 5. wasm 插件构建（Go 1.25 原生 wasm；国密库 gmsm 要求 1.25+）
       - name: build wasm plugin
         run: |
           GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared \
