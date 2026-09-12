@@ -185,3 +185,16 @@ kubectl apply -f deploy/higress/gateway-hpa.yaml                 # 网关 HPA（
 3. **fake-apiserver 会丢弃 WasmPlugin `spec.configuration`**（defaultConfig 不进 ECDS），配置必须走 matchRules。
 4. **wasm-go 空配置 = 全局启用**（按默认值跑）——这是 configDisable 豁免无效的根因，白名单制是正解。
 5. 生产 dns registry 443 端口必须显式 `protocol: HTTPS`（漏配 = 明文打 443，TLS 握手失败）。
+
+### 9.6 自定义厂家接入（OpenAI 兼容，界面零开发）
+
+内置 17 家之外的第三方/自建模型，走**「OpenAI 兼容」类型 + 自定义 BaseURL**，无需改代码：
+
+1. **AI 服务 → AI 服务提供者 → 创建**：类型选 `OpenAI/OpenAI 兼容`（界面标签已注明"自定义厂家选此项"）；
+   **名称自填**（如 `my-vendor`，即决定调用前缀 `/provider/my-vendor/`）；
+2. 「自定义 OpenAI 服务配置方式」选 `url`，填厂商 BaseURL（如 `https://llm.internal.example.com/v1`；同协议多地址可一次填多个）；
+3. 填该厂商 **API Key**，保存即激活（key 落控制台托管插件，不入仓库，见 §9.2）；
+4. 调用：`POST /provider/<自填名称>/v1/chat/completions`（OpenAI messages 体，出站标准 SSE）。
+
+**限制（如实）**：当前仅支持 **OpenAI 兼容协议**。非 OpenAI 协议的自定义厂家（自定义 header /
+鉴权签名 / 请求体转换）**不支持**——需在 ai-proxy 之外新增适配层，属独立工作包（待排期），不在本轮范围。

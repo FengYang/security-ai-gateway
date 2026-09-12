@@ -2201,7 +2201,7 @@ index 0000000..9c5f80a
 +
 +export default AdminExtBadge;
 diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
-index 1a41985..b247585 100644
+index 1a41985..32f47f6 100644
 --- a/frontend/src/locales/en-US/translation.json
 +++ b/frontend/src/locales/en-US/translation.json
 @@ -22,7 +22,224 @@
@@ -2430,8 +2430,17 @@ index 1a41985..b247585 100644
    },
    "index": {
      "title": "Higress Console"
+@@ -224,7 +441,7 @@
+       "tokens": "Tokens"
+     },
+     "providerTypes": {
+-      "openai": "OpenAI/OpenAI Compatible",
++      "openai": "OpenAI/OpenAI Compatible (custom vendors: pick this and set a custom BaseURL)",
+       "qwen": "Tongyi Qianwen",
+       "moonshot": "Moonshot",
+       "ai360": "360 Zhinao",
 diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
-index c148f42..42f7286 100644
+index c148f42..fd8b3d2 100644
 --- a/frontend/src/locales/zh-CN/translation.json
 +++ b/frontend/src/locales/zh-CN/translation.json
 @@ -22,7 +22,224 @@
@@ -2660,6 +2669,15 @@ index c148f42..42f7286 100644
    },
    "index": {
      "title": "Higress Console"
+@@ -224,7 +441,7 @@
+       "tokens": "凭证"
+     },
+     "providerTypes": {
+-      "openai": "OpenAI/OpenAI兼容服务",
++      "openai": "OpenAI/OpenAI兼容服务（自定义厂家选此项，并填自定义 BaseURL）",
+       "qwen": "通义千问",
+       "moonshot": "月之暗面",
+       "ai360": "360智脑",
 diff --git a/frontend/src/pages/_defaultProps.tsx b/frontend/src/pages/_defaultProps.tsx
 index f4c0ecb..111d28a 100644
 --- a/frontend/src/pages/_defaultProps.tsx
