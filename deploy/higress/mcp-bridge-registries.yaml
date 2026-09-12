@@ -111,3 +111,19 @@ spec:
     port: 443
     type: dns
     protocol: HTTPS
+  # ---- 限流依赖（cluster-key-rate-limit）----
+  # Redis 服务：供 cluster-key-rate-limit 做**集群级计数**（按租户动态分桶，见 security-plugins.yaml）。
+  #
+  # 关键约束（实境取证 2026-09-12，勿踩）：
+  #   - registry 名 `redis-ratelimit` → 插件侧 `redis.service_name` 须写 **`redis-ratelimit.dns`**
+  #     （dns 类型后缀为 .dns；静态类型后缀为 .static，本地 standalone 曾用 static + 容器 IP 验证通过）；
+  #   - dns 类型的 domain 必须是**合法域名格式**，单标签名会被 controller 拒绝
+  #     （`invalid domain format:xxx`）→ 故此处用 K8s 集群内 FQDN；
+  #   - protocol 用 TCP（Redis 非 HTTP）；
+  #   - **Redis 不可用时 cluster-key-rate-limit 为 fail-open**（实测请求全部放行、限流失效，
+  #     恢复后自动重连）→ 必须为 Redis 可用性配告警，不可静默依赖。
+  - name: redis-ratelimit
+    domain: redis-ratelimit.<namespace>.svc.cluster.local
+    port: 6379
+    type: dns
+    protocol: TCP

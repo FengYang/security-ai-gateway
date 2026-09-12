@@ -1,21 +1,29 @@
 # 安全插件启用（P0b：Higress 插件生态，全部 FAIL_CLOSED）
 #
-# 链序：cors（CORS phase，预检豁免）→ key-auth（AUTHN）→ IP Restriction（AUTHZ）
-#       → Local Rate Limit（RATE_LIMIT）→ otpmask（DEFAULT，段① 加密）→ 路由
+# 链序：cors（CORS phase，预检豁免）→ key-auth（AUTHN，310）→ ip-restriction（AUTHN，210）
+#       → cluster-key-rate-limit（默认阶段，20）→ otpmask（DEFAULT，段① 加密）→ 路由
 # 强制项（v3 评审 P0）：所有启用插件的 failStrategy 显式 FAIL_CLOSED，
 # 故障即拒绝，不降级放行（对齐项目 fail-closed 哲学）。
-# 注意：本文件为启用模板，插件 url 指向 Higress 内建插件服务（localhost:8002），
-# 由 Higress 控制面统一分发；生产请确认镜像版本包含对应插件（并做插件 schema
-# 字段级核验，见研发计划 GF.1）。
 #
-# 覆盖路径（2026-09-12 补全，Phase 1 门禁 #5/#7 语义）：
-#   - 密态推理入口 `/infer`（ingress: infer）；
-#   - 明文 Provider 入口 `/provider/<name>/...`（ingress: ai-* 共 17 条，GF.3.2 厂商路由）。
-#   此前 key-auth / ip-restriction / local-rate-limit 仅覆盖 `/infer`，
-#   导致明文 Provider 路径既无调用方认证也无限流——本次一并纳入（同一份插件配置）。
+# 【2026-09-12 版本与 schema 修正（实境取证）】本清单原按 Higress 1.x 编写，在当前镜像
+# （higress/all-in-one，插件目录实测）上**不生效**，已按 2.x 逐项修正：
+#   - 版本：key-auth 1.0.0 → **2.0.0**；ip-restriction 1.0.0 → **2.0.1**；cors 1.0.0 → **2.0.2**；
+#   - `local-rate-limit` 在 2.x **已不存在**（拆为 key-rate-limit / cluster-key-rate-limit），
+#     改用 **cluster-key-rate-limit 2.0.1**（Redis 计数，支持按 header 值动态分桶）；
+#   - key-auth 2.x 字段：`consumers[].credential`（1.x 为 `key`）；且 **`global_auth` 只能在
+#     实例级 `defaultConfig` 生效**（写在 matchRule config 内会被忽略），路由/域名粒度鉴权
+#     须用 matchRule config 的 `allow: [consumerName]`。
+#   依据：官方文档 key-auth / ip-restriction / cluster-key-rate-limit（higress.cn/docs/latest）
+#   + 本地 standalone 实测。
+#
+# 覆盖路径：密态推理入口 `/infer`（ingress: infer）与明文 Provider 入口 `/provider/<name>/...`
+# （ingress: ai-* 共 17 条，GF.3.2 厂商路由）。此前三类插件仅覆盖 `/infer`。
 
 ---
 # Key Auth：消费者 API Key 认证（调用方层；otpmask 内部 JWT 保留为租户层，二者叠加）
+#
+# 说明：认证配置（consumers/keys/global_auth）只能在**实例级 defaultConfig**；
+# 路由/域名粒度用 matchRules[].config.allow 列允许的 consumer 名称（官方推荐用法）。
 apiVersion: extensions.higress.io/v1alpha1
 kind: WasmPlugin
 metadata:
@@ -25,21 +33,26 @@ metadata:
     higress.io/wasm-plugin-title: Key Auth
     higress.io/wasm-plugin-category: auth
 spec:
-  url: http://localhost:8002/plugins/key-auth/1.0.0/plugin.wasm
+  url: http://localhost:8002/plugins/key-auth/2.0.0/plugin.wasm
   failStrategy: FAIL_CLOSED
+  defaultConfig:
+    global_auth: true # 实例级：全局生效认证（未列入 allow 的路由/域名亦须认证）
+    consumers:
+    - name: otpmask-customer-a
+      credential: "CHANGE_ME_API_KEY_A"
+    - name: otpmask-customer-b
+      credential: "CHANGE_ME_API_KEY_B"
+    keys:
+    - x-api-key
+    in_header: true
+    in_query: false
   matchRules:
   - ingress:
     - infer
     config:
-      consumers:
-      - name: otpmask-customer-a
-        key: "CHANGE_ME_API_KEY_A"
-      - name: otpmask-customer-b
-        key: "CHANGE_ME_API_KEY_B"
-      keys:
-      - x-api-key
-      global_auth: true
-  # 明文 Provider 入口：同一消费者集合（生产按客户/租户维度拆分消费者）
+      allow:
+      - otpmask-customer-a
+      - otpmask-customer-b
   - ingress:
     - ai-openai
     - ai-claude
@@ -59,14 +72,9 @@ spec:
     - ai-stepfun
     - ai-coze
     config:
-      consumers:
-      - name: otpmask-customer-a
-        key: "CHANGE_ME_API_KEY_A"
-      - name: otpmask-customer-b
-        key: "CHANGE_ME_API_KEY_B"
-      keys:
-      - x-api-key
-      global_auth: true
+      allow:
+      - otpmask-customer-a
+      - otpmask-customer-b
 
 ---
 # IP Restriction：IP 黑白名单（白名单模式，FAIL_CLOSED = 名单外一律 403）
@@ -79,7 +87,7 @@ metadata:
     higress.io/wasm-plugin-title: IP Restriction
     higress.io/wasm-plugin-category: security
 spec:
-  url: http://localhost:8002/plugins/ip-restriction/1.0.0/plugin.wasm
+  url: http://localhost:8002/plugins/ip-restriction/2.0.1/plugin.wasm
   failStrategy: FAIL_CLOSED
   defaultConfigDisable: true
   matchRules:
@@ -88,7 +96,6 @@ spec:
     config:
       allow:
       - "0.0.0.0/0" # 生产改为内网/管理网段 CIDR
-  # 明文 Provider 入口：生产按调用方来源收紧（当前与 infer 同口径）
   - ingress:
     - ai-openai
     - ai-claude
@@ -120,35 +127,58 @@ spec:
       - "192.168.0.0/16"
 
 ---
-# Local Rate Limit：QPS 限流（进程内 token bucket；集群级一致性需 Cluster Rate Limit + Redis）
+# Cluster Key Rate Limit：基于 Key 的**集群级**限流（Redis 计数，多副本一致；按租户动态分桶）
 #
-# 维度说明：`limit_by_header: x-tenant-id` = 按租户分桶（缺该头时落入单一默认桶，
-# 退化为全局限流——不放大风险）；CORS 已允许 x-tenant-id 头。
+# 【为什么不是 key-rate-limit（本地版）】本地版只支持「枚举 key 精确匹配」，
+# 无法按 header 任意值动态分桶；**动态按值分桶必须用 cluster-key-rate-limit 的
+# `limit_by_per_header`（支持 "*"）**。
+#
+# 【实境取证（2026-09-12，本地 standalone + Redis 容器，配额 2/s 的临时验证配置）】
+#   - 同窗口对照：tenant=t-a 出现 **429**，同时 tenant=t-b **全 200**（桶相互独立）；
+#   - Redis 键形如 `higress-cluster-key-rate-limit:{rule_name}:limit_by_per_header:1:x-tenant-id:<租户值>`；
+#   - 三个必踩的坑（已按此修正，勿回退）：
+#     ① 限流项必须嵌在 **`rule_items[]`** 内——写到 config 顶层会报
+#        `parse rule config failed: at least one of 'global_threshold' or 'rule_items'` 且插件加载失败；
+#     ② `limit_by_header` **不支持** `"*"`/正则，动态分桶必须用 `limit_by_per_header`；
+#     ③ registry 服务名后缀随类型而定：静态 registry 为 `<name>.static`，dns registry 为 `<name>.dns`；
+#        且 dns registry 的 domain 必须是合法域名格式（单标签名被 controller 拒绝：
+#        `invalid domain format:xxx`）。
+#   - **已知风险（如实标注，待改进）**：**Redis 不可用时该插件 fail-open**（实测停 Redis 后请求全部放行，
+#     限流失效但业务不中断，恢复后自动重连生效）。与项目 fail-closed 哲学不一致 → 必须配
+#     "Redis 不可用" 告警；是否改为 fail-closed 需单独评估（Higress 插件未提供该开关的证据）。
+#
+# 【依赖】需要 Redis 服务：见 mcp-bridge-registries.yaml 的 `redis-ratelimit` 注册项。
+# 【维度说明】rule_items 按 `x-tenant-id` 分桶；缺该头时按空值分桶（等价于一个默认桶），
+# 因 key-auth 已强制认证，未认证请求不会进入本插件统计。
 apiVersion: extensions.higress.io/v1alpha1
 kind: WasmPlugin
 metadata:
-  name: local-rate-limit
+  name: cluster-key-rate-limit
   namespace: higress-system
   annotations:
-    higress.io/wasm-plugin-title: Local Rate Limit
+    higress.io/wasm-plugin-title: Cluster Key Rate Limit
     higress.io/wasm-plugin-category: traffic
 spec:
-  url: http://localhost:8002/plugins/local-rate-limit/1.0.0/plugin.wasm
+  url: http://localhost:8002/plugins/cluster-key-rate-limit/2.0.1/plugin.wasm
   failStrategy: FAIL_CLOSED
+  defaultConfigDisable: true
   matchRules:
   - ingress:
     - infer
-    config:
-      rule_name: otpmask-qps
-      match:
-        # 按请求匹配（连接建立扣减一次；流时长限流为扩展项，见方案 §6）
-        path_prefix: "/infer"
-      limit_by_header: "x-tenant-id"   # 按租户分桶（此前为空 = 全局）
-      limit:
-        unit: second
-        quota: 1000          # 每秒 1000 请求
-        burst_multiplier: 2  # 突发系数
-  # 明文 Provider 入口：独立规则名与路径前缀（便于分维度观测与调参）
+    config: &tenant_qps
+      rule_name: otpmask-tenant-qps # 租户总配额（/infer 与 /provider/* 共用同一计数器）
+      rule_items:
+      - limit_by_per_header: x-tenant-id
+        limit_keys:
+        - key: "*" # "*" 意为「按该头的每个不同取值分别计数」
+          query_per_second: 1000
+      show_limit_quota_header: true
+      rejected_code: 429
+      redis:
+        service_name: redis-ratelimit.dns # dns 类型 registry → <name>.dns
+        service_port: 6379
+        timeout: 500
+        database: 0
   - ingress:
     - ai-openai
     - ai-claude
@@ -167,15 +197,7 @@ spec:
     - ai-mistral
     - ai-stepfun
     - ai-coze
-    config:
-      rule_name: provider-qps
-      match:
-        path_prefix: "/provider/"
-      limit_by_header: "x-tenant-id"
-      limit:
-        unit: second
-        quota: 1000
-        burst_multiplier: 2
+    config: *tenant_qps
 
 ---
 # CORS：跨域（允许来源按生产收紧）
@@ -190,7 +212,7 @@ metadata:
     higress.io/wasm-plugin-title: CORS
     higress.io/wasm-plugin-category: security
 spec:
-  url: http://localhost:8002/plugins/cors/1.0.0/plugin.wasm
+  url: http://localhost:8002/plugins/cors/2.0.2/plugin.wasm
   failStrategy: FAIL_CLOSED
   matchRules:
   - ingress:
