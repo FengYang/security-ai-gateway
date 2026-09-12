@@ -1,11 +1,15 @@
 package auditverify
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 固定测试向量（**由独立实现算出**：PowerShell + .NET SHA256，按同样的
@@ -143,7 +147,7 @@ func TestTailTamperNeedsAnchor(t *testing.T) {
 
 	chainPath, anchorPath := writeFixtures(t, tailTampered,
 		fmt.Sprintf(`{"timestamp":1,"events":3,"chain_hash":%q}`+"\n", original.LastHash))
-	withAnchor, err := VerifyFile(chainPath, anchorPath, schema)
+	withAnchor, err := VerifyFile(chainPath, anchorPath, schema, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +162,7 @@ func TestTailTamperNeedsAnchor(t *testing.T) {
 func verifyViaFile(t *testing.T, chain string, schema Schema) *Result {
 	t.Helper()
 	chainPath, _ := writeFixtures(t, chain, "")
-	res, err := VerifyFile(chainPath, "", schema)
+	res, err := VerifyFile(chainPath, "", schema, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +191,7 @@ func TestVerifyFileWithAnchorOK(t *testing.T) {
 	chainPath, anchorPath := writeFixtures(t, adminEventA+"\n"+adminEventB+"\n",
 		fmt.Sprintf(`{"timestamp":1700000000000000002,"events":2,"chain_hash":%q}`+"\n", vecAdminTarget))
 	schema, _ := SchemaFor("admin")
-	res, err := VerifyFile(chainPath, anchorPath, schema)
+	res, err := VerifyFile(chainPath, anchorPath, schema, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +206,7 @@ func TestVerifyFileWithAnchorOK(t *testing.T) {
 func TestEmptyAnchorIsNotFailure(t *testing.T) {
 	chainPath, anchorPath := writeFixtures(t, adminEventA+"\n"+adminEventB+"\n", "")
 	schema, _ := SchemaFor("admin")
-	res, err := VerifyFile(chainPath, anchorPath, schema)
+	res, err := VerifyFile(chainPath, anchorPath, schema, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +228,7 @@ func TestDetectTruncation(t *testing.T) {
 	chainPath, anchorPath := writeFixtures(t, adminEventA+"\n",
 		fmt.Sprintf(`{"timestamp":1700000000000000002,"events":2,"chain_hash":%q}`+"\n", vecAdminTarget))
 	schema, _ := SchemaFor("admin")
-	res, err := VerifyFile(chainPath, anchorPath, schema)
+	res, err := VerifyFile(chainPath, anchorPath, schema, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +247,7 @@ func TestAnchorHashMismatch(t *testing.T) {
 	chainPath, anchorPath := writeFixtures(t, adminEventA+"\n"+adminEventB+"\n",
 		fmt.Sprintf(`{"timestamp":1,"events":2,"chain_hash":%q}`+"\n", strings.Repeat("0", 64)))
 	schema, _ := SchemaFor("admin")
-	res, err := VerifyFile(chainPath, anchorPath, schema)
+	res, err := VerifyFile(chainPath, anchorPath, schema, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,4 +271,342 @@ func writeFixtures(t *testing.T, chain, anchor string) (string, string) {
 		t.Fatal(err)
 	}
 	return chainPath, anchorPath
+}
+
+// ---------- 窗口抽样（入口哈希驱动；缺省重算并如实标注） ----------
+
+// 三事件管理面链的时间戳（A/B/C，间隔与事件常量注释一致）。
+const (
+	tsA = int64(1700000000000000000)
+	tsB = int64(1700000000000000001)
+	tsC = int64(1700000000000000003)
+)
+
+const adminChain3 = adminEventA + "\n" + adminEventB + "\n" + adminEventC + "\n"
+
+// TestWindowWithExternalEntryHash 外部入口哈希：跳过窗口前缀，窗口内逐条校验。
+func TestWindowWithExternalEntryHash(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	chainPath, _ := writeFixtures(t, adminChain3, "")
+	res, err := VerifyFile(chainPath, "", schema, Options{From: time.Unix(0, tsB), EntryHash: vecAdminNoTarget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || !res.Scoped {
+		t.Fatalf("期望窗口验证通过，实际 ok=%v scoped=%v reason=%s", res.OK, res.Scoped, res.BreakReason)
+	}
+	if res.Events != 2 || res.ScopeFirstIndex != 1 || res.ScopeLastIndex != 2 || res.SkipBefore != 1 {
+		t.Errorf("窗口应为第 2–3 条（index 1–2，跳过 1 条），实际 events=%d first=%d last=%d skipBefore=%d",
+			res.Events, res.ScopeFirstIndex, res.ScopeLastIndex, res.SkipBefore)
+	}
+	if res.EntryHashSource != "external" || res.EntryHash != vecAdminNoTarget {
+		t.Errorf("入口哈希应标注为 external 且等于第 1 条重算哈希，实际 source=%s hash=%s",
+			res.EntryHashSource, res.EntryHash)
+	}
+	if res.RemainAfter != 0 {
+		t.Errorf("未设 -to 应读到文件尾（remain_after=0），实际 %d", res.RemainAfter)
+	}
+}
+
+// TestWindowRecomputedEntryHash 未提供入口哈希：先重算到窗口起点，口径如实标注 recomputed。
+func TestWindowRecomputedEntryHash(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	chainPath, _ := writeFixtures(t, adminChain3, "")
+	res, err := VerifyFile(chainPath, "", schema, Options{From: time.Unix(0, tsB)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || res.Events != 2 || res.ScopeFirstIndex != 1 || res.ScopeLastIndex != 2 {
+		t.Fatalf("期望窗口内 2 条通过，实际 ok=%v events=%d first=%d last=%d",
+			res.OK, res.Events, res.ScopeFirstIndex, res.ScopeLastIndex)
+	}
+	if res.EntryHashSource != "recomputed" || res.EntryHash != vecAdminNoTarget {
+		t.Errorf("入口哈希应标注 recomputed 且等于重算所得 %s，实际 source=%s hash=%s",
+			vecAdminNoTarget, res.EntryHashSource, res.EntryHash)
+	}
+}
+
+// TestWindowEntryHashMismatch 入口哈希与链不一致 → 判失败（抽样验证的核心断言）。
+func TestWindowEntryHashMismatch(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	chainPath, _ := writeFixtures(t, adminChain3, "")
+	res, err := VerifyFile(chainPath, "", schema, Options{From: time.Unix(0, tsB), EntryHash: strings.Repeat("0", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK || res.BreakIndex != 1 {
+		t.Fatalf("入口哈希不符应判失败并定位第 2 条，实际 ok=%v breakIndex=%d", res.OK, res.BreakIndex)
+	}
+	if !strings.Contains(res.BreakReason, "窗口起点哈希不符") {
+		t.Errorf("应给出入口哈希不符的原因，实际：%s", res.BreakReason)
+	}
+}
+
+// TestWindowToOnlyStopsEarly 仅设 -to：窗口自创世起，读到超出窗口即停（入口来源 = genesis）。
+func TestWindowToOnlyStopsEarly(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	chainPath, _ := writeFixtures(t, adminChain3, "")
+	res, err := VerifyFile(chainPath, "", schema, Options{To: time.Unix(0, tsA)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || res.Events != 1 || res.ScopeFirstIndex != 0 || res.ScopeLastIndex != 0 {
+		t.Fatalf("期望仅第 1 条在窗口内，实际 ok=%v events=%d first=%d last=%d",
+			res.OK, res.Events, res.ScopeFirstIndex, res.ScopeLastIndex)
+	}
+	if res.EntryHashSource != "genesis" {
+		t.Errorf("未设 -from 时入口应为创世（genesis），实际 %s", res.EntryHashSource)
+	}
+	if res.RemainAfter != -1 {
+		t.Errorf("提前停止读取应标注 remain_after=-1，实际 %d", res.RemainAfter)
+	}
+}
+
+// TestWindowOutsideAnchorNotReportedAsTruncation 窗口之外的锚点**不得误报截断**（如实标注未参与判定）。
+func TestWindowOutsideAnchorNotReportedAsTruncation(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	full, err := VerifyReader(strings.NewReader(adminChain3), schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chainPath, anchorPath := writeFixtures(t, adminChain3,
+		fmt.Sprintf(`{"timestamp":1,"events":3,"chain_hash":%q}`+"\n", full.LastHash))
+	res, err := VerifyFile(chainPath, anchorPath, schema, Options{To: time.Unix(0, tsA)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.AnchorChecked {
+		t.Errorf("窗口外锚点应标注为未参与判定，实际 checked=%v detail=%s", res.AnchorChecked, res.AnchorDetail)
+	}
+	if !strings.Contains(res.AnchorDetail, "超出验证窗口") {
+		t.Errorf("明细应说明超出验证窗口，实际：%s", res.AnchorDetail)
+	}
+	if strings.Contains(res.AnchorDetail, "尾部事件被删除") {
+		t.Errorf("窗口外锚点不得误报截断，实际：%s", res.AnchorDetail)
+	}
+}
+
+// TestWindowAnchorBeforeWindow 早于窗口起点的锚点同样如实标注（不误报）。
+func TestWindowAnchorBeforeWindow(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	chainPath, anchorPath := writeFixtures(t, adminChain3,
+		fmt.Sprintf(`{"timestamp":1,"events":1,"chain_hash":%q}`+"\n", vecAdminNoTarget))
+	res, err := VerifyFile(chainPath, anchorPath, schema, Options{From: time.Unix(0, tsC), EntryHash: vecAdminTarget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.AnchorChecked {
+		t.Errorf("窗口之前（第 1 条）的锚点应标注为未参与判定，实际 detail=%s", res.AnchorDetail)
+	}
+	if !strings.Contains(res.AnchorDetail, "早于验证窗口起点") {
+		t.Errorf("明细应说明锚点早于窗口起点，实际：%s", res.AnchorDetail)
+	}
+}
+
+// TestWindowAnchorAtEntryValidatesEntryHash 锚点落在窗口入口位置时，等于用锚点校验调用方给的入口哈希。
+func TestWindowAnchorAtEntryValidatesEntryHash(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	chainPath, anchorPath := writeFixtures(t, adminChain3,
+		fmt.Sprintf(`{"timestamp":1,"events":1,"chain_hash":%q}`+"\n", vecAdminNoTarget))
+	res, err := VerifyFile(chainPath, anchorPath, schema, Options{From: time.Unix(0, tsB), EntryHash: vecAdminNoTarget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.AnchorChecked || !res.AnchorOK {
+		t.Errorf("锚点应校验通过入口哈希，实际 checked=%v ok=%v detail=%s",
+			res.AnchorChecked, res.AnchorOK, res.AnchorDetail)
+	}
+}
+
+// TestWindowOptionsValidation 参数自洽性（入口哈希须与 -from 同用；窗口不得倒置）。
+func TestWindowOptionsValidation(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	chainPath, _ := writeFixtures(t, adminChain3, "")
+	if _, err := VerifyFile(chainPath, "", schema, Options{EntryHash: vecAdminNoTarget}); err == nil {
+		t.Error("入口哈希未配 -from 应报错")
+	}
+	if _, err := VerifyFile(chainPath, "", schema, Options{From: time.Unix(1, 0), To: time.Unix(0, 0)}); err == nil {
+		t.Error("-from 晚于 -to 应报错")
+	}
+}
+
+// TestWindowBadTimestampInvalid 窗口模式下事件缺时间戳 → 输入错误（全链模式不受影响）。
+func TestWindowBadTimestampInvalid(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	noTS := `{"event_id":"evt-1","actor":"a","action":"x","request_id":"r","result":"ok","prev_hash":""}`
+	chainPath, _ := writeFixtures(t, noTS+"\n", "")
+	if _, err := VerifyFile(chainPath, "", schema, Options{To: time.Unix(0, tsA)}); err == nil {
+		t.Error("窗口模式下缺时间戳应报错")
+	}
+	if _, err := VerifyFile(chainPath, "", schema, Options{}); err != nil {
+		t.Errorf("全链模式不应解析时间戳（既有行为不得变化），实际 %v", err)
+	}
+}
+
+// ---------- 锚点 TST imprint 一致性（决策③：离线校验，验签属外部条件） ----------
+
+func imprintOf(chainHash string) string {
+	sum := sha256.Sum256([]byte(chainHash))
+	return hex.EncodeToString(sum[:])
+}
+
+func TestTSTImprintConsistency(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	full, err := VerifyReader(strings.NewReader(adminChain3), schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := fmt.Sprintf(
+		`{"timestamp":1,"events":3,"chain_hash":%q,"tst":{"version":1,"algorithm":"sha256","timestamp_ns":1,"message_imprint":%q,"signature":"ab","tsa_public_key":"cd","source":"mock"}}`+"\n",
+		full.LastHash, imprintOf(full.LastHash))
+
+	chainPath, anchorPath := writeFixtures(t, adminChain3, good)
+	res, err := VerifyFile(chainPath, anchorPath, schema, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.TSTChecked || !res.TSTOK {
+		t.Errorf("imprint 一致应通过，实际 checked=%v ok=%v detail=%s", res.TSTChecked, res.TSTOK, res.TSTDetail)
+	}
+
+	// 锚点记录被替换（chain_hash 另取一条自洽记录）而令牌未同步换 → imprint 不符。
+	tampered := strings.Replace(good, full.LastHash, strings.Repeat("0", 64), 1)
+	chainPath2, anchorPath2 := writeFixtures(t, adminChain3, tampered)
+	res2, err := VerifyFile(chainPath2, anchorPath2, schema, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res2.TSTChecked || res2.TSTOK {
+		t.Errorf("imprint 不符应判失败，实际 checked=%v ok=%v detail=%s", res2.TSTChecked, res2.TSTOK, res2.TSTDetail)
+	}
+}
+
+// TestTSTAbsentIsNotFailure 未携带 TST（未启用 TSA / 旧格式）属正常情况：如实标注未执行。
+func TestTSTAbsentIsNotFailure(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	chainPath, anchorPath := writeFixtures(t, adminChain3,
+		fmt.Sprintf(`{"timestamp":1,"events":3,"chain_hash":%q}`+"\n", vecAdminTarget))
+	res, err := VerifyFile(chainPath, anchorPath, schema, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TSTChecked {
+		t.Errorf("无 TST 应标注未执行校验，实际 detail=%s", res.TSTDetail)
+	}
+	if !strings.Contains(res.TSTDetail, "未携带 TST") {
+		t.Errorf("应说明未携带 TST，实际：%s", res.TSTDetail)
+	}
+}
+
+// ---------- 报告导出与锚点发射（决策②/③ 工具化） ----------
+
+func TestReportWriteAndFields(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	chainPath, _ := writeFixtures(t, adminChain3, "")
+	res, err := VerifyFile(chainPath, "", schema, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := NewReport(chainPath, res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Tool != "audit-verify" || rep.ChainLines != 3 || rep.ChainBytes == 0 || len(rep.ChainSHA256) != 64 {
+		t.Errorf("报告元信息不完整：tool=%s lines=%d bytes=%d sha=%q",
+			rep.Tool, rep.ChainLines, rep.ChainBytes, rep.ChainSHA256)
+	}
+	if len(rep.Limitations) < len(reportLimitations) {
+		t.Errorf("报告应固化已知局限声明，实际 %d 条", len(rep.Limitations))
+	}
+	out := filepath.Join(t.TempDir(), "report.json")
+	if err := WriteReport(out, rep); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Report
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("报告应为合法 JSON: %v", err)
+	}
+	if back.Result == nil || !back.Result.OK || back.Result.Events != 3 {
+		t.Errorf("报告结论字段缺失：%+v", back.Result)
+	}
+}
+
+// TestReportIncludesWindowLimitation 窗口模式报告须附带窗口局限声明。
+func TestReportIncludesWindowLimitation(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	chainPath, _ := writeFixtures(t, adminChain3, "")
+	res, err := VerifyFile(chainPath, "", schema, Options{To: time.Unix(0, tsA)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := NewReport(chainPath, res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, l := range rep.Limitations {
+		if strings.Contains(l, "窗口抽样模式") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("窗口模式报告应含窗口局限声明，实际 %v", rep.Limitations)
+	}
+}
+
+// TestEmitAnchorRoundTripAndTruncation 锚点发射闭环：产出的锚点既能判通过，也能检出截断。
+func TestEmitAnchorRoundTripAndTruncation(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	chainPath, _ := writeFixtures(t, adminChain3, "")
+	res, err := VerifyFile(chainPath, "", schema, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchorPath := filepath.Join(t.TempDir(), "emitted.anchor")
+	rec, err := AnchorRecordFrom(res, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Events != 3 || rec.ChainHash != res.LastHash || rec.Timestamp != 42 {
+		t.Fatalf("锚点记录内容不符：%+v", rec)
+	}
+	if err := EmitAnchor(anchorPath, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := VerifyFile(chainPath, anchorPath, schema, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok.AnchorChecked || !ok.AnchorOK {
+		t.Errorf("正常链 + 新锚点应通过，实际 checked=%v ok=%v detail=%s", ok.AnchorChecked, ok.AnchorOK, ok.AnchorDetail)
+	}
+
+	truncated, _ := writeFixtures(t, adminEventA+"\n"+adminEventB+"\n", "")
+	cut, err := VerifyFile(truncated, anchorPath, schema, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cut.AnchorChecked || cut.AnchorOK {
+		t.Fatalf("截断链应被锚点检出，实际 checked=%v ok=%v detail=%s", cut.AnchorChecked, cut.AnchorOK, cut.AnchorDetail)
+	}
+	if !strings.Contains(cut.AnchorDetail, "截断") {
+		t.Errorf("明细应说明截断，实际：%s", cut.AnchorDetail)
+	}
+}
+
+// TestAnchorRecordFromEmptyResult 未校验任何事件时不得产出锚点（避免产生"空链尾哈希"锚点污染）。
+func TestAnchorRecordFromEmptyResult(t *testing.T) {
+	schema, _ := SchemaFor("admin")
+	res, err := VerifyReader(strings.NewReader("\n"), schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AnchorRecordFrom(res, 1); err == nil {
+		t.Error("空链不应产出锚点记录")
+	}
 }
