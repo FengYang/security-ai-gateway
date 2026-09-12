@@ -69,6 +69,9 @@ type PluginConfig struct {
 	GatewayCoreService string `json:"gateway_core_service"`
 	GatewayCorePort    int64  `json:"gateway_core_port"`
 	RouteVerifyKeyHex  string `json:"route_verify_key"` // 路由表验签密钥 K_rx（32 字节 hex，与 gateway-core 一致）
+	// §6 降级接线：默认路由表缓存的最老可接受时长（秒）。缺省 300；显式负数 = 永不过期
+	// （对应设计 §6 原文"接受旧版本继续用"，可用性优先）。
+	MaxStaleSeconds int64 `json:"max_stale_seconds"`
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -89,6 +92,7 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.GatewayCoreService = json.Get("gateway_core_service").String()
 	config.GatewayCorePort = json.Get("gateway_core_port").Int()
 	config.RouteVerifyKeyHex = json.Get("route_verify_key").String()
+	config.MaxStaleSeconds = json.Get("max_stale_seconds").Int()
 	if config.GatewayCoreService == "" {
 		config.GatewayCoreService = "gateway-core" // 缺省 K8s service 名
 	}
@@ -116,6 +120,12 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	if config.TEEPort == 0 {
 		config.TEEPort = 19090
 	}
+	// §6 降级接线：缺省 max_stale=300s；显式负数 = 永不过期（对应设计 §6 原文"接受旧版本"）。
+	if config.MaxStaleSeconds == 0 {
+		config.MaxStaleSeconds = 300
+	}
+	// 按配置初始化/刷新路由运行时（未启用则置空 → 决策不介入请求，行为与接线前一致）。
+	initRouteRuntime(*config, log)
 	log.Infof("otpmask-plugin: 配置已加载 config_version=%q mask_modulus=%d model=%q embedding=%s:%d tee=%s:%d require_auth=%v",
 		orStr(config.ConfigVersion, "unset"), config.MaskModulus, config.Model, config.EmbeddingService, config.EmbeddingPort,
 		config.TEEService, config.TEEPort, config.RequireAuth)
@@ -210,6 +220,11 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log logs
 	}
 	if t := tenantHeaderValue(ctx); t != "" {
 		_ = proxywasm.ReplaceHttpRequestHeader("X-Tenant-ID", t)
+	}
+	// §6 推拉结合路由决策（仅显式启用时介入）：处方 L1 → 默认路由表 L2 → 无命中密态 fail-closed；
+	// 命中则写 X-Otp-Engine / X-Otp-Target 供 Envoy 路由规则消费。必须在请求头放行前完成。
+	if action := applyRouteDecision(ctx, config, log); action != types.HeaderContinue {
+		return action
 	}
 	// P1b 修复：有请求体时持住请求头（ActionPause）——请求头在 HeaderContinue 后
 	// 即刻转发上游，body 阶段的 X-Session-ID/content-type 替换不生效（TEE 收不到

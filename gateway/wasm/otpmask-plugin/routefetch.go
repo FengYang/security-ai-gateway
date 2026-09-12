@@ -45,8 +45,12 @@ func maybeFetchRoutes(cfg PluginConfig, log logs.Log) {
 				return
 			}
 			if routecache.Verify(key, rt) {
-				// 通过全局缓存实例合并（部署期用单例；此处占位交由外部接入持有）。
-				log.Infof("otpmask-plugin: 路由表验签通过 version=%d", rt.Version)
+				// 写入路由运行时单例（route.go 持有）；Update 内部再做一次验签 + 防回滚判定。
+				if routeEnabled() && routeRuntime.cache.Update(rt) {
+					log.Infof("otpmask-plugin: 路由表验签通过并已入缓存 version=%d routes=%d", rt.Version, len(rt.Routes))
+				} else {
+					log.Warnf("otpmask-plugin: 路由表未入缓存（重复/回滚版本，或路由未启用）version=%d", rt.Version)
+				}
 			} else {
 				log.Warnf("otpmask-plugin: 路由表验签失败，拒绝")
 			}

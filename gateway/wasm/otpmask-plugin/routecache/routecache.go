@@ -52,6 +52,14 @@ func Verify(key []byte, t *RouteTable) bool {
 	return hmac.Equal(t.Signature, mac.Sum(nil))
 }
 
+// Sign 用 K_rx 计算路由表签名并写入 Signature 字段（与 gateway-core 侧同法）。
+// 生产路径上路由表由 gateway-core 签发；本函数供测试与本地演练构造**合法**路由表使用。
+func Sign(key []byte, t *RouteTable) {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(t.canon())
+	t.Signature = mac.Sum(nil)
+}
+
 // Options 缓存行为选项（不设 = 保持既有默认语义）。
 type Options struct {
 	// MaxStale > 0：缓存表的 UpdatedAt 早于 now-MaxStale 即视为**失效**
