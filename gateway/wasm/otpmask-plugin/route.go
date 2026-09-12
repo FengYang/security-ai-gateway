@@ -5,15 +5,18 @@ package main
 // 阶梯：
 //
 //	L1 处方（请求头 X-Otp-Route，经共享包 rxroute 验签）→ 采用其 preferred_engine；
-//	L2 默认路由表缓存（routecache，防回滚/防篡改）→ 采用 default_engine/target（**降级**）；
+//	L2 默认路由表缓存（routecache，防回滚/防篡改；由周期 tick 任务拉取填充）→ 采用
+//	   default_engine/target（**降级**）；
 //	无命中 → 密态 fail-closed（503，不静默直连）。
 //
 // 命中后把决策写入请求头 X-Otp-Engine / X-Otp-Target，由 Envoy/Higress 路由规则消费
 // （插件不直接切上游，职责边界清晰）。
 //
+// ⚠️ 请求路径**只读缓存、不发起拉取**：拉取由 ensureRouteFetchLoop（routefetch.go）的
+// tick 任务承担——同请求内先 fail-closed 会丢弃挂起的异步回调（2026-09-12 实证）。
+//
 // ⚠️ 兼容性（关键）：仅当**显式启用**（gateway_core_enabled=true 且 route_verify_key 有效）
 // 时才介入请求；未启用 = 行为与接线前完全一致（不改任何请求头、不因路由 fail-closed）。
-// 这样既有部署/展示环境零影响。
 //
 // ⚠️ 已知约束（模型维度）：路由决策发生在**请求头阶段**，而请求体里的 model 要到 body
 // 阶段才可见——那时改写请求头已不生效（HeaderContinue 已把请求头放行上游）。故模型维度取
@@ -44,16 +47,33 @@ const (
 	hdrOtpModel  = "X-Otp-Model"  // 可选输入：模型维度（请求头阶段可得）
 )
 
-// routeRuntime 路由运行时单例：验签密钥 + 路由表缓存（由 parseConfig 初始化）。
-var routeRuntime struct {
-	key   []byte
-	cache *routecache.Cache
+// routeRuntimeState 路由运行时状态：验签密钥 + 路由表缓存 + 拉取参数（由 parseConfig 初始化）。
+type routeRuntimeState struct {
+	key            []byte
+	cache          *routecache.Cache
+	service        string
+	port           int64
+	pollIntervalMs int64
+}
+
+// routeRuntime 运行时单例（含周期拉取参数）。
+var routeRuntime routeRuntimeState
+
+// fetchParams 返回拉取所需参数；未启用返回 ok=false。
+func (r *routeRuntimeState) fetchParams() (key []byte, service string, port int64, ok bool) {
+	if r.key == nil || r.cache == nil || r.service == "" {
+		return nil, "", 0, false
+	}
+	return r.key, r.service, r.port, true
 }
 
 // initRouteRuntime 按配置初始化/刷新路由运行时；未启用则置空（决策不介入）。
 func initRouteRuntime(config PluginConfig, log logs.Log) {
 	routeRuntime.key = nil
 	routeRuntime.cache = nil
+	routeRuntime.service = ""
+	routeRuntime.port = 0
+	routeRuntime.pollIntervalMs = 0
 	if !config.GatewayCoreEnabled || config.RouteVerifyKeyHex == "" {
 		return
 	}
@@ -66,8 +86,13 @@ func initRouteRuntime(config PluginConfig, log logs.Log) {
 	routeRuntime.cache = routecache.NewWithOptions(key, routecache.Options{
 		MaxStale: time.Duration(config.MaxStaleSeconds) * time.Second,
 	})
-	log.Infof("otpmask-plugin: 路由决策已启用 gateway-core=%s:%d max_stale=%ds",
-		config.GatewayCoreService, config.GatewayCorePort, config.MaxStaleSeconds)
+	routeRuntime.service = config.GatewayCoreService
+	routeRuntime.port = config.GatewayCorePort
+	routeRuntime.pollIntervalMs = config.PollIntervalSeconds * 1000
+	// 注册周期拉取（幂等）：负责冷启动与后续刷新（请求路径不再发起拉取）。
+	ensureRouteFetchLoop()
+	log.Infof("otpmask-plugin: 路由决策已启用 gateway-core=%s:%d max_stale=%ds poll=%ds",
+		config.GatewayCoreService, config.GatewayCorePort, config.MaxStaleSeconds, config.PollIntervalSeconds)
 }
 
 // routeEnabled 路由决策是否已启用。
@@ -99,7 +124,7 @@ func decideRoute(cache *routecache.Cache, key []byte, tenant, model, rxToken str
 	return d, rxErr, "无可用路由（处方缺失且默认路由表未命中）——密态 fail-closed"
 }
 
-// applyRouteDecision 读请求维度 → 决策 → 写路由头或 fail-closed。
+// applyRouteDecision 读请求维度 → 决策 → 写路由头或 fail-closed（只读缓存，不发起拉取）。
 func applyRouteDecision(ctx wrapper.HttpContext, config PluginConfig, log logs.Log) types.Action {
 	if !routeEnabled() {
 		return types.HeaderContinue // 未启用路由：与接线前行为一致
@@ -116,8 +141,7 @@ func applyRouteDecision(ctx wrapper.HttpContext, config PluginConfig, log logs.L
 		metricRouteDegraded.incr() // §6：降级事件可观测
 		log.Warnf("otpmask-plugin: 路由降级 L2（处方缺失/失效）tenant=%q model=%q engine=%q", tenant, model, d.Engine)
 	case routecache.SourceNone:
-		// L3：缓存未命中 → 触发一次冷启动拉取（异步；本次仍 fail-closed）
-		maybeFetchRoutes(config, log)
+		// 缓存未命中即 fail-closed（拉取由周期 tick 任务承担，见 routefetch.go）。
 		return failClosed(log, failReason)
 	}
 	if d.Engine != "" {

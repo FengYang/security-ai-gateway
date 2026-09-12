@@ -1,74 +1,82 @@
 package main
 
-import (
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"net/http"
+// routefetch.go — 默认路由表拉取（拉路径 B / L3 冷启动 + 周期刷新）。
+//
+// 实现要点（2026-09-12 门禁 #5 实证后的修正）：
+//   - 拉取由 **周期 tick 任务**驱动（设计 §3.3 poll_interval），**不再**在请求路径里
+//     "即发即弃"：请求路径若先 fail-closed（SendHttpResponse 结束流上下文），挂起的
+//     异步回调会被丢弃——实测表现为 HTTP 请求已发出、stub 返回 200，但回调从未执行
+//     （fetch_cb 计数恒未注册）→ 缓存永不写入 → 降级永不发生。
+//   - 出站客户端统一用 wrapper.FQDNCluster（与 tee/embedding/attest 一致）；此前用
+//     DnsCluster（插件内唯一孤例）实测无法发出请求。故 gateway_core_service 须配置为
+//     FQDN 形式（<svc>.<ns>.svc.cluster.local）。
+//   - 仅当启用路由（gateway_core_enabled + 有效 route_verify_key）时注册与拉取。
 
+import (
+	"encoding/json"
+	"net/http"
+	"sync"
+
+	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
-	logs "github.com/higress-group/wasm-go/pkg/log"
 
 	"security-ai-gateway/gateway/wasm/otpmask-plugin/routecache"
 )
 
-// routeFetch 冷启动拉取（拉路径 B / L3）：从 gateway-core 拉取并验签默认路由表写入缓存。
-//
-// 仅在 config.GatewayCoreEnabled=true 时启用。使用 wrapper 异步 cluster client，
-// 与既有 embedding/tee 调用一致。回调内完成验签（防篡改）与版本推进（防回滚）。
-//
-// 说明：wasm 异步拉取依赖 Envoy 事件循环，需在真实运行环境验证；本函数为能力封装，
-// 调用入口（如 onHttpRequestHeaders 头部缓存空判定）在官方接入真机时接通。
-func maybeFetchRoutes(cfg PluginConfig, log logs.Log) {
-	if !cfg.GatewayCoreEnabled || cfg.RouteVerifyKeyHex == "" {
-		return
-	}
-	key, err := hex.DecodeString(cfg.RouteVerifyKeyHex)
-	if err != nil || len(key) < 32 {
-		log.Warnf("otpmask-plugin: route_verify_key 无效（须≥32字节hex），跳过路由拉取")
-		return
-	}
-	// 注意（2026-09-12 演练实证）：此处原用 wrapper.DnsCluster —— 它与插件其余出站调用
-	// （tee/embedding/attest 全用 FQDNCluster）不一致，且实测**容器从未发起请求**
-	// （宿主 stub 零请求日志）→ 冷启动拉取形同虚设。改为 FQDNCluster 并统一按 FQDN 配置
-	// （gateway_core_service 须写 <svc>.<ns>.svc.cluster.local，与 tee_service 同理）。
-	cli := wrapper.NewClusterClient(wrapper.FQDNCluster{
-		FQDN: cfg.GatewayCoreService,
-		Port: cfg.GatewayCorePort,
+// routeFetchLoopOnce 保证 tick 仅注册一次（parseConfig 可能因配置热更新被重复调用）。
+var routeFetchLoopOnce sync.Once
+
+// ensureRouteFetchLoop 注册周期拉取任务（幂等）。
+func ensureRouteFetchLoop() {
+	routeFetchLoopOnce.Do(func() {
+		interval := routeRuntime.pollIntervalMs
+		if interval < 100 {
+			interval = 100
+		}
+		wrapper.RegisterTickFunc(interval, fetchRouteTableOnce)
+		proxywasm.LogInfof("otpmask-plugin: 路由表周期拉取已注册 period_ms=%d", interval)
 	})
-	err = cli.Get("/routes",
+}
+
+// fetchRouteTableOnce 拉取一次路由表并写入运行时缓存（tick 触发；同时覆盖冷启动场景）。
+func fetchRouteTableOnce() {
+	key, service, port, ok := routeRuntime.fetchParams()
+	if !ok {
+		return
+	}
+	cli := wrapper.NewClusterClient(wrapper.FQDNCluster{FQDN: service, Port: port})
+	err := cli.Get("/routes",
 		[][2]string{{"Accept", "application/json"}},
 		func(statusCode int, _ http.Header, respBody []byte) {
-			// 诊断计数（门禁 #5）：cb 恒为 0 ⇒ 回调从未执行（例如响应已随 fail-closed
-			// 发出导致挂起回调被丢弃），而非"验签失败"。
+			// 诊断计数（门禁 #5）：cb 恒未注册 ⇒ 回调从未执行（异步回调被丢弃）。
 			metricRouteFetchCb.incr()
 			if statusCode != 200 {
 				metricRouteFetchReject.incr()
-				log.Warnf("otpmask-plugin: 拉取 /routes 返回 %d", statusCode)
+				proxywasm.LogWarnf("otpmask-plugin: 拉取 /routes 返回 %d", statusCode)
 				return
 			}
 			rt, err := parseRouteTable(respBody)
 			if err != nil {
 				metricRouteFetchReject.incr()
-				log.Warnf("otpmask-plugin: 解析路由表失败: %v", err)
+				proxywasm.LogWarnf("otpmask-plugin: 解析路由表失败: %v", err)
 				return
 			}
 			if routecache.Verify(key, rt) {
-				// 写入路由运行时单例（route.go 持有）；Update 内部再做一次验签 + 防回滚判定。
-				if routeEnabled() && routeRuntime.cache.Update(rt) {
+				// Update 内部再做一次验签 + 防回滚判定。
+				if routeRuntime.cache != nil && routeRuntime.cache.Update(rt) {
 					metricRouteFetchOK.incr()
-					log.Infof("otpmask-plugin: 路由表验签通过并已入缓存 version=%d routes=%d", rt.Version, len(rt.Routes))
+					proxywasm.LogInfof("otpmask-plugin: 路由表验签通过并已入缓存 version=%d routes=%d", rt.Version, len(rt.Routes))
 				} else {
 					metricRouteFetchReject.incr()
-					log.Warnf("otpmask-plugin: 路由表未入缓存（重复/回滚版本，或路由未启用）version=%d", rt.Version)
+					proxywasm.LogWarnf("otpmask-plugin: 路由表未入缓存（重复/回滚版本，或路由未启用）version=%d", rt.Version)
 				}
 			} else {
 				metricRouteFetchReject.incr()
-				log.Warnf("otpmask-plugin: 路由表验签失败，拒绝")
+				proxywasm.LogWarnf("otpmask-plugin: 路由表验签失败，拒绝")
 			}
 		})
 	if err != nil {
-		log.Warnf("otpmask-plugin: 触发路由拉取失败: %v", err)
+		proxywasm.LogWarnf("otpmask-plugin: 触发路由拉取失败: %v", err)
 	}
 }
 
@@ -76,7 +84,7 @@ func maybeFetchRoutes(cfg PluginConfig, log logs.Log) {
 func parseRouteTable(body []byte) (*routecache.RouteTable, error) {
 	var rt routecache.RouteTable
 	if err := json.Unmarshal(body, &rt); err != nil {
-		return nil, fmt.Errorf("路由表 JSON 解析失败: %w", err)
+		return nil, err
 	}
 	return &rt, nil
 }

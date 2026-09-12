@@ -184,6 +184,7 @@ spec:
       gateway_core_port: $StubPort
       route_verify_key: $RouteKeyHex
       max_stale_seconds: 300
+      poll_interval: 2
 "@
     $repl = '${1}require_auth: false' + "`n" + $inject.TrimEnd()
     $yaml2 = $yaml -replace '(?m)^(\s*)require_auth: false\s*$', $repl

@@ -72,6 +72,8 @@ type PluginConfig struct {
 	// §6 降级接线：默认路由表缓存的最老可接受时长（秒）。缺省 300；显式负数 = 永不过期
 	// （对应设计 §6 原文"接受旧版本继续用"，可用性优先）。
 	MaxStaleSeconds int64 `json:"max_stale_seconds"`
+	// 默认路由表拉取周期（秒，设计 §3.3 poll_interval）。缺省 60；最小按 100ms tick 粒度换算。
+	PollIntervalSeconds int64 `json:"poll_interval"`
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -93,6 +95,7 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.GatewayCorePort = json.Get("gateway_core_port").Int()
 	config.RouteVerifyKeyHex = json.Get("route_verify_key").String()
 	config.MaxStaleSeconds = json.Get("max_stale_seconds").Int()
+	config.PollIntervalSeconds = json.Get("poll_interval").Int()
 	if config.GatewayCoreService == "" {
 		// 缺省 FQDN（与 tee_service 同理：FQDNCluster 需完整服务域名，短名不会物化）。
 		config.GatewayCoreService = "gateway-core.higress-system.svc.cluster.local"
@@ -124,6 +127,10 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	// §6 降级接线：缺省 max_stale=300s；显式负数 = 永不过期（对应设计 §6 原文"接受旧版本"）。
 	if config.MaxStaleSeconds == 0 {
 		config.MaxStaleSeconds = 300
+	}
+	// 拉取周期缺省 60s（设计 §3.3 poll_interval）。
+	if config.PollIntervalSeconds <= 0 {
+		config.PollIntervalSeconds = 60
 	}
 	// 按配置初始化/刷新路由运行时（未启用则置空 → 决策不介入请求，行为与接线前一致）。
 	initRouteRuntime(*config, log)
