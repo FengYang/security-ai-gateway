@@ -112,6 +112,13 @@ func TestSecCenterAuditChainVerifyAndExport(t *testing.T) {
 	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") {
 		t.Fatalf("导出应带 attachment 头，实际 %q", cd)
 	}
+	// 链尾摘要（Phase 2 门禁 #4）：供**拿到导出包的第三方**独立判定截断。
+	if got := rec.Header().Get("X-Audit-Chain-Events"); got != "2" {
+		t.Errorf("X-Audit-Chain-Events 应为 2，实际 %q", got)
+	}
+	if got, want := rec.Header().Get("X-Audit-Chain-Last-Hash"), chain.lastHash(); got != want {
+		t.Errorf("X-Audit-Chain-Last-Hash 应为链尾哈希 %s，实际 %q", want, got)
+	}
 	lines := strings.Split(strings.TrimSpace(rec.Body.String()), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("导出应为 2 行 JSONL，实际 %d", len(lines))

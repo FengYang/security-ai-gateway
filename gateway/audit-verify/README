@@ -1,0 +1,77 @@
+审计链独立验证器（gateway/audit-verify）— Phase 2 门禁 #4
+=========================================================
+
+定位
+----
+与运行中的服务**完全独立**：不 import 服务端代码、不调用服务端点。第三方（或流水线）拿到
+链文件 / 导出 NDJSON（可选锚点文件）即可自行重算哈希链，判定「篡改」与「截断」。
+设计理念同 gateway/attest-verify（D2：证明验证出插件）——让校验能力脱离被校验对象。
+
+为什么需要"独立"验证
+--------------------
+服务自身已有 /v1/adminext/audit-chain/verify 与启动恢复校验，但那属**自证**：被验证对象
+与验证逻辑同源，无法排除"服务本身被改/被绕过"。独立实现才有对抗力，且能覆盖服务自身
+不检的场景（截断，见下）。
+
+支持的两条链（字段序不同，各自锁定）
+------------------------------------
+  admin  管理面链  gateway-admin-service/audit.go  adminAuditEvent.hash()
+         字段序：event_id, timestamp, actor, action, provider, key_fingerprint,
+                 tenant, max_tokens, [target 仅非空], request_id, result
+  tee    数据面链  tee-infer-service/audit.go       AuditEvent.hash()
+         字段序：event_id, timestamp, tenant_id, user_id, request_id, action,
+                 tokens_in, tokens_out, result, payload_hash
+         注：tee 链的证据字段（transformed_hash / cache_hit / key_fp / metering_mode /
+         engine_type / model）**不进哈希**，不参与重算。
+
+⚠️ 硬约束：防"双实现漂移"
+------------------------
+验证器必须与两端 hash() 逐字段同序同编码（含 admin 侧 target 的条件编码：空值不进哈希）。
+任一端改动字段/顺序/编码，**必须同步本包与固定测试向量**，否则验证器会误报"链断裂"——
+比没有验证器更危险。
+
+固定测试向量由**独立实现**（PowerShell + .NET SHA256，按同样的 8 字节大端长度前缀编码）
+算出并固化在 verifier_test.go，它同时锁死三件事：字段序、长度前缀编码、target 条件编码。
+
+用法
+----
+  # 库（单测）
+  go test -mod=mod ./gateway/audit-verify/... -v
+
+  # CLI
+  go build -mod=mod -o audit-verify.exe ./gateway/audit-verify/cmd/audit-verify
+  audit-verify -file admin-audit-chain.jsonl [-anchor admin-audit-chain.anchor] \
+               -schema admin [-json]
+
+退出码：0 通过 ｜ 1 哈希链断裂（篡改）｜ 2 锚点不一致（截断/内容被改）｜ 3 输入错误
+
+截断为什么必须靠锚点
+--------------------
+删掉链尾若干行后，剩余链**依然自洽**（每行 prev_hash 仍对得上），链式校验发现不了。
+只有比对锚定文件声明的 (events, chain_hash) 才能判定："锚点声明 24 条而当前链只剩 21 条"
+即尾部被删除。同理，**篡改链尾事件的内容**链式校验也发现不了（尾部哈希只是变了）——
+这两种场景都由锚点覆盖，测试中有对应用例（TestDetectTruncation / TestTailTamperNeedsAnchor）。
+
+锚点文件为空（尚未达到 8192 条锚定间隔）属**正常情况**：工具如实标注"无法判定截断"，
+不判失败（区别于"锚点哈希不符"这种真失败）。
+
+第三方场景（只有导出包）
+------------------------
+导出端点 `GET /v1/adminext/audit-chain/export` 现随包返回链尾摘要响应头：
+
+  X-Audit-Chain-Events       导出的事件条数
+  X-Audit-Chain-Last-Hash    导出链尾哈希
+
+第三方把导出的 NDJSON 与该摘要比对即可检出截断；也可把摘要整理成一条锚点记录
+（{"timestamp":…,"events":…,"chain_hash":…}）喂给 `-anchor` 复用同一套判定。
+
+实境实测（2026-09-11，用 M3-B/C 联调留下的真实链，24 事件）
+----------------------------------------------------------
+  A 正常链 + 空锚点                  → 链完整，锚点"未执行"，exit 0
+  B 中间行篡改（改写 actor）          → 第 3 条断裂，exit 1
+  C 截断（24 → 21 行）+ 锚点声明 24  → 链自洽但锚点检出截断，exit 2
+
+局限
+----
+- 只验"内容与链序是否被改"；不验时间戳真伪（那需要 tee 链的 RFC 3161 TSA 或外部公证）。
+- 不覆盖"整链被替换成另一条自洽链"的场景（需外部可信锚点副本，属后续工作）。

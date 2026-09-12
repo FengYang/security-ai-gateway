@@ -125,9 +125,13 @@ func (h *secCenterHandler) handleAuditChainExport(w http.ResponseWriter, r *http
 		return
 	}
 	// 导出全部：limit 给足够大值（list 内部按实际条数分配容量，无预分配风险）。
-	events, _ := h.chain.list(1<<30, 0)
+	events, total := h.chain.list(1<<30, 0)
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Content-Disposition", `attachment; filename="admin-audit-chain.jsonl"`)
+	// 独立验证增强（Phase 2 门禁 #4）：随导出附「链尾摘要」，使**拿到导出包的第三方**
+	// 也能判定截断（否则导出包只能自证内部自洽）。校验器：gateway/audit-verify。
+	w.Header().Set("X-Audit-Chain-Events", strconv.Itoa(total))
+	w.Header().Set("X-Audit-Chain-Last-Hash", h.chain.lastHash())
 	enc := json.NewEncoder(w)
 	for i := len(events) - 1; i >= 0; i-- { // 倒序取回后按链序输出
 		_ = enc.Encode(events[i])
