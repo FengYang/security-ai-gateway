@@ -27,8 +27,10 @@ package main
 //	$env:GUARDRAIL_EVAL_SCORER_KEY="..."             # 可选，Bearer
 //	go test -mod=mod ./gateway/tee-infer-service/ -run TestGuardrailEvalExternalScorer -v
 //
-// 结果落盘：`<repo>/docs/benchmark/guardrail-classifier/<scorer-id>.json`
-// （目录可用 GUARDRAIL_EVAL_OUT 覆盖；默认写入仓库内以便作为门禁证据入库）。
+// 结果落盘（**仅在 GUARDRAIL_EVAL_WRITE=1 时写盘**，避免 go test 重写已入库证据）：
+// <repo>/docs/benchmark/guardrail-classifier/<scorer-id>.json
+// （目录可用 GUARDRAIL_EVAL_OUT 覆盖；默认写入仓库内以便作为门禁证据入库）
+// 未开启时只打印指标，不落盘。
 
 import (
 	"bufio"
@@ -326,6 +328,11 @@ func truncate(s string, n int) string {
 // writeEvalReport 落盘报告（目录不存在则创建；返回写入路径）。
 func writeEvalReport(t *testing.T, rep *evalReport) string {
 	t.Helper()
+	// 仅显式触发时写盘（避免 `go test ./gateway/...` 重写已入库的基线证据、弄脏工作区）。
+	if os.Getenv("GUARDRAIL_EVAL_WRITE") != "1" {
+		t.Logf("（未落盘：设 GUARDRAIL_EVAL_WRITE=1 可写入 %s/%s.json）", filepath.ToSlash(evalDefaultOutDir), rep.Scorer)
+		return ""
+	}
 	dir := filepath.FromSlash(evalDefaultOutDir)
 	if override := os.Getenv("GUARDRAIL_EVAL_OUT"); override != "" {
 		dir = override
@@ -354,7 +361,9 @@ func logEvalSummary(t *testing.T, rep *evalReport, out string) {
 	t.Logf("  已知固有误报      %d/%d（规则缺陷水位，仅报告）", rep.KnownFP.Blocked, rep.KnownFP.Total)
 	t.Logf("  延迟 mean=%.1fµs P50=%.1fµs P99=%.1fµs", rep.Latency.Mean, rep.Latency.P50, rep.Latency.P99)
 	t.Logf("  资源 %v", rep.Resources)
-	t.Logf("  结果落盘：%s", out)
+	if out != "" {
+		t.Logf("  结果落盘：%s", out)
+	}
 }
 
 // ---------- 用例 ----------
@@ -419,6 +428,7 @@ func TestGuardrailEvalContractWithStub(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv("GUARDRAIL_EVAL_OUT", t.TempDir())
+	t.Setenv("GUARDRAIL_EVAL_WRITE", "1")
 	sc := &httpEvalScorer{id: "stub-candidate", c: model.NewHTTPClassifier(srv.URL, "", 2*time.Second, nil, nil)}
 	rep := runGuardrailEval(t, sc)
 	if len(rep.Errors) > 0 {
