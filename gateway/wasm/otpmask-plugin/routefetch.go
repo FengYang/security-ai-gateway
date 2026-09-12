@@ -28,9 +28,13 @@ func maybeFetchRoutes(cfg PluginConfig, log logs.Log) {
 		log.Warnf("otpmask-plugin: route_verify_key 无效（须≥32字节hex），跳过路由拉取")
 		return
 	}
-	cli := wrapper.NewClusterClient(wrapper.DnsCluster{
-		ServiceName: cfg.GatewayCoreService,
-		Port:        cfg.GatewayCorePort,
+	// 注意（2026-09-12 演练实证）：此处原用 wrapper.DnsCluster —— 它与插件其余出站调用
+	// （tee/embedding/attest 全用 FQDNCluster）不一致，且实测**容器从未发起请求**
+	// （宿主 stub 零请求日志）→ 冷启动拉取形同虚设。改为 FQDNCluster 并统一按 FQDN 配置
+	// （gateway_core_service 须写 <svc>.<ns>.svc.cluster.local，与 tee_service 同理）。
+	cli := wrapper.NewClusterClient(wrapper.FQDNCluster{
+		FQDN: cfg.GatewayCoreService,
+		Port: cfg.GatewayCorePort,
 	})
 	err = cli.Get("/routes",
 		[][2]string{{"Accept", "application/json"}},

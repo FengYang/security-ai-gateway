@@ -94,7 +94,8 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.RouteVerifyKeyHex = json.Get("route_verify_key").String()
 	config.MaxStaleSeconds = json.Get("max_stale_seconds").Int()
 	if config.GatewayCoreService == "" {
-		config.GatewayCoreService = "gateway-core" // 缺省 K8s service 名
+		// 缺省 FQDN（与 tee_service 同理：FQDNCluster 需完整服务域名，短名不会物化）。
+		config.GatewayCoreService = "gateway-core.higress-system.svc.cluster.local"
 	}
 	if config.GatewayCorePort == 0 {
 		config.GatewayCorePort = 8085
