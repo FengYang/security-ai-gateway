@@ -7,6 +7,12 @@
 # 注意：本文件为启用模板，插件 url 指向 Higress 内建插件服务（localhost:8002），
 # 由 Higress 控制面统一分发；生产请确认镜像版本包含对应插件（并做插件 schema
 # 字段级核验，见研发计划 GF.1）。
+#
+# 覆盖路径（2026-09-12 补全，Phase 1 门禁 #5/#7 语义）：
+#   - 密态推理入口 `/infer`（ingress: infer）；
+#   - 明文 Provider 入口 `/provider/<name>/...`（ingress: ai-* 共 17 条，GF.3.2 厂商路由）。
+#   此前 key-auth / ip-restriction / local-rate-limit 仅覆盖 `/infer`，
+#   导致明文 Provider 路径既无调用方认证也无限流——本次一并纳入（同一份插件配置）。
 
 ---
 # Key Auth：消费者 API Key 认证（调用方层；otpmask 内部 JWT 保留为租户层，二者叠加）
@@ -24,6 +30,34 @@ spec:
   matchRules:
   - ingress:
     - infer
+    config:
+      consumers:
+      - name: otpmask-customer-a
+        key: "CHANGE_ME_API_KEY_A"
+      - name: otpmask-customer-b
+        key: "CHANGE_ME_API_KEY_B"
+      keys:
+      - x-api-key
+      global_auth: true
+  # 明文 Provider 入口：同一消费者集合（生产按客户/租户维度拆分消费者）
+  - ingress:
+    - ai-openai
+    - ai-claude
+    - ai-gemini
+    - ai-qwen
+    - ai-deepseek
+    - ai-moonshot
+    - ai-minimax
+    - ai-doubao
+    - ai-groq
+    - ai-openrouter
+    - ai-hunyuan
+    - ai-ernie
+    - ai-spark
+    - ai-yi
+    - ai-mistral
+    - ai-stepfun
+    - ai-coze
     config:
       consumers:
       - name: otpmask-customer-a
@@ -54,6 +88,28 @@ spec:
     config:
       allow:
       - "0.0.0.0/0" # 生产改为内网/管理网段 CIDR
+  # 明文 Provider 入口：生产按调用方来源收紧（当前与 infer 同口径）
+  - ingress:
+    - ai-openai
+    - ai-claude
+    - ai-gemini
+    - ai-qwen
+    - ai-deepseek
+    - ai-moonshot
+    - ai-minimax
+    - ai-doubao
+    - ai-groq
+    - ai-openrouter
+    - ai-hunyuan
+    - ai-ernie
+    - ai-spark
+    - ai-yi
+    - ai-mistral
+    - ai-stepfun
+    - ai-coze
+    config:
+      allow:
+      - "0.0.0.0/0" # 生产改为内网/管理网段 CIDR
   - ingress:
     - tee-admin
     config:
@@ -65,6 +121,9 @@ spec:
 
 ---
 # Local Rate Limit：QPS 限流（进程内 token bucket；集群级一致性需 Cluster Rate Limit + Redis）
+#
+# 维度说明：`limit_by_header: x-tenant-id` = 按租户分桶（缺该头时落入单一默认桶，
+# 退化为全局限流——不放大风险）；CORS 已允许 x-tenant-id 头。
 apiVersion: extensions.higress.io/v1alpha1
 kind: WasmPlugin
 metadata:
@@ -84,14 +143,44 @@ spec:
       match:
         # 按请求匹配（连接建立扣减一次；流时长限流为扩展项，见方案 §6）
         path_prefix: "/infer"
-      limit_by_header: ""   # 全局维度；按租户可配 x-tenant-id
+      limit_by_header: "x-tenant-id"   # 按租户分桶（此前为空 = 全局）
       limit:
         unit: second
         quota: 1000          # 每秒 1000 请求
         burst_multiplier: 2  # 突发系数
+  # 明文 Provider 入口：独立规则名与路径前缀（便于分维度观测与调参）
+  - ingress:
+    - ai-openai
+    - ai-claude
+    - ai-gemini
+    - ai-qwen
+    - ai-deepseek
+    - ai-moonshot
+    - ai-minimax
+    - ai-doubao
+    - ai-groq
+    - ai-openrouter
+    - ai-hunyuan
+    - ai-ernie
+    - ai-spark
+    - ai-yi
+    - ai-mistral
+    - ai-stepfun
+    - ai-coze
+    config:
+      rule_name: provider-qps
+      match:
+        path_prefix: "/provider/"
+      limit_by_header: "x-tenant-id"
+      limit:
+        unit: second
+        quota: 1000
+        burst_multiplier: 2
 
 ---
 # CORS：跨域（允许来源按生产收紧）
+# 说明：仅覆盖 `/infer`（浏览器场景）。`/provider/*` 为服务端到服务端的 API 调用，
+# 不配置 CORS；若后续出现浏览器直连需求，再按需追加 matchRule。
 apiVersion: extensions.higress.io/v1alpha1
 kind: WasmPlugin
 metadata:
