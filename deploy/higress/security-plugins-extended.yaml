@@ -163,3 +163,83 @@ spec:
       - match_rule_domain: "*"
         match_rule_path: "/infer"
         match_rule_type: "prefix"
+
+---
+# Qwen3Guard 内容安全（**自托管**；补上明文路径的内容安全真空）
+#
+# 【为什么需要】明文 Provider 路径（/provider/*）的 body 不经段①、也**不经过 tee-infer**，
+#   因此 tee-infer 的 Guardrail（PII/提示注入）对该路径**完全不覆盖**；而 WAF 的 CRS 是通用
+#   Web 攻击规则，对 prompt 注入与 PII 无效 → 该路径此前**没有内容安全能力**。本插件补上这一环。
+#
+# 【为什么不是 ai-security-guard】后者强依赖**阿里云内容安全云服务**（serviceHost / accessKey /
+#   secretKey 三字段必填），会把明文 prompt 送出域，与本项目"密态 / 数据不出域 / 内网部署"
+#   的定位直接冲突（已核实官方字段后放弃该路线）。qwen3guard 为自托管路线：安全模型自行部署，
+#   无任何云依赖。
+#
+# 【三个硬前提（缺一不可）】
+#   1. **插件产物需自行构建**（上游不提供预构建镜像；Higress 官方插件仓库亦无此插件，已实测）：
+#      源码已内置 gateway/wasm/qwen3guard-plugin/（含 PROVENANCE 溯源），构建：
+#      scripts/build-qwen3guard-plugin.ps1（-trimpath -buildvcs=false，产物哈希可复现）。
+#   2. 需一个 **OpenAI 兼容**的 Qwen3Guard 服务（vLLM/SGLang 暴露 POST /v1/chat/completions），
+#      并注册为服务来源；dns 模式下 Envoy cluster 名为 `outbound|<servicePort>||<serviceName>.dns`，
+#      故 serviceName **不要**带 `.dns`（否则变成 `.dns.dns`）。本地联调可用
+#      scripts/stub-qwen3guard.py（按插件解析规则返回 Safety 判定的替身，无需真实模型/GPU）。
+#   3. 依赖 Proxy-Wasm ABI 0.2.100（本仓库使用的 Higress 2.x 数据面满足）。
+#
+# 【已知行为（如实标注，勿忽略）】
+#   - 仅 `Safety: Unsafe` 拦截（`Controversial` 默认放行；可用 riskLevelBar 调为更严）；
+#   - **安全服务不可用 / 超时 / 返回非 200 / 解析不出 Safety → fail-open（放行）**：
+#     与项目 fail-closed 哲学不一致，生产**必须**为安全服务可用率、超时与插件错误日志配告警；
+#   - `denyCode` 取默认 200 时返回 OpenAI 兼容拒答体（内容＝denyMessage）；**实测设为 403 时
+#     响应体为空**（仅状态码，content-type 仍为 application/json）——按客户端容错能力选择；
+#   - 启用 checkResponse 会移除请求的 Accept-Encoding，且流式响应按 `streamBufferChars`
+#     分段缓冲送检（命中时丢弃未释放数据并追加拒答 SSE；此时 denyCode 不生效）；
+#   - **仅覆盖 17 条 `/provider/*`**：`/infer` 的 body 是段① 密文，审核无意义且徒增延迟与外呼成本，
+#     其内容安全仍由 TEE 内 Guardrail 承担。
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: qwen3guard
+  namespace: higress-system
+  annotations:
+    higress.io/wasm-plugin-title: Qwen3Guard Content Safety
+    higress.io/wasm-plugin-category: security
+spec:
+  url: http://localhost:8002/plugins/qwen3guard/1.0.0/plugin.wasm
+  failStrategy: FAIL_CLOSED
+  defaultConfigDisable: true
+  priority: 300 # 默认阶段，**必须早于 ai-proxy**（否则请求/响应的 GJSON Path 取不到原始报文）
+  matchRules:
+  - ingress:
+    - ai-openai
+    - ai-claude
+    - ai-gemini
+    - ai-qwen
+    - ai-deepseek
+    - ai-moonshot
+    - ai-minimax
+    - ai-doubao
+    - ai-groq
+    - ai-openrouter
+    - ai-hunyuan
+    - ai-ernie
+    - ai-spark
+    - ai-yi
+    - ai-mistral
+    - ai-stepfun
+    - ai-coze
+    config:
+      serviceSource: dns
+      serviceName: qwen3guard # CHANGE_ME：不要带 .dns
+      servicePort: 8080 # CHANGE_ME：Qwen3Guard 服务端口
+      domain: qwen3guard.otpmask.svc.cluster.local # CHANGE_ME：dns 类型必填，同时作为外呼 Host
+      requestPath: /v1/chat/completions
+      model: Qwen/Qwen3Guard-Gen-4B
+      timeoutMs: 3000
+      checkRequest: true # 输入检测
+      checkResponse: true # 输出检测（注意上文的流式与编码副作用）
+      riskLevelBar: Unsafe # Unsafe 或 Controversial（后者更严）
+      denyCode: 403 # 见上文：403 = 仅状态码；如需 OpenAI 兼容拒答体请用默认 200
+      denyMessage: "内容不合规，已被网关安全策略拦截"
+      maxBodyBytes: 10485760
+      streamBufferChars: 1000

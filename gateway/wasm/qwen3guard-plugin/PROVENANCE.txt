@@ -1,0 +1,68 @@
+PROVENANCE —— qwen3guard 插件（第三方源码内置说明）
+================================================================
+
+为什么内置源码：本项目交付场景包含**内网/离线部署**，构建期无法访问 GitHub；
+故将上游插件源码逐文件内置，保证「可审计 + 可复现构建」，不依赖外网与私有镜像仓库。
+
+上游来源
+--------
+仓库    ：https://github.com/higress-group/higress
+路径    ：plugins/wasm-go/extensions/qwen3guard
+固定提交：c1fbf7fb0197d2d6f577b0f5328862f04af6b8cd
+提交时间：2026-08-06T13:04:38Z
+提交标题：feat(wasm): add Qwen3Guard security plugin (#4213)
+许可证  ：Apache-2.0（上游 LICENSE 全文见同目录 LICENSE.upstream）
+取源方式：GitHub Contents API（HTTPS，逐文件 base64），非 git clone（本机 git 直连受限）
+
+文件清单与 sha256（与上游逐字一致，未做任何修改）
+------------------------------------------------
+body.go               d68aba361987fc728b9f61844253e941698639f4b9b23b0ac57d0b14f5b8d588
+config.go             f9e9d45a9980a8572e549ed8667b9d18a791005b771d309bd0edb70ce3265171
+deny.go               40bc7b3f8a5130d610355f914e7fab80820c6a3e5e556bafc63434ebfa890420
+go.mod                b33b4e77253452a6b00fb8d4d778a3a6327fc2aebab18933dcf9668362a90f2f
+go.sum                2ef76e1a37200cdef30707ea517f80e5c5fefbc16fa49457382f5e9576d95be7
+guard.go              170660ecccc4037188e6b5d2da7e69396f11f7a5dc4228852ec1c3265aa4c24d
+main.go               c04749732412bcd3bfd57fd5f8322b1c9b0880fe192b13c7239cbe7c4598356e
+qwen3guard_test.go    70dbb411ce5f977384aa44ffe7d692c1fa5e7385b44d04037b7e6c98738568e5
+UPSTREAM-README.txt   3a0a150945d972e5861adc30ce7fa809991f93ad6b76ec7275af360e038bf076
+LICENSE.upstream      22bf8276b611d32982cd0dbb7a997a5ff9e7419079607f17af54899a4f717365
+
+说明：上游 README.md 已重命名为 UPSTREAM-README.txt（本仓库 .gitignore 全局忽略 *.md，
+      改名以确保该文档随之入库，内容未改）。
+
+构建（内网可复现）
+------------------
+    powershell -ExecutionPolicy Bypass -File scripts/build-qwen3guard-plugin.ps1
+    # 可加 -DeployContainer <容器名> 直接把产物投放到本地网关插件目录
+产物：gateway/wasm/qwen3guard-plugin/main.wasm（本仓库 .gitignore 忽略 *.wasm，不入库）
+
+可复现构建（2026-09-12 实测，两处不同绝对路径构建产出同一哈希）
+    工具链：Go 1.27 / GOOS=wasip1 GOARCH=wasm / -buildmode=c-shared
+    必需参数：-trimpath（去绝对源码路径） + -buildvcs=false（不嵌 VCS revision/modified）
+    产物：7,954,887 bytes
+    sha256：f2ba8d9cc1c85327d76832780c7eae60cfe1aeecd08dc6f2cb537d1f804ba7a9
+    验证：仓库内路径与 %TEMP% 下另一路径分别构建 → 哈希一致（True）
+
+    踩坑记录（供后人省时间）：仅加 -trimpath 仍不可复现——因为在 git 工作树内构建时
+    Go 会嵌入 vcs.revision/vcs.modified，仓库外构建则没有，二者必然不同；必须同时加
+    -buildvcs=false。此前一次未加这两个参数的构建产物为 7,967,896 bytes /
+    sha256 1a15c4c3990f137e6d579da5b5aa9aa6a67736e312a3cffaa2a9c775a2930580，已作废。
+
+    上游未提供预构建镜像；Higress 官方插件仓库亦无 qwen3guard（已实测确认，故必须自建）。
+
+运行前提与已知行为（完整说明见 UPSTREAM-README.txt）
+---------------------------------------------------
+1. 需一个 OpenAI 兼容（POST /v1/chat/completions）的 Qwen3Guard 服务；本仓库提供本地替身
+   scripts/stub-qwen3guard.py 用于无模型联调（按插件解析规则返回 Safety 判定）。
+2. 服务发现：dns 模式下 Envoy cluster 名为 outbound|<servicePort>||<serviceName>.dns，
+   因此 serviceName 不要写 `.dns`（否则变成 `.dns.dns`）。
+3. 插件 ABI：Proxy-Wasm 0.2.100（本仓库使用的 Higress 2.x 数据面满足）。
+4. **fail-open**：安全服务不可用/超时/返回非 200/解析不出 Safety 标签时放行当前请求；
+   与项目 fail-closed 哲学不一致，生产必须为可用率、超时与插件错误日志配置告警。
+5. denyCode 语义（本机实测）：默认 200 时返回 OpenAI 兼容拒答体（内容=denyMessage）；
+   设为 403 时**响应体为空**（仅状态码）。按客户端容错能力选择。
+
+维护约定
+--------
+- 升级上游时：更新本文件中的提交与 sha256，并在同一提交内说明差异（勿静默覆盖）。
+- 本插件为**自托管**路线，禁止改为依赖任何云端内容安全服务（项目要求内网可部署）。

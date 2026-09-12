@@ -30,3 +30,8 @@ mcp-server=2.0.1
 oidc=2.0.1
 otpmask=1.0.0
 waf=2.0.1
+
+# qwen3guard: our own artifact (built from vendored upstream source, self-hosted moderation).
+#             Build: scripts/build-qwen3guard-plugin.ps1 (reproducible: -trimpath -buildvcs=false).
+#             Version dir is our convention (matches deploy URL .../plugins/qwen3guard/1.0.0/plugin.wasm).
+qwen3guard=1.0.0
