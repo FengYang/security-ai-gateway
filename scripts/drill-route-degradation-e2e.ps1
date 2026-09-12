@@ -18,7 +18,10 @@ param(
     [string]$Container = 'higress-chain-control-plane',
     [int]$StubPort = 18085,
     [string]$HostIp = '192.168.65.254',
-    [string]$RouteKeyHex = '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
+    [string]$RouteKeyHex = '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff',
+    # 诊断取证：dump 插件 VM 配置 / Envoy 集群 / stub 请求计数，用于区分"配置未到达插件"
+    # 与"集群创建失败被静默吞掉"这两类根因。
+    [switch]$Diagnose
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,7 +53,11 @@ function Invoke-InferProbe {
     [System.IO.File]::WriteAllText($bodyFile, '{"text":"drill-e2e-probe"}', $utf8NoBom)
     $outFile = Join-Path $tmp 'drill-e2e-infer.out'
     if (Test-Path $outFile) { Remove-Item $outFile -Force }
-    $code = & curl.exe -s -m 30 -o $outFile -w '%{http_code}' -X POST "$Gateway/v1/infer" --data-binary "@$bodyFile"
+    # 关键：L2 查询键 = (X-Tenant-ID, X-Otp-Model 或 config.Model)。探针必须携带与 stub
+    # 路由表一致的维度，否则 Lookup 必然 miss（2026-09-12 实测：不带这两个头时插件查的是
+    # ("", "mock")，与 stub 的 ("tenant-a","qwen-plus") 不匹配 → 降级永不发生）。
+    # 注意 header 值不含空格（PS 向原生命令传参的拆分坑）。
+    $code = & curl.exe -s -m 30 -o $outFile -w '%{http_code}' -X POST "$Gateway/v1/infer" -H X-Tenant-ID:tenant-a -H X-Otp-Model:qwen-plus --data-binary "@$bodyFile"
     $parsed = 0
     if ($code) { [void][int]::TryParse(($code | Select-Object -Last 1).ToString().Trim(), [ref]$parsed) }
     return $parsed
@@ -135,7 +142,36 @@ subsets:
 "@
     [System.IO.File]::WriteAllText($svcFile, $svc, $utf8NoBom)
     [System.IO.File]::WriteAllText($epFile, $ep, $utf8NoBom)
-    Write-Output ("已创建临时 Service/Endpoints -> " + $HostIp + ":" + $StubPort)
+    # 关键：仅 Service+Endpoints 不足以让控制器物化**出站集群**——tee-infer 是靠 Ingress
+    # （higress.io/destination: tee-infer:19090）才物化出 outbound 集群的（2026-09-12 取证：
+    # 无 Ingress 时 clusters 里查不到 gateway-core，插件拉取静默失败、stub 零请求）。
+    $ingFile = Join-Path $repo 'higress-standalone\ingresses\drill-gateway-core.yaml'
+    $ing = @"
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  labels:
+    higress.io/domain_higress-default-domain: "true"
+    higress.io/resource-definer: higress
+  name: drill-gateway-core
+  namespace: higress-system
+  annotations:
+    higress.io/destination: gateway-core:$StubPort
+spec:
+  ingressClassName: higress
+  rules:
+    - http:
+        paths:
+          - backend:
+              service:
+                name: gateway-core
+                port:
+                  number: $StubPort
+            path: /routes
+            pathType: Prefix
+"@
+    [System.IO.File]::WriteAllText($ingFile, $ing, $utf8NoBom)
+    Write-Output ("已创建临时 Service/Endpoints/Ingress -> " + $HostIp + ":" + $StubPort)
 
     # ---- 2. 坏签名阶段：起 stub(bad) + 启用路由 + 重启 ----
     $stubProc = Start-Stub $true
@@ -181,11 +217,37 @@ subsets:
     } else {
         Record 'P2E-3' '§6 第 3 行：好签名路由表入缓存 ⇒ 命中 L2 ⇒ 降级事件可观测' 'FAIL' ("route_degraded 未增长（" + $d2 + " -> " + $d3 + "）；可能原因：容器→宿主 stub 不可达 / 拉取未触发")
     }
+    # ---- 2b. 诊断取证（-Diagnose）----
+    if ($Diagnose) {
+        Write-Output '----- 诊断取证 -----'
+        $cd = docker exec $Container curl -s http://127.0.0.1:15000/config_dump 2>$null
+        $cdHit = $cd | Select-String 'gateway_core_enabled|route_verify_key|max_stale_seconds'
+        if (@($cdHit).Count -gt 0) {
+            Record 'P2E-D1' '路由配置是否到达插件 VM（排除配置未送达）' 'PASS' ("config_dump 命中 " + @($cdHit).Count + " 行")
+        } else {
+            Record 'P2E-D1' '路由配置是否到达插件 VM（排除配置未送达）' 'FAIL' 'config_dump 无路由键 → 配置未到达插件（routeEnabled()=false，拉取不会被调用）'
+        }
+        $cl = docker exec $Container curl -s http://127.0.0.1:15000/clusters 2>$null
+        $clHit = $cl | Select-String 'gateway-core|18085'
+        if (@($clHit).Count -gt 0) {
+            Record 'P2E-D2' 'Envoy 是否物化 gateway-core 集群（排除集群创建失败）' 'PASS' ("clusters 命中 " + @($clHit).Count + " 行")
+        } else {
+            Record 'P2E-D2' 'Envoy 是否物化 gateway-core 集群（排除集群创建失败）' 'FAIL' 'clusters 无 gateway-core/18085 → FQDNCluster 未建立（拉取无法发出）'
+        }
+        foreach ($tag in @('bad', 'good')) {
+            $lf = Join-Path $tmp ("stub-gwcore-" + $tag + ".log")
+            if (Test-Path $lf) {
+                $reqs = Get-Content $lf | Select-String '<-'
+                Write-Output ("  stub(" + $tag + ") 收到请求数 = " + @($reqs).Count)
+            }
+        }
+    }
 } finally {
     # ---- 4. 清理（无论成败）----
     Stop-Stub
     if (Test-Path $backup) { Copy-Item $backup $crFile -Force; Remove-Item $backup -Force }
-    foreach ($f in @($svcFile, $epFile)) { if (Test-Path $f) { Remove-Item $f -Force } }
+    $ingFileCleanup = Join-Path $repo 'higress-standalone\ingresses\drill-gateway-core.yaml'
+    foreach ($f in @($svcFile, $epFile, $ingFileCleanup)) { if (Test-Path $f) { Remove-Item $f -Force } }
     $ready = Restart-Container
     Record 'P9' '清理：杀 stub、删临时 yaml、还原 CR、重启容器' $(if ($ready) { 'PASS' } else { 'FAIL' }) '已还原 baseline'
 }
