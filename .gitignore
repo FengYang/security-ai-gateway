@@ -56,6 +56,9 @@ assets/
 !docs/benchmark/
 docs/benchmark/*
 !docs/benchmark/README.md
+# GF.4.3 语义分类器评测结果（量化证据，随门禁 #1 入库；语料本身不入库，靠 SHA-256 复现）
+!docs/benchmark/guardrail-classifier/
+!docs/benchmark/guardrail-classifier/*.json
 !deploy/higress/README.md
 !gateway/wasm/hello-plugin/README.md
 !gateway/wasm/otpmask-plugin/README.md

@@ -1609,6 +1609,9 @@ func main() {
 	systemPrompt := flag.String("system-prompt", "", "提示词装饰：非空时在 text 载荷 messages 头部插入 system 消息（P2a，记录于审计 transformed_hash）")
 	protoVersion := flag.String("protocol-version", protocol.Version, "南向协议版本声明（C-4 版本一致性；默认 protocol.Version）")
 	guardrailCfg := flag.String("guardrail-config", "", "Guardrail 运行时配置持久化文件（M3-B：高敏复核写入的 pii_mode）；为空 = 仅进程内生效，重启回退 -pii-mode")
+	guardClassURL := flag.String("guard-classifier-url", "", "GF.4.3 语义分类器侧车地址（如 http://127.0.0.1:19091/classify）；为空 = 使用关键词规则分类器（默认，行为不变）")
+	guardClassKey := flag.String("guard-classifier-key", "", "语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
+	guardClassTimeout := flag.Duration("guard-classifier-timeout", 2*time.Second, "语义分类器侧车调用超时（分类器在请求路径上，须有限且小）")
 	flag.Parse()
 
 	// 双路线路由配置
@@ -1790,6 +1793,20 @@ func main() {
 	}
 	// M3-B：恢复运行时 Guardrail 配置（高敏复核写入的 pii_mode，跨重启保持）。
 	srv.loadGuardrailOverride()
+	// GF.4.3：语义分类器接线（默认关闭——未配置 URL 即保持关键词规则分类器，行为不变）。
+	// 侧车不可用时回退关键词规则并上报降级指标：可用性不中断，但语义检出能力回落到规则水位，
+	// 该水位由基准集量化（见 docs/GA-Guardrail分类器选型.md），必须可观测。
+	if *guardClassURL != "" {
+		srv.guard.useClassifier(
+			model.NewHTTPClassifier(*guardClassURL, *guardClassKey, *guardClassTimeout, srv.guard.classifier,
+				func(result string) {
+					srv.metrics.incGuardClassifier(model.GuardClassifierBackendHTTP, result)
+				}),
+			model.GuardClassifierBackendHTTP,
+		)
+		log.Printf("[guardrail] 语义分类器接线：backend=%s url=%s timeout=%s（不可用时回退关键词规则）",
+			model.GuardClassifierBackendHTTP, *guardClassURL, guardClassTimeout.String())
+	}
 	go srv.seenCleanup()                                           // 防重放集合 TTL 清理
 	go srv.sessionCleanup()                                        // 远程证明会话 TTL 清理
 	go newReconciler(audit, srv.usage, &srv.mu, srv.metrics).run() // 审计-计费对账

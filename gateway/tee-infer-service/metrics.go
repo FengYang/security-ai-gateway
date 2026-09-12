@@ -9,6 +9,7 @@
 // otpmask_tokens_in_total{tenant}                  输入 token（向量数）计数
 // otpmask_tokens_out_total{tenant}                 输出 token 计数
 // otpmask_denies_total{tenant,reason}              拒绝计数（bad_signature/replay/guardrail_* 等）
+// otpmask_guard_classifier_total{backend,result}   语义分类器调用（ok=侧车判定可用 / degraded=不可用已回退）
 // otpmask_key_issue_total{tenant}                  密钥签发计数
 // otpmask_audit_events                             审计链当前长度（gauge）
 package main
@@ -22,30 +23,41 @@ import (
 
 // otpmaskMetrics 指标集合（按标签维度 map 累加，线程安全）。
 type otpmaskMetrics struct {
-	mu           sync.Mutex
-	requests     map[string]int64 // tenant|result
-	tokensIn     map[string]int64 // tenant
-	tokensOut    map[string]int64 // tenant
-	denies       map[string]int64 // tenant|reason
-	keyIssues    map[string]int64 // tenant
-	reconcile    map[string]int64 // reason（审计-计费对账偏差，）
-	tokenTraffic map[string]int64 // tenant
-	recomputeOps map[string]int64 // op（补算调用计数）
-	recomputeDur map[string]int64 // op（补算耗时累计，毫秒）
+	mu              sync.Mutex
+	requests        map[string]int64 // tenant|result
+	tokensIn        map[string]int64 // tenant
+	tokensOut       map[string]int64 // tenant
+	denies          map[string]int64 // tenant|reason
+	keyIssues       map[string]int64 // tenant
+	reconcile       map[string]int64 // reason（审计-计费对账偏差，）
+	tokenTraffic    map[string]int64 // tenant
+	recomputeOps    map[string]int64 // op（补算调用计数）
+	recomputeDur    map[string]int64 // op（补算耗时累计，毫秒）
+	guardClassifier map[string]int64 // backend|result（语义分类器调用）
 }
 
 func newMetrics() *otpmaskMetrics {
 	return &otpmaskMetrics{
-		requests:     make(map[string]int64),
-		tokensIn:     make(map[string]int64),
-		tokensOut:    make(map[string]int64),
-		denies:       make(map[string]int64),
-		keyIssues:    make(map[string]int64),
-		reconcile:    make(map[string]int64),
-		tokenTraffic: make(map[string]int64),
-		recomputeOps: make(map[string]int64),
-		recomputeDur: make(map[string]int64),
+		requests:        make(map[string]int64),
+		tokensIn:        make(map[string]int64),
+		tokensOut:       make(map[string]int64),
+		denies:          make(map[string]int64),
+		keyIssues:       make(map[string]int64),
+		reconcile:       make(map[string]int64),
+		tokenTraffic:    make(map[string]int64),
+		recomputeOps:    make(map[string]int64),
+		recomputeDur:    make(map[string]int64),
+		guardClassifier: make(map[string]int64),
 	}
+}
+
+// incGuardClassifier 记录语义分类器调用结果（GF.4.3）。
+// result=ok：侧车判定可用；result=degraded：侧车不可用并已回退关键词规则
+// （此时语义检出能力回落到关键词水位，须可观测、可告警）。
+func (m *otpmaskMetrics) incGuardClassifier(backend, result string) {
+	m.mu.Lock()
+	m.guardClassifier[backend+"|"+result]++
+	m.mu.Unlock()
 }
 
 // incReconcileMismatch 记录审计-计费对账偏差。
@@ -103,6 +115,7 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	writeCounter(w, "otpmask_tokens_in_total", "输入 token 计数（按租户）", m.tokensIn, []string{"tenant"})
 	writeCounter(w, "otpmask_tokens_out_total", "输出 token 计数（按租户）", m.tokensOut, []string{"tenant"})
 	writeCounter(w, "otpmask_denies_total", "拒绝计数（按租户与原因）", m.denies, []string{"tenant", "reason"})
+	writeCounter(w, "otpmask_guard_classifier_total", "语义分类器调用（ok=侧车判定可用 / degraded=不可用已回退关键词规则）", m.guardClassifier, []string{"backend", "result"})
 	writeCounter(w, "otpmask_key_issue_total", "密钥签发计数（按租户）", m.keyIssues, []string{"tenant"})
 	writeCounter(w, "otpmask_reconcile_mismatch_total", "审计-计费对账偏差累计", m.reconcile, []string{"reason"})
 	writeCounter(w, "otpmask_attest_token_traffic_total", "token 证明模式流量", m.tokenTraffic, []string{"tenant"})
