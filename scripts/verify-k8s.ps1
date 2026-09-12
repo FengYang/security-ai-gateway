@@ -1,4 +1,4 @@
-# verify-k8s.ps1 - M10 K8s manifests verification (single-node dev env)
+﻿# verify-k8s.ps1 - M10 K8s manifests verification (single-node dev env)
 #
 # Validates the K8s/monitoring manifests and app images WITHOUT a cluster:
 #   1. kustomize render  (kubectl kustomize, catches structural errors)

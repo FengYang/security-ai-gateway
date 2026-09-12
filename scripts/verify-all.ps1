@@ -185,6 +185,11 @@ Write-Host "`n[19/19] AI 网关能力补齐（配额 + 脱敏 + 装饰 + 双 has
 $capOk = $LASTEXITCODE -eq 0
 Check 'AI 网关能力补齐（P0a/P1/P2a）' $capOk '(token 配额 429/预占防超卖 + PII 脱敏/拦截 + 提示词装饰 + transformed_hash 审计)'
 
+# 20. Higress 插件版本门禁（防"版本漂移 → wasm 404 → 静默放行"）
+Write-Host "`n[20] Higress 插件版本门禁（仓库 ↔ 锁定 ↔ 镜像）" -ForegroundColor Yellow
+& powershell -NoProfile -File scripts/check-higress-plugin-versions.ps1 -Container higress-chain-control-plane *> $null
+Check 'Higress plugin versions' ($LASTEXITCODE -eq 0) '(deploy 清单 ↔ plugin-versions.lock ↔ 运行镜像；版本错配即 FAIL)'
+
 Pop-Location
 
 # Summary
