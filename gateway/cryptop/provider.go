@@ -112,14 +112,19 @@ type Provider interface {
 
 // New 按 profile 构造 Provider。
 //
-// 本轮仅实现 ProfileIntl；sm-software 与 sm-module 返回 ErrNotImplemented
-// （待国密库选型与许可审查通过、或认证密码模块接入后实现）——**调用方据此如实降级或报错，
-// 不得回退到 intl 冒充国密**。
+// 当前实现两档：ProfileIntl（国际算法）与 ProfileSMSW（国密软件实现，依赖 emmansun/gmsm）。
+// ProfileSMModule（认证密码模块/密码服务）返回 ErrNotImplemented——**调用方据此如实降级或报错，
+// 绝不回退到软件实现冒充合规**。
 func New(profile Profile) (Provider, error) {
 	switch profile {
 	case ProfileIntl:
 		return newIntlProvider(), nil
-	case ProfileSMSW, ProfileSMModule:
+	case ProfileSMSW:
+		// 国密软件实现（SM2/SM3/SM4，依赖 github.com/emmansun/gmsm）：**不满足密评**，
+		// 仅限功能验证与过渡（见 Profile.ComplianceNote）。
+		return newSMProvider(), nil
+	case ProfileSMModule:
+		// 认证密码模块/密码服务接入后实现；**绝不回退到软件实现冒充合规**。
 		return nil, ErrNotImplemented
 	default:
 		return nil, ErrUnknownProfile
