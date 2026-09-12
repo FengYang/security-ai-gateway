@@ -15,3 +15,11 @@ frontend/src/locales/zh-CN/translation.json
 # and non-ASCII bytes can merge lines and silently drop whitelist entries.
 backend/sdk/src/test/java/com/alibaba/higress/sdk/service/WasmPluginServiceTest.java
 backend/sdk/src/test/resources/plugins/plugin-snapshot.lock.json
+# Upstream-defect fix (NOT a customization point): LlmProviderType already declares
+# "hunyuan"/"spark", but LlmProviderServiceImpl.PROVIDER_HANDLERS never registered
+# them, so addOrUpdate failed with "Provider type hunyuan is not supported".
+# Two default handlers added; the matching UI entries (enabled=false) enabled and the
+# Hunyuan serviceAddress aligned with its OpenAI-compatible endpoint.
+backend/sdk/src/main/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImpl.java
+backend/sdk/src/test/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImplTest.java
+frontend/src/pages/ai/configs.tsx

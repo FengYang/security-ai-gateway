@@ -2083,6 +2083,23 @@ index 0000000..257cc96
 +        assertThrows(AdminExtLoginGuard.LockedException.class, () -> guard.checkNotLocked("bob"));
 +    }
 +}
+diff --git a/backend/sdk/src/main/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImpl.java b/backend/sdk/src/main/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImpl.java
+index 6553707..19d0561 100644
+--- a/backend/sdk/src/main/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImpl.java
++++ b/backend/sdk/src/main/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImpl.java
+@@ -74,8 +74,12 @@ public class LlmProviderServiceImpl implements LlmProviderService {
+             new ClaudeLlmProviderHandler(),
+             new DefaultLlmProviderHandler(LlmProviderType.BAIDU, "qianfan.baidubce.com", 443,
+                 V1McpBridge.PROTOCOL_HTTPS),
++            new DefaultLlmProviderHandler(LlmProviderType.HUNYUAN, "api.hunyuan.cloud.tencent.com", 443,
++                V1McpBridge.PROTOCOL_HTTPS),
+             new DefaultLlmProviderHandler(LlmProviderType.STEPFUN, "api.stepfun.com", 443, V1McpBridge.PROTOCOL_HTTPS),
+             new DefaultLlmProviderHandler(LlmProviderType.MINIMAX, "api.minimax.chat", 443, V1McpBridge.PROTOCOL_HTTPS),
++            new DefaultLlmProviderHandler(LlmProviderType.SPARK, "spark-api-open.xf-yun.com", 443,
++                V1McpBridge.PROTOCOL_HTTPS),
+             new DefaultLlmProviderHandler(LlmProviderType.GEMINI, "generativelanguage.googleapis.com", 443,
+                 V1McpBridge.PROTOCOL_HTTPS),
+             new DefaultLlmProviderHandler(LlmProviderType.MISTRAL, "api.mistral.ai", 443, V1McpBridge.PROTOCOL_HTTPS),
 diff --git a/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/WasmPluginServiceTest.java b/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/WasmPluginServiceTest.java
 index 22bf72e..d1b0106 100644
 --- a/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/WasmPluginServiceTest.java
@@ -2105,6 +2122,36 @@ index 22bf72e..d1b0106 100644
  
          when(kubernetesClientService.listWasmPlugin(eq(pluginName), anyString(), anyBoolean())).thenReturn(Collections.emptyList());
          when(kubernetesClientService.createWasmPlugin(any())).thenAnswer(invocation -> invocation.getArgument(0));
+diff --git a/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImplTest.java b/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImplTest.java
+index 152fe8c..7fe90f7 100644
+--- a/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImplTest.java
++++ b/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImplTest.java
+@@ -146,6 +146,25 @@ public class LlmProviderServiceImplTest {
+         verify(wasmPluginInstanceService, never()).addOrUpdateAll(any());
+     }
+ 
++    @Test
++    public void addOrUpdate_hunyuanAndSparkProviderTypes_areSupported() {
++        when(wasmPluginInstanceService.list(eq(BuiltInPluginName.AI_PROXY), anyBoolean()))
++            .thenReturn(Collections.emptyList());
++        when(wasmPluginInstanceService.createEmptyInstance(BuiltInPluginName.AI_PROXY))
++            .thenReturn(createEmptyGlobalInstance());
++        when(aiRouteService.list(any(CommonPageQuery.class)))
++            .thenReturn(createEmptyPaginatedResult());
++        when(wasmPluginInstanceService.addOrUpdateAll(any()))
++            .thenReturn(Collections.emptyList());
++
++        for (String type : new String[] {LlmProviderType.HUNYUAN, LlmProviderType.SPARK}) {
++            LlmProvider provider = buildProvider(TEST_PROVIDER_NAME, type);
++
++            Assertions.assertDoesNotThrow(() -> service.addOrUpdate(provider),
++                "Provider type should be registered: " + type);
++        }
++    }
++
+     @Test
+     public void addOrUpdate_addOrUpdateAllIsCalledWithInstancesList() {
+         when(wasmPluginInstanceService.list(eq(BuiltInPluginName.AI_PROXY), anyBoolean()))
 diff --git a/backend/sdk/src/test/resources/plugins/plugin-snapshot.lock.json b/backend/sdk/src/test/resources/plugins/plugin-snapshot.lock.json
 index af8233c..2b460af 100644
 --- a/backend/sdk/src/test/resources/plugins/plugin-snapshot.lock.json
@@ -4512,6 +4559,30 @@ index 0000000..01bde01
 +};
 +
 +export default ProviderStatus;
+diff --git a/frontend/src/pages/ai/configs.tsx b/frontend/src/pages/ai/configs.tsx
+index a91019f..101ca6f 100644
+--- a/frontend/src/pages/ai/configs.tsx
++++ b/frontend/src/pages/ai/configs.tsx
+@@ -438,8 +438,8 @@ export const aiModelProviders = [
+   {
+     label: 'Hunyuan',
+     value: 'hunyuan',
+-    enabled: false,
+-    serviceAddress: 'https://hunyuan.tencentcloudapi.com',
++    enabled: true,
++    serviceAddress: 'https://api.hunyuan.cloud.tencent.com',
+     modelNamePattern: 'hunyuan-*',
+     targetModelList: [
+       {
+@@ -507,7 +507,7 @@ export const aiModelProviders = [
+   {
+     label: 'Spark',
+     value: 'spark',
+-    enabled: false,
++    enabled: true,
+     serviceAddress: 'https://spark-api-open.xf-yun.com',
+     targetModelList: [
+       {
 diff --git a/frontend/src/pages/security-center/index.tsx b/frontend/src/pages/security-center/index.tsx
 new file mode 100644
 index 0000000..6750e75
