@@ -50,9 +50,9 @@ $refs = New-Object System.Collections.Generic.List[object]
 # 排除：vendor/node_modules/.git（非源码）与 higress-standalone（本地运行态快照目录，
 # 其中 wasmplugins/*.yaml 由 Higress 控制台写入、会被覆盖，不作为"部署清单"校验对象）。
 Get-ChildItem $Root -Recurse -File -Include *.yaml, *.yml, *.md, *.json, *.ps1, *.sh, *.go -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -notmatch '\\vendor\\|\\node_modules\\|\\.git\\|\\higress-standalone\\' } |
+    Where-Object { $_.FullName -notmatch '[\\/]vendor[\\/]|[\\/]node_modules[\\/]|[\\/]\.git[\\/]|[\\/]higress-standalone[\\/]' } |
     ForEach-Object {
-        $rel = $_.FullName.Replace((Resolve-Path $Root).Path + '\', '')
+        $rel = $_.FullName.Replace((Resolve-Path $Root).Path, '').TrimStart('\', '/')
         Select-String -Path $_.FullName -Pattern 'plugins/([a-zA-Z0-9._-]+)/([0-9][0-9a-zA-Z.\-]*)/plugin\.wasm' -AllMatches -ErrorAction SilentlyContinue |
             ForEach-Object {
                 foreach ($m in $_.Matches) {

@@ -1,5 +1,13 @@
 # OTP-Mask 安全 AI 网关 CI（M12）
-# 覆盖：单元测试、协议交叉一致性、供应链漏洞扫描、wasm 构建、端到端验证、渗透测试
+#
+# 【2026-09-12 拆分（方案①）】原为单 job、且 push 分支写 [main]（仓库实为 master）→ 永不触发；
+# 同时裸 go 命令与仓库 vendor/（无 modules.txt）冲突 → 一旦触发即失败。现拆为两个 job：
+#   job 1 static-and-unit：不依赖任何本地环境（静态检查/单测/协议一致/门禁/wasm 构建/脚本语法）
+#                          → 跑托管 runner（ubuntu-latest），可立即给出结论；
+#   job 2 env-suite      ：依赖完整环境（compose 容器组 + kubectl/kustomize/helm/docker）
+#                          → 跑自托管 runner（标签 otpmask-e2e），需在具备该环境的机器上注册 runner。
+# 说明：未接入自托管 runner 时，job 2 会处于"等待 runner"状态（不阻塞 job 1 的结论）；
+#       job 2 依赖 job 1 成功（needs），避免浪费环境机资源。
 name: ci
 
 on:
@@ -8,7 +16,9 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # ---------------- job 1：托管 runner（零本地环境依赖） ----------------
+  static-and-unit:
+    name: static & unit (hosted)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +32,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 1. 静态与单元
+      # 1. 静态与单元（-mod=mod：仓库含 vendor/ 但无 modules.txt，裸 go 会 inconsistent vendoring）
       - name: go vet
         run: go vet -mod=mod ./...
       - name: unit tests
@@ -51,9 +61,25 @@ jobs:
           GOOS=wasip1 GOARCH=wasm go build -mod=mod -buildmode=c-shared \
             -o gateway/wasm/otpmask-plugin/main.wasm ./gateway/wasm/otpmask-plugin
 
-      # 7. 端到端 + 治理 + 渗透（Docker Compose 环境）
-      #    注意：本步与 K8s 步依赖本地 compose 容器/集群，托管 runner 不具备；
-      #    接入自托管 runner 后再纳入 CI 必过项（当前保留，失败即暴露环境缺失）。
+      # 7. 脚本语法（纯静态：bash -n + 全部 ps1 解析）
+      - name: Linux scripts syntax
+        run: |
+          bash -n scripts/setup-env.sh
+          pwsh -NoProfile -Command "Get-ChildItem scripts/*.ps1 | ForEach-Object { \$null = [System.Management.Automation.Language.Parser]::ParseFile(\$_.FullName, [ref]\$null, [ref]\$e); if (\$e) { throw \$e[0] } }; Write-Host 'ps1 parse OK'"
+
+  # ---------------- job 2：自托管 runner（完整环境依赖） ----------------
+  # 前置条件（在环境机上注册 runner 并打标签 otpmask-e2e）：
+  #   - 已启动 compose 环境（higress 控制面/网关 + tee-infer + embedding 等容器组）；
+  #   - 具备 kubectl（kustomize 子命令）、helm、docker（可构建镜像）与 go/python 工具链；
+  #   - Windows 环境亦可（脚本均为 ps1，经 pwsh 调用；python 需在 PATH）。
+  env-suite:
+    name: e2e & governance (self-hosted)
+    needs: static-and-unit
+    runs-on: [self-hosted, otpmask-e2e]
+    steps:
+      - uses: actions/checkout@v4
+
+      # 8. 端到端 + 治理 + 渗透（Docker Compose 环境）
       - name: e2e & governance suite
         run: pwsh -NoProfile -File scripts/verify-all.ps1
         env:
@@ -62,12 +88,7 @@ jobs:
       - name: penetration tests
         run: python scripts/pen_test.py
 
-      # 8. K8s 清单校验（kustomize 渲染 + YAML 语法；无集群执行 dry-run 跳过）
+      # 9. K8s 清单校验（kustomize 渲染 + YAML 语法 + dry-run + 镜像构建 + helm lint）
+      #    依赖 kubectl/helm/docker，故与 e2e 同置自托管 runner
       - name: K8s manifests
         run: pwsh -NoProfile -File scripts/verify-k8s.ps1
-
-      # 9. Linux 一键脚本语法 + 脚本集校验
-      - name: Linux scripts syntax
-        run: |
-          bash -n scripts/setup-env.sh
-          pwsh -NoProfile -Command "Get-ChildItem scripts/*.ps1 | ForEach-Object { \$null = [System.Management.Automation.Language.Parser]::ParseFile(\$_.FullName, [ref]\$null, [ref]\$e); if (\$e) { throw \$e[0] } }; Write-Host 'ps1 parse OK'"
