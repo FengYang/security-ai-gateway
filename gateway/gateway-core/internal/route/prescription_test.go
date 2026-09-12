@@ -1,6 +1,7 @@
 package route
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -76,13 +77,18 @@ func TestVerifyTamperedPayload(t *testing.T) {
 	now := time.Unix(1725500000, 0)
 	tok, _ := s.Issue(&RoutePrescription{Tenant: "tenant-a", Model: "qwen-plus", CreatedAt: now.Unix()})
 	// 篡改 payload 中 tenant 为 evil-tenant（与签名不匹配，应验签失败）
-	parts := splitToken(tok)
-	b, _ := b64.DecodeString(parts[1])
+	// 注：JWT 三段切分与 base64url 编解码改为测试内联——原用的包内私有助手
+	// （splitToken/b64）已随处方算法迁移到共享包 gateway/rxroute。
+	parts := strings.Split(tok, ".")
+	b, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("payload 解码失败: %v", err)
+	}
 	evil := strings.Replace(string(b), "tenant-a", "evil-tenant", 1)
 	if evil == string(b) {
 		t.Fatal("替换未生效，测试无效")
 	}
-	parts[1] = b64.EncodeToString([]byte(evil))
+	parts[1] = base64.RawURLEncoding.EncodeToString([]byte(evil))
 	tampered := strings.Join(parts, ".")
 	if _, err := s.Verify(tampered, now); err == nil {
 		t.Fatal("篡改 payload 应验签失败")
