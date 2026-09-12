@@ -241,6 +241,11 @@ spec:
                 Write-Output ("  stub(" + $tag + ") 收到请求数 = " + @($reqs).Count)
             }
         }
+        # 拉取链路计数：cb 恒为 -1（未注册）⇒ 回调从未执行（异步回调被丢弃）；
+        # cb 增长但 ok 不增长 ⇒ 回调执行了但表被拒（验签/版本）；ok 增长但 degraded 不动 ⇒ 查询键仍不匹配。
+        foreach ($c in @('otpmask_route_fetch_cb_total', 'otpmask_route_fetch_ok_total', 'otpmask_route_fetch_reject_total')) {
+            Write-Output ("  " + $c + " = " + (Get-EnvoyStat $c) + "（-1 = 未注册）")
+        }
     }
 } finally {
     # ---- 4. 清理（无论成败）----

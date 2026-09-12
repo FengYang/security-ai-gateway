@@ -10,6 +10,11 @@ package main
 //	otpmask_keys_issued_total     请求密钥签发数（入库即计）
 //	otpmask_keys_deleted_total    请求密钥删除数（存量 = issued - deleted）
 //	otpmask_route_degraded_total  路由降级数（§6：L1 处方缺失/失效 → 走 L2 默认路由表）
+//	otpmask_route_fetch_cb_total  路由表拉取**回调被执行**次数（异步响应到达回调的次数；
+//	                              恒为 0 说明回调从未执行，例如响应已随 fail-closed 发出后
+//	                              流上下文结束导致挂起回调被丢弃）
+//	otpmask_route_fetch_ok_total  路由表验签通过并写入缓存次数
+//	otpmask_route_fetch_reject_total 路由表被拒次数（验签失败 / 版本回滚 / 路由未启用 / 非 200）
 //
 // hostcall 仅在 wasm 运行时可用（go:wasmimport 在宿主单测进程不可调用）：
 // pwCounter 懒初始化（Define 同名幂等，复用同一 stat），metricsHostGuard 由
@@ -39,12 +44,15 @@ func (m *pwCounter) incr() {
 	m.c.Increment(1)
 }
 
-// 插件计数器（W-1 最小集 + §6 降级可观测）。
+// 插件计数器（W-1 最小集 + §6 降级/拉取可观测）。
 var (
-	metricRequests      = &pwCounter{name: "otpmask_request_total"}
-	metricFailClosed    = &pwCounter{name: "otpmask_fail_closed_total"}
-	metricDecryptError  = &pwCounter{name: "otpmask_decrypt_error_total"}
-	metricKeysIssued    = &pwCounter{name: "otpmask_keys_issued_total"}
-	metricKeysDeleted   = &pwCounter{name: "otpmask_keys_deleted_total"}
-	metricRouteDegraded = &pwCounter{name: "otpmask_route_degraded_total"}
+	metricRequests         = &pwCounter{name: "otpmask_request_total"}
+	metricFailClosed       = &pwCounter{name: "otpmask_fail_closed_total"}
+	metricDecryptError     = &pwCounter{name: "otpmask_decrypt_error_total"}
+	metricKeysIssued       = &pwCounter{name: "otpmask_keys_issued_total"}
+	metricKeysDeleted      = &pwCounter{name: "otpmask_keys_deleted_total"}
+	metricRouteDegraded    = &pwCounter{name: "otpmask_route_degraded_total"}
+	metricRouteFetchCb     = &pwCounter{name: "otpmask_route_fetch_cb_total"}
+	metricRouteFetchOK     = &pwCounter{name: "otpmask_route_fetch_ok_total"}
+	metricRouteFetchReject = &pwCounter{name: "otpmask_route_fetch_reject_total"}
 )

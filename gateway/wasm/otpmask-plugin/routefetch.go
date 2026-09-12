@@ -39,23 +39,31 @@ func maybeFetchRoutes(cfg PluginConfig, log logs.Log) {
 	err = cli.Get("/routes",
 		[][2]string{{"Accept", "application/json"}},
 		func(statusCode int, _ http.Header, respBody []byte) {
+			// 诊断计数（门禁 #5）：cb 恒为 0 ⇒ 回调从未执行（例如响应已随 fail-closed
+			// 发出导致挂起回调被丢弃），而非"验签失败"。
+			metricRouteFetchCb.incr()
 			if statusCode != 200 {
+				metricRouteFetchReject.incr()
 				log.Warnf("otpmask-plugin: 拉取 /routes 返回 %d", statusCode)
 				return
 			}
 			rt, err := parseRouteTable(respBody)
 			if err != nil {
+				metricRouteFetchReject.incr()
 				log.Warnf("otpmask-plugin: 解析路由表失败: %v", err)
 				return
 			}
 			if routecache.Verify(key, rt) {
 				// 写入路由运行时单例（route.go 持有）；Update 内部再做一次验签 + 防回滚判定。
 				if routeEnabled() && routeRuntime.cache.Update(rt) {
+					metricRouteFetchOK.incr()
 					log.Infof("otpmask-plugin: 路由表验签通过并已入缓存 version=%d routes=%d", rt.Version, len(rt.Routes))
 				} else {
+					metricRouteFetchReject.incr()
 					log.Warnf("otpmask-plugin: 路由表未入缓存（重复/回滚版本，或路由未启用）version=%d", rt.Version)
 				}
 			} else {
+				metricRouteFetchReject.incr()
 				log.Warnf("otpmask-plugin: 路由表验签失败，拒绝")
 			}
 		})
