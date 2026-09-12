@@ -4,28 +4,40 @@
 # 本文件原按 Higress 1.x 编写，在当前镜像（higress/all-in-one，镜像内插件目录实测版本见下）
 # 上**不生效**——插件 URL 404（wasm 加载失败，静默放行）+ 多个配置字段在 2.x 中不存在。
 # 已按 2.x 修正，依据＝官方文档（higress.cn/docs/latest）+ 镜像实际安装版本：
-#   - bot-detect 1.0.0 → **2.0.0**（配置字段 allow/deny/blocked_code/blocked_message 与官方一致，未改 schema）
+#   - bot-detect 1.0.0 → **2.0.0**（配置字段 allow/deny/blocked_code/blocked_message 与官方一致）
 #   - waf        1.0.0 → **2.0.1**，且**配置字段全部纠正**：2.x 只有 `useCRS`(bool) 与 `secRules`(array)，
-#     原写的 `sec_rule_engine` / `default_rule_set` 在 2.x **不存在**（原文"字段对齐 v2.1.5 schema"
-#     的说法有误，此处更正）；影子模式改为官方写法 `useCRS: true` + `secRules: ["SecRuleEngine DetectionOnly"]`
+#     原写的 `sec_rule_engine` / `default_rule_set` 在 2.x **不存在**；影子模式改为官方写法
+#     `useCRS: true` + `secRules: ["SecRuleEngine DetectionOnly"]`
 #   - oauth        1.0.0 → **改用 `oidc` 2.0.1**：2.x 的 `oauth` 插件是**OAuth2 Token 签发器**
-#     （consumers[{name,client_id,client_secret}] + auth_path），**不是**接企业 IdP 的客户端；
-#     原配置里的 auth_url/token_url/user_info_url/redirect_url/scopes 属 `oidc` 插件能力形态
-#   - **未核实项**：本文件仅覆盖 `infer` ingress；是否将 WAF/Bot/OIDC 也覆盖到 17 条 `/provider/*`
-#     明文入口，属策略决定（security-plugins.yaml 已覆盖），**待确认后再改**，本文件不做擅自扩展。
+#     （consumers[{name,client_id,client_secret}] + auth_path），**不是**接企业 IdP 的客户端
+#
+# 【2026-09-12 覆盖范围决定（原"未核实项"已解决）】明文 Provider 入口 `/provider/<name>/...`
+# （17 条 ai-* ingress）是否纳入本文件的插件，逐插件给出结论与依据：
+#   - **WAF：纳入**。明文入口 body 为**明文**，CRS 可做内容级检测（密态路径只能看元数据），
+#     收益真实；当前保持 `DetectionOnly` 影子模式（只记录不拦截），误报风险可控，
+#     观察无误杀后再切 On。
+#   - **bot-detect：不纳入**。该插件 `allow`/`deny` 为**追加**语义，**无法关闭内置爬虫规则**；
+#     内置规则按 `name/0.0` 形态匹配，正好命中 LLM SDK 与探针 UA
+#     （`curl/x.y.z`、`OpenAI/Python x`、`Anthropic/x`、`Go-http-client`），且 API 入口已有 key-auth
+#     认证把关，爬虫防护收益低、误杀代价高。若将来确需，须先以窄 deny + 显式 allow 做误杀评估。
+#   - **OIDC：不纳入**。OIDC 为浏览器重定向流程，不适用于机机 API 调用（/infer、/provider/* 走
+#     key-auth + 段① 加密）；OIDC 适用场景为管理门户等**人机**入口。
 #
 # 链序（2.x 官方阶段/优先级）：cors(CORS) → key-auth(AUTHN,310) → bot-detect(AUTHZ,310)
 #   → ip-restriction(AUTHN,210) → waf(AUTHZ,330) → cluster-key-rate-limit(DEFAULT,20)
 #   → otpmask(DEFAULT, 段① 加密) → 路由。其中 key-auth/ip-restriction/限流见 security-plugins.yaml。
 #
-# 关键边界（方案 §3.10.4 / 研发计划 GF.2.1）：推理路径 body 为段① 密文，WAF/Bot 仅做
-# **元数据级**防护（URL / Header / User-Agent / Method / 客户端 IP），不做密文内容检测；
-# 内容安全由 tee-infer Guardrail 承担。WAF 建议先以 DetectionOnly 影子模式观察，
-# 无误杀后再切 On（研发计划 GF.2.1 风险项）。
+# 关键边界（方案 §3.10.4 / 研发计划 GF.2.1）：WAF/Bot 只做**元数据级**防护（URL / Header /
+# User-Agent / Method / 客户端 IP），**不对密态路径的密文 body 做内容检测**；内容安全由 tee-infer
+# Guardrail 承担。明文 Provider 路径的 body 为明文，WAF 的 CRS 会对其做内容检测（见上）。
 
 ---
 # Bot Detect：基于 User-Agent 的爬虫/扫描器识别（AUTHZ，priority 310）
-# allow/deny 均为正则数组；blocked_code 默认 403（字段与 2.0.0 官方文档一致）
+#
+# 覆盖范围：**仅 infer**（有意不覆盖 /provider/*，依据见文件头——内置规则会误杀 LLM SDK/探针 UA，
+# 且 allow/deny 无法关闭内置规则）。
+# 注意：内置规则默认将 `Go-http-client`、`curl/x.y.z` 等 `name/版本` 形态判为爬虫；
+#       若本网关的调用方或探针使用此类 UA，须在 **allow** 中显式放行（官方示例：".*Go-http-client.*"）。
 apiVersion: extensions.higress.io/v1alpha1
 kind: WasmPlugin
 metadata:
@@ -43,24 +55,25 @@ spec:
   - ingress:
     - infer
     config:
-      # 放行规则（优先于 deny）：搜索引擎/监控探活，避免误杀正常流量
+      # 放行规则（优先于 deny）：搜索引擎/监控探活 + 本项目联调/探针 UA（避免误杀）
       allow:
       - "(?i)(googlebot|bingbot|baiduspider|yandexbot|duckduckbot)"
       - "(?i)(uptimerobot|pingdom|site24x7|datadog)"
-      # 拦截规则：常见扫描器/无头浏览器/恶意爬虫框架
+      - "(?i)(go-http-client|curl/|python-requests|wget)"
+      # 拦截规则：仅针对明确的扫描器/攻击工具与无头浏览器
+      # 注意：**不列入** java/、okhttp、python-requests 等通用客户端库（会误杀合法 SDK 调用方）
       deny:
       - "(?i)(sqlmap|nikto|nmap|masscan|zgrab|nuclei)"
-      - "(?i)(phantomjs|headless|selenium|puppeteer|playwright)"
-      # 注意：bot-detect 内置规则默认把 Go-http-client 视为爬虫，而本项目联调脚本/探针多用 Go/curl。
-      # 若需放行探针，须在 allow 中显式加入（官方示例：".*Go-http-client.*"）。
-      - "(?i)(scrapy|java/|okhttp)"
+      - "(?i)(phantomjs|headlesschrome|selenium|puppeteer|playwright)"
+      - "(?i)(scrapy|acunetix|nessus|w3af)"
       blocked_code: 403
       blocked_message: "forbidden: automated client detected"
 
 ---
 # WAF：Coraza/ModSecurity 规则引擎（AUTHZ，priority 330）
 # 2.x 配置字段：useCRS(bool) + secRules(array)；影子模式见官方示例（下）
-# 边界：仅元数据级防护（密文 body 不检测）；先 DetectionOnly 观察，确认无误杀后切 On（GF.2.1）
+# 覆盖范围：**infer + 17 条 /provider/* 明文入口**（明文 body 可做内容级检测，见文件头）
+# 边界：密态路径仅元数据级（密文 body 不检测）；先 DetectionOnly 观察，确认无误杀后切 On（GF.2.1）
 apiVersion: extensions.higress.io/v1alpha1
 kind: WasmPlugin
 metadata:
@@ -77,13 +90,32 @@ spec:
   matchRules:
   - ingress:
     - infer
-    config:
+    config: &waf_shadow
       # 开启 OWASP CRS（核心规则集）
       useCRS: true
       # 影子模式：只记录不拦截；稳定无误杀后改为 "SecRuleEngine On"（fail-closed 拦截）
       # 如需移除误报规则：追加 "SecRuleRemoveById <id>"（官方示例）
       secRules:
       - "SecRuleEngine DetectionOnly"
+  - ingress:
+    - ai-openai
+    - ai-claude
+    - ai-gemini
+    - ai-qwen
+    - ai-deepseek
+    - ai-moonshot
+    - ai-minimax
+    - ai-doubao
+    - ai-groq
+    - ai-openrouter
+    - ai-hunyuan
+    - ai-ernie
+    - ai-spark
+    - ai-yi
+    - ai-mistral
+    - ai-stepfun
+    - ai-coze
+    config: *waf_shadow
 
 ---
 # OIDC 接入企业 IdP（GF.2.2；AUTHN，priority 350）
@@ -94,8 +126,9 @@ spec:
 #   - IdP 需先注册为服务来源（McpBridge registry，如 `idp.dns`），供 `service_name` 引用；
 #   - client_secret / cookie_secret **严禁明文**，走 KMS/Vault（GF.2.5）；
 #   - `oidc_issuer_url` 用于 OIDC 发现（discovery），生产须为 https 且可达；
-#   - 适用性提示：OIDC 为**浏览器重定向**流程，适用于人机场景（如门户/管理面）；
-#     机机调用的 API 路径（/infer、/provider/*）仍以 key-auth + 段① 为主，勿盲上 OIDC。
+#   - **覆盖范围：不纳入 /provider/*（有意）**。OIDC 为浏览器重定向流程，机机 API 调用不适用；
+#     本模板当前仅覆盖 `infer` 的**骨架占位**，实际启用前应按人机入口（管理门户等）重新确定
+#     匹配范围与 claim 边界——即：本段是**待重新定向的骨架**，不要在 API 路径上启用。
 apiVersion: extensions.higress.io/v1alpha1
 kind: WasmPlugin
 metadata:
