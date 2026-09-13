@@ -33,7 +33,7 @@ metadata:
     higress.io/wasm-plugin-title: Key Auth
     higress.io/wasm-plugin-category: auth
 spec:
-  url: http://localhost:8002/plugins/key-auth/2.0.0/plugin.wasm
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/key-auth:2.0.0
   failStrategy: FAIL_CLOSE
   defaultConfig:
     global_auth: true # 实例级：全局生效认证（未列入 allow 的路由/域名亦须认证）
@@ -87,7 +87,7 @@ metadata:
     higress.io/wasm-plugin-title: IP Restriction
     higress.io/wasm-plugin-category: security
 spec:
-  url: http://localhost:8002/plugins/ip-restriction/2.0.1/plugin.wasm
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/ip-restriction:2.0.1
   failStrategy: FAIL_CLOSE
   defaultConfigDisable: true
   matchRules:
@@ -165,7 +165,7 @@ metadata:
     higress.io/wasm-plugin-title: Cluster Key Rate Limit
     higress.io/wasm-plugin-category: traffic
 spec:
-  url: http://localhost:8002/plugins/cluster-key-rate-limit/2.0.1/plugin.wasm
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/cluster-key-rate-limit:2.0.1
   failStrategy: FAIL_CLOSE
   defaultConfigDisable: true
   matchRules:
@@ -218,14 +218,19 @@ metadata:
     higress.io/wasm-plugin-title: CORS
     higress.io/wasm-plugin-category: security
 spec:
-  url: http://localhost:8002/plugins/cors/2.0.2/plugin.wasm
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/cors:2.0.2
   failStrategy: FAIL_CLOSE
   matchRules:
   - ingress:
     - infer
     config:
+      # allow_origins 必须是**字符串列表**（`["*"]` 或具体源）；写成 `- prefix: "*"` 会被插件
+      # 判为非法预检（实测 204 且**不带任何 CORS 头**，网关日志 `cors.preflight.invalid`）
+      # ——2026-09-13 本地集群实测纠正：改 `- "*"` 后预检返回
+      # `access-control-allow-origin / -methods / -headers / -max-age` 齐备。
+      # 生产按实际前端域名收紧（勿长期用 "*"）。
       allow_origins:
-      - prefix: "*"
+      - "*"
       allow_methods:
       - GET
       - POST

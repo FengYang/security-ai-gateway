@@ -47,7 +47,7 @@ metadata:
     higress.io/wasm-plugin-title: Bot Detect
     higress.io/wasm-plugin-category: security
 spec:
-  url: http://localhost:8002/plugins/bot-detect/2.0.0/plugin.wasm
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/bot-detect:2.0.0
   failStrategy: FAIL_CLOSE
   phase: AUTHZ
   priority: 310
@@ -83,7 +83,7 @@ metadata:
     higress.io/wasm-plugin-title: WAF
     higress.io/wasm-plugin-category: security
 spec:
-  url: http://localhost:8002/plugins/waf/2.0.1/plugin.wasm
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/waf:2.0.1
   failStrategy: FAIL_CLOSE
   phase: AUTHZ
   priority: 330
@@ -138,7 +138,7 @@ metadata:
     higress.io/wasm-plugin-title: OIDC
     higress.io/wasm-plugin-category: auth
 spec:
-  url: http://localhost:8002/plugins/oidc/2.0.1/plugin.wasm
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/oidc:2.0.1
   failStrategy: FAIL_CLOSE
   phase: AUTHN
   priority: 350
@@ -223,7 +223,7 @@ metadata:
     higress.io/wasm-plugin-title: Qwen3Guard Content Safety
     higress.io/wasm-plugin-category: security
 spec:
-  url: http://localhost:8002/plugins/qwen3guard/1.0.0/plugin.wasm
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/qwen3guard:1.0.0
   failStrategy: FAIL_CLOSE
   defaultConfigDisable: true
   priority: 300 # 默认阶段，**必须早于 ai-proxy**（否则请求/响应的 GJSON Path 取不到原始报文）

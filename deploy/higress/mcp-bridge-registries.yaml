@@ -119,14 +119,19 @@ spec:
   #     （dns 类型后缀为 .dns；静态类型后缀为 .static，本地 standalone 曾用 static + 容器 IP 验证通过）；
   #   - dns 类型的 domain 必须是**合法域名格式**，单标签名会被 controller 拒绝
   #     （`invalid domain format:xxx`）→ 故此处用 K8s 集群内 FQDN；
-  #   - protocol 用 TCP（Redis 非 HTTP）；
+  #   - **protocol 必须为 HTTP（2026-09-13 本地集群实测纠正）**：原写"Redis 非 HTTP 故用 TCP"
+  #     是**错的**——wasm 插件出站调用走 HTTP 语义，TCP 型簇没有 HTTP 选项，
+  #     插件报 `redis call failed: error status returned by host: internal failure`
+  #     （表现为限流静默不生效、Redis 无计数键）。改 `protocol: HTTP` 后：
+  #     同租户连打 8 次出现 **429×7**、Redis 出现
+  #     `higress-cluster-key-rate-limit:{otpmask-tenant-qps}:limit_by_per_header:1:x-tenant-id:t-a` 计数键。
   #   - **Redis 不可用时 cluster-key-rate-limit 为 fail-open**（实测请求全部放行、限流失效，
   #     恢复后自动重连）→ 必须为 Redis 可用性配告警，不可静默依赖。
   - name: redis-ratelimit
     domain: redis-ratelimit.<namespace>.svc.cluster.local
     port: 6379
     type: dns
-    protocol: TCP
+    protocol: HTTP
   # ---- 平台内部服务（插件出站目标）----
   # 背景（P0b-1 本地集群实测 2026-09-13）：wasm 插件的出站调用走 **FQDNCluster**，
   # 其簇名只可能来自两种注册：① 本 McpBridge 的 dns registry → `outbound|<port>||<name>.dns`；
