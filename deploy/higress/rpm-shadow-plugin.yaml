@@ -1,0 +1,77 @@
+# rpm-shadow 插件 WasmPlugin 挂载（Phase 1 门禁 #7 边界 A：明文 Provider 路由的 RPM 影子执行器）
+#
+# 目的：为 17 条 `/provider/*`（ingress `ai-*`）补齐 **RPM 影子计数**（判据 4：只计数不拒绝 + 命中落审计）。
+#   otpmask 插件的 matchRules 只覆盖 otpmask-infer/tee-infer/embedding，故这些明文路由此前**无影子计数器**。
+#
+# 作用域 = 白名单制（同 otpmask，勿改回黑名单）：
+#   仅通过 matchRules 绑定 17 条 ai-* 路由，并置 defaultConfigDisable: true →
+#   未匹配路由不回退全局配置（插件跳过）。
+#
+# failStrategy 语义（与 otpmask 不同，**刻意如此**）：本插件只计数、不执行限流，属**非安全边界**；
+#   故障时放行（FAIL_OPEN）+ 指标告警（otpmask_shadow_report_* / head_missing）即可，绝不影响业务。
+#
+# 插件分发（wasm ≈7.4MB 超 ConfigMap 1MiB，二选一；同 otpmask）：
+#   1) OCI artifact（推荐）：oras push <registry>/plugins/rpm-shadow:1.0.0 \
+#        --artifact-type application/vnd.module.wasm.content.layer.v1+wasm main.wasm
+#      并将下方 url 改为 oci://<registry>/plugins/rpm-shadow:1.0.0
+#   2) 本地 HTTP：main.wasm 放到网关可访问的静态服务，url: http://<host>/rpm-shadow/1.0.0/plugin.wasm
+#
+# 配置要点：
+#   - **通道令牌不落 CR**：gateway_core_credential_name/-token 走管理面凭据端点运行态拉取
+#     （core-channel 集合 + 其**独立受限读令牌**，与 otpmask 段① 同一通道；见 README §6.1）；
+#     gateway_core_token 仅联调兼容（配了 credential_name 时以运行态令牌为准）。
+#   - 维度头：tenant_header 缺省 x-tenant-id；consumer_header 缺省 **x-mse-consumer**
+#     （key-auth 2.0.0 注入；2026-09-13 standalone 实链取证：插件 wasm 字面量 + 上游观测）。
+#   - shadow_enabled 缺省 "false"（行为不变）；poll_interval=拉取周期（秒）；
+#     flush_seconds=窗口结算/上报周期（秒）；queue_max=上报队列上限（溢出丢弃 + 指标）。
+#   - **token 维度不在本插件**（明文链路无 tokenizer，避免假精度）：仅 rpm→minute。
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: rpm-shadow
+  namespace: higress-system
+  annotations:
+    higress.io/wasm-plugin-title: RPM Shadow
+    higress.io/wasm-plugin-category: traffic
+spec:
+  url: http://localhost:8002/plugins/rpm-shadow/1.0.0/plugin.wasm
+  failStrategy: FAIL_OPEN
+  defaultConfigDisable: true
+  matchRules:
+  - ingress:
+    - ai-openai
+    - ai-claude
+    - ai-gemini
+    - ai-qwen
+    - ai-deepseek
+    - ai-moonshot
+    - ai-minimax
+    - ai-doubao
+    - ai-groq
+    - ai-openrouter
+    - ai-hunyuan
+    - ai-ernie
+    - ai-spark
+    - ai-yi
+    - ai-mistral
+    - ai-stepfun
+    - ai-coze
+    config:
+      shadow_enabled: "true"
+      # ---- 限流表拉取（与 otpmask 同源：K_rx 验签 + 版本单调 + 失败保留旧表）----
+      gateway_core_service: "gateway-core.otpmask.svc.cluster.local"
+      gateway_core_port: "8085"
+      route_verify_key: "__ROUTE_VERIFY_KEY__"
+      poll_interval: "60"
+      # ---- 通道令牌生产化（门禁 #7 边界 C 同一通道）----
+      gateway_core_credential_name: "core-channel"
+      gateway_core_credential_token: "__CORE_CHANNEL_READ_TOKEN__"
+      gateway_core_token: ""
+      credential_service: "gateway-admin-service.otpmask.svc.cluster.local"
+      credential_port: "19095"
+      # ---- 汇总上报（窗口级，幂等）----
+      tee_service: "tee-infer-service.otpmask.svc.cluster.local"
+      tee_port: "19090"
+      admin_token: ""
+      flush_seconds: "5"
+      queue_max: "32"

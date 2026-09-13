@@ -46,6 +46,10 @@ services:
     - "3031323334353637383961626364656630313233343536373839616263646566"
     - "-attest-token"
     - "3031323334353637383961626364656630313233343536373839616263646566"
+    # 审计 WORM 文件（门禁 #7 边界 A 实链）：使审计链可由独立验证器 audit-verify 判定完整性
+    # （此前为内存模式：本文件由 e2e 脚本经 docker cp 取出后跑 audit-verify -schema tee）。
+    - "-audit-file"
+    - "/tmp/tee-audit.jsonl"
     networks:
     - wasmtest
     ports:

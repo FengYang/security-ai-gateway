@@ -10,6 +10,7 @@
 // otpmask_tokens_out_total{tenant}                 输出 token 计数
 // otpmask_denies_total{tenant,reason}              拒绝计数（bad_signature/replay/guardrail_* 等）
 // otpmask_quota_denies_total{tenant,window}        配额拒绝计数（按触发维度归因：minute|day|total，B 项）
+// otpmask_shadow_reports_total{result}             数据面明文影子窗口级上报计数（accepted/deduped/rejected，A 项）
 // otpmask_guard_classifier_total{backend,result}   语义分类器调用（ok=侧车判定可用 / degraded=不可用已回退）
 // otpmask_key_issue_total{tenant}                  密钥签发计数
 // otpmask_reconcile_mismatch_total{reason}         审计-计量对账不一致次数（按差异分类，S5）
@@ -52,6 +53,8 @@ type otpmaskMetrics struct {
 	shadowWouldReject map[string]int64
 	// B 项：配额拒绝按触发维度归因（tenant|window，window=minute|day|total）
 	quotaDenies map[string]int64
+	// A 项：数据面明文影子窗口级上报计数（result=accepted|deduped|rejected）
+	shadowReports map[string]int64
 }
 
 func newMetrics() *otpmaskMetrics {
@@ -71,6 +74,7 @@ func newMetrics() *otpmaskMetrics {
 		billingSuppressed: make(map[string]int64),
 		shadowWouldReject: make(map[string]int64),
 		quotaDenies:       make(map[string]int64),
+		shadowReports:     make(map[string]int64),
 	}
 }
 
@@ -175,6 +179,17 @@ func (m *otpmaskMetrics) incQuotaDeny(tenant, window string) {
 	m.mu.Unlock()
 }
 
+// incShadowReport 记录窗口级影子上报的处理结果（A 项：result = accepted|deduped|rejected）。
+// n<=0 不计数（避免无意义样本）。
+func (m *otpmaskMetrics) incShadowReport(result string, n int64) {
+	if n <= 0 {
+		return
+	}
+	m.mu.Lock()
+	m.shadowReports[result] += n
+	m.mu.Unlock()
+}
+
 func (m *otpmaskMetrics) incKeyIssue(tenant string) {
 	m.mu.Lock()
 	m.keyIssues[tenant]++
@@ -190,6 +205,7 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	writeCounter(w, "otpmask_tokens_out_total", "输出 token 计数（按租户）", m.tokensOut, []string{"tenant"})
 	writeCounter(w, "otpmask_denies_total", "拒绝计数（按租户与原因）", m.denies, []string{"tenant", "reason"})
 	writeCounter(w, "otpmask_quota_denies_total", "配额拒绝计数（按租户与触发维度：minute|day|total）", m.quotaDenies, []string{"tenant", "window"})
+	writeCounter(w, "otpmask_shadow_reports_total", "数据面明文影子窗口级上报计数（accepted/deduped/rejected）", m.shadowReports, []string{"result"})
 	writeCounter(w, "otpmask_guard_classifier_total", "语义分类器调用（ok=侧车判定可用 / degraded=不可用已回退关键词规则）", m.guardClassifier, []string{"backend", "result"})
 	writeCounter(w, "otpmask_key_issue_total", "密钥签发计数（按租户）", m.keyIssues, []string{"tenant"})
 	writeCounter(w, "otpmask_reconcile_mismatch_total", "审计-计量对账不一致次数（按差异分类）", m.reconcile, []string{"reason"})

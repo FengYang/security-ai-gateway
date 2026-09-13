@@ -142,21 +142,23 @@ type teeServer struct {
 	// S5（判据 4）影子运行态（键 = "tenant|dim"，dim = rpm|tpm|daily_budget）。只计数不拒绝。
 	shadowWindowUsage map[string]int64
 	shadowWindowKey   map[string]string
-	audit             *auditChain     // 审计哈希链
-	guard             *guardrail      // 内容安全检测（M9-4）
-	metrics           *otpmaskMetrics // Prometheus 指标
-	seen              map[string]bool
-	seenAt            map[string]int64       // request_id -> 首见时间戳（TTL 清理用）
-	sessions          map[string]*teeSession // 挑战-响应会话（session_id -> 会话）
-	recomputeStates   *recomputeStates       // 补算层序状态机（会话级）
-	weightProvider    LayerWeightProvider    // 层权重提供器（掩码像计算）
-	route             *RouteConfig           // 双路线路由配置
-	tokenizer         Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
-	cache             model.SemanticCache    // GF.4.1 精确缓存（演示实现；nil = 关闭）
-	billing           *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
-	meterToken        string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
-	reconciler        *reconciler            // S5 判据 6：审计-计量对账器（/reconcile 快照数据源）
-	mu                sync.Mutex
+	// A 项（判据 4 扩展）：数据面明文路由影子的**窗口级汇总上报**幂等状态（nil = 不判重）。
+	shadowReports   *shadowReportState
+	audit           *auditChain     // 审计哈希链
+	guard           *guardrail      // 内容安全检测（M9-4）
+	metrics         *otpmaskMetrics // Prometheus 指标
+	seen            map[string]bool
+	seenAt          map[string]int64       // request_id -> 首见时间戳（TTL 清理用）
+	sessions        map[string]*teeSession // 挑战-响应会话（session_id -> 会话）
+	recomputeStates *recomputeStates       // 补算层序状态机（会话级）
+	weightProvider  LayerWeightProvider    // 层权重提供器（掩码像计算）
+	route           *RouteConfig           // 双路线路由配置
+	tokenizer       Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
+	cache           model.SemanticCache    // GF.4.1 精确缓存（演示实现；nil = 关闭）
+	billing         *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
+	meterToken      string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
+	reconciler      *reconciler            // S5 判据 6：审计-计量对账器（/reconcile 快照数据源）
+	mu              sync.Mutex
 }
 
 // usageRecord 租户用量计量（token 级）。
@@ -1918,6 +1920,206 @@ func (s *teeServer) handleAudit(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(s.audit.query(r.URL.Query().Get("tenant")))
 }
 
+// ---------- A 项（判据 4 扩展）：数据面明文路由影子的**窗口级汇总**上报 ----------
+
+// 汇总上报的幂等保留窗口与容量上限（方案《GA-门禁7-剩余能力边界-实现方案.md》§A.3：默认 10 分钟 / 10k 条）。
+const (
+	shadowReportTTL = 10 * time.Minute
+	shadowReportMax = 10000
+)
+
+// shadowReport 一条窗口级影子汇总（= 某 (scope,target,规则) 在某窗口内的聚合）。
+//
+// 口径与 tee-infer 自身影子一致（判据 4：**只计数不拒绝**）；数据面插件按窗口聚合后上报，
+// 而非逐请求（设计 §A.3：审计量 = O(窗口数 × 规则数)，可预期）。
+type shadowReport struct {
+	ReportID    string   `json:"report_id"`                    // 幂等键（插件生成；重试不重复落链）
+	RuleID      string   `json:"rule_id"`                      // 控制面规则 ID
+	Scope       string   `json:"scope"`                        // tenant | api_key
+	Target      string   `json:"target"`                       // scope=tenant → 租户；scope=api_key → key-auth 消费者名（X-Mse-Consumer）
+	Tenant      string   `json:"tenant,omitempty"`             // 请求侧租户（api_key 维度用于审计归属；可空）
+	Window      string   `json:"window"`                       // 当前仅 minute
+	WindowStart int64    `json:"window_start"`                 // 窗口起点（Unix 秒）
+	Threshold   int64    `json:"threshold"`                    // 规则阈值（rpm）
+	Observed    int64    `json:"observed"`                     // 窗口内观察到的请求数
+	WouldReject int64    `json:"would_reject"`                 // 其中"若转 enforce 会被拦"的请求数
+	SampleIDs   []string `json:"sample_request_ids,omitempty"` // 可选，最多 5 条（逐笔核对）
+	Source      string   `json:"source,omitempty"`             // 上报方标识（如 data-plane）
+}
+
+// shadowReportRequest 上报请求体（批量）。
+type shadowReportRequest struct {
+	Reports []shadowReport `json:"reports"`
+}
+
+// validate 校验单条上报（**非法即整批 400**，不做部分接受——避免"半批已落链"的不可解释状态）。
+func (r *shadowReport) validate() error {
+	if strings.TrimSpace(r.ReportID) == "" {
+		return fmt.Errorf("report_id 必填")
+	}
+	switch r.Scope {
+	case "tenant", "api_key":
+	default:
+		return fmt.Errorf("scope 非法（须为 tenant|api_key），实际 %q", r.Scope)
+	}
+	if strings.TrimSpace(r.RuleID) == "" {
+		return fmt.Errorf("rule_id 必填")
+	}
+	if strings.TrimSpace(r.Target) == "" {
+		if r.Scope == "tenant" {
+			return fmt.Errorf("scope=tenant 时 target（租户）必填")
+		}
+		return fmt.Errorf("scope=api_key 时 target（消费者名，X-Mse-Consumer）必填")
+	}
+	if r.Window != quotaWindowMinute {
+		return fmt.Errorf("window 非法（当前仅支持 minute），实际 %q", r.Window)
+	}
+	if r.WindowStart <= 0 {
+		return fmt.Errorf("window_start 须为正整数（Unix 秒）")
+	}
+	if r.Threshold <= 0 {
+		return fmt.Errorf("threshold 须为正整数")
+	}
+	if r.Observed < 0 || r.WouldReject < 0 {
+		return fmt.Errorf("observed/would_reject 不得为负")
+	}
+	if r.WouldReject > r.Observed {
+		return fmt.Errorf("would_reject(%d) 不得大于 observed(%d)", r.WouldReject, r.Observed)
+	}
+	if len(r.SampleIDs) > 5 {
+		return fmt.Errorf("sample_request_ids 最多 5 条，实际 %d", len(r.SampleIDs))
+	}
+	return nil
+}
+
+// shadowReportState 窗口级上报的幂等状态（短时集合：TTL + 容量上限，超限按最早淘汰）。
+type shadowReportState struct {
+	seen map[string]time.Time
+	ttl  time.Duration
+	max  int
+}
+
+// newShadowReportState 构造幂等状态（ttl<=0 / max<=0 时用缺省）。
+func newShadowReportState(ttl time.Duration, max int) *shadowReportState {
+	if ttl <= 0 {
+		ttl = shadowReportTTL
+	}
+	if max <= 0 {
+		max = shadowReportMax
+	}
+	return &shadowReportState{seen: make(map[string]time.Time, 64), ttl: ttl, max: max}
+}
+
+// admit 幂等判定：首次见到返回 true（并入集合）；TTL 内重复返回 false。调用方须持 s.mu。
+// nil 接收者（测试以结构体字面量构造的裸 server）视为"无幂等状态"→ 放行，避免误判重与 panic。
+func (st *shadowReportState) admit(id string, now time.Time) bool {
+	if st == nil {
+		return true
+	}
+	if st.seen == nil {
+		st.seen = make(map[string]time.Time, 64)
+	}
+	st.evict(now)
+	if _, dup := st.seen[id]; dup {
+		return false
+	}
+	st.seen[id] = now
+	return true
+}
+
+// evict 清理过期项；仍超上限时按最早时间淘汰（保留最新的 max 条）。
+func (st *shadowReportState) evict(now time.Time) {
+	for id, t := range st.seen {
+		if now.Sub(t) > st.ttl {
+			delete(st.seen, id)
+		}
+	}
+	for len(st.seen) >= st.max {
+		oldestID, oldest := "", time.Time{}
+		for id, t := range st.seen {
+			if oldestID == "" || t.Before(oldest) {
+				oldestID, oldest = id, t
+			}
+		}
+		delete(st.seen, oldestID)
+	}
+}
+
+// handleShadowReport POST /audit/shadow：接收**明文路由影子**的窗口级汇总并落审计链（A 项）。
+//
+// 契约（方案 §A.3）：
+//   - 每条 report 落**一条**审计事件：action=shadow、result=would_reject、
+//     shadow_rule="<rule_id>@<window>"、payload_hash=sha256(report_id)、tokens_in/out=0
+//     （明文本方案不计量 token：无 tokenizer，避免假精度）；
+//   - report_id 幂等：TTL（默认 10 分钟）内重复上报 → deduped 计数，**不重复落链**；
+//   - 校验：整批先校验，任一非法 → 400（不做部分接受）；管理令牌认证（X-Admin-Token）；
+//   - 响应：{"accepted","deduped","chain_events"}；指标 otpmask_shadow_reports_total{result}。
+func (s *teeServer) handleShadowReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAdmin(r) {
+		http.Error(w, "管理认证失败", http.StatusUnauthorized)
+		return
+	}
+	var req shadowReportRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		s.metrics.incShadowReport("rejected", 1)
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if len(req.Reports) == 0 {
+		s.metrics.incShadowReport("rejected", 1)
+		http.Error(w, "reports 不得为空", http.StatusBadRequest)
+		return
+	}
+	for i := range req.Reports {
+		if err := req.Reports[i].validate(); err != nil {
+			s.metrics.incShadowReport("rejected", 1)
+			http.Error(w, fmt.Sprintf("第 %d 条上报非法: %v", i, err), http.StatusBadRequest)
+			return
+		}
+	}
+
+	now := time.Now()
+	newly := make([]*shadowReport, 0, len(req.Reports))
+	deduped := 0
+	s.mu.Lock()
+	for i := range req.Reports {
+		rep := &req.Reports[i]
+		if s.shadowReports.admit(rep.ReportID, now) {
+			newly = append(newly, rep)
+		} else {
+			deduped++
+		}
+	}
+	s.mu.Unlock()
+
+	for _, rep := range newly {
+		tenant := rep.Tenant
+		if tenant == "" && rep.Scope == "tenant" {
+			tenant = rep.Target // tenant 维度：target 即租户
+		}
+		sum := sha256.Sum256([]byte(rep.ReportID))
+		s.audit.append(AuditEvent{
+			TenantID: tenant, RequestID: rep.ReportID, Action: "shadow",
+			Result: "would_reject", PayloadSHA: hex.EncodeToString(sum[:]),
+			ShadowRule: rep.RuleID + "@" + rep.Window,
+		})
+	}
+	s.metrics.incShadowReport("accepted", int64(len(newly)))
+	s.metrics.incShadowReport("deduped", int64(deduped))
+	log.Printf("[tee] 影子汇总上报 accepted=%d deduped=%d chain_events=%d",
+		len(newly), deduped, len(newly))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"accepted":     len(newly),
+		"deduped":      deduped,
+		"chain_events": len(newly),
+	})
+}
+
 // auditVerifyResponse /audit/verify 响应。
 type auditVerifyResponse struct {
 	OK     bool `json:"ok"`
@@ -2249,6 +2451,7 @@ func main() {
 		quotaDefault:      *tokenQuota,
 		quotaWindowUsage:  make(map[string]int64),
 		quotaWindowKey:    make(map[string]string),
+		shadowReports:     newShadowReportState(shadowReportTTL, shadowReportMax), // A 项：上报幂等状态
 		shadowWindowUsage: make(map[string]int64),
 		shadowWindowKey:   make(map[string]string),
 		audit:             audit,
@@ -2289,6 +2492,7 @@ func main() {
 	mux.HandleFunc("/usage", srv.handleUsage)                      // M9-2 用量
 	mux.HandleFunc("/usage/quota", srv.handleQuota)                // P1 配额设置
 	mux.HandleFunc("/audit", srv.handleAudit)                      // M9-3 审计
+	mux.HandleFunc("/audit/shadow", srv.handleShadowReport)        // A 项：数据面明文影子窗口级汇总上报（幂等落链）
 	mux.HandleFunc("/audit/verify", srv.handleAuditVerify)         // M9-3 哈希链校验
 	mux.HandleFunc("/audit/anchor", srv.handleAuditAnchor)         // C-5 审计锚定
 	mux.HandleFunc("/metrics", srv.handleMetrics)                  // M10 可观测性

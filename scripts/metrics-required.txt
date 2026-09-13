@@ -59,6 +59,11 @@ plugin otpmask_core_channel_fetch_cb_total conditional
 plugin otpmask_core_channel_fetch_ok_total conditional
 plugin otpmask_core_channel_fetch_reject_total conditional
 
+# ---- boundary A (gate #7): plaintext-route RPM shadow executor (rpm-shadow plugin) ----
+plugin otpmask_shadow_would_reject_total conditional
+plugin otpmask_shadow_report_dropped_total conditional
+plugin otpmask_shadow_head_missing_total conditional
+
 # ---- gateway-core (ratelimit / quota dispatch / policy-change audit) ----
 core gateway_core_ratelimit_table_version required
 core gateway_core_policy_audit_events required

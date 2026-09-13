@@ -406,6 +406,7 @@ func newM9Server(t *testing.T) (*teeServer, *httptest.Server) {
 		quotaWindowKey:    make(map[string]string),
 		shadowWindowUsage: make(map[string]int64),
 		shadowWindowKey:   make(map[string]string),
+		shadowReports:     newShadowReportState(shadowReportTTL, shadowReportMax), // A 项：上报幂等状态
 		audit:             newAuditChain(),
 		guard:             newGuardrail(),
 		metrics:           newMetrics(),
@@ -420,6 +421,7 @@ func newM9Server(t *testing.T) (*teeServer, *httptest.Server) {
 	mux.HandleFunc("/usage", srv.handleUsage)
 	mux.HandleFunc("/usage/quota", srv.handleQuota)
 	mux.HandleFunc("/audit", srv.handleAudit)
+	mux.HandleFunc("/audit/shadow", srv.handleShadowReport) // A 项：明文影子窗口级汇总上报
 	mux.HandleFunc("/audit/verify", srv.handleAuditVerify)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
