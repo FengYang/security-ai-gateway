@@ -105,13 +105,20 @@ static_resources:
                         filename: /etc/envoy/main.wasm
                   configuration:
                     "@type": "type.googleapis.com/google.protobuf.StringValue"
+                    # attest_mode=token：本地 compose 栈的 Envoy 无 TEE 证明主机 API（quote 握手会以
+                    # "调用 attest 失败: bad argument" fail-closed），且 tee-infer-service 容器以
+                    # -sig-key/-attest-token 启动（token 模式）；生产 CR 缺省 quote（见 deploy/higress）。
+                    # tee_service/embedding_service 填 <名>.dns：插件出站统一 wrapper.FQDNCluster，
+                    # 其簇名 = outbound|<port>||<FQDN>，故 FQDN 取本文件末尾已声明的
+                    # outbound|<port>||<名>.dns 的 <名>.dns 部分；生产 CR 用完整服务域名。
                     value: |
                       {
+                        "attest_mode": "token",
                         "mask_modulus": 4294967296,
                         "model": "mock",
-                        "embedding_service": "embedding_service",
+                        "embedding_service": "embedding_service.dns",
                         "embedding_port": 18080,
-                        "tee_service": "tee_infer_service",
+                        "tee_service": "tee_infer_service.dns",
                         "tee_port": 19090,
                         "sig_key": "3031323334353637383961626364656630313233343536373839616263646566",
                         "attest_token": "3031323334353637383961626364656630313233343536373839616263646566"

@@ -85,7 +85,7 @@ def gw_post(text, tenant='pen-gw'):
     return http_post(GW, json.dumps({'text': text}).encode(), h)
 
 
-def main:
+def main():
     print('===== M11 dynamic penetration tests =====')
 
     # PT-01 密文篡改：修改响应/请求尾部字节 -> 验签失败 401
@@ -181,4 +181,4 @@ def main:
 
 
 if __name__ == '__main__':
-    sys.exit(main)
+    sys.exit(main())

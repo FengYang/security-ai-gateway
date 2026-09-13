@@ -70,9 +70,9 @@ Check 'Docker containers ready' $envOk
 Write-Host "`n[5/7] E2E (text -> encrypt -> TEE infer -> decrypt -> SSE)" -ForegroundColor Yellow
 $e2eScript = @"
 import urllib.request, json
-data = json.dumps({'text': 'e2e check'}).encode
+data = json.dumps({'text': 'e2e check'}).encode()
 req = urllib.request.Request('http://127.0.0.1:10000/infer', data=data, headers={'Content-Type': 'application/json'})
-body = urllib.request.urlopen(req, timeout=20).read.decode
+body = urllib.request.urlopen(req, timeout=20).read().decode()
 print(body)
 assert 'data: [DONE]' in body, 'missing SSE done marker'
 assert 'data: {' in body, 'missing SSE token line'
@@ -95,7 +95,7 @@ Write-Host "`n[8/12] M10 K8s manifests (kustomize + YAML + images)" -ForegroundC
 $m10Out = & cmd /c "powershell -NoProfile -File scripts\verify-k8s.ps1 2>&1" | Out-String
 Check 'M10 K8s manifests' ($LASTEXITCODE -eq 0) (($m10Out -replace "`n", ' ').Trim)
 Write-Host "`n[9/12] App /metrics endpoint" -ForegroundColor Yellow
-$metricsOut = python -c "import urllib.request; b=urllib.request.urlopen('http://127.0.0.1:19090/metrics', timeout=5).read.decode; print('otpmask_inference_requests_total' in b and 'otpmask_audit_events' in b)" 2>&1 | Out-String
+$metricsOut = python -c "import urllib.request; b=urllib.request.urlopen('http://127.0.0.1:19090/metrics', timeout=5).read().decode(); print('otpmask_inference_requests_total' in b and 'otpmask_audit_events' in b)" 2>&1 | Out-String
 Check 'App /metrics endpoint' ($metricsOut -match 'True') '(tee-infer exposes Prometheus text)'
 
 # 10. M11 penetration tests
@@ -109,7 +109,7 @@ Write-Host "`n[11/15] vLLM + auth-service + canary tooling" -ForegroundColor Yel
 $vllmBuild = $LASTEXITCODE -eq 0
 & $go test ./gateway/tee-infer-service/model/ *> $null
 $vllmTest = $LASTEXITCODE -eq 0
-$pyCheck = python -c "import ast; ast.parse(open('gateway/vllm-adapter/vllm_adapter.py', encoding='utf-8').read); print('ok')" 2>&1 | Out-String
+$pyCheck = python -c "import ast; ast.parse(open('gateway/vllm-adapter/vllm_adapter.py', encoding='utf-8').read()); print('ok')" 2>&1 | Out-String
 $vllmPy = $pyCheck -match 'ok'
 & $go build ./gateway/auth-service/ *> $null
 $authBuild = $LASTEXITCODE -eq 0
@@ -192,7 +192,7 @@ Check 'Higress plugin versions' ($LASTEXITCODE -eq 0) '(deploy 清单 ↔ plugin
 
 # 21. 指标"全绿"可执行判定（门禁 #9：required 全命中 + 三来源必须全可达）
 Write-Host "`n[21] 指标全绿判定（门禁 #9）" -ForegroundColor Yellow
-& powershell -NoProfile -File scripts/check-metrics-green.ps1 -RequireAllSources *> $null
+& powershell -NoProfile -File scripts/check-metrics-green.ps1 -RequireAllSources -CoreToken $env:OTP_CORE_AUTH_TOKEN *> $null
 Check 'Metrics all-green (gate #9)' ($LASTEXITCODE -eq 0) '(scripts/metrics-required.txt：required 缺席即 FAIL；来源不可达在门禁模式亦 FAIL)'
 
 # 22. 审计-计量对账（S5 判据 6）：窗口 0 容差 + 差异分类 + 出账阻断与恢复
