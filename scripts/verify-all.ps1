@@ -190,6 +190,11 @@ Write-Host "`n[20] Higress 插件版本门禁（仓库 ↔ 锁定 ↔ 镜像）"
 & powershell -NoProfile -File scripts/check-higress-plugin-versions.ps1 -Container higress-chain-control-plane *> $null
 Check 'Higress plugin versions' ($LASTEXITCODE -eq 0) '(deploy 清单 ↔ plugin-versions.lock ↔ 运行镜像；版本错配即 FAIL)'
 
+# 21. 指标"全绿"可执行判定（门禁 #9：required 全命中 + 三来源必须全可达）
+Write-Host "`n[21] 指标全绿判定（门禁 #9）" -ForegroundColor Yellow
+& powershell -NoProfile -File scripts/check-metrics-green.ps1 -RequireAllSources *> $null
+Check 'Metrics all-green (gate #9)' ($LASTEXITCODE -eq 0) '(scripts/metrics-required.txt：required 缺席即 FAIL；来源不可达在门禁模式亦 FAIL)'
+
 Pop-Location
 
 # Summary

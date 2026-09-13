@@ -1,0 +1,51 @@
+# Metrics "all-green" checklist (Phase 1 gate #9)
+#
+# Format: <source> <metric> <required|conditional>
+#   source   = tee | admin | plugin   (see check-metrics-green.ps1)
+#   required = must exist whenever the source is reachable
+#   conditional = registered only after a specific event / switch; treated as SKIP
+#                 when absent (NOT a failure), because the trigger has not happened.
+#
+# Semantics: FAIL only when a `required` metric is missing from a reachable source.
+# Rationale: plugin/tee counters are lazily defined (proxywasm.DefineCounterMetric on
+# first increment; tee-infer counters likewise), so a never-triggered counter does not
+# exist. Judging them as failures would make "all green" unreachable by design.
+#
+# NOTE: keep this file ASCII-only (PS 5.1 Get-Content reads BOM-less files as ANSI).
+
+# ---- tee-infer (inference / quota / audit / guardrail) ----
+tee otpmask_inference_requests_total required
+tee otpmask_tokens_in_total required
+tee otpmask_tokens_out_total required
+tee otpmask_key_issue_total required
+tee otpmask_audit_events required
+tee otpmask_denies_total conditional
+tee otpmask_guard_classifier_total conditional
+tee otpmask_reconcile_mismatch_total conditional
+tee otpmask_attest_token_traffic_total conditional
+tee otpmask_recompute_ops_total conditional
+tee otpmask_recompute_duration_ms_total conditional
+
+# ---- gateway-admin-service (auth / credentials / audit chain) ----
+admin gateway_admin_requests_total required
+admin gateway_admin_auth_rejected_total required
+admin gateway_admin_broker_config_reload_failed_total required
+admin gateway_admin_broker_audit_write_failed_total required
+admin gateway_admin_broker_requests_total required
+
+# ---- data-plane plugin (segment-1 crypto / route degrade / credential fetch) ----
+plugin otpmask_request_total required
+plugin otpmask_fail_closed_total conditional
+plugin otpmask_decrypt_error_total conditional
+plugin otpmask_keys_issued_total conditional
+plugin otpmask_keys_deleted_total conditional
+plugin otpmask_route_degraded_total conditional
+plugin otpmask_route_fetch_cb_total conditional
+plugin otpmask_route_fetch_ok_total conditional
+plugin otpmask_route_fetch_reject_total conditional
+plugin otpmask_cred_fetch_cb_total required
+plugin otpmask_cred_fetch_ok_total conditional
+plugin otpmask_cred_fetch_reject_total conditional
+
+# ---- gateway-core (ratelimit/meter) — not implemented yet (gate #7) ----
+# Register its counters here once gate #7 lands.
