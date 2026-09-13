@@ -69,6 +69,17 @@ spec:
           value: "/var/run/broker-secrets"
         - name: ADMIN_BROKER_PUBLIC_BASE
           value: "http://gateway-admin-service.otpmask.svc.cluster.local:19096"
+        # 段① 凭据只读投递（Phase 1 门禁 #8 / GF.2.5）：供 otpmask 插件内网周期拉取。
+        # 令牌缺失（Secret 未建）→ 端点不注册（fail-closed，不裸奔投递）；凭据文件为
+        # 单文件 KEY=VALUE 文本（sig_key / attest_token），由 Secret 键 otpmask-keys.env 提供。
+        - name: ADMIN_CREDENTIAL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-credentials
+              key: credential-token
+              optional: true
+        - name: ADMIN_CREDENTIAL_FILE
+          value: "/var/run/credentials/otpmask-keys.env"
         ports:
         - name: http-admin
           containerPort: 19095
@@ -79,6 +90,10 @@ spec:
         volumeMounts:
         - name: broker-secrets
           mountPath: /var/run/broker-secrets
+          readOnly: true
+        # 段① 凭据文件（门禁 #8）：Secret 键 otpmask-keys.env 以单文件形式挂入
+        - name: otpmask-credentials
+          mountPath: /var/run/credentials
           readOnly: true
         resources:
           requests:
@@ -111,6 +126,16 @@ spec:
       - name: broker-secrets
         secret:
           secretName: broker-providers
+          optional: true
+      # 段① 凭据 Secret（门禁 #8）：键 otpmask-keys.env = KEY=VALUE 文本（sig_key/attest_token）、
+      # 键 credential-token = 插件侧受限读取令牌。**optional: true** → Secret 未建时容器仍可启动，
+      # 端点不注册（特性关闭），不影响既有链路；生产按需创建：
+      #   kubectl -n otpmask create secret generic otpmask-credentials \
+      #     --from-file=otpmask-keys.env=deploy/secrets/otpmask-keys.env \
+      #     --from-literal=credential-token=<受限读取令牌>
+      - name: otpmask-credentials
+        secret:
+          secretName: otpmask-credentials
           optional: true
 ---
 # 管理面 Service：仅控制台与监控可达（见 NetworkPolicy）

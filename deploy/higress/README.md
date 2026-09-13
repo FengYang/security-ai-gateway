@@ -98,6 +98,34 @@ kubectl apply -f deploy/higress/gateway-hpa.yaml                 # 网关 HPA（
   3. **CI 变量替换**：`sed`/`envsubst` 替换 `__SIG_KEY_HEX__`/`__ATTEST_TOKEN_HEX__`（严禁把真实值提交进仓库）。
 - 真实密钥由 KMS/Vault/TEE 签发后写入集群 Secret；轮换需 tee-infer 与插件两侧同步（避免窗口期签名不匹配）。
 
+### 6.1 段① 凭据运行时拉取（推荐；Phase 1 门禁 #8 落地）
+
+上述"流水线替换"模式下 CR 内**仍是明文**（wasm config 不支持 secretKeyRef）。改为**运行时拉取**可让 CR 彻底不含真实密钥：
+
+1. 管理面凭据文件（0600，**不入库**，默认 `deploy/secrets/otpmask-keys.env`）：
+
+   ```
+   sig_key=<64 位 hex>
+   attest_token=<与 tee-infer 侧一致>
+   ```
+
+2. gateway-admin-service 启用只读端点：`ADMIN_CREDENTIAL_TOKEN=<受限读取令牌>`
+   （可选 `ADMIN_CREDENTIAL_FILE` 指定文件路径）。**未配置令牌 = 端点不注册**（fail-closed，不裸奔投递）。
+   端点契约：`GET /v1/adminext/credentials/otpmask-keys`，请求头 `X-Credential-Token`（常量时间比较），
+   响应 `{"name","sig_key","attest_token"}`；非 GET → 405；名称不支持 → 404；文件缺失/损坏/权限过宽 → 503。
+3. 插件侧在 `otpmask-plugin.yaml` 打开：`credential_enabled: "true"` + `credential_service/port/name/interval`
+   + `credential_token`（建议经 Secret 注入）；此模式下 `sig_key`/`attest_token` 两键**可整体删除**。
+4. 轮换：改写凭据文件 → 插件在 `credential_interval`（缺省 300s）内热生效，**无需重启网关/插件**；
+   编排脚本 `scripts/rotate-otpmask-keys.ps1`（写新密钥 → 触发/等待拉取 → 校验生效）。
+
+**语义与边界（如实）**：
+
+- 失败策略＝**保留旧值**（不像路由表那样拒绝入缓存）：密钥被清空会导致全量请求 401，可用性优先；
+  连续失败以 `otpmask_cred_fetch_reject_total` 与日志暴露，不静默。
+- 通道为**内网 + 受限读取令牌（明文）**，属评审选定口径；CR 内仍保留该读取令牌（非厂商密钥、非段① 真实密钥）。
+- token 模式下 sig_key/attest_token 与 tee-infer 的一致性仍须人工保证（不一致 → fail-closed 拒绝）。
+- 观测三计数：`otpmask_cred_fetch_cb_total`（回调是否执行，恒 0 = 回调被丢弃）/`_ok_total`/`_reject_total`。
+
 ## 7. GF.1 验证矩阵（切换前必须全绿）
 
 | # | 验证项 | 预期 |

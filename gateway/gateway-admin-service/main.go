@@ -246,6 +246,15 @@ func main() {
 	}
 	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, ah, sch, cs, bs.legacyPort)
 
+	// 段① 凭据只读投递端点（Phase 1 门禁 #8）：ADMIN_CREDENTIAL_TOKEN 未配置 = 不注册
+	// （fail-closed：绝不无令牌裸奔投递密钥）。仅供 otpmask 插件内网周期拉取。
+	if csh := newCredentialHandler(loadCredentialSettings()); csh != nil {
+		adminMux.HandleFunc(credentialAPIBase+"/", csh.handle)
+		log.Printf("段① 凭据投递已启用：name=%s file=%s", credentialNameOTPMask, csh.settings.file)
+	} else {
+		log.Printf("段① 凭据投递未启用（ADMIN_CREDENTIAL_TOKEN 未配置）")
+	}
+
 	if bh != nil {
 		if bs.brokerListen == cfg.listen {
 			log.Fatalf("配置错误：broker 监听 %s 与管理面监听相同（A-2 要求端口分离）", bs.brokerListen)

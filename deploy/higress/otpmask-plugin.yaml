@@ -61,3 +61,17 @@ spec:
       sig_key: "__SIG_KEY_HEX__"
       attest_token: "__ATTEST_TOKEN_HEX__"
       attest_mode: "quote"
+      # ---- 段① 凭据运行态拉取（Phase 1 门禁 #8 / GF.2.5）----
+      # 启用后：插件按 credential_interval 周期从管理面**只读**端点
+      # （GET /v1/adminext/credentials/<credential_name>）拉取 sig_key/attest_token，
+      # **CR 内不再出现真实密钥**（上方 sig_key/attest_token 两项可整体删除）；
+      # 轮换＝改管理面凭据文件后由插件周期热生效，**无需重启网关/插件**。
+      # 默认关闭（credential_enabled="false" = 行为与接线前完全一致）。
+      # 安全边界（如实）：通道为**内网 + 受限读取令牌**（明文）；credential_token 非厂商密钥，
+      # 但仍建议经 Secret 注入而非硬编码，见 deploy/higress/README.md §6。
+      credential_enabled: "false"
+      credential_service: "gateway-admin-service.otpmask.svc.cluster.local"
+      credential_port: "19095"
+      credential_name: "otpmask-keys"
+      credential_interval: "300"
+      credential_token: "__CREDENTIAL_TOKEN__"

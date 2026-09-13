@@ -74,6 +74,14 @@ type PluginConfig struct {
 	MaxStaleSeconds int64 `json:"max_stale_seconds"`
 	// 默认路由表拉取周期（秒，设计 §3.3 poll_interval）。缺省 60；最小按 100ms tick 粒度换算。
 	PollIntervalSeconds int64 `json:"poll_interval"`
+	// 段① 凭据运行态拉取（Phase 1 门禁 #8 / GF.2.5）：启用后从管理面只读端点周期拉取
+	// sig_key/attest_token，CR 内不再出现真实密钥。**未启用 = 行为与接线前完全一致**。
+	CredentialEnabled         bool   `json:"credential_enabled"`
+	CredentialService         string `json:"credential_service"`
+	CredentialPort            int64  `json:"credential_port"`
+	CredentialToken           string `json:"credential_token"` // 受限读取令牌（内网通道；非真实厂商密钥）
+	CredentialName            string `json:"credential_name"`  // 凭据集名（缺省 otpmask-keys）
+	CredentialIntervalSeconds int64  `json:"credential_interval"`
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -96,6 +104,12 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.RouteVerifyKeyHex = json.Get("route_verify_key").String()
 	config.MaxStaleSeconds = json.Get("max_stale_seconds").Int()
 	config.PollIntervalSeconds = json.Get("poll_interval").Int()
+	config.CredentialEnabled = json.Get("credential_enabled").Bool()
+	config.CredentialService = json.Get("credential_service").String()
+	config.CredentialPort = json.Get("credential_port").Int()
+	config.CredentialToken = json.Get("credential_token").String()
+	config.CredentialName = json.Get("credential_name").String()
+	config.CredentialIntervalSeconds = json.Get("credential_interval").Int()
 	if config.GatewayCoreService == "" {
 		// 缺省 FQDN（与 tee_service 同理：FQDNCluster 需完整服务域名，短名不会物化）。
 		config.GatewayCoreService = "gateway-core.higress-system.svc.cluster.local"
@@ -132,8 +146,27 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	if config.PollIntervalSeconds <= 0 {
 		config.PollIntervalSeconds = 60
 	}
+	// 段① 凭据拉取缺省（门禁 #8）；无读取令牌 = 不启用（fail-closed：不发半配置请求）。
+	if config.CredentialService == "" {
+		// 与 deploy/k8s/gateway-admin-service.yaml 的命名空间一致（otpmask）。
+		config.CredentialService = "gateway-admin-service.otpmask.svc.cluster.local"
+	}
+	if config.CredentialPort == 0 {
+		config.CredentialPort = 19095
+	}
+	if config.CredentialName == "" {
+		config.CredentialName = "otpmask-keys"
+	}
+	if config.CredentialIntervalSeconds <= 0 {
+		config.CredentialIntervalSeconds = 300
+	}
+	if config.CredentialToken == "" {
+		config.CredentialEnabled = false
+	}
 	// 按配置初始化/刷新路由运行时（未启用则置空 → 决策不介入请求，行为与接线前一致）。
 	initRouteRuntime(*config, log)
+	// 段① 凭据运行态（未启用则零影响）。
+	initCredentialRuntime(*config)
 	log.Infof("otpmask-plugin: 配置已加载 config_version=%q mask_modulus=%d model=%q embedding=%s:%d tee=%s:%d require_auth=%v",
 		orStr(config.ConfigVersion, "unset"), config.MaskModulus, config.Model, config.EmbeddingService, config.EmbeddingPort,
 		config.TEEService, config.TEEPort, config.RequireAuth)
@@ -148,12 +181,20 @@ func orStr(v, def string) string {
 	return v
 }
 
-// sigKey 解析后的协议签名密钥（K_sig，；token 模式静态注入）。
+// sigKey 解析后的协议签名密钥（K_sig）：**运行态拉取优先**，非法/缺失时回退静态注入（token 模式）。
 func (c *PluginConfig) sigKey() []byte {
-	if c.SigKeyHex == "" {
+	if k := decodeSigKeyHex(runtimeSigKeyHex()); k != nil {
+		return k
+	}
+	return decodeSigKeyHex(c.SigKeyHex)
+}
+
+// decodeSigKeyHex 解析 32 字节 K_sig（hex）；非法或长度不符返回 nil。
+func decodeSigKeyHex(hexStr string) []byte {
+	if hexStr == "" {
 		return nil
 	}
-	k, err := hex.DecodeString(c.SigKeyHex)
+	k, err := hex.DecodeString(hexStr)
 	if err != nil || len(k) != 32 {
 		return nil
 	}
@@ -408,8 +449,8 @@ func proceedKeyIssue(ctx wrapper.HttpContext, config PluginConfig, req *textRequ
 			{"Content-Type", "application/octet-stream"},
 			{"X-Session-ID", Session.SessionID},
 		}
-	} else if config.AttestToken != "" {
-		attestHeaders = append(attestHeaders, [2]string{"X-Attest-Token", config.AttestToken})
+	} else if token := currentAttestToken(config); token != "" {
+		attestHeaders = append(attestHeaders, [2]string{"X-Attest-Token", token})
 	}
 	// M9-1：密钥签发携带租户标识（TEE 侧按租户隔离主密钥与密钥表）
 	if t := tenantHeaderValue(ctx); t != "" {

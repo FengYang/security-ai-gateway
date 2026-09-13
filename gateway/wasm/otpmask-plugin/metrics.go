@@ -15,6 +15,9 @@ package main
 //	                              流上下文结束导致挂起回调被丢弃）
 //	otpmask_route_fetch_ok_total  路由表验签通过并写入缓存次数
 //	otpmask_route_fetch_reject_total 路由表被拒次数（验签失败 / 版本回滚 / 路由未启用 / 非 200）
+//	otpmask_cred_fetch_cb_total   段① 凭据拉取**回调被执行**次数（恒 0 ⇒ 回调被丢弃）
+//	otpmask_cred_fetch_ok_total   段① 凭据校验通过并写入运行态次数
+//	otpmask_cred_fetch_reject_total 段① 凭据被拒次数（非 200 / 解析失败 / 载荷非法；插件保留旧值）
 //
 // hostcall 仅在 wasm 运行时可用（go:wasmimport 在宿主单测进程不可调用）：
 // pwCounter 懒初始化（Define 同名幂等，复用同一 stat），metricsHostGuard 由
@@ -55,4 +58,9 @@ var (
 	metricRouteFetchCb     = &pwCounter{name: "otpmask_route_fetch_cb_total"}
 	metricRouteFetchOK     = &pwCounter{name: "otpmask_route_fetch_ok_total"}
 	metricRouteFetchReject = &pwCounter{name: "otpmask_route_fetch_reject_total"}
+	// 段① 凭据运行态拉取（门禁 #8）：cb 恒为 0 ⇒ 回调从未执行（异步回调被丢弃）；
+	// reject 持续增长 ⇒ 端点不可用/令牌错误/载荷非法（插件保留旧值继续服务）。
+	metricCredFetchCb     = &pwCounter{name: "otpmask_cred_fetch_cb_total"}
+	metricCredFetchOK     = &pwCounter{name: "otpmask_cred_fetch_ok_total"}
+	metricCredFetchReject = &pwCounter{name: "otpmask_cred_fetch_reject_total"}
 )
