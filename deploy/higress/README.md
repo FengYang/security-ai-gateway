@@ -109,14 +109,28 @@ kubectl apply -f deploy/higress/gateway-hpa.yaml                 # 网关 HPA（
    attest_token=<与 tee-infer 侧一致>
    ```
 
-2. gateway-admin-service 启用只读端点：`ADMIN_CREDENTIAL_TOKEN=<受限读取令牌>`
-   （可选 `ADMIN_CREDENTIAL_FILE` 指定文件路径）。**未配置令牌 = 端点不注册**（fail-closed，不裸奔投递）。
-   端点契约：`GET /v1/adminext/credentials/otpmask-keys`，请求头 `X-Credential-Token`（常量时间比较），
-   响应 `{"name","sig_key","attest_token"}`；非 GET → 405；名称不支持 → 404；文件缺失/损坏/权限过宽 → 503。
+2. gateway-admin-service 启用只读端点（**门禁 #7 边界 C 起为凭据集注册表**，每集合独立读令牌）：
+
+   ```
+   ADMIN_CREDENTIAL_SETS="otpmask-keys:/var/run/credentials/otpmask-keys.env:<otpmask 读令牌>,core-channel:/var/run/credentials/gateway-core-token.env:<core-channel 读令牌>"
+   ```
+   （`deploy/k8s/gateway-admin-service.yaml` 已按此配置，令牌经 `secretKeyRef` + `$(VAR)` 展开注入；
+   兼容写法 `ADMIN_CREDENTIAL_TOKEN` + `ADMIN_CREDENTIAL_FILE` 仍可用，等价于仅注册 `otpmask-keys`。）
+   **未配置任何集合 = 端点不注册**（fail-closed，不裸奔投递）。
+   端点契约：`GET /v1/adminext/credentials/<集合名>`，请求头 `X-Credential-Token`（**该集合的**读令牌，
+   常量时间比较，跨集合一律 401）；字段**白名单在代码内固定**（`otpmask-keys → sig_key/attest_token`、
+   `core-channel → token`，文件多写字段也不会被投递）；非 GET → 405；名称不支持 → 404；
+   文件缺失/损坏/权限过宽 → 503；`core-channel` 的 `token` 短于 32 字符 → 503。
 3. 插件侧在 `otpmask-plugin.yaml` 打开：`credential_enabled: "true"` + `credential_service/port/name/interval`
    + `credential_token`（建议经 Secret 注入）；此模式下 `sig_key`/`attest_token` 两键**可整体删除**。
+   **限流表拉取（门禁 #7）**：`ratelimit_enabled: "true"` + `gateway_core_service/port/poll_interval`；
+   其通道令牌同样**不落 CR**——配 `gateway_core_credential_name: "core-channel"` +
+   `gateway_core_credential_token: "<core-channel 读令牌>"`，插件与段① 凭据**共用同一 tick** 拉取，
+   轮换**即时生效**（取到新令牌即触发一次限流表拉取）、失败**保留旧令牌**；
+   `gateway_core_token` 仅为兼容/联调写法（配置了 credential_name 时以运行态令牌为准）。
 4. 轮换：改写凭据文件 → 插件在 `credential_interval`（缺省 300s）内热生效，**无需重启网关/插件**；
-   编排脚本 `scripts/rotate-otpmask-keys.ps1`（写新密钥 → 触发/等待拉取 → 校验生效）。
+   段① 编排脚本 `scripts/rotate-otpmask-keys.ps1`；**通道令牌**编排脚本
+   `scripts/rotate-core-channel-token.ps1`（原子写 + 权限收紧 + 端点复验 + 可选插件侧 stats 校验）。
 
 **语义与边界（如实）**：
 

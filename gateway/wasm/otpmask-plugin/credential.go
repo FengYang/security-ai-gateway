@@ -63,7 +63,8 @@ func initCredentialRuntime(c PluginConfig) {
 	if credRuntime.intervalMs < 1000 {
 		credRuntime.intervalMs = 1000 // 最小 1s（防御性下限：防热点轮询）
 	}
-	channelOn := credRuntime.channelName != "" && credRuntime.channelToken != "" && credRuntime.service != ""
+	// 通道令牌集仅在"限流表拉取已启用"时拉取（消费方开启才需要令牌；避免无关拉取与噪声指标）
+	channelOn := c.RateLimitEnabled && credRuntime.channelName != "" && credRuntime.channelToken != "" && credRuntime.service != ""
 	if !credRuntime.enabled && !channelOn {
 		proxywasm.LogInfof("otpmask-plugin: 段① 凭据运行态拉取未启用（使用静态 config）")
 		return

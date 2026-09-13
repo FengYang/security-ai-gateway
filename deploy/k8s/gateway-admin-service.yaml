@@ -72,12 +72,26 @@ spec:
         # 段① 凭据只读投递（Phase 1 门禁 #8 / GF.2.5）：供 otpmask 插件内网周期拉取。
         # 令牌缺失（Secret 未建）→ 端点不注册（fail-closed，不裸奔投递）；凭据文件为
         # 单文件 KEY=VALUE 文本（sig_key / attest_token），由 Secret 键 otpmask-keys.env 提供。
+        # 门禁 #7 边界 C：改为**凭据集注册表**（每集合独立读令牌），并将 gateway-core 拉取
+        # 通道令牌纳入同一通道（插件侧 CR 内不再出现令牌）：
+        #   otpmask-keys  → /var/run/credentials/otpmask-keys.env      （sig_key/attest_token）
+        #   core-channel  → /var/run/credentials/gateway-core-token.env（token）
+        # 下方两个 *_TOKEN 仅作 $(VAR) 展开来源（Secret 注入），不直接参与逻辑。
         - name: ADMIN_CREDENTIAL_TOKEN
           valueFrom:
             secretKeyRef:
               name: otpmask-credentials
               key: credential-token
               optional: true
+        - name: ADMIN_CORE_CHANNEL_READ_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-credentials
+              key: core-channel-read-token
+              optional: true
+        - name: ADMIN_CREDENTIAL_SETS
+          value: "otpmask-keys:/var/run/credentials/otpmask-keys.env:$(ADMIN_CREDENTIAL_TOKEN),core-channel:/var/run/credentials/gateway-core-token.env:$(ADMIN_CORE_CHANNEL_READ_TOKEN)"
+        # 兼容写法（单集合）：ADMIN_CREDENTIAL_SETS 已配置时本项被忽略
         - name: ADMIN_CREDENTIAL_FILE
           value: "/var/run/credentials/otpmask-keys.env"
         ports:
@@ -127,12 +141,17 @@ spec:
         secret:
           secretName: broker-providers
           optional: true
-      # 段① 凭据 Secret（门禁 #8）：键 otpmask-keys.env = KEY=VALUE 文本（sig_key/attest_token）、
-      # 键 credential-token = 插件侧受限读取令牌。**optional: true** → Secret 未建时容器仍可启动，
-      # 端点不注册（特性关闭），不影响既有链路；生产按需创建：
+      # 段① 凭据 Secret（门禁 #8；门禁 #7 边界 C 起为多集合）：
+      #   键 otpmask-keys.env        = KEY=VALUE（sig_key/attest_token）
+      #   键 credential-token        = otpmask-keys 的受限读取令牌
+      #   键 gateway-core-token.env  = KEY=VALUE（token=...，gateway-core 拉取通道令牌）
+      #   键 core-channel-read-token = core-channel 的**独立**受限读取令牌（最小权限）
+      # **optional: true** → Secret 未建时容器仍可启动，端点不注册（特性关闭），不影响既有链路；生产按需创建：
       #   kubectl -n otpmask create secret generic otpmask-credentials \
       #     --from-file=otpmask-keys.env=deploy/secrets/otpmask-keys.env \
-      #     --from-literal=credential-token=<受限读取令牌>
+      #     --from-file=gateway-core-token.env=deploy/secrets/gateway-core-token.env \
+      #     --from-literal=credential-token=<otpmask 读令牌> \
+      #     --from-literal=core-channel-read-token=<core-channel 读令牌>
       - name: otpmask-credentials
         secret:
           secretName: otpmask-credentials

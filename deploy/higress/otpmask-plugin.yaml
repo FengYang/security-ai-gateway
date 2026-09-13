@@ -75,3 +75,21 @@ spec:
       credential_name: "otpmask-keys"
       credential_interval: "300"
       credential_token: "__CREDENTIAL_TOKEN__"
+      # ---- 限流表拉取（Phase 1 门禁 #7 / 判据 5）----
+      # 启用后：插件周期从 gateway-core `GET /ratelimits` 拉取**已签名**限流表（K_rx 验签、
+      # 版本单调、**失败保留旧表**；从未拉到 → 放行 + otpmask_ratelimit_degraded_total 告警）。
+      # 与路由决策开关 gateway_core_enabled **相互独立**（避免为拉表而打开路由决策）。
+      # 默认关闭（ratelimit_enabled="false" = 行为与接线前完全一致）；数据面**执行**仍走
+      # 控制面编译产物（cluster-key-rate-limit 配置）。
+      ratelimit_enabled: "false"
+      gateway_core_service: "gateway-core.otpmask.svc.cluster.local"
+      gateway_core_port: "8085"
+      poll_interval: "60"
+      # ---- 通道令牌生产化（门禁 #7 边界 C）----
+      # 通道令牌（gateway-core 拉取鉴权）**不落 CR**：改由管理面凭据端点运行态拉取
+      # （GET /v1/adminext/credentials/core-channel，与段① 凭据共用同一 tick，
+      # 轮换即时生效、失败保留旧令牌）。下方 gateway_core_token 仅为兼容/联调写法：
+      # 配置了 credential_name 时以运行态令牌为准。
+      gateway_core_credential_name: "core-channel"
+      gateway_core_credential_token: "__CORE_CHANNEL_TOKEN__"
+      gateway_core_token: ""
