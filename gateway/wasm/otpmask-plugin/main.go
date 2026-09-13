@@ -82,6 +82,13 @@ type PluginConfig struct {
 	CredentialToken           string `json:"credential_token"` // 受限读取令牌（内网通道；非真实厂商密钥）
 	CredentialName            string `json:"credential_name"`  // 凭据集名（缺省 otpmask-keys）
 	CredentialIntervalSeconds int64  `json:"credential_interval"`
+	// 限流表拉取（Phase 1 门禁 #7 / 判据 5）：启用后周期拉取 gateway-core `GET /ratelimits`
+	// （同一 K_rx 验签），失败**保留旧表**、从未拉到则放行+告警。
+	// **未启用 = 行为与接线前完全一致**（数据面执行仍走控制面编译产物）。
+	RateLimitEnabled bool `json:"ratelimit_enabled"`
+	// gateway-core 拉取通道令牌（内网静态 token，Authorization: Bearer）。**通道令牌**，
+	// 与 credential_token 同级（非厂商密钥）；生产经 Secret/环境注入，勿长期落 CR。
+	GatewayCoreToken string `json:"gateway_core_token"`
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -110,6 +117,8 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.CredentialToken = json.Get("credential_token").String()
 	config.CredentialName = json.Get("credential_name").String()
 	config.CredentialIntervalSeconds = json.Get("credential_interval").Int()
+	config.RateLimitEnabled = json.Get("ratelimit_enabled").Bool()
+	config.GatewayCoreToken = json.Get("gateway_core_token").String()
 	if config.GatewayCoreService == "" {
 		// 缺省 FQDN（与 tee_service 同理：FQDNCluster 需完整服务域名，短名不会物化）。
 		config.GatewayCoreService = "gateway-core.higress-system.svc.cluster.local"
@@ -167,6 +176,8 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	initRouteRuntime(*config, log)
 	// 段① 凭据运行态（未启用则零影响）。
 	initCredentialRuntime(*config)
+	// 限流表拉取（Phase 1 门禁 #7 / 判据 5；未启用则零影响：不拉取、不介入请求）。
+	initRateLimitRuntime(*config, log)
 	log.Infof("otpmask-plugin: 配置已加载 config_version=%q mask_modulus=%d model=%q embedding=%s:%d tee=%s:%d require_auth=%v",
 		orStr(config.ConfigVersion, "unset"), config.MaskModulus, config.Model, config.EmbeddingService, config.EmbeddingPort,
 		config.TEEService, config.TEEPort, config.RequireAuth)

@@ -6,13 +6,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"time"
 
+	"security-ai-gateway/gateway/gateway-core/internal/policyaudit"
 	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
 	"security-ai-gateway/gateway/gateway-core/internal/route"
 	"security-ai-gateway/gateway/gateway-core/internal/store"
 	"security-ai-gateway/gateway/mcpsec"
 )
+
+// policyHistoryLimit 策略历史保留版本数（回滚可回溯范围；重启后仅剩当前版本）。
+const policyHistoryLimit = 16
 
 // Server 组合 HTTP 处理器与依赖。
 type Server struct {
@@ -23,6 +28,10 @@ type Server struct {
 	store    store.Store
 	token    string // 内网静态鉴权 token
 	mux      *http.ServeMux
+	audit    *policyaudit.Chain // 策略变更审计链（Phase 1 门禁 #7 / 判据 7；默认内存，可用 SetPolicyAuditFile 落 WORM）
+	metrics  *coreMetrics       // 控制面指标（门禁 #7/#9）
+	histMu   sync.Mutex
+	history  []*ratelimit.Table // 历史版本（含当前），用于按 version 回滚
 }
 
 // New 构造 API Server。routerTable 为启动时注入的已签名默认路由表（可为空表）；
@@ -36,9 +45,80 @@ func New(signer *route.Signer, msigner *mcpsec.Signer, rlsigner *ratelimit.Signe
 	if rateLimitTable != nil {
 		st.SaveRateLimitTable(rateLimitTable)
 	}
-	s := &Server{signer: signer, msigner: msigner, rlsigner: rlsigner, teeQuota: teeQuota, store: st, token: authToken, mux: http.NewServeMux()}
+	s := &Server{
+		signer: signer, msigner: msigner, rlsigner: rlsigner, teeQuota: teeQuota,
+		store: st, token: authToken, mux: http.NewServeMux(),
+		audit: &policyaudit.Chain{}, metrics: newCoreMetrics(),
+	}
+	if rateLimitTable != nil {
+		s.recordHistory(rateLimitTable)
+		s.metrics.setTable(rateLimitTable.Version, ruleDimensionCounts(rateLimitTable))
+	}
 	s.routes()
 	return s
+}
+
+// SetPolicyAuditFile 启用策略变更审计的 WORM 持久化（启动时调用一次）。
+// 文件损坏/不可写 → 返回错误，调用方应拒绝启动（fail-closed：变更审计不可用即不留痕）。
+func (s *Server) SetPolicyAuditFile(path string) error {
+	if path == "" {
+		return nil
+	}
+	chain, err := policyaudit.New(path)
+	if err != nil {
+		return err
+	}
+	s.audit = chain
+	return nil
+}
+
+// ClosePolicyAudit 关闭审计链文件（进程退出时调用）。
+func (s *Server) ClosePolicyAudit() error { return s.audit.Close() }
+
+// recordHistory 记录策略表历史版本（保留最近 policyHistoryLimit 版）。
+func (s *Server) recordHistory(t *ratelimit.Table) {
+	if t == nil {
+		return
+	}
+	s.histMu.Lock()
+	defer s.histMu.Unlock()
+	s.history = append(s.history, t.Clone())
+	if len(s.history) > policyHistoryLimit {
+		s.history = s.history[len(s.history)-policyHistoryLimit:]
+	}
+}
+
+// findHistory 按 version 取历史版本（找不到返回 nil）。
+func (s *Server) findHistory(version int) *ratelimit.Table {
+	s.histMu.Lock()
+	defer s.histMu.Unlock()
+	for i := len(s.history) - 1; i >= 0; i-- {
+		if s.history[i].Version == version {
+			return s.history[i].Clone()
+		}
+	}
+	return nil
+}
+
+// ruleDimensionCounts 统计规则维度分布（kind|scope|action → 条数）。
+func ruleDimensionCounts(t *ratelimit.Table) map[string]int {
+	out := map[string]int{}
+	if t == nil {
+		return out
+	}
+	for _, r := range t.Rules {
+		out[string(r.Kind)+"|"+string(r.Scope)+"|"+string(r.Action)]++
+	}
+	return out
+}
+
+// actorOf 取变更发起人（调用方经 X-Actor 传入；缺省 "unknown"——如实记录未知发起人，
+// 不伪造成某个具体账号）。生产由管理面/控制台在代理时注入登录用户。
+func actorOf(r *http.Request) string {
+	if a := r.Header.Get("X-Actor"); a != "" {
+		return a
+	}
+	return "unknown"
 }
 
 // Handler 暴露给 net/http。
@@ -51,11 +131,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /prescriptions/{id}", s.withAuth(s.handleDelete))
 	s.mux.HandleFunc("GET /prescriptions", s.withAuth(s.handleListByTenant))
 	s.mux.HandleFunc("GET /routes", s.withAuth(s.handleGetRoutes))
-	// 限流/预算表（Phase 1 门禁 #7）：GET 下发（拉路径）、PUT 策略源（校验+防回滚+签名）。
+	// 限流/预算表（Phase 1 门禁 #7）：GET 下发（拉路径）、PUT 策略源（校验+防回滚+签名）、
+	// history 变更审计查询、rollback 按版本回滚（判据 7）。
 	s.mux.HandleFunc("GET /ratelimits", s.withAuth(s.handleGetRateLimits))
 	s.mux.HandleFunc("PUT /ratelimits", s.withAuth(s.handlePutRateLimits))
+	s.mux.HandleFunc("GET /ratelimits/history", s.withAuth(s.handleRateLimitHistory))
+	s.mux.HandleFunc("POST /ratelimits/rollback", s.withAuth(s.handleRateLimitRollback))
 	s.mux.HandleFunc("POST /tools/policy", s.withAuth(s.handleToolPolicy))
 	s.mux.HandleFunc("GET /tools/policy", s.withAuth(s.handleGetToolPolicy))
+	s.mux.HandleFunc("GET /metrics", s.withAuth(s.handleMetrics))
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 }
 

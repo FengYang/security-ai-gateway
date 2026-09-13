@@ -14,8 +14,9 @@
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\check-metrics-green.ps1
 #   ... -Tee http://127.0.0.1:19090 -TeeToken <token> -Admin http://127.0.0.1:19095 `
+#       -Core http://127.0.0.1:8085 -CoreToken <OTP_CORE_AUTH_TOKEN> `
 #       -Container higress-chain-control-plane       # 数据面 stats 经容器内 :15000
-#   跳过来源：-SkipTee / -SkipAdmin / -SkipPlugin
+#   来源：tee | admin | core | plugin；跳过来源：-SkipTee / -SkipAdmin / -SkipCore / -SkipPlugin
 #
 # 退出码：0 = required 全命中（conditional 可 SKIP）；1 = 存在 FAIL；2 = 脚本自身错误
 #
@@ -25,13 +26,16 @@ param(
     [string]$Tee = 'http://127.0.0.1:19090',
     [string]$TeeToken = '',
     [string]$Admin = 'http://127.0.0.1:19095',
+    [string]$Core = 'http://127.0.0.1:8085',
+    [string]$CoreToken = '',
     [string]$Container = 'higress-chain-control-plane',
     [string]$Manifest = '',
     [int]$TimeoutSec = 15,
     [switch]$SkipTee,
     [switch]$SkipAdmin,
+    [switch]$SkipCore,
     [switch]$SkipPlugin,
-    # 门禁模式（verify-all 用）：三个来源必须全部可达，任一个不可达即 FAIL（避免"空跑通过"）
+    # 门禁模式（verify-all 用）：全部来源必须可达，任一个不可达即 FAIL（避免"空跑通过"）
     [switch]$RequireAllSources
 )
 
@@ -77,6 +81,14 @@ if (-not $SkipAdmin) {
     if ($adminUp) { $adminBody = $r.body } else { Write-Host "  [SKIP] 管理面不可达（$Admin/metrics）：$($r.body)" -ForegroundColor DarkYellow }
 } else { Write-Host '  [SKIP] 按参数跳过管理面' -ForegroundColor DarkYellow }
 
+$coreBody = ''; $coreUp = $false
+if (-not $SkipCore) {
+    $h = @(); if ($CoreToken) { $h = @("Authorization: Bearer $CoreToken") }
+    $r = Get-HttpBody "$Core/metrics" $h
+    $coreUp = $r.ok
+    if ($coreUp) { $coreBody = $r.body } else { Write-Host "  [SKIP] 控制面不可达（$Core/metrics）：$($r.body)" -ForegroundColor DarkYellow }
+} else { Write-Host '  [SKIP] 按参数跳过控制面' -ForegroundColor DarkYellow }
+
 $pluginBody = ''; $pluginUp = $false
 if (-not $SkipPlugin) {
     try {
@@ -99,12 +111,13 @@ foreach ($line in [System.IO.File]::ReadAllLines($Manifest)) {
     switch ($src) {
         'tee'    { $body = $teeBody;    $up = $teeUp;    $srcName = 'tee-infer /metrics' }
         'admin'  { $body = $adminBody;  $up = $adminUp;  $srcName = '管理面 /metrics' }
+        'core'   { $body = $coreBody;   $up = $coreUp;   $srcName = '控制面 /metrics' }
         'plugin' { $body = $pluginBody; $up = $pluginUp; $srcName = '数据面 Envoy stats' }
         default  { Record $src $metric $kind 'FAIL' "未知来源: $src"; continue }
     }
 
     if (-not $up) {
-        if ($RequireAllSources) { Record $src $metric $kind 'FAIL' "$srcName 不可达（门禁模式要求三来源全可达）" }
+        if ($RequireAllSources) { Record $src $metric $kind 'FAIL' "$srcName 不可达（门禁模式要求全部来源可达）" }
         else { Record $src $metric $kind 'SKIP' "$srcName 不可达" }
         continue
     }
@@ -128,7 +141,7 @@ Write-Host "`n===== 汇总 =====" -ForegroundColor Cyan
 Write-Host "PASS=$pass FAIL=$fail SKIP=$skip（清单 $($results.Count) 条；required 失败 $reqFail）" -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
 if ($skip -gt 0) {
     Write-Host '说明（如实）：SKIP 分两类——来源不可达 / conditional 未触发；两类都不等于"全绿"' -ForegroundColor DarkYellow
-    Write-Host '      宣布"全绿"口径 = 三来源可达 且 required 全命中（本脚本退出码 0 且 SKIP 中无"来源不可达"）' -ForegroundColor DarkYellow
+    Write-Host '      宣布"全绿"口径 = 全部来源可达 且 required 全命中（本脚本退出码 0 且 SKIP 中无"来源不可达"）' -ForegroundColor DarkYellow
 }
 if ($fail -gt 0) { exit 1 }
 exit 0

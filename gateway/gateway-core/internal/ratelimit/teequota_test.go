@@ -13,6 +13,7 @@ func teeTable(rules ...Rule) *Table {
 }
 
 // TestCompileTEEQuota_budgetAndTPM 预算 → day 窗口；tpm → minute 窗口（S3b 闭合两个缺口）。
+// S5 起按租户合并为**一条**更新（tee-infer 契约＝每租户完整状态），窗口冲突按"预算优先"择一并记 Note。
 func TestCompileTEEQuota_budgetAndTPM(t *testing.T) {
 	updates, notes, err := CompileTEEQuota(teeTable(
 		Rule{ID: "t-a-budget", Kind: KindBudget, Scope: ScopeTenant, Target: "t-a",
@@ -23,30 +24,80 @@ func TestCompileTEEQuota_budgetAndTPM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("编译失败: %v", err)
 	}
-	if len(updates) != 2 {
-		t.Fatalf("应下发 2 条（日预算 + 每分钟 tpm）: %+v", updates)
+	if len(updates) != 1 {
+		t.Fatalf("同租户应合并为 1 条更新: %+v", updates)
 	}
 	if updates[0].Tenant != "t-a" || updates[0].MaxTokens != 50_000_000 || updates[0].Window != "day" {
-		t.Fatalf("日预算应映射为 window=day: %+v", updates[0])
-	}
-	if updates[1].MaxTokens != 200_000 || updates[1].Window != "minute" {
-		t.Fatalf("tpm 应映射为 window=minute: %+v", updates[1])
+		t.Fatalf("日预算优先并映射为 window=day: %+v", updates[0])
 	}
 	if !notesContain(notes, "UTC+8 自然日窗口") || !notesContain(notes, "内存态") {
 		t.Fatalf("预算须带窗口语义与内存态声明: %v", notes)
+	}
+	if !notesContain(notes, "预算优先") {
+		t.Fatalf("窗口冲突须如实记 Note（预算优先）: %v", notes)
+	}
+
+	// 仅 tpm（无预算）→ minute 窗口
+	updates, notes, err = CompileTEEQuota(teeTable(
+		Rule{ID: "t-b-rate", Kind: KindRate, Scope: ScopeTenant, Target: "t-b",
+			RPM: 600, TPM: 200_000, Action: ActionReject, Enabled: true},
+	))
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	if len(updates) != 1 || updates[0].MaxTokens != 200_000 || updates[0].Window != "minute" {
+		t.Fatalf("tpm 应映射为 window=minute: %+v", updates)
 	}
 	if !notesContain(notes, "每分钟窗口") {
 		t.Fatalf("tpm 须说明窗口语义: %v", notes)
 	}
 }
 
-// TestCompileTEEQuota_skips 非 tenant 维度 / 影子 / 禁用一律不下发并记 Note。
+// TestCompileTEEQuota_shadow 影子规则（判据 4）：按租户合并下发 shadow（只计数不拒绝），
+// 并与同租户 enforce 合并为一条更新（避免"两次下发互相清空"）。
+func TestCompileTEEQuota_shadow(t *testing.T) {
+	// 仅影子（rate：rpm+tpm；budget：日预算）→ 合并为一条 shadow
+	updates, notes, err := CompileTEEQuota(teeTable(
+		Rule{ID: "t-s-rate-shadow", Kind: KindRate, Scope: ScopeTenant, Target: "t-s",
+			RPM: 600, TPM: 1_000, Action: ActionShadow, Enabled: true},
+		Rule{ID: "t-s-budget-shadow", Kind: KindBudget, Scope: ScopeTenant, Target: "t-s",
+			DailyBudgetTokens: 9_000, Action: ActionShadow, Enabled: true},
+	))
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	if len(updates) != 1 || updates[0].Tenant != "t-s" || updates[0].MaxTokens != 0 || updates[0].Shadow == nil {
+		t.Fatalf("影子应合并为一条（无 enforce）: %+v", updates)
+	}
+	sh := updates[0].Shadow
+	if sh.RPM != 600 || sh.TPM != 1_000 || sh.DailyBudgetTokens != 9_000 {
+		t.Fatalf("影子三维度应合并: %+v", sh)
+	}
+	if !notesContain(notes, "影子") || !notesContain(notes, "would_reject") {
+		t.Fatalf("影子须说明语义: %v", notes)
+	}
+
+	// 同租户 enforce + shadow → 一条更新同时携带（契约＝每租户完整状态）
+	updates, _, err = CompileTEEQuota(teeTable(
+		Rule{ID: "t-c-budget", Kind: KindBudget, Scope: ScopeTenant, Target: "t-c",
+			DailyBudgetTokens: 5_000, Action: ActionReject, Enabled: true},
+		Rule{ID: "t-c-shadow", Kind: KindRate, Scope: ScopeTenant, Target: "t-c",
+			RPM: 60, Action: ActionShadow, Enabled: true},
+	))
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	if len(updates) != 1 || updates[0].MaxTokens != 5_000 || updates[0].Window != "day" ||
+		updates[0].Shadow == nil || updates[0].Shadow.RPM != 60 {
+		t.Fatalf("enforce 与 shadow 应合并到一条更新: %+v", updates)
+	}
+}
+
+// TestCompileTEEQuota_skips 非 tenant 维度 / 禁用不下发并记 Note（影子例外：按租户下发）。
 func TestCompileTEEQuota_skips(t *testing.T) {
 	updates, notes, err := CompileTEEQuota(teeTable(
-		Rule{ID: "shadow-budget", Kind: KindBudget, Scope: ScopeTenant, Target: "t-s",
+		Rule{ID: "shadow-model", Kind: KindBudget, Scope: ScopeModel, Target: "qwen-plus",
 			DailyBudgetTokens: 1_000, Action: ActionShadow, Enabled: true},
-		Rule{ID: "model-budget", Kind: KindBudget, Scope: ScopeModel, Target: "qwen-plus",
-			DailyBudgetTokens: 1_000, Action: ActionReject, Enabled: true},
 		Rule{ID: "apikey-tpm", Kind: KindRate, Scope: ScopeAPIKey, Target: "consumer-1",
 			TPM: 1_000, Action: ActionReject, Enabled: true},
 		Rule{ID: "off-budget", Kind: KindBudget, Scope: ScopeTenant, Target: "t-off",
@@ -58,7 +109,7 @@ func TestCompileTEEQuota_skips(t *testing.T) {
 	if len(updates) != 0 {
 		t.Fatalf("不应下发任何配额更新: %+v", updates)
 	}
-	for _, want := range []string{"action=shadow", "仅支持 tenant 维度", "仅支持 tenant 维度", "已禁用"} {
+	for _, want := range []string{"影子仅支持 tenant 维度", "仅支持 tenant 维度", "已禁用"} {
 		if !notesContain(notes, want) {
 			t.Fatalf("缺少 Note(%s): %v", want, notes)
 		}

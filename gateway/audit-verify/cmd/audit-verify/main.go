@@ -34,7 +34,7 @@ import (
 func main() {
 	file := flag.String("file", "", "链文件或导出 NDJSON（必填）")
 	anchor := flag.String("anchor", "", "锚点文件（可选；提供后可判定截断）")
-	schemaName := flag.String("schema", "admin", "链类型：admin（管理面）| tee（数据面）")
+	schemaName := flag.String("schema", "admin", "链类型：admin（管理面）| tee（数据面）| core（控制面策略变更）")
 	asJSON := flag.Bool("json", false, "以 JSON 输出结论（便于流水线消费）")
 	from := flag.String("from", "", "窗口起点（时间；含）")
 	to := flag.String("to", "", "窗口终点（时间；含）")

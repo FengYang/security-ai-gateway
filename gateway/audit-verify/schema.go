@@ -72,13 +72,33 @@ var Schemas = map[string]Schema{
 			{JSONKey: "payload_hash"},
 		},
 	},
+	// 控制面策略变更链（gateway-core）：gateway/gateway-core/internal/policyaudit 的 Event.hash()。
+	// 说明：字段为空串时**仍进哈希**（与 admin 链的 Target 不同），故此处不设 SkipIfEmpty。
+	"core": {
+		Name: "core",
+		Fields: []Field{
+			{JSONKey: "event_id"},
+			{JSONKey: "timestamp", IsNumber: true, DefaultZero: "0"},
+			{JSONKey: "actor"},
+			{JSONKey: "action"},
+			{JSONKey: "version_from", IsNumber: true, DefaultZero: "0"},
+			{JSONKey: "version_to", IsNumber: true, DefaultZero: "0"},
+			{JSONKey: "rule_id"},
+			{JSONKey: "change"},
+			{JSONKey: "field"},
+			{JSONKey: "old_value"},
+			{JSONKey: "new_value"},
+			{JSONKey: "request_id"},
+			{JSONKey: "result"},
+		},
+	},
 }
 
 // SchemaFor 按名称取 schema。
 func SchemaFor(name string) (Schema, error) {
 	s, ok := Schemas[name]
 	if !ok {
-		return Schema{}, fmt.Errorf("未知 schema %q（支持：admin / tee）", name)
+		return Schema{}, fmt.Errorf("未知 schema %q（支持：admin / tee / core）", name)
 	}
 	return s, nil
 }

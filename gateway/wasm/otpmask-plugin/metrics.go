@@ -63,4 +63,15 @@ var (
 	metricCredFetchCb     = &pwCounter{name: "otpmask_cred_fetch_cb_total"}
 	metricCredFetchOK     = &pwCounter{name: "otpmask_cred_fetch_ok_total"}
 	metricCredFetchReject = &pwCounter{name: "otpmask_cred_fetch_reject_total"}
+	// 限流表拉取（门禁 #7 / 判据 5）：reject 持续增长 ⇒ 策略源不可用/验签失败/版本回退
+	// （插件保留旧表）；degraded ⇒ **从未拉到**任何可用表（按设计 §6 放行 + 告警）。
+	metricRateLimitFetchCb     = &pwCounter{name: "otpmask_ratelimit_fetch_cb_total"}
+	metricRateLimitFetchOK     = &pwCounter{name: "otpmask_ratelimit_fetch_ok_total"}
+	metricRateLimitFetchReject = &pwCounter{name: "otpmask_ratelimit_fetch_reject_total"}
+	metricRateLimitDegraded    = &pwCounter{name: "otpmask_ratelimit_degraded_total"}
 )
+
+// 说明（如实）：**不暴露**"当前生效限流表版本"仪表。proxy-wasm 的 MetricGauge 在多 worker
+// 下由 Envoy 按**累加**聚合（各 worker 独立实例、共享进程级统计），"当前值"语义不成立（实测
+// 版本 4 被累加为 17×4=68）。版本可观测改由：插件日志（"验签通过并已入缓存 version=N"）与
+// gateway-core `GET /ratelimits` 的 version 字段承担。

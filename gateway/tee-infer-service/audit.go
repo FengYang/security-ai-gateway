@@ -56,6 +56,10 @@ type AuditEvent struct {
 	// （multi_instance）。omitempty 保证旧 WORM 行反序列化兼容（旧行无该字段，
 	// 不参与异实例判定）。
 	InstanceID string `json:"instance_id,omitempty"`
+	// S5（判据 4）：影子命中维度（rpm/tpm/daily_budget，多命中逗号分隔）。
+	// 仅 action=shadow、result=would_reject 的事件携带。证据字段，不进 hash()
+	// （链完整性由 Action/Result 段保障：would_reject 本身进 hash）。
+	ShadowRule string `json:"shadow_rule,omitempty"`
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。

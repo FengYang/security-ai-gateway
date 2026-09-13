@@ -19,10 +19,14 @@ import (
 // newQuotaTestServer 构造仅含配额相关状态的最小 teeServer（纯逻辑单测，不起完整服务）。
 func newQuotaTestServer() *teeServer {
 	return &teeServer{
-		usage:            make(map[string]*usageRecord),
-		quota:            make(map[string]quotaSpec),
-		quotaWindowUsage: make(map[string]int64),
-		quotaWindowKey:   make(map[string]string),
+		usage:             make(map[string]*usageRecord),
+		quota:             make(map[string]quotaSpec),
+		quotaWindowUsage:  make(map[string]int64),
+		quotaWindowKey:    make(map[string]string),
+		shadowWindowUsage: make(map[string]int64),
+		shadowWindowKey:   make(map[string]string),
+		audit:             newAuditChain(),
+		metrics:           newMetrics(),
 	}
 }
 

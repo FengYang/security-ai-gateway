@@ -12,6 +12,7 @@
 // otpmask_guard_classifier_total{backend,result}   语义分类器调用（ok=侧车判定可用 / degraded=不可用已回退）
 // otpmask_key_issue_total{tenant}                  密钥签发计数
 // otpmask_reconcile_mismatch_total{reason}         审计-计量对账不一致次数（按差异分类，S5）
+// otpmask_shadow_would_reject_total{tenant,rule}   影子命中计数（只计数不拒绝，S5 判据 4）
 // otpmask_reconcile_diff_tokens{reason}            对账偏差 token 量级累计（按差异分类，S5）
 // otpmask_billing_blocked_total{reason}            对外出账阻断置位次数（按差异分类，S5）
 // otpmask_billing_suppressed_total{reason}         被阻断抑制的计费推送事件数（S5）
@@ -46,6 +47,8 @@ type otpmaskMetrics struct {
 	billingBlocked    int64            // gauge 0/1：对外出账是否被阻断
 	billingBlockCount map[string]int64 // reason（阻断置位次数）
 	billingSuppressed map[string]int64 // reason（被阻断抑制的推送事件数）
+	// S5（判据 4）：影子 would_reject 计数（tenant|rule）
+	shadowWouldReject map[string]int64
 }
 
 func newMetrics() *otpmaskMetrics {
@@ -63,7 +66,15 @@ func newMetrics() *otpmaskMetrics {
 		reconcileDiff:     make(map[string]int64),
 		billingBlockCount: make(map[string]int64),
 		billingSuppressed: make(map[string]int64),
+		shadowWouldReject: make(map[string]int64),
 	}
+}
+
+// incShadowWouldReject 记录影子命中（判据 4：只计数不拒绝；rule = rpm|tpm|daily_budget）。
+func (m *otpmaskMetrics) incShadowWouldReject(tenant, rule string) {
+	m.mu.Lock()
+	m.shadowWouldReject[tenant+"|"+rule]++
+	m.mu.Unlock()
 }
 
 // incGuardClassifier 记录语义分类器调用结果（GF.4.3）。
@@ -166,6 +177,7 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	writeCounter(w, "otpmask_guard_classifier_total", "语义分类器调用（ok=侧车判定可用 / degraded=不可用已回退关键词规则）", m.guardClassifier, []string{"backend", "result"})
 	writeCounter(w, "otpmask_key_issue_total", "密钥签发计数（按租户）", m.keyIssues, []string{"tenant"})
 	writeCounter(w, "otpmask_reconcile_mismatch_total", "审计-计量对账不一致次数（按差异分类）", m.reconcile, []string{"reason"})
+	writeCounter(w, "otpmask_shadow_would_reject_total", "影子命中计数（只计数不拒绝；按租户与维度）", m.shadowWouldReject, []string{"tenant", "rule"})
 	writeCounter(w, "otpmask_reconcile_diff_tokens", "审计-计量对账偏差 token 量级累计（按差异分类）", m.reconcileDiff, []string{"reason"})
 	writeCounter(w, "otpmask_billing_blocked_total", "对外出账阻断置位次数（按差异分类）", m.billingBlockCount, []string{"reason"})
 	writeCounter(w, "otpmask_billing_suppressed_total", "因对账不一致被抑制的计费推送事件数（按差异分类）", m.billingSuppressed, []string{"reason"})

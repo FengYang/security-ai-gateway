@@ -139,21 +139,24 @@ type teeServer struct {
 	// S3b：窗口配额运行态（键 = "tenant|window"）。窗口标识翻转即重置计数。
 	quotaWindowUsage map[string]int64
 	quotaWindowKey   map[string]string
-	audit            *auditChain     // 审计哈希链
-	guard            *guardrail      // 内容安全检测（M9-4）
-	metrics          *otpmaskMetrics // Prometheus 指标
-	seen             map[string]bool
-	seenAt           map[string]int64       // request_id -> 首见时间戳（TTL 清理用）
-	sessions         map[string]*teeSession // 挑战-响应会话（session_id -> 会话）
-	recomputeStates  *recomputeStates       // 补算层序状态机（会话级）
-	weightProvider   LayerWeightProvider    // 层权重提供器（掩码像计算）
-	route            *RouteConfig           // 双路线路由配置
-	tokenizer        Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
-	cache            model.SemanticCache    // GF.4.1 精确缓存（演示实现；nil = 关闭）
-	billing          *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
-	meterToken       string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
-	reconciler       *reconciler            // S5 判据 6：审计-计量对账器（/reconcile 快照数据源）
-	mu               sync.Mutex
+	// S5（判据 4）影子运行态（键 = "tenant|dim"，dim = rpm|tpm|daily_budget）。只计数不拒绝。
+	shadowWindowUsage map[string]int64
+	shadowWindowKey   map[string]string
+	audit             *auditChain     // 审计哈希链
+	guard             *guardrail      // 内容安全检测（M9-4）
+	metrics           *otpmaskMetrics // Prometheus 指标
+	seen              map[string]bool
+	seenAt            map[string]int64       // request_id -> 首见时间戳（TTL 清理用）
+	sessions          map[string]*teeSession // 挑战-响应会话（session_id -> 会话）
+	recomputeStates   *recomputeStates       // 补算层序状态机（会话级）
+	weightProvider    LayerWeightProvider    // 层权重提供器（掩码像计算）
+	route             *RouteConfig           // 双路线路由配置
+	tokenizer         Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
+	cache             model.SemanticCache    // GF.4.1 精确缓存（演示实现；nil = 关闭）
+	billing           *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
+	meterToken        string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
+	reconciler        *reconciler            // S5 判据 6：审计-计量对账器（/reconcile 快照数据源）
+	mu                sync.Mutex
 }
 
 // usageRecord 租户用量计量（token 级）。
@@ -230,7 +233,25 @@ func (s *teeServer) recordUsage(tenant string, tokensIn, tokensOut int, denied b
 type quotaSpec struct {
 	MaxTokens int64
 	Window    string
+	// S5：影子配置（判据 4：只计数不拒绝，命中落审计 would_reject）。零值 = 未配置影子。
+	Shadow shadowSpec
 }
+
+// shadowSpec 影子阈值（判据 4）。三个维度各自独立窗口计数：
+//
+//	RPM              每分钟请求数（minute 窗口）——覆盖经 tee-infer 的**密态链路**（/infer、/v1/infer）
+//	TPM              每分钟 token 数（minute 窗口）
+//	DailyBudgetTokens 自然日 token 数（day 窗口，UTC+8）
+//
+// 影子命中**不拒绝**请求，仅在审计链记 would_reject（设计 §5：不得只计数不留痕）。
+type shadowSpec struct {
+	RPM               int64 `json:"rpm,omitempty"`
+	TPM               int64 `json:"tpm,omitempty"`
+	DailyBudgetTokens int64 `json:"daily_budget_tokens,omitempty"`
+}
+
+// configured 是否配置了任何影子维度。
+func (s shadowSpec) configured() bool { return s.RPM > 0 || s.TPM > 0 || s.DailyBudgetTokens > 0 }
 
 // 窗口取值白名单（与 control-plane 策略字段对应）。
 const (
@@ -349,6 +370,91 @@ func (s *teeServer) quotaWindowUsed(tenant string) int64 {
 		s.quotaWindowUsage[uk] = 0
 	}
 	return s.quotaWindowUsage[uk]
+}
+
+// ---------- S5（判据 4）：影子模式（只计数不拒绝 + would_reject 落审计） ----------
+
+// shadowObserve 影子计数与判定：**只计数不拒绝**；命中即落审计 would_reject 并计数指标。
+//
+// 调用点＝配额预占通过之后（语义：影子回答"若该规则转为 enforce，这部分流量会被拦"）。
+// 三个维度各自独立窗口（rpm/tpm=minute，daily_budget=day UTC+8），窗口翻转即重置。
+// engine_type/model 沿用请求声明值（可能为空，如实记录，不做推断）。
+// 返回命中的维度名（rpm/tpm/daily_budget），无命中返回 nil。
+func (s *teeServer) shadowObserve(tenant, requestID string, tokensIn int, engineType, model, payloadSHA string) []string {
+	s.mu.Lock()
+	spec, ok := s.quota[tenant]
+	if !ok || !spec.Shadow.configured() {
+		s.mu.Unlock()
+		return nil
+	}
+	sh := spec.Shadow
+	var hits []string
+	if sh.RPM > 0 {
+		uk := tenant + "|rpm"
+		s.rotateShadowWindow(uk, quotaWindowMinute)
+		n := s.shadowWindowUsage[uk] + 1
+		if n > sh.RPM {
+			hits = append(hits, "rpm")
+		}
+		s.shadowWindowUsage[uk] = n
+	}
+	if sh.TPM > 0 {
+		uk := tenant + "|tpm"
+		s.rotateShadowWindow(uk, quotaWindowMinute)
+		used := s.shadowWindowUsage[uk] + int64(tokensIn)
+		if used > sh.TPM {
+			hits = append(hits, "tpm")
+		}
+		s.shadowWindowUsage[uk] = used
+	}
+	if sh.DailyBudgetTokens > 0 {
+		uk := tenant + "|daily_budget"
+		s.rotateShadowWindow(uk, quotaWindowDay)
+		used := s.shadowWindowUsage[uk] + int64(tokensIn)
+		if used > sh.DailyBudgetTokens {
+			hits = append(hits, "daily_budget")
+		}
+		s.shadowWindowUsage[uk] = used
+	}
+	s.mu.Unlock()
+
+	if len(hits) == 0 {
+		return nil
+	}
+	for _, r := range hits {
+		s.metrics.incShadowWouldReject(tenant, r)
+	}
+	// 每个命中请求**一条**审计事件（多维度命中合并到 shadow_rule，避免事件放大）
+	s.audit.append(AuditEvent{
+		TenantID: tenant, RequestID: requestID, Action: "shadow",
+		TokensIn: tokensIn, Result: "would_reject", PayloadSHA: payloadSHA,
+		EngineType: engineType, Model: model,
+		ShadowRule: strings.Join(hits, ","),
+	})
+	return hits
+}
+
+// rotateShadowWindow 影子窗口翻转（翻转即重置该维度计数）。调用方须持 s.mu。
+func (s *teeServer) rotateShadowWindow(uk, window string) {
+	key := quotaWindowKeyFor(window, time.Now())
+	if s.shadowWindowKey[uk] != key {
+		s.shadowWindowKey[uk] = key
+		s.shadowWindowUsage[uk] = 0
+	}
+}
+
+// shadowUsage 读取影子各维度当前窗口计数（展示用）。
+func (s *teeServer) shadowUsage(tenant string) (rpm, tpm, daily int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	get := func(dim, window string) int64 {
+		uk := tenant + "|" + dim
+		if s.shadowWindowKey[uk] != quotaWindowKeyFor(window, time.Now()) {
+			return 0
+		}
+		return s.shadowWindowUsage[uk]
+	}
+	return get("rpm", quotaWindowMinute), get("tpm", quotaWindowMinute), get("daily_budget", quotaWindowDay)
 }
 
 // recordModelUsage 模型维度计量（GA-计费 P0-1：分价计费数据基础）。
@@ -845,6 +951,8 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "租户 token 配额超限（429）", http.StatusTooManyRequests)
 		return
 	}
+	// S5（判据 4）：影子观测（只计数不拒绝；命中落审计 would_reject）
+	s.shadowObserve(tenant, req.RequestID, len(req.CipherVectors), req.EngineType, req.Model, payloadSHA)
 
 	// 解密（飞地内明文）→ 模型推理：对每个输入向量采样一个 token（自回归 M8）
 	tokens := make([]uint64, 0, len(req.CipherVectors))
@@ -1071,6 +1179,8 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		http.Error(w, "租户 token 配额超限（429）", http.StatusTooManyRequests)
 		return
 	}
+	// S5（判据 4）：影子观测（只计数不拒绝；命中落审计 would_reject）
+	s.shadowObserve(tenant, req.RequestID, s.countTokens(inputText.String()), req.EngineType, req.Model, payloadSHA)
 	engType := req.EngineType
 	if engType == "" {
 		// GF.3.3 / D-6：未显式指定引擎时，若配置了成本路由策略（route.Policy）则自动择优
@@ -1484,13 +1594,24 @@ func (s *teeServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.metrics.render(w, s.audit.len())
 }
 
-// usageView 用量查询响应视图（含配额信息，P1；S3b 起含窗口配额）。
+// usageView 用量查询响应视图（含配额信息，P1；S3b 起含窗口配额；S5 起含影子配置与计数）。
 type usageView struct {
 	*usageRecord
-	Quota           int64  `json:"quota"`                       // 配额上限（<=0 = 不限）
-	UsedTokens      int64  `json:"used_tokens"`                 // 累计消耗 token（输入+输出）
-	QuotaWindow     string `json:"quota_window,omitempty"`      // S3b：minute | day（缺省 = 累计）
-	QuotaWindowUsed int64  `json:"quota_window_used,omitempty"` // S3b：当前窗口内已用 token
+	Quota           int64       `json:"quota"`                       // 配额上限（<=0 = 不限）
+	UsedTokens      int64       `json:"used_tokens"`                 // 累计消耗 token（输入+输出）
+	QuotaWindow     string      `json:"quota_window,omitempty"`      // S3b：minute | day（缺省 = 累计）
+	QuotaWindowUsed int64       `json:"quota_window_used,omitempty"` // S3b：当前窗口内已用 token
+	Shadow          *shadowView `json:"shadow,omitempty"`            // S5：影子配置与窗口内计数（判据 4）
+}
+
+// shadowView 影子视图（判据 4）：阈值 + 当前窗口内已计数。
+type shadowView struct {
+	RPM               int64 `json:"rpm,omitempty"`
+	TPM               int64 `json:"tpm,omitempty"`
+	DailyBudgetTokens int64 `json:"daily_budget_tokens,omitempty"`
+	RPMUsed           int64 `json:"rpm_used"`
+	TPMUsed           int64 `json:"tpm_used"`
+	DailyBudgetUsed   int64 `json:"daily_budget_used"`
 }
 
 // handleUsage 用量查询：GET /usage（全部租户）或 ?tenant=X（单租户）。
@@ -1524,6 +1645,22 @@ func (s *teeServer) handleUsage(w http.ResponseWriter, r *http.Request) {
 					s.quotaWindowUsage[uk] = 0
 				}
 				uv.QuotaWindowUsed = s.quotaWindowUsage[uk]
+			}
+			// S5（判据 4）：影子配置与当前窗口内计数（同一锁内直接读，避免重入）
+			if q.Shadow.configured() {
+				uv.Shadow = &shadowView{RPM: q.Shadow.RPM, TPM: q.Shadow.TPM, DailyBudgetTokens: q.Shadow.DailyBudgetTokens}
+				rotate := func(dim, window string) int64 {
+					uk := tenant + "|" + dim
+					key := quotaWindowKeyFor(window, time.Now())
+					if s.shadowWindowKey[uk] != key {
+						s.shadowWindowKey[uk] = key
+						s.shadowWindowUsage[uk] = 0
+					}
+					return s.shadowWindowUsage[uk]
+				}
+				uv.Shadow.RPMUsed = rotate("rpm", quotaWindowMinute)
+				uv.Shadow.TPMUsed = rotate("tpm", quotaWindowMinute)
+				uv.Shadow.DailyBudgetUsed = rotate("daily_budget", quotaWindowDay)
 			}
 		}
 		if rec != nil {
@@ -1580,11 +1717,15 @@ type quotaRequest struct {
 	Tenant    string `json:"tenant"`
 	MaxTokens int64  `json:"max_tokens"`       // <=0 = 不限
 	Window    string `json:"window,omitempty"` // S3b："" = 累计（默认，行为不变）| minute | day（UTC+8 自然日）
+	// S5（判据 4）：影子配置（只计数不拒绝；命中落审计 would_reject）。
+	// 传 null/缺省 = 清除该租户的影子（与 max_tokens<=0 清除 enforce 配额同语义）。
+	Shadow *shadowSpec `json:"shadow,omitempty"`
 }
 
 // handleQuota 配额设置：POST /usage/quota {"tenant":"acme","max_tokens":1000000,"window":"day"}。
 // max_tokens <= 0 解除限制；window 缺省 = 累计上限（P1 既有语义，行为不变）。
-// 返回当前生效配额、窗口与窗口内已用（window_used）。
+// S5：可同时下发 shadow（{rpm,tpm,daily_budget_tokens}，只计数不拒绝）。
+// 返回当前生效配额、窗口与窗口内已用（window_used）、影子配置与影子窗口内已用。
 func (s *teeServer) handleQuota(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1603,27 +1744,47 @@ func (s *teeServer) handleQuota(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad window（须为 minute|day 或省略）", http.StatusBadRequest)
 		return
 	}
+	if req.Shadow != nil && (req.Shadow.RPM < 0 || req.Shadow.TPM < 0 || req.Shadow.DailyBudgetTokens < 0) {
+		http.Error(w, "bad shadow（rpm/tpm/daily_budget_tokens 须为非负）", http.StatusBadRequest)
+		return
+	}
 	s.mu.Lock()
+	// 语义：每次下发为该租户的**完整状态**（缺省 shadow 视为清除；与 max_tokens<=0 解除 enforce 一致）。
+	spec := quotaSpec{MaxTokens: req.MaxTokens, Window: req.Window}
 	if req.MaxTokens <= 0 {
-		delete(s.quota, req.Tenant)
+		spec.MaxTokens, spec.Window = 0, quotaWindowNone
+	}
+	if req.Shadow != nil {
+		spec.Shadow = *req.Shadow
+	}
+	if spec.MaxTokens <= 0 && !spec.Shadow.configured() {
+		delete(s.quota, req.Tenant) // 既无 enforce 也无影子 → 移除条目
 	} else {
-		s.quota[req.Tenant] = quotaSpec{MaxTokens: req.MaxTokens, Window: req.Window}
+		s.quota[req.Tenant] = spec
 	}
 	effective := s.quotaDefault
 	window := quotaWindowNone
+	var shadow shadowSpec
 	if q, ok := s.quota[req.Tenant]; ok {
 		effective = q.MaxTokens
 		window = q.Window
+		shadow = q.Shadow
 	}
 	s.mu.Unlock()
 	used := s.quotaWindowUsed(req.Tenant)
+	rpmUsed, tpmUsed, dailyUsed := s.shadowUsage(req.Tenant)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"tenant":      req.Tenant,
 		"quota":       effective,
 		"window":      window,
 		"window_used": used,
+		"shadow": map[string]any{
+			"rpm": shadow.RPM, "tpm": shadow.TPM, "daily_budget_tokens": shadow.DailyBudgetTokens,
+			"rpm_used": rpmUsed, "tpm_used": tpmUsed, "daily_budget_used": dailyUsed,
+		},
 	})
-	log.Printf("[tee] 配额设置 tenant=%s max_tokens=%d window=%q", req.Tenant, req.MaxTokens, req.Window)
+	log.Printf("[tee] 配额设置 tenant=%s max_tokens=%d window=%q shadow(rpm=%d tpm=%d daily=%d)",
+		req.Tenant, req.MaxTokens, req.Window, shadow.RPM, shadow.TPM, shadow.DailyBudgetTokens)
 }
 
 // handleAudit 审计查询：GET /audit（全部）或 ?tenant=X（按租户过滤）。
@@ -1942,34 +2103,36 @@ func main() {
 
 	srv := &teeServer{
 		km: km, kSig: kSig, attest: *attestToken,
-		enclave:          encl,
-		requireAttest:    *requireAttest,
-		adminToken:       *adminToken,
-		meterToken:       *meterToken,                                    // GA-计费 P1-2：独立只读计量令牌（/usage 最小权限）
-		billing:          newBillingWebhook(*billingURL, *billingSecret), // GA-计费 P1-1：nil = 推送关闭（拉取为主）
-		model:            eng,
-		cmaasEngine:      cmaasEng,
-		protoVersion:     *protoVersion,
-		piiMode:          *piiMode,
-		guardrailCfgPath: *guardrailCfg,
-		systemPrompt:     *systemPrompt,
-		seen:             make(map[string]bool),
-		seenAt:           make(map[string]int64),
-		sessions:         make(map[string]*teeSession),
-		recomputeStates:  newRecomputeStates(),
-		weightProvider:   NewMockWeightProvider(32),
-		route:            routeCfg,
-		tokenizer:        nil,                       // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
-		cache:            model.NewExactCache(1024), // GF.4.1：精确缓存演示（LRU 1024）；真机替换为语义缓存
-		tenants:          make(map[string]*teecore.KeyManager),
-		usage:            make(map[string]*usageRecord),
-		quota:            make(map[string]quotaSpec),
-		quotaDefault:     *tokenQuota,
-		quotaWindowUsage: make(map[string]int64),
-		quotaWindowKey:   make(map[string]string),
-		audit:            audit,
-		guard:            newGuardrail(),
-		metrics:          newMetrics(),
+		enclave:           encl,
+		requireAttest:     *requireAttest,
+		adminToken:        *adminToken,
+		meterToken:        *meterToken,                                    // GA-计费 P1-2：独立只读计量令牌（/usage 最小权限）
+		billing:           newBillingWebhook(*billingURL, *billingSecret), // GA-计费 P1-1：nil = 推送关闭（拉取为主）
+		model:             eng,
+		cmaasEngine:       cmaasEng,
+		protoVersion:      *protoVersion,
+		piiMode:           *piiMode,
+		guardrailCfgPath:  *guardrailCfg,
+		systemPrompt:      *systemPrompt,
+		seen:              make(map[string]bool),
+		seenAt:            make(map[string]int64),
+		sessions:          make(map[string]*teeSession),
+		recomputeStates:   newRecomputeStates(),
+		weightProvider:    NewMockWeightProvider(32),
+		route:             routeCfg,
+		tokenizer:         nil,                       // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
+		cache:             model.NewExactCache(1024), // GF.4.1：精确缓存演示（LRU 1024）；真机替换为语义缓存
+		tenants:           make(map[string]*teecore.KeyManager),
+		usage:             make(map[string]*usageRecord),
+		quota:             make(map[string]quotaSpec),
+		quotaDefault:      *tokenQuota,
+		quotaWindowUsage:  make(map[string]int64),
+		quotaWindowKey:    make(map[string]string),
+		shadowWindowUsage: make(map[string]int64),
+		shadowWindowKey:   make(map[string]string),
+		audit:             audit,
+		guard:             newGuardrail(),
+		metrics:           newMetrics(),
 	}
 	// M3-B：恢复运行时 Guardrail 配置（高敏复核写入的 pii_mode，跨重启保持）。
 	srv.loadGuardrailOverride()

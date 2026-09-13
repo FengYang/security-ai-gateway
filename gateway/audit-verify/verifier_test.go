@@ -21,7 +21,13 @@ const (
 	vecAdminNoTarget = "462ca655ea44d3c0eb19b4566531e9694b1589643688633357236e1fb956b445"
 	vecAdminTarget   = "d2a4dc5437996a082961f26129bc5cdec60732f7415b2081da49f0fce6974c4e"
 	vecTee           = "bc0294225639208a169b8af3472701163ab831d47d0547948307a280f163b793"
+	// core 链（gateway-core 策略变更）：同一固定事件（apply/updated rpm 60→120），
+	// 由 PowerShell + .NET SHA256 独立算出（同编码规则）。
+	vecCore = "e6526a8b628dc5e070de7e5b0c7ed04cafa29551663bf6c8da7dc98ae00e8e67"
 )
+
+// coreEventFixed core 链固定事件（字段与 gateway-core/internal/policyaudit.Event 一致）。
+const coreEventFixed = `{"event_id":"pol-1","timestamp":1789272000000000000,"actor":"ops-admin","action":"apply","version_from":3,"version_to":4,"rule_id":"t-a-rate","change":"updated","field":"rpm","old_value":"60","new_value":"120","request_id":"req-xyz","result":"ok","prev_hash":""}`
 
 // admin 链：evt-1（无 target）→ evt-2（带 target）。
 const (
@@ -76,6 +82,24 @@ func TestVectorTeeSchema(t *testing.T) {
 	}
 	if got != vecTee {
 		t.Errorf("tee schema 哈希与固定向量不符\n got=%s\nwant=%s", got, vecTee)
+	}
+}
+
+func TestVectorCoreSchema(t *testing.T) {
+	schema, err := SchemaFor("core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := decodeEvent([]byte(coreEventFixed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := schema.Hash(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != vecCore {
+		t.Errorf("core schema 哈希与固定向量不符\n got=%s\nwant=%s\n（若 gateway-core policyaudit.hash() 有变更，须同步本向量）", got, vecCore)
 	}
 }
 

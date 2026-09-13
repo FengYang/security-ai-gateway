@@ -22,6 +22,7 @@ tee otpmask_audit_events required
 tee otpmask_denies_total conditional
 tee otpmask_guard_classifier_total conditional
 tee otpmask_reconcile_mismatch_total conditional
+tee otpmask_shadow_would_reject_total conditional
 tee otpmask_reconcile_diff_tokens conditional
 tee otpmask_reconcile_last_run_timestamp_seconds conditional
 tee otpmask_billing_blocked required
@@ -52,5 +53,10 @@ plugin otpmask_cred_fetch_cb_total required
 plugin otpmask_cred_fetch_ok_total conditional
 plugin otpmask_cred_fetch_reject_total conditional
 
-# ---- gateway-core (ratelimit/meter) — not implemented yet (gate #7) ----
-# Register its counters here once gate #7 lands.
+# ---- gateway-core (ratelimit / quota dispatch / policy-change audit) ----
+core gateway_core_ratelimit_table_version required
+core gateway_core_policy_audit_events required
+core gateway_core_ratelimit_rules_total conditional
+core gateway_core_ratelimit_change_total conditional
+core gateway_core_ratelimit_tee_applied_total conditional
+core gateway_core_ratelimit_pull_reject_total conditional
