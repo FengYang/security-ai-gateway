@@ -127,3 +127,35 @@ spec:
     port: 6379
     type: dns
     protocol: TCP
+  # ---- 平台内部服务（插件出站目标）----
+  # 背景（P0b-1 本地集群实测 2026-09-13）：wasm 插件的出站调用走 **FQDNCluster**，
+  # 其簇名只可能来自两种注册：① 本 McpBridge 的 dns registry → `outbound|<port>||<name>.dns`；
+  # ② 网关**同命名空间** Service → `outbound|<port>||<svc>.<gw-ns>.svc.cluster.local`。
+  # 业务服务在 otpmask、网关在 higress-system ⇒ ② 不成立，必须在这里注册为 dns registry，
+  # 插件配置（otpmask-plugin.yaml / rpm-shadow-plugin.yaml）与路由注解
+  # （ingress-infer.yaml 的 `higress.io/destination`）**必须写 `<name>.dns`**；
+  # 写跨命名空间 FQDN（如 `tee-infer-service.otpmask.svc.cluster.local`）会因簇不存在
+  # 报 `error status returned by host: bad argument`，表现为插件 fail-closed（503，不降级）。
+  #
+  # 命名约束：dns registry 的 domain 必须是**合法域名格式**（单标签名会被 controller 拒），
+  # 故用集群内 FQDN；registry 的 name 即插件/路由侧引用的 `<name>.dns`。
+  - name: tee-infer
+    domain: tee-infer-service.<namespace>.svc.cluster.local
+    port: 19090
+    type: dns
+    protocol: HTTP
+  - name: embedding
+    domain: embedding-service.<namespace>.svc.cluster.local
+    port: 18080
+    type: dns
+    protocol: HTTP
+  - name: admin-credential # 段① 凭据运行态拉取端点（gateway-admin-service:19095）
+    domain: gateway-admin-service.<namespace>.svc.cluster.local
+    port: 19095
+    type: dns
+    protocol: HTTP
+  # - name: gateway-core   # 限流表/策略下发（插件 `gateway_core_service`）——**待补**：
+  #   domain: gateway-core.<namespace>.svc.cluster.local   # 仓库尚无 gateway-core 的 K8s 清单，
+  #   port: 8085                                           # 无 Service 可指向；P0b-2 前置项。
+  #   type: dns
+  #   protocol: HTTP

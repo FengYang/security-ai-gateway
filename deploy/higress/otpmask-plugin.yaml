@@ -40,17 +40,21 @@ spec:
   matchRules:
   # 密态路由白名单：仅 infer 走段① 加密；ai-*（/provider/* 明文双轨）与 tee-admin
   # 管理面不在此列 → 自动豁免，无需逐条 configDisable。
-  # 路由名 = Ingress 名（infer，见 ingress-infer.yaml）；tee/embedding 上游取 K8s
-  # Service FQDN（deploy/k8s/tee-infer-service.yaml、embedding-service.yaml，ns otpmask）——
-  # 勿填未物化主机名/下划线名（本地 E2E 实证：非法上游 → wasm hostcall bad argument，503）。
+  # 路由名 = Ingress 名（infer，见 ingress-infer.yaml）。
+  # 插件出站目标（tee/embedding/凭据端点）**必须写 McpBridge dns registry 名 `<name>.dns`**
+  # ——注册见 deploy/higress/mcp-bridge-registries.yaml「平台内部服务」段；
+  # 簇名只可能是 `outbound|<port>||<name>.dns`（dns registry）或网关同命名空间 Service 的
+  # `<svc>.<gw-ns>.svc.cluster.local`。**勿填跨命名空间 FQDN**
+  # （如 `tee-infer-service.otpmask.svc.cluster.local`）：该簇不存在 →
+  # wasm hostcall `bad argument` → 插件 fail-closed（503，不降级）。本地集群实测于 2026-09-13。
   - ingress:
     - infer
     config:
       mask_modulus: "4294967296"
       model: "mock"
-      embedding_service: "embedding-service.otpmask.svc.cluster.local"
+      embedding_service: "embedding.dns"
       embedding_port: "18080"
-      tee_service: "tee-infer-service.otpmask.svc.cluster.local"
+      tee_service: "tee-infer.dns"
       tee_port: "19090"
       # 密钥生产化（评审 P0，2026-09-01）：以下两项仅在 token 模式（attest_mode: token）下
       # 使用，且必须与 tee-infer 侧 otpmask-keys Secret 完全一致（sig_key 用于协议签名
@@ -70,7 +74,7 @@ spec:
       # 安全边界（如实）：通道为**内网 + 受限读取令牌**（明文）；credential_token 非厂商密钥，
       # 但仍建议经 Secret 注入而非硬编码，见 deploy/higress/README.md §6。
       credential_enabled: "false"
-      credential_service: "gateway-admin-service.otpmask.svc.cluster.local"
+      credential_service: "admin-credential.dns"
       credential_port: "19095"
       credential_name: "otpmask-keys"
       credential_interval: "300"
@@ -82,7 +86,11 @@ spec:
       # 默认关闭（ratelimit_enabled="false" = 行为与接线前完全一致）；数据面**执行**仍走
       # 控制面编译产物（cluster-key-rate-limit 配置）。
       ratelimit_enabled: "false"
-      gateway_core_service: "gateway-core.otpmask.svc.cluster.local"
+      # 注意：`gateway-core.dns` 对应 McpBridge 注册名 `gateway-core`，**当前待补**
+      # （仓库尚无 gateway-core 的 K8s 清单 → 无 Service 可指向；注册位见
+      # mcp-bridge-registries.yaml「平台内部服务」段的注释项）。未注册时该路径按设计
+      # 「从未拉到 → 放行 + degraded 计数」，不影响业务可用性。
+      gateway_core_service: "gateway-core.dns"
       gateway_core_port: "8085"
       poll_interval: "60"
       # ---- 通道令牌生产化（门禁 #7 边界 C）----

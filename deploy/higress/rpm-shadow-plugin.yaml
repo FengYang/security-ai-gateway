@@ -59,7 +59,10 @@ spec:
     config:
       shadow_enabled: "true"
       # ---- 限流表拉取（与 otpmask 同源：K_rx 验签 + 版本单调 + 失败保留旧表）----
-      gateway_core_service: "gateway-core.otpmask.svc.cluster.local"
+      # 出站目标写 McpBridge dns registry 名（`<name>.dns`，注册见 mcp-bridge-registries.yaml
+      # 「平台内部服务」段）；**勿写跨命名空间 FQDN**——簇不存在 → wasm hostcall
+      # `bad argument`（本地集群实测 2026-09-13）。`gateway-core` 注册待补（无 K8s 清单）。
+      gateway_core_service: "gateway-core.dns"
       gateway_core_port: "8085"
       route_verify_key: "__ROUTE_VERIFY_KEY__"
       poll_interval: "60"
@@ -67,10 +70,10 @@ spec:
       gateway_core_credential_name: "core-channel"
       gateway_core_credential_token: "__CORE_CHANNEL_READ_TOKEN__"
       gateway_core_token: ""
-      credential_service: "gateway-admin-service.otpmask.svc.cluster.local"
+      credential_service: "admin-credential.dns"
       credential_port: "19095"
       # ---- 汇总上报（窗口级，幂等）----
-      tee_service: "tee-infer-service.otpmask.svc.cluster.local"
+      tee_service: "tee-infer.dns"
       tee_port: "19090"
       admin_token: ""
       flush_seconds: "5"

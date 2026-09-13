@@ -2,15 +2,17 @@
 #
 # Higress 网关将 /infer 请求路由到 tee-infer-service（南向推理），
 # 插件链按 phase/priority 在转发前执行；tee-infer 侧段① 解密入口不变。
-# 路由目标：以 higress.io/destination 注解为准（跨命名空间 FQDN）；
-# spec.backend 的 namespace 与 Ingress 所在 ns 对齐（消除双写歧义）。
+# 路由目标：以 higress.io/destination 注解为准，写 **McpBridge dns registry 名**
+# （`<name>.dns:<port>`，注册见 mcp-bridge-registries.yaml「平台内部服务」段）；
+# **勿写跨命名空间 FQDN**——该簇不存在，插件/路由会 fail-closed（503）。
+# spec.backend 的 service.name 仅为声明式占位（K8s 标准 Ingress 不支持跨命名空间后端字段）。
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: infer
   namespace: higress-system
   annotations:
-    higress.io/destination: tee-infer-service.otpmask.svc.cluster.local:19090
+    higress.io/destination: tee-infer.dns:19090
 spec:
   ingressClassName: higress
   rules:
@@ -19,23 +21,27 @@ spec:
       - path: /infer
         pathType: Prefix
         backend:
-          service:
-            name: tee-infer-service
-            port:
-              number: 19090
+          # 必须用 McpBridge **resource** backend（同 ingress-ai-providers.yaml）：
+          # 用 `service` backend 时 name 会被展开成 `<name>.<ns>.svc.cluster.local`，
+          # 路由不到 registry 物化的 `<name>.dns` 簇 → 503 `cluster_not_found`
+          # （本地集群实测 2026-09-13；该结论与 ai-providers 清单注释一致）。
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
   tls:
   - secretName: default
 ---
 # 管理面路由（治理端点 /usage /audit）
 # 内网隔离为硬约束（非假设）：由 security-plugins.yaml 中挂到 tee-admin 的
-# ip-restriction 插件（allow 内网 CIDR）强制，且 failStrategy: FAIL_CLOSED。
+# ip-restriction 插件（allow 内网 CIDR）强制，且 failStrategy: FAIL_CLOSE。
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: tee-admin
   namespace: higress-system
   annotations:
-    higress.io/destination: tee-infer-service.otpmask.svc.cluster.local:19090
+    higress.io/destination: tee-infer.dns:19090
 spec:
   ingressClassName: higress
   rules:
@@ -44,16 +50,24 @@ spec:
       - path: /usage
         pathType: Prefix
         backend:
-          service:
-            name: tee-infer-service
-            port:
-              number: 19090
+          # 必须用 McpBridge **resource** backend（同 ingress-ai-providers.yaml）：
+          # 用 `service` backend 时 name 会被展开成 `<name>.<ns>.svc.cluster.local`，
+          # 路由不到 registry 物化的 `<name>.dns` 簇 → 503 `cluster_not_found`
+          # （本地集群实测 2026-09-13；该结论与 ai-providers 清单注释一致）。
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
       - path: /audit
         pathType: Prefix
         backend:
-          service:
-            name: tee-infer-service
-            port:
-              number: 19090
+          # 必须用 McpBridge **resource** backend（同 ingress-ai-providers.yaml）：
+          # 用 `service` backend 时 name 会被展开成 `<name>.<ns>.svc.cluster.local`，
+          # 路由不到 registry 物化的 `<name>.dns` 簇 → 503 `cluster_not_found`
+          # （本地集群实测 2026-09-13；该结论与 ai-providers 清单注释一致）。
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
   tls:
   - secretName: default
