@@ -99,6 +99,10 @@ kubectl get hpa,pdb -n otpmask
 | `otpmask/embedding-service:latest` | `docker build -f gateway/embedding-service/Dockerfile .` | 文本向量服务 |
 | `otpmask/tee-infer-service:latest` | `docker build -f gateway/tee-infer-service/Dockerfile .` | TEE 密态推理 |
 | `otpmask/envoy-gateway:latest` | `docker build -f gateway/wasm/otpmask-plugin/Dockerfile.k8s gateway/wasm/otpmask-plugin` | Envoy + wasm 插件（wasm 随镜像打包） |
+| `security-ai-gateway/gateway-admin-service:latest` | `docker build -f gateway/gateway-admin-service/Dockerfile .` | 管理门户业务服务 + 内部凭据 broker（含 ca-certificates；`USER 65532` 与清单 `runAsNonRoot` 对齐） |
+
+> P0b-1 本地轻集群实测补齐：`gateway-admin-service` 此前**无 Dockerfile**（清单已引用该镜像但无法构建）；
+> 同时 tee-infer / embedding 基础镜像补 `USER 65532`（清单置 `runAsNonRoot`，镜像默认 root 会被 kubelet 拒绝）。
 
 > wasm 插件 7.1MB 超 ConfigMap 1MiB 限制，必须随镜像分发（`Dockerfile.k8s` 已内置）。
 

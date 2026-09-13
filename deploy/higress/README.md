@@ -9,15 +9,20 @@
 
 > 研发计划 GF.1 要求：GF.1 启动前记录集群基线并归档至本文件，作为 GF.5 性能对照的起点，
 > 变更需记录（新增/变更行加日期）。当前集群未就绪，下表为字段模板，GF.1 部署时填写。
+>
+> **2026-09-13 首次填写（P0b-1 本地轻集群，kind）**：下表为**本地轻集群**实测值，用于流程验证
+> （判据见《GA-项目总览与路线图.md》§4.2「P0b-1」）；**P0b-2 真实集群验收前须以真实集群实测值替换**
+> 并另起变更记录行。
 
 | 基线项 | 值 | 记录日期 |
 | --- | --- | --- |
-| K8s 版本 | （待填，如 v1.29.x） | — |
-| 节点规格 | （CPU/内存/数量，含 higress-system 与 otpmask 命名空间调度） | — |
-| Higress 版本 | Gateway v2.1.5（对齐镜像） | — |
-| 网络策略 | 内网隔离 CIDR：10.0.0.0/8、172.16.0.0/12、192.168.0.0/16 | — |
-| Pod 限额与资源预留 | （网关/tee-infer 的 requests/limits 实测值） | — |
-| 变更记录 | （基线变更时追加行，含变更内容与日期） | — |
+| K8s 版本 | **v1.31.0**（kind v0.24.0 单节点；containerd 1.7.18；节点 OS Debian 12） | 2026-09-13（P0b-1 本地） |
+| 节点规格 | 单节点 16 vCPU / 27.7 GiB 物理（Docker Desktop Linux VM 14.5 GiB）；kubelet 未设预留（示例值） | 2026-09-13（P0b-1 本地） |
+| Higress 版本 | **Gateway v2.1.5**（chart `higress-2.1.5`，`--set global.local=true`）；注意：chart 默认 version 为 2.2.4，与本仓库插件基线 2.1.5 不一致，须显式 `--version 2.1.5` | 2026-09-13（P0b-1 本地） |
+| 网络策略 | 内网隔离 CIDR：10.0.0.0/8、172.16.0.0/12、192.168.0.0/16（`deploy/k8s/gateway-admin-service.yaml` NetworkPolicy 四向规则） | 2026-09-13（P0b-1 本地） |
+| Pod 限额与资源预留 | 实测 requests/limits：tee-infer 100m/128Mi → 2000m/1Gi；embedding 50m/64Mi → 500m/256Mi；admin-svc 100m/128Mi → 1000m/512Mi；Higress gateway 由 chart 默认值提供 | 2026-09-13（P0b-1 本地） |
+| 镜像可达性 | **受限网络事实**：`registry.k8s.io` 与 `docker.io` 在集群内**被拒**（connection refused）→ k8s 组件镜像须改源（本次用 `registry.cn-hangzhou.aliyuncs.com/google_containers/*`），监控栈镜像须宿主预拉 + 节点导入；`higress-registry.cn-hangzhou.cr.aliyuncs.com` 可达 | 2026-09-13（P0b-1 本地） |
+| 变更记录 | 2026-09-13：建立基线（P0b-1 本地 kind）。**待替换**：P0b-2 真实集群（单机 x86+k3s 或 3 节点）实测后另记 | 2026-09-13 |
 
 ## 1. 迁移原理
 
