@@ -52,6 +52,10 @@ plugin otpmask_route_fetch_reject_total conditional
 plugin otpmask_cred_fetch_cb_total required
 plugin otpmask_cred_fetch_ok_total conditional
 plugin otpmask_cred_fetch_reject_total conditional
+# ---- boundary C (gate #7): gateway-core channel token via credential endpoint ----
+plugin otpmask_core_channel_fetch_cb_total conditional
+plugin otpmask_core_channel_fetch_ok_total conditional
+plugin otpmask_core_channel_fetch_reject_total conditional
 
 # ---- gateway-core (ratelimit / quota dispatch / policy-change audit) ----
 core gateway_core_ratelimit_table_version required

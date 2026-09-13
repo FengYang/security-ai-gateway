@@ -69,6 +69,10 @@ var (
 	metricRateLimitFetchOK     = &pwCounter{name: "otpmask_ratelimit_fetch_ok_total"}
 	metricRateLimitFetchReject = &pwCounter{name: "otpmask_ratelimit_fetch_reject_total"}
 	metricRateLimitDegraded    = &pwCounter{name: "otpmask_ratelimit_degraded_total"}
+	// C 项（门禁 #7 边界 C）：gateway-core 通道令牌集拉取（每集合独立读令牌；失败保留旧令牌）。
+	metricChannelFetchCb     = &pwCounter{name: "otpmask_core_channel_fetch_cb_total"}
+	metricChannelFetchOK     = &pwCounter{name: "otpmask_core_channel_fetch_ok_total"}
+	metricChannelFetchReject = &pwCounter{name: "otpmask_core_channel_fetch_reject_total"}
 )
 
 // 说明（如实）：**不暴露**"当前生效限流表版本"仪表。proxy-wasm 的 MetricGauge 在多 worker

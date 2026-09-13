@@ -33,10 +33,15 @@ type credentialRuntime struct {
 	token      string
 	name       string
 	intervalMs int64
+	// C 项（门禁 #7 边界 C）：gateway-core 拉取通道令牌集，与段① 凭据**共用同一 tick**。
+	// 未配置 channelName = 不拉取该集合（沿用静态 gateway_core_token，行为不变）。
+	channelName  string
+	channelToken string // 该集合的独立读令牌（配置注入；非通道令牌本身）
 
 	mu          sync.RWMutex
 	sigKeyHex   string // 运行态 K_sig（64 位 hex）；空 = 尚未拉到
 	attestToken string // 运行态 attest token；空 = 尚未拉到
+	coreToken   string // 运行态 gateway-core 通道令牌；空 = 尚未拉到（只由 tick 读写，无需额外锁）
 }
 
 // credRuntime 全局凭据运行态（与 routeRuntime 同风格）。
@@ -53,31 +58,42 @@ func initCredentialRuntime(c PluginConfig) {
 	credRuntime.token = c.CredentialToken
 	credRuntime.name = c.CredentialName
 	credRuntime.intervalMs = c.CredentialIntervalSeconds * 1000
+	credRuntime.channelName = c.GatewayCoreCredentialName
+	credRuntime.channelToken = c.GatewayCoreCredentialToken
 	if credRuntime.intervalMs < 1000 {
 		credRuntime.intervalMs = 1000 // 最小 1s（防御性下限：防热点轮询）
 	}
-	if !credRuntime.enabled {
+	channelOn := credRuntime.channelName != "" && credRuntime.channelToken != "" && credRuntime.service != ""
+	if !credRuntime.enabled && !channelOn {
 		proxywasm.LogInfof("otpmask-plugin: 段① 凭据运行态拉取未启用（使用静态 config）")
 		return
 	}
 	credFetchLoopOnce.Do(func() {
 		wrapper.RegisterTickFunc(credRuntime.intervalMs, fetchCredentialOnce)
-		proxywasm.LogInfof("otpmask-plugin: 段① 凭据周期拉取已注册 period_ms=%d name=%s",
-			credRuntime.intervalMs, credRuntime.name)
+		proxywasm.LogInfof("otpmask-plugin: 凭据周期拉取已注册 period_ms=%d name=%s channel=%s",
+			credRuntime.intervalMs, credRuntime.name, orStr(credRuntime.channelName, "off"))
 	})
 	// 冷启动：tick 首个回调要等一个周期，配置加载期先立即拉一次（失败由后续 tick 兜底）。
 	fetchCredentialOnce()
 }
 
-// credentialResponse 端点响应（字段名与 plugin config 的 sig_key/attest_token 对齐）。
+// credentialResponse 端点响应（字段名与插件 config 对齐，便于直接反序列化）。
+// C 项起支持多集合：otpmask-keys → sig_key/attest_token；core-channel → token。
 type credentialResponse struct {
 	Name        string `json:"name"`
 	SigKeyHex   string `json:"sig_key"`
 	AttestToken string `json:"attest_token"`
+	Token       string `json:"token"`
 }
 
-// fetchCredentialOnce 拉取一次凭据并写入运行态（tick 触发；失败保留旧值）。
+// fetchCredentialOnce 凭据拉取 tick（**共用同一 tick** 拉取两个集合；各自失败保留旧值）。
 func fetchCredentialOnce() {
+	fetchOTPMaskCredentialOnce()
+	fetchCoreChannelOnce()
+}
+
+// fetchOTPMaskCredentialOnce 拉取段① 凭据并写入运行态（失败保留旧值）。
+func fetchOTPMaskCredentialOnce() {
 	if !credRuntime.enabled {
 		return
 	}
@@ -133,6 +149,71 @@ func validateCredentialPayload(r credentialResponse) error {
 	}
 	return nil
 }
+
+// fetchCoreChannelOnce 拉取 gateway-core 通道令牌集（C 项；失败保留旧值）。
+// 成功后：写入运行态并**立即触发一次限流表拉取**（令牌轮换即时生效，无需等下一 tick）。
+func fetchCoreChannelOnce() {
+	if credRuntime.channelName == "" || credRuntime.channelToken == "" || credRuntime.service == "" {
+		return
+	}
+	cli := wrapper.NewClusterClient(wrapper.FQDNCluster{FQDN: credRuntime.service, Port: credRuntime.port})
+	err := cli.Get("/v1/adminext/credentials/"+credRuntime.channelName,
+		[][2]string{
+			{"Accept", "application/json"},
+			{"X-Credential-Token", credRuntime.channelToken},
+		},
+		func(statusCode int, _ http.Header, respBody []byte) {
+			metricChannelFetchCb.incr()
+			if statusCode != 200 {
+				metricChannelFetchReject.incr()
+				proxywasm.LogWarnf("otpmask-plugin: 拉取通道令牌集 %s 返回 %d（保留旧令牌）", credRuntime.channelName, statusCode)
+				return
+			}
+			var resp credentialResponse
+			if err := json.Unmarshal(respBody, &resp); err != nil {
+				metricChannelFetchReject.incr()
+				proxywasm.LogWarnf("otpmask-plugin: 解析通道令牌集失败（保留旧令牌）: %v", err)
+				return
+			}
+			changed, err := applyCoreChannelToken(resp.Token)
+			if err != nil {
+				metricChannelFetchReject.incr()
+				proxywasm.LogWarnf("otpmask-plugin: 通道令牌非法（保留旧令牌）: %v", err)
+				return
+			}
+			metricChannelFetchOK.incr()
+			// 绝不打印令牌内容，仅记录长度
+			proxywasm.LogInfof("otpmask-plugin: 通道令牌已更新（len=%d changed=%v）", len(resp.Token), changed)
+			if changed {
+				rateLimitRuntime.token = resp.Token // 轮换即时生效（无需等下一 tick）
+				if rateLimitRuntime.cache != nil {
+					fetchRateLimitOnce()
+				}
+			}
+		})
+	if err != nil {
+		proxywasm.LogWarnf("otpmask-plugin: 触发通道令牌拉取失败: %v", err)
+	}
+}
+
+// applyCoreChannelToken 校验并应用通道令牌；返回是否发生变化（空/过短 → 拒绝，保留旧值）。
+// 纯逻辑（无 hostcall），便于单测。
+func applyCoreChannelToken(v string) (changed bool, err error) {
+	if len(v) < minCoreChannelTokenLen {
+		return false, fmt.Errorf("通道令牌过短（%d < %d）", len(v), minCoreChannelTokenLen)
+	}
+	if v == credRuntime.coreToken {
+		return false, nil
+	}
+	credRuntime.coreToken = v
+	return true, nil
+}
+
+// runtimeCoreChannelToken 运行态通道令牌（尚未拉到则为空串 → 调用方回退静态配置）。
+func runtimeCoreChannelToken() string { return credRuntime.coreToken }
+
+// minCoreChannelTokenLen 通道令牌最小长度（与管理面 core-channel 集合的下限一致）。
+const minCoreChannelTokenLen = 32
 
 // runtimeSigKeyHex 运行态 K_sig（尚未拉取到则为空串）。
 func runtimeSigKeyHex() string {

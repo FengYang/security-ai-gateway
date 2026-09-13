@@ -89,6 +89,10 @@ type PluginConfig struct {
 	// gateway-core 拉取通道令牌（内网静态 token，Authorization: Bearer）。**通道令牌**，
 	// 与 credential_token 同级（非厂商密钥）；生产经 Secret/环境注入，勿长期落 CR。
 	GatewayCoreToken string `json:"gateway_core_token"`
+	// C 项（门禁 #7 边界 C）：通道令牌改为**经管理面凭据端点运行态拉取**（CR 内不落明文）。
+	// gateway_core_credential_name 为空 = 沿用静态 gateway_core_token（行为不变）。
+	GatewayCoreCredentialName  string `json:"gateway_core_credential_name"`  // 集合名（如 core-channel）
+	GatewayCoreCredentialToken string `json:"gateway_core_credential_token"` // 该集合的独立读令牌
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -119,6 +123,8 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.CredentialIntervalSeconds = json.Get("credential_interval").Int()
 	config.RateLimitEnabled = json.Get("ratelimit_enabled").Bool()
 	config.GatewayCoreToken = json.Get("gateway_core_token").String()
+	config.GatewayCoreCredentialName = json.Get("gateway_core_credential_name").String()
+	config.GatewayCoreCredentialToken = json.Get("gateway_core_credential_token").String()
 	if config.GatewayCoreService == "" {
 		// 缺省 FQDN（与 tee_service 同理：FQDNCluster 需完整服务域名，短名不会物化）。
 		config.GatewayCoreService = "gateway-core.higress-system.svc.cluster.local"

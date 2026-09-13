@@ -67,7 +67,12 @@ func initRateLimitRuntime(config PluginConfig, log logs.Log) {
 	rateLimitRuntime.key = key
 	rateLimitRuntime.cache = ratelimitcache.New(key)
 	rateLimitRuntime.service = config.GatewayCoreService
+	// 通道令牌优先级：运行态（凭据端点拉取，C 项）> 静态 config（兼容写法）。
+	// 冷启动时序不确定（凭据回调可能先于本函数），故此处也读一次运行态。
 	rateLimitRuntime.token = config.GatewayCoreToken
+	if v := runtimeCoreChannelToken(); v != "" {
+		rateLimitRuntime.token = v
+	}
 	rateLimitRuntime.port = config.GatewayCorePort
 	rateLimitRuntime.pollIntervalMs = config.PollIntervalSeconds * 1000
 	ensureRateLimitFetchLoop()
