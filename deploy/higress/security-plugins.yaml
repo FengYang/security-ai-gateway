@@ -140,6 +140,12 @@ spec:
 #     ① 限流项必须嵌在 **`rule_items[]`** 内——写到 config 顶层会报
 #        `parse rule config failed: at least one of 'global_threshold' or 'rule_items'` 且插件加载失败；
 #     ② `limit_by_header` **不支持** `"*"`/正则，动态分桶必须用 `limit_by_per_header`；
+#        **反向约束（2026-09-13 实链取证，控制面 S4）**：`limit_by_per_header` 的 `limit_keys.key`
+#        **只接受 `"*"` 或 `regexp:` 前缀**，写具体租户名会被插件拒载并报
+#        `the "limit_by_per_header" restriction must start with 'regexp:' or be exactly '*'`。
+#        故：**所有租户统一配额** = per_header + `"*"`（本文件用法）；**按租户逐一配额**
+#        = `limit_by_header` + 精确租户名（gateway-core `CompileDataPlane` 的编译形态；
+#        未命中的租户不落桶、不限流，见 internal/ratelimit/compile.go 注释）；
 #     ③ registry 服务名后缀随类型而定：静态 registry 为 `<name>.static`，dns registry 为 `<name>.dns`；
 #        且 dns registry 的 domain 必须是合法域名格式（单标签名被 controller 拒绝：
 #        `invalid domain format:xxx`）。
