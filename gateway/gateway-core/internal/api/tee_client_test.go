@@ -92,9 +92,9 @@ func TestPutRateLimits_teeApplied(t *testing.T) {
 	if !r.TeeApplied || r.TeeUpdates != 1 {
 		t.Fatalf("应成功下发 1 条配额: %+v", r)
 	}
-	if len(stub.got) != 1 || stub.got[0].Tenant != "t-a" || stub.got[0].MaxTokens != 50_000_000 ||
-		stub.got[0].Window != "day" {
-		t.Fatalf("下发内容不符（应为 day 窗口）: %+v", stub.got)
+	if len(stub.got) != 1 || stub.got[0].Tenant != "t-a" || len(stub.got[0].Limits) != 1 ||
+		stub.got[0].Limits[0] != (ratelimit.QuotaLimit{Window: "day", MaxTokens: 50_000_000}) {
+		t.Fatalf("下发内容不符（应为 limits[day]）: %+v", stub.got)
 	}
 	// 预算规则在数据面无内容（不下发），并须带窗口语义与内存态说明
 	if r.DataPlaneCompiled {
@@ -154,7 +154,10 @@ func TestNewHTTPTeeQuotaApplier_applies(t *testing.T) {
 	if applier == nil {
 		t.Fatal("URL 非空时应返回下发器")
 	}
-	if err := applier.ApplyQuota(context.Background(), []ratelimit.QuotaUpdate{{Tenant: "t-a", MaxTokens: 50_000_000, Window: "day"}}); err != nil {
+	if err := applier.ApplyQuota(context.Background(), []ratelimit.QuotaUpdate{{
+		Tenant: "t-a",
+		Limits: []ratelimit.QuotaLimit{{Window: "day", MaxTokens: 50_000_000}},
+	}}); err != nil {
 		t.Fatalf("下发失败: %v", err)
 	}
 	if gotPath != "/usage/quota" {
@@ -163,8 +166,17 @@ func TestNewHTTPTeeQuotaApplier_applies(t *testing.T) {
 	if gotToken != "admin-token-1" {
 		t.Fatalf("管理头不符: %s", gotToken)
 	}
-	if gotBody["tenant"] != "t-a" || gotBody["max_tokens"] != float64(50_000_000) || gotBody["window"] != "day" {
-		t.Fatalf("负载形态不符（须含 window）: %+v", gotBody)
+	// B 项契约：只发 limits[]（扁平 max_tokens/window 不再使用）
+	if _, has := gotBody["max_tokens"]; has {
+		t.Fatalf("不应再发扁平 max_tokens: %+v", gotBody)
+	}
+	limits, _ := gotBody["limits"].([]any)
+	if gotBody["tenant"] != "t-a" || len(limits) != 1 {
+		t.Fatalf("负载形态不符（须含 limits[]）: %+v", gotBody)
+	}
+	first, _ := limits[0].(map[string]any)
+	if first["window"] != "day" || first["max_tokens"] != float64(50_000_000) {
+		t.Fatalf("limits 维度不符: %+v", limits[0])
 	}
 }
 
@@ -176,7 +188,7 @@ func TestNewHTTPTeeQuotaApplier_rejects(t *testing.T) {
 	defer ts.Close()
 
 	applier := NewHTTPTeeQuotaApplier(ts.URL, "")
-	err := applier.ApplyQuota(context.Background(), []ratelimit.QuotaUpdate{{Tenant: "t-a", MaxTokens: 1}})
+	err := applier.ApplyQuota(context.Background(), []ratelimit.QuotaUpdate{{Tenant: "t-a", Limits: []ratelimit.QuotaLimit{{MaxTokens: 1}}}})
 	if err == nil || !strings.Contains(err.Error(), "保留现有配额") {
 		t.Fatalf("非 200 应报失败且说明保留配额，实际 %v", err)
 	}

@@ -20,6 +20,8 @@ tee otpmask_tokens_out_total required
 tee otpmask_key_issue_total required
 tee otpmask_audit_events required
 tee otpmask_denies_total conditional
+# boundary B (gate #7): quota denies attributed by enforced dimension (minute|day|total)
+tee otpmask_quota_denies_total conditional
 tee otpmask_guard_classifier_total conditional
 tee otpmask_reconcile_mismatch_total conditional
 tee otpmask_shadow_would_reject_total conditional

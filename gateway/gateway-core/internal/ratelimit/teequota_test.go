@@ -13,7 +13,7 @@ func teeTable(rules ...Rule) *Table {
 }
 
 // TestCompileTEEQuota_budgetAndTPM 预算 → day 窗口；tpm → minute 窗口（S3b 闭合两个缺口）。
-// S5 起按租户合并为**一条**更新（tee-infer 契约＝每租户完整状态），窗口冲突按"预算优先"择一并记 Note。
+// B 项起同租户两维度**同时下发**（不再"择一"），并按 minute < day 规范化顺序（与规则书写顺序解耦）。
 func TestCompileTEEQuota_budgetAndTPM(t *testing.T) {
 	updates, notes, err := CompileTEEQuota(teeTable(
 		Rule{ID: "t-a-budget", Kind: KindBudget, Scope: ScopeTenant, Target: "t-a",
@@ -27,14 +27,20 @@ func TestCompileTEEQuota_budgetAndTPM(t *testing.T) {
 	if len(updates) != 1 {
 		t.Fatalf("同租户应合并为 1 条更新: %+v", updates)
 	}
-	if updates[0].Tenant != "t-a" || updates[0].MaxTokens != 50_000_000 || updates[0].Window != "day" {
-		t.Fatalf("日预算优先并映射为 window=day: %+v", updates[0])
+	u := updates[0]
+	if u.Tenant != "t-a" || len(u.Limits) != 2 ||
+		u.Limits[0] != (QuotaLimit{Window: "minute", MaxTokens: 200_000}) ||
+		u.Limits[1] != (QuotaLimit{Window: "day", MaxTokens: 50_000_000}) {
+		t.Fatalf("两维度应同时下发且按 minute<day 规范化: %+v", u)
 	}
 	if !notesContain(notes, "UTC+8 自然日窗口") || !notesContain(notes, "内存态") {
 		t.Fatalf("预算须带窗口语义与内存态声明: %v", notes)
 	}
-	if !notesContain(notes, "预算优先") {
-		t.Fatalf("窗口冲突须如实记 Note（预算优先）: %v", notes)
+	if !notesContain(notes, "多维 enforce") {
+		t.Fatalf("多维下发须记 Note: %v", notes)
+	}
+	if notesContain(notes, "预算优先") || notesContain(notes, "未下发") {
+		t.Fatalf("B 项后不应再有择一/未下发 Note: %v", notes)
 	}
 
 	// 仅 tpm（无预算）→ minute 窗口
@@ -45,7 +51,8 @@ func TestCompileTEEQuota_budgetAndTPM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("编译失败: %v", err)
 	}
-	if len(updates) != 1 || updates[0].MaxTokens != 200_000 || updates[0].Window != "minute" {
+	if len(updates) != 1 || len(updates[0].Limits) != 1 ||
+		updates[0].Limits[0] != (QuotaLimit{Window: "minute", MaxTokens: 200_000}) {
 		t.Fatalf("tpm 应映射为 window=minute: %+v", updates)
 	}
 	if !notesContain(notes, "每分钟窗口") {
@@ -66,7 +73,7 @@ func TestCompileTEEQuota_shadow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("编译失败: %v", err)
 	}
-	if len(updates) != 1 || updates[0].Tenant != "t-s" || updates[0].MaxTokens != 0 || updates[0].Shadow == nil {
+	if len(updates) != 1 || updates[0].Tenant != "t-s" || len(updates[0].Limits) != 0 || updates[0].Shadow == nil {
 		t.Fatalf("影子应合并为一条（无 enforce）: %+v", updates)
 	}
 	sh := updates[0].Shadow
@@ -87,7 +94,8 @@ func TestCompileTEEQuota_shadow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("编译失败: %v", err)
 	}
-	if len(updates) != 1 || updates[0].MaxTokens != 5_000 || updates[0].Window != "day" ||
+	if len(updates) != 1 || len(updates[0].Limits) != 1 ||
+		updates[0].Limits[0] != (QuotaLimit{Window: "day", MaxTokens: 5_000}) ||
 		updates[0].Shadow == nil || updates[0].Shadow.RPM != 60 {
 		t.Fatalf("enforce 与 shadow 应合并到一条更新: %+v", updates)
 	}

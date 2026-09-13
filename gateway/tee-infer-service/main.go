@@ -224,17 +224,47 @@ func (s *teeServer) recordUsage(tenant string, tokensIn, tokensOut int, denied b
 
 // ---------- P1：token 配额管控 ----------
 
-// quotaSpec 租户配额（S3b：在原"累计上限"基础上支持窗口）。
+// quotaLimit 单维度 enforce 上限（B 项：多维度）。
 //
 // Window 取值：
 //   - ""       累计上限（P1 既有语义，**默认，行为不变**）；
 //   - "minute" 每分钟窗口（对应控制面策略的 tpm）；
 //   - "day"    UTC+8 自然日窗口（对应控制面策略的 daily_budget_tokens）。
+type quotaLimit struct {
+	Window    string `json:"window,omitempty"`
+	MaxTokens int64  `json:"max_tokens"`
+}
+
+// quotaSpec 租户配额（B 项：Limits 承载**多维** enforce，任一维度超限即拒绝；空 = 无 enforce）。
 type quotaSpec struct {
-	MaxTokens int64
-	Window    string
+	Limits []quotaLimit
 	// S5：影子配置（判据 4：只计数不拒绝，命中落审计 would_reject）。零值 = 未配置影子。
 	Shadow shadowSpec
+}
+
+// normalizeLimits 规范化维度列表：丢弃 max_tokens<=0 的条目（该维度视为未配置），保持输入顺序。
+func normalizeLimits(in []quotaLimit) []quotaLimit {
+	out := make([]quotaLimit, 0, len(in))
+	for _, l := range in {
+		if l.MaxTokens > 0 {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// primaryLimit 主维度（兼容单维度视图：/usage 的 quota/window/window_used 与门户）：
+// 优先累计维度，否则首个维度；无 enforce 返回 (零值, false)。
+func primaryLimit(limits []quotaLimit) (quotaLimit, bool) {
+	for _, l := range limits {
+		if l.Window == quotaWindowNone {
+			return l, true
+		}
+	}
+	if len(limits) > 0 {
+		return limits[0], true
+	}
+	return quotaLimit{}, false
 }
 
 // shadowSpec 影子阈值（判据 4）。三个维度各自独立窗口计数：
@@ -283,48 +313,80 @@ func validQuotaWindow(w string) bool {
 	}
 }
 
+// quotaLimitsOf 返回租户生效的 enforce 维度（持有 s.mu 时必须调用）：
+//   - 租户已配置条目 → 用其 Limits（空 = 该租户不限，**不**回落全局默认，与 P1 语义一致）；
+//   - 未配置条目 → 全局默认（-token-quota，累计维度；<=0 = 不限）。
+func (s *teeServer) quotaLimitsOf(tenant string) []quotaLimit {
+	if spec, ok := s.quota[tenant]; ok {
+		return spec.Limits
+	}
+	if s.quotaDefault > 0 {
+		return []quotaLimit{{Window: quotaWindowNone, MaxTokens: s.quotaDefault}}
+	}
+	return nil
+}
+
+// dimensionUsed 读取某维度当前已用 token（持有 s.mu 时必须调用；窗口翻转即重置，与判定同规则）。
+// window="" = 累计维度（usage.TokensIn+TokensOut）。
+func (s *teeServer) dimensionUsed(tenant, window string) int64 {
+	if window == quotaWindowNone {
+		if rec := s.usage[tenant]; rec != nil {
+			return int64(rec.TokensIn) + int64(rec.TokensOut)
+		}
+		return 0
+	}
+	uk := tenant + "|" + window
+	key := quotaWindowKeyFor(window, time.Now())
+	if s.quotaWindowKey[uk] != key {
+		s.quotaWindowKey[uk] = key
+		s.quotaWindowUsage[uk] = 0
+	}
+	return s.quotaWindowUsage[uk]
+}
+
+// dimensionReserve 窗口维度占位（持有 s.mu；含"窗口翻转即重置"语义）。
+func (s *teeServer) dimensionReserve(tenant, window string, tokensIn int64) {
+	uk := tenant + "|" + window
+	key := quotaWindowKeyFor(window, time.Now())
+	if s.quotaWindowKey[uk] != key {
+		s.quotaWindowKey[uk] = key
+		s.quotaWindowUsage[uk] = 0
+	}
+	s.quotaWindowUsage[uk] += tokensIn
+}
+
+// dimensionRelease 窗口维度退回（持有 s.mu；下限保护不退成负数）。
+func (s *teeServer) dimensionRelease(tenant, window string, tokensIn int64) {
+	uk := tenant + "|" + window
+	if s.quotaWindowUsage[uk] >= tokensIn {
+		s.quotaWindowUsage[uk] -= tokensIn
+	} else {
+		s.quotaWindowUsage[uk] = 0
+	}
+}
+
 // reserveQuota 预占式配额检查（原子）：在 s.mu 内完成"检查 + 占位"，杜绝并发超卖。
+//
+// B 项（多维度）：**先全量检查所有维度，全部通过后统一提交占位**——任一维度不足即整单拒绝
+// （返回触发拒绝的维度窗口，供指标归因）；因检查阶段不落任何占位，故无需回滚，天然杜绝
+// "部分占位泄漏"（与"逐个占位+失败回滚"等价且少一条回滚路径）。
+//
 // 占位计入 usage.TokensIn（输入侧控制，计费计量不丢）；推理成功后 recordUsage 只补记输出。
-// 配额 <=0 = 不限（仍占位累计 TokensIn，仅跳过上限检查）；
-// S3b：带窗口的配额按"窗口内已用"判定，窗口翻转（分钟/UTC+8 自然日）即自动重置；
+// 配额 <=0 = 不限（仍占位累计 TokensIn，仅跳过上限检查）；窗口翻转（分钟/UTC+8 自然日）即自动重置。
 // 失败路径（GA-计费 P0-3）：预占后失败且无任何输出交付 → rollbackQuota 退回输入
 // 计量（fail-closed 故障不向租户计费）；流中断已有部分输出 → 按实收计费（不回滚）。
 // 输出侧配额控制为扩展项（流式输出无法预知）。
-func (s *teeServer) reserveQuota(tenant string, tokensIn int64) bool {
+func (s *teeServer) reserveQuota(tenant string, tokensIn int64) (bool, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	max := s.quotaDefault
-	window := quotaWindowNone
-	if spec, ok := s.quota[tenant]; ok {
-		max = spec.MaxTokens
-		window = spec.Window
-	}
-	if window != quotaWindowNone {
-		// 窗口配额：按窗口内已用判定，窗口翻转即重置（不触碰累计计量）
-		uk := tenant + "|" + window
-		key := quotaWindowKeyFor(window, time.Now())
-		if s.quotaWindowKey[uk] != key {
-			s.quotaWindowKey[uk] = key
-			s.quotaWindowUsage[uk] = 0
+	limits := s.quotaLimitsOf(tenant)
+	for _, l := range limits {
+		if l.MaxTokens <= 0 {
+			continue
 		}
-		if max > 0 && s.quotaWindowUsage[uk]+tokensIn > max {
-			return false
+		if s.dimensionUsed(tenant, l.Window)+tokensIn > l.MaxTokens {
+			return false, l.Window
 		}
-		s.quotaWindowUsage[uk] += tokensIn
-		rec := s.usage[tenant]
-		if rec == nil {
-			rec = &usageRecord{}
-			s.usage[tenant] = rec
-		}
-		rec.TokensIn += int(tokensIn) // 预占（计量照记）
-		return true
-	}
-	used := int64(0)
-	if rec := s.usage[tenant]; rec != nil {
-		used = int64(rec.TokensIn) + int64(rec.TokensOut)
-	}
-	if max > 0 && used+tokensIn > max {
-		return false
 	}
 	rec := s.usage[tenant]
 	if rec == nil {
@@ -332,44 +394,43 @@ func (s *teeServer) reserveQuota(tenant string, tokensIn int64) bool {
 		s.usage[tenant] = rec
 	}
 	rec.TokensIn += int(tokensIn) // 预占（无限额时同样累计计量）
-	return true
+	for _, l := range limits {
+		if l.Window != quotaWindowNone {
+			s.dimensionReserve(tenant, l.Window, tokensIn)
+		}
+	}
+	return true, quotaWindowNone
 }
 
-// quotaOf 读取租户配额上限（展示用）。
+// quotaOf 读取租户配额上限（展示用；多维度取主维度，见 primaryLimit）。
 func (s *teeServer) quotaOf(tenant string) int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if q, ok := s.quota[tenant]; ok {
-		return q.MaxTokens
+	if l, ok := primaryLimit(s.quotaLimitsOf(tenant)); ok {
+		return l.MaxTokens
 	}
-	return s.quotaDefault
+	return 0
 }
 
-// quotaWindowOf 读取租户配额窗口（展示用）。
+// quotaWindowOf 读取租户配额窗口（展示用；多维度取主维度）。
 func (s *teeServer) quotaWindowOf(tenant string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if q, ok := s.quota[tenant]; ok {
-		return q.Window
+	if l, ok := primaryLimit(s.quotaLimitsOf(tenant)); ok {
+		return l.Window
 	}
 	return quotaWindowNone
 }
 
-// quotaWindowUsed 读取租户当前窗口已用 token（展示/验证用；窗口翻转时先重置）。
+// quotaWindowUsed 读取租户主维度当前窗口已用 token（展示/验证用；窗口翻转时先重置）。
 func (s *teeServer) quotaWindowUsed(tenant string) int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	spec, ok := s.quota[tenant]
-	if !ok || spec.Window == quotaWindowNone {
+	l, ok := primaryLimit(s.quotaLimitsOf(tenant))
+	if !ok || l.Window == quotaWindowNone {
 		return 0
 	}
-	uk := tenant + "|" + spec.Window
-	key := quotaWindowKeyFor(spec.Window, time.Now())
-	if s.quotaWindowKey[uk] != key {
-		s.quotaWindowKey[uk] = key
-		s.quotaWindowUsage[uk] = 0
-	}
-	return s.quotaWindowUsage[uk]
+	return s.dimensionUsed(tenant, l.Window)
 }
 
 // ---------- S5（判据 4）：影子模式（只计数不拒绝 + would_reject 落审计） ----------
@@ -484,7 +545,8 @@ func (s *teeServer) recordModelUsage(tenant, engineType, model string, tokensIn,
 
 // rollbackQuota 回滚预占（GA-计费 P0-3）：预占后失败且无任何输出交付时，
 // 输入计量退回（fail-closed 故障不向租户计费）。下限保护不退成负数。
-// S3b：带窗口的配额同步退回窗口内计数（否则失败请求会白占窗口额度）。
+// B 项：逐窗口维度同步退回（否则失败请求会白占窗口额度）；维度取当前生效配置
+// （与预占同一配置即精确对应；请求处理中途被改配属已知残余边界，与改造前一致）。
 func (s *teeServer) rollbackQuota(tenant string, tokensIn int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -496,12 +558,9 @@ func (s *teeServer) rollbackQuota(tenant string, tokensIn int64) {
 		tokensIn = int64(rec.TokensIn)
 	}
 	rec.TokensIn -= int(tokensIn)
-	if spec, ok := s.quota[tenant]; ok && spec.Window != quotaWindowNone {
-		uk := tenant + "|" + spec.Window
-		if s.quotaWindowUsage[uk] >= tokensIn {
-			s.quotaWindowUsage[uk] -= tokensIn
-		} else {
-			s.quotaWindowUsage[uk] = 0
+	for _, l := range s.quotaLimitsOf(tenant) {
+		if l.Window != quotaWindowNone {
+			s.dimensionRelease(tenant, l.Window, tokensIn)
 		}
 	}
 	log.Printf("[tee] 配额预占回滚 tenant=%s tokens=%d（fail-closed 故障不计费）", tenant, tokensIn)
@@ -945,9 +1004,11 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// P1：配额预占（输入 token 数，超限 429 fail-closed；原子占位防并发超卖）
-	if !s.reserveQuota(tenant, int64(len(req.CipherVectors))) {
+	if ok, denied := s.reserveQuota(tenant, int64(len(req.CipherVectors))); !ok {
+		s.metrics.incQuotaDeny(tenant, denied)
 		s.denyAndAudit(tenant, req.RequestID, "quota_exceeded", payloadSHA)
-		log.Printf("[tee] 配额超限拒绝 tenant=%s req=%s tokens_in=%d", tenant, req.RequestID, len(req.CipherVectors))
+		log.Printf("[tee] 配额超限拒绝 tenant=%s req=%s tokens_in=%d window=%q（空=累计维度）",
+			tenant, req.RequestID, len(req.CipherVectors), denied)
 		http.Error(w, "租户 token 配额超限（429）", http.StatusTooManyRequests)
 		return
 	}
@@ -1173,9 +1234,11 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	// P1：配额预占（输入 token，超限 429 fail-closed；原子占位防并发超卖。
 	// 计量口径为 CJK 感知估算（过渡口径，GF.2.4），生产须接入真机 tokenizer，
 	// 见 GA-AI网关能力补齐方案 D-3）
-	if !s.reserveQuota(tenant, int64(s.countTokens(inputText.String()))) {
+	if ok, denied := s.reserveQuota(tenant, int64(s.countTokens(inputText.String()))); !ok {
+		s.metrics.incQuotaDeny(tenant, denied)
 		s.denyAndAudit(tenant, req.RequestID, "quota_exceeded", payloadSHA)
-		log.Printf("[tee] 配额超限拒绝（text）tenant=%s req=%s", tenant, req.RequestID)
+		log.Printf("[tee] 配额超限拒绝（text）tenant=%s req=%s window=%q（空=累计维度）",
+			tenant, req.RequestID, denied)
 		http.Error(w, "租户 token 配额超限（429）", http.StatusTooManyRequests)
 		return
 	}
@@ -1594,14 +1657,23 @@ func (s *teeServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.metrics.render(w, s.audit.len())
 }
 
-// usageView 用量查询响应视图（含配额信息，P1；S3b 起含窗口配额；S5 起含影子配置与计数）。
+// usageView 用量查询响应视图（含配额信息，P1；S3b 起含窗口配额；S5 起含影子配置与计数；
+// B 项起含多维 enforce 全量快照）。
 type usageView struct {
 	*usageRecord
-	Quota           int64       `json:"quota"`                       // 配额上限（<=0 = 不限）
-	UsedTokens      int64       `json:"used_tokens"`                 // 累计消耗 token（输入+输出）
-	QuotaWindow     string      `json:"quota_window,omitempty"`      // S3b：minute | day（缺省 = 累计）
-	QuotaWindowUsed int64       `json:"quota_window_used,omitempty"` // S3b：当前窗口内已用 token
-	Shadow          *shadowView `json:"shadow,omitempty"`            // S5：影子配置与窗口内计数（判据 4）
+	Quota           int64            `json:"quota"`                       // 主维度配额上限（<=0 = 不限）
+	UsedTokens      int64            `json:"used_tokens"`                 // 累计消耗 token（输入+输出）
+	QuotaWindow     string           `json:"quota_window,omitempty"`      // S3b：minute | day（缺省 = 累计）
+	QuotaWindowUsed int64            `json:"quota_window_used,omitempty"` // S3b：主维度当前窗口内已用 token
+	QuotaLimits     []quotaLimitView `json:"quota_limits,omitempty"`      // B 项：多维 enforce 快照
+	Shadow          *shadowView      `json:"shadow,omitempty"`            // S5：影子配置与窗口内计数（判据 4）
+}
+
+// quotaLimitView 单维度 enforce 视图（B 项：window="" 为累计维度）。
+type quotaLimitView struct {
+	Window     string `json:"window,omitempty"`
+	MaxTokens  int64  `json:"max_tokens"`
+	WindowUsed int64  `json:"window_used"`
 }
 
 // shadowView 影子视图（判据 4）：阈值 + 当前窗口内已计数。
@@ -1634,17 +1706,20 @@ func (s *teeServer) handleUsage(w http.ResponseWriter, r *http.Request) {
 	view := func(tenant string, rec *usageRecord) *usageView {
 		uv := &usageView{usageRecord: rec, Quota: s.quotaDefault}
 		if q, ok := s.quota[tenant]; ok {
-			uv.Quota = q.MaxTokens
-			uv.QuotaWindow = q.Window
-			if q.Window != quotaWindowNone {
+			// 兼容字段取主维度（累计优先，否则首维度）；多维全量见 quota_limits。
+			uv.Quota, uv.QuotaWindow = 0, quotaWindowNone
+			if l, has := primaryLimit(q.Limits); has {
+				uv.Quota, uv.QuotaWindow = l.MaxTokens, l.Window
+			}
+			for _, l := range q.Limits {
 				// 展示前先做一次窗口翻转（与 reserveQuota 同规则，避免显示上个窗口的旧计数）
-				uk := tenant + "|" + q.Window
-				key := quotaWindowKeyFor(q.Window, time.Now())
-				if s.quotaWindowKey[uk] != key {
-					s.quotaWindowKey[uk] = key
-					s.quotaWindowUsage[uk] = 0
+				used := s.dimensionUsed(tenant, l.Window)
+				uv.QuotaLimits = append(uv.QuotaLimits, quotaLimitView{
+					Window: l.Window, MaxTokens: l.MaxTokens, WindowUsed: used,
+				})
+				if l.Window == uv.QuotaWindow {
+					uv.QuotaWindowUsed = used
 				}
-				uv.QuotaWindowUsed = s.quotaWindowUsage[uk]
 			}
 			// S5（判据 4）：影子配置与当前窗口内计数（同一锁内直接读，避免重入）
 			if q.Shadow.configured() {
@@ -1713,19 +1788,47 @@ func (s *teeServer) handleUsageIncremental(w http.ResponseWriter, q url.Values) 
 }
 
 // quotaRequest 配额设置请求。
+//
+// 两种写法**互斥**（同时出现即 400，避免"两套口径谁生效"歧义）：
+//   - 扁平（S3b 兼容）：{"max_tokens":50000000,"window":"day"}（单维度）
+//   - 多维（B 项）：{"limits":[{"window":"minute","max_tokens":200000},{"window":"day","max_tokens":50000000}]}（任一维度超限即拒绝）
+//
+// limits 为**空数组** ＝ 清除 enforce（保留 shadow）；limits 中 max_tokens<=0 的维度视为未配置。
 type quotaRequest struct {
 	Tenant    string `json:"tenant"`
 	MaxTokens int64  `json:"max_tokens"`       // <=0 = 不限
 	Window    string `json:"window,omitempty"` // S3b："" = 累计（默认，行为不变）| minute | day（UTC+8 自然日）
+	// B 项：多维 enforce；nil = 未提供（走扁平字段），非 nil（含空数组）= 以 limits 为准。
+	Limits []quotaLimit `json:"limits"`
 	// S5（判据 4）：影子配置（只计数不拒绝；命中落审计 would_reject）。
 	// 传 null/缺省 = 清除该租户的影子（与 max_tokens<=0 清除 enforce 配额同语义）。
 	Shadow *shadowSpec `json:"shadow,omitempty"`
 }
 
-// handleQuota 配额设置：POST /usage/quota {"tenant":"acme","max_tokens":1000000,"window":"day"}。
-// max_tokens <= 0 解除限制；window 缺省 = 累计上限（P1 既有语义，行为不变）。
+// quotaLimitsView 某租户**显式配置**的多维快照（不含全局默认；持有 s.mu 时必须调用）。
+// 无显式配置返回空切片（序列化为 []，便于消费方直接遍历）。
+func (s *teeServer) quotaLimitsView(tenant string) []quotaLimitView {
+	spec, ok := s.quota[tenant]
+	out := make([]quotaLimitView, 0)
+	if !ok {
+		return out
+	}
+	for _, l := range spec.Limits {
+		out = append(out, quotaLimitView{
+			Window: l.Window, MaxTokens: l.MaxTokens, WindowUsed: s.dimensionUsed(tenant, l.Window),
+		})
+	}
+	return out
+}
+
+// handleQuota 配额设置：POST /usage/quota。
+//   - 扁平（S3b）：{"tenant":"acme","max_tokens":1000000,"window":"day"}；max_tokens<=0 解除限制，
+//     window 缺省 = 累计上限（P1 既有语义，行为不变）；
+//   - 多维（B 项）：{"tenant":"acme","limits":[{"window":"minute","max_tokens":200000},
+//     {"window":"day","max_tokens":50000000}]}——任一维度超限即 429，拒绝按维度归因（指标）。
+//
 // S5：可同时下发 shadow（{rpm,tpm,daily_budget_tokens}，只计数不拒绝）。
-// 返回当前生效配额、窗口与窗口内已用（window_used）、影子配置与影子窗口内已用。
+// 返回生效主维度（quota/window/window_used，兼容旧消费方）、多维全量（quota_limits）与影子计数。
 func (s *teeServer) handleQuota(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1744,47 +1847,65 @@ func (s *teeServer) handleQuota(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad window（须为 minute|day 或省略）", http.StatusBadRequest)
 		return
 	}
+	if req.Limits != nil && (req.MaxTokens != 0 || req.Window != "") {
+		http.Error(w, "bad request（limits 与 max_tokens/window 互斥，勿同时下发）", http.StatusBadRequest)
+		return
+	}
+	seenWindow := make(map[string]bool, len(req.Limits))
+	for _, l := range req.Limits {
+		if !validQuotaWindow(l.Window) {
+			http.Error(w, "bad limits（window 须为 minute|day 或省略）", http.StatusBadRequest)
+			return
+		}
+		if seenWindow[l.Window] {
+			http.Error(w, fmt.Sprintf("bad limits（window=%q 重复）", l.Window), http.StatusBadRequest)
+			return
+		}
+		seenWindow[l.Window] = true
+	}
 	if req.Shadow != nil && (req.Shadow.RPM < 0 || req.Shadow.TPM < 0 || req.Shadow.DailyBudgetTokens < 0) {
 		http.Error(w, "bad shadow（rpm/tpm/daily_budget_tokens 须为非负）", http.StatusBadRequest)
 		return
 	}
 	s.mu.Lock()
-	// 语义：每次下发为该租户的**完整状态**（缺省 shadow 视为清除；与 max_tokens<=0 解除 enforce 一致）。
-	spec := quotaSpec{MaxTokens: req.MaxTokens, Window: req.Window}
-	if req.MaxTokens <= 0 {
-		spec.MaxTokens, spec.Window = 0, quotaWindowNone
+	// 语义：每次下发为该租户的**完整状态**（缺省 shadow 视为清除；enforce 以 limits 为准，空 = 清除）。
+	spec := quotaSpec{}
+	if req.Limits != nil {
+		spec.Limits = normalizeLimits(req.Limits)
+	} else if req.MaxTokens > 0 {
+		spec.Limits = normalizeLimits([]quotaLimit{{Window: req.Window, MaxTokens: req.MaxTokens}})
 	}
 	if req.Shadow != nil {
 		spec.Shadow = *req.Shadow
 	}
-	if spec.MaxTokens <= 0 && !spec.Shadow.configured() {
+	if len(spec.Limits) == 0 && !spec.Shadow.configured() {
 		delete(s.quota, req.Tenant) // 既无 enforce 也无影子 → 移除条目
 	} else {
 		s.quota[req.Tenant] = spec
 	}
-	effective := s.quotaDefault
-	window := quotaWindowNone
-	var shadow shadowSpec
-	if q, ok := s.quota[req.Tenant]; ok {
-		effective = q.MaxTokens
-		window = q.Window
-		shadow = q.Shadow
+	// 兼容字段取主维度；未配置条目时回落全局默认（与 P1 行为一致）。
+	effective, window := int64(0), quotaWindowNone
+	if l, ok := primaryLimit(s.quotaLimitsOf(req.Tenant)); ok {
+		effective, window = l.MaxTokens, l.Window
 	}
+	limitsView := s.quotaLimitsView(req.Tenant)
+	shadow := spec.Shadow
 	s.mu.Unlock()
 	used := s.quotaWindowUsed(req.Tenant)
 	rpmUsed, tpmUsed, dailyUsed := s.shadowUsage(req.Tenant)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"tenant":      req.Tenant,
-		"quota":       effective,
-		"window":      window,
-		"window_used": used,
+		"tenant":       req.Tenant,
+		"quota":        effective,
+		"window":       window,
+		"window_used":  used,
+		"quota_limits": limitsView,
 		"shadow": map[string]any{
 			"rpm": shadow.RPM, "tpm": shadow.TPM, "daily_budget_tokens": shadow.DailyBudgetTokens,
 			"rpm_used": rpmUsed, "tpm_used": tpmUsed, "daily_budget_used": dailyUsed,
 		},
 	})
-	log.Printf("[tee] 配额设置 tenant=%s max_tokens=%d window=%q shadow(rpm=%d tpm=%d daily=%d)",
-		req.Tenant, req.MaxTokens, req.Window, shadow.RPM, shadow.TPM, shadow.DailyBudgetTokens)
+	log.Printf("[tee] 配额设置 tenant=%s limits=%v shadow(rpm=%d tpm=%d daily=%d)",
+		req.Tenant, limitsView, shadow.RPM, shadow.TPM, shadow.DailyBudgetTokens)
 }
 
 // handleAudit 审计查询：GET /audit（全部）或 ?tenant=X（按租户过滤）。
