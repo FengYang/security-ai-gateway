@@ -31,7 +31,7 @@ func testServer() *Server {
 	if err != nil {
 		panic(err)
 	}
-	return New(sig, msig, rlsig, store.NewMemory(), "tok",
+	return New(sig, msig, rlsig, nil, store.NewMemory(), "tok",
 		route.NewRouteTable(1, 1725500000), ratelimit.NewTable(1, time.Unix(1725500000, 0)))
 }
 

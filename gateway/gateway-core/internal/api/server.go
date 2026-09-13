@@ -19,21 +19,24 @@ type Server struct {
 	signer   *route.Signer
 	msigner  *mcpsec.Signer
 	rlsigner *ratelimit.Signer
+	teeQuota TeeQuotaApplier // nil = 未配置（不做 TEE 侧配额下发）
 	store    store.Store
 	token    string // 内网静态鉴权 token
 	mux      *http.ServeMux
 }
 
 // New 构造 API Server。routerTable 为启动时注入的已签名默认路由表（可为空表）；
-// rateLimitTable 为启动时注入的已签名默认限流表（可为空表，Phase 1 门禁 #7）。
-func New(signer *route.Signer, msigner *mcpsec.Signer, rlsigner *ratelimit.Signer, st store.Store, authToken string, routerTable *route.RouteTable, rateLimitTable *ratelimit.Table) *Server {
+// rateLimitTable 为启动时注入的已签名默认限流表（可为空表，Phase 1 门禁 #7）；
+// teeQuota 为 TEE 侧配额下发器（nil = 未配置，此时预算/TPM 仅在响应 Note 中说明）。
+func New(signer *route.Signer, msigner *mcpsec.Signer, rlsigner *ratelimit.Signer, teeQuota TeeQuotaApplier,
+	st store.Store, authToken string, routerTable *route.RouteTable, rateLimitTable *ratelimit.Table) *Server {
 	if routerTable != nil {
 		st.SaveRouteTable(routerTable)
 	}
 	if rateLimitTable != nil {
 		st.SaveRateLimitTable(rateLimitTable)
 	}
-	s := &Server{signer: signer, msigner: msigner, rlsigner: rlsigner, store: st, token: authToken, mux: http.NewServeMux()}
+	s := &Server{signer: signer, msigner: msigner, rlsigner: rlsigner, teeQuota: teeQuota, store: st, token: authToken, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }

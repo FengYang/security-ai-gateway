@@ -66,9 +66,12 @@ func main() {
 	st := store.NewMemory()
 	rt := defaultRouteTable(signer)
 	rlt := defaultRateLimitTable(rsigner)
-	srv := api.New(signer, msigner, rsigner, st, authToken, rt, rlt)
+	// TEE 侧配额下发器（S3）：OTP_CORE_TEE_URL 为空 = nil（预算/TPM 不下发，仅在响应 Note 中说明）
+	teeQuota := api.NewHTTPTeeQuotaApplier(os.Getenv("OTP_CORE_TEE_URL"), os.Getenv("OTP_CORE_TEE_ADMIN_TOKEN"))
+	srv := api.New(signer, msigner, rsigner, teeQuota, st, authToken, rt, rlt)
 
-	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d 限流版本=%d", addr, authToken != "", rt.Version, rlt.Version)
+	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d 限流版本=%d TEE配额下发=%v",
+		addr, authToken != "", rt.Version, rlt.Version, teeQuota != nil)
 	// 控制面无流式响应，全量超时；body 上限防资源耗尽（T-1 评审项）
 	httpSrv := &http.Server{
 		Addr:              addr,

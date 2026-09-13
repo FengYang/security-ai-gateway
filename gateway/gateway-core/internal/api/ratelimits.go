@@ -67,12 +67,15 @@ func (s *Server) handlePutRateLimits(w http.ResponseWriter, r *http.Request) {
 	}
 	s.store.SaveRateLimitTable(tbl)
 
+	cfg, notes, cerr := ratelimit.CompileDataPlane(tbl, ratelimit.DefaultCompileOptions())
+	updates, teeNotes, terr := ratelimit.CompileTEEQuota(tbl)
+	notes = append(notes, teeNotes...)
+
 	resp := map[string]any{
 		"version": tbl.Version,
 		"rules":   len(tbl.Rules),
+		"notes":   notes,
 	}
-	cfg, notes, cerr := ratelimit.CompileDataPlane(tbl, ratelimit.DefaultCompileOptions())
-	resp["notes"] = notes
 	if cerr != nil {
 		// 与设计 §6 一致：编译失败不下发数据面配置（保留现状），此处如实回报
 		resp["data_plane_compiled"] = false
@@ -80,6 +83,27 @@ func (s *Server) handlePutRateLimits(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resp["data_plane_compiled"] = true
 		resp["data_plane_config"] = cfg
+	}
+
+	// TEE 侧配额下发（S3）：失败**不清零** tee-infer 现有配额，仅如实回报
+	switch {
+	case terr != nil:
+		resp["tee_applied"] = false
+		resp["tee_error"] = terr.Error()
+	case s.teeQuota == nil:
+		resp["tee_applied"] = false
+		resp["tee_error"] = "未配置 tee-infer 下发器（OTP_CORE_TEE_URL 为空）：预算/TPM 未下发"
+	case len(updates) == 0:
+		resp["tee_applied"] = true
+		resp["tee_updates"] = 0
+	default:
+		if err := s.teeQuota.ApplyQuota(r.Context(), updates); err != nil {
+			resp["tee_applied"] = false
+			resp["tee_error"] = err.Error()
+		} else {
+			resp["tee_applied"] = true
+			resp["tee_updates"] = len(updates)
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
