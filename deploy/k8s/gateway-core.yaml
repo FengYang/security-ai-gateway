@@ -1,0 +1,114 @@
+# gateway-core：控制面服务（处方/路由表/限流预算表签发 + 策略变更审计）
+#
+# 定位（门禁 #7 控制面链路）：数据面插件（otpmask / rpm-shadow）按 tick 从本服务
+# `GET /ratelimits`（K_rx 验签、版本单调、失败保留旧表）与 `GET /routes` 拉表；
+# 策略变更经 `PUT /ratelimits` 下发并落 WORM 审计（判据 7）。
+#
+# 上游注册（关键，P0b-1 实测结论）：插件出站走 FQDNCluster，簇名只可能来自
+#   `McpBridge dns registry` → `outbound|<port>||<name>.dns`，故本服务必须在
+#   `deploy/higress/mcp-bridge-registries.yaml` 注册为 `gateway-core`（域名为下文 FQDN），
+#   插件侧 `gateway_core_service` 写 `gateway-core.dns`。
+#
+# 密钥（均来自 otpmask-keys Secret，生产须由 KMS/Vault 注入）：
+#   - core-sig-key  → OTP_CORE_SIG_KEY：处方/路由/限流表签名密钥（K_tx/K_rx），
+#     **必须与插件 side `route_verify_key` 完全一致**，否则插件验签失败（保留旧表，degraded）。
+#   - core-auth-token → OTP_CORE_AUTH_TOKEN：控制面静态令牌（`X-Auth-Token`/Bearer 语义见
+#     internal/api 的 withAuth）；为空即关闭鉴权（严禁用于集群）。
+#
+# 审计：OTP_CORE_AUDIT_FILE 指向 emptyDir（**本地轻集群口径**）。生产须改为持久卷
+# （WORM/追加锁定存储），否则重启后策略变更审计链丢失（判据 7 的持久性要求）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-core
+  namespace: otpmask
+  labels:
+    app: gateway-core
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway-core
+  template:
+    metadata:
+      labels:
+        app: gateway-core
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8085"
+    spec:
+      containers:
+      - name: gateway-core
+        image: security-ai-gateway/gateway-core:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: OTP_CORE_ADDR
+          value: ":8085"
+        - name: OTP_CORE_SIG_KEY
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-keys
+              key: core-sig-key
+        - name: OTP_CORE_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-keys
+              key: core-auth-token
+        # 策略变更审计（判据 7）：本地轻集群用 emptyDir；生产改持久卷（WORM）
+        - name: OTP_CORE_AUDIT_FILE
+          value: "/var/lib/otpmask/policy-audit.jsonl"
+        # TEE 配额下发（S3，可选）：留空 = 不下发（仅响应 Note 说明）
+        - name: OTP_CORE_TEE_URL
+          value: "http://tee-infer-service.otpmask.svc.cluster.local:19090"
+        ports:
+        - name: http-core
+          containerPort: 8085
+          protocol: TCP
+        # 探针路径 = /health（服务端**唯一免鉴权**端点；实际路由见 internal/api/server.go）
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http-core
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http-core
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: policy-audit
+          mountPath: /var/lib/otpmask
+      volumes:
+      - name: policy-audit
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-core
+  namespace: otpmask
+  labels:
+    app: gateway-core
+spec:
+  selector:
+    app: gateway-core
+  ports:
+  - name: http-core
+    port: 8085
+    targetPort: http-core

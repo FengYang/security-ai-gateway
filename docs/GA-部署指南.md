@@ -100,6 +100,7 @@ kubectl get hpa,pdb -n otpmask
 | `otpmask/tee-infer-service:latest` | `docker build -f gateway/tee-infer-service/Dockerfile .` | TEE 密态推理 |
 | `otpmask/envoy-gateway:latest` | `docker build -f gateway/wasm/otpmask-plugin/Dockerfile.k8s gateway/wasm/otpmask-plugin` | Envoy + wasm 插件（wasm 随镜像打包） |
 | `security-ai-gateway/gateway-admin-service:latest` | `docker build -f gateway/gateway-admin-service/Dockerfile .` | 管理门户业务服务 + 内部凭据 broker（含 ca-certificates；`USER 65532` 与清单 `runAsNonRoot` 对齐） |
+| `security-ai-gateway/gateway-core:latest` | `docker build -f gateway/gateway-core/Dockerfile .` | 控制面（处方/路由表/限流预算表签发 + 策略变更审计）；需 `otpmask-keys` 的 `core-sig-key`/`core-auth-token`，且 `core-sig-key` 必须与插件 `route_verify_key` 一致 |
 
 > P0b-1 本地轻集群实测补齐：`gateway-admin-service` 此前**无 Dockerfile**（清单已引用该镜像但无法构建）；
 > 同时 tee-infer / embedding 基础镜像补 `USER 65532`（清单置 `runAsNonRoot`，镜像默认 root 会被 kubelet 拒绝）。

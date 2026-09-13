@@ -7,6 +7,7 @@ resources:
 - embedding-service.yaml
 - tee-infer-service.yaml
 - gateway-admin-service.yaml
+- gateway-core.yaml
 - envoy-gateway.yaml
 - hpa.yaml
 - pdb.yaml

@@ -177,6 +177,25 @@ func TestCredentialEndpoint_loosePermission_503(t *testing.T) {
 	}
 }
 
+// TestCredentialEndpoint_groupReadOnly_200 K8s Secret + fsGroup 场景（0640）必须放行：
+// kubelet 在 pod 设 fsGroup 时会把 Secret 卷文件由 0600 改写为 0640（owner rw + 组只读），
+// 而组只读是**非 root 容器读取 Secret 的必要条件**；若仍要求"恰为 0600"则端点恒 503。
+// 见 credential_endpoint.go 的权限校验口径说明（2026-09-13 本地集群实测）。
+func TestCredentialEndpoint_groupReadOnly_200(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 无 Unix 权限位语义，跳过权限校验用例")
+	}
+	path := writeCredentialFile(t, "sig_key="+testSigKeyHex+"\nattest_token=test-attest-token\n")
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	mux, token := credentialMux(path)
+	rec := doCredential(t, mux, http.MethodGet, credentialAPIBase+"/"+credentialNameOTPMask, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("0640（K8s Secret+fsGroup）期望 200，实际 %d", rec.Code)
+	}
+}
+
 func TestLoadCredentialSettings_disabledWithoutToken(t *testing.T) {
 	t.Setenv("ADMIN_CREDENTIAL_SETS", "")
 	t.Setenv("ADMIN_CREDENTIAL_TOKEN", "")

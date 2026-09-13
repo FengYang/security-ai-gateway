@@ -156,6 +156,10 @@ spec:
         secret:
           secretName: otpmask-credentials
           optional: true
+          # 必须 0600：凭据端点在 Linux 下**强校验文件权限恰为 0600**（credential_endpoint.go:
+          # `info.Mode().Perm() != 0o600` → 503 fail-closed）。Secret 卷默认 0644 → 端点恒 503、
+          # 插件永远拿不到通道令牌（限流表/影子表拉取恒失败）。P0b-1 实测补齐。
+          defaultMode: 0600
 ---
 # 管理面 Service：仅控制台与监控可达（见 NetworkPolicy）
 apiVersion: v1

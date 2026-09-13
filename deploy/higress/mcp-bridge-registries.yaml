@@ -159,8 +159,11 @@ spec:
     port: 19095
     type: dns
     protocol: HTTP
-  # - name: gateway-core   # 限流表/策略下发（插件 `gateway_core_service`）——**待补**：
-  #   domain: gateway-core.<namespace>.svc.cluster.local   # 仓库尚无 gateway-core 的 K8s 清单，
-  #   port: 8085                                           # 无 Service 可指向；P0b-2 前置项。
-  #   type: dns
-  #   protocol: HTTP
+  - name: gateway-core # 限流/路由表下发（插件 `gateway_core_service`）
+    # P0b-1 补齐：清单见 deploy/k8s/gateway-core.yaml（Deployment+Service，端口 8085）。
+    # 密钥对齐：gateway-core 的 OTP_CORE_SIG_KEY 必须与插件 `route_verify_key` 一致，
+    # 否则拉表验签失败（按设计保留旧表 + degraded 计数，不阻断业务）。
+    domain: gateway-core.<namespace>.svc.cluster.local
+    port: 8085
+    type: dns
+    protocol: HTTP

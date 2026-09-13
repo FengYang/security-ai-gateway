@@ -14,7 +14,7 @@
 //
 // 安全约束：
 //   - 凭据值**绝不入日志/错误信息**（与 broker 同规则）；
-//   - 文件须 0600（Windows 无 Unix 权限语义，跳过该校验并如实说明）；
+//   - 文件权限严禁 world 位与组写（0600 或 K8s Secret+fsGroup 下的 0640 均可；Windows 无 Unix 权限语义，跳过该校验并如实说明）；
 //   - 只读端点：无任何写路径（写凭据仍走 broker / 高敏变更复核 D8）。
 package main
 
@@ -208,9 +208,18 @@ func loadCredentialFile(name, path string) (*credentialResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("凭据文件不可读: %w", err)
 	}
-	// 权限收紧校验（Windows 无 Unix 权限位语义，跳过后如实记录）。
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		return nil, fmt.Errorf("凭据文件权限过宽（%o，要求 600）", info.Mode().Perm())
+	// 权限收紧校验：禁止 **world 位**（他人读/写/执行）与**组可写**。
+	//
+	// 为什么不是"恰为 0600"（2026-09-13 本地集群实测纠正）：K8s Secret 卷在 pod 配置了 `fsGroup`
+	// 时——非 root 容器读取 Secret 文件的必要前提——kubelet 会把挂载文件权限改写为 **0640**
+	// （owner rw + 组只读），恒不满足"恰为 0600"⇒ 凭据端点恒 503、插件永远取不到通道令牌。
+	// 故口径改为安全等价的最小可行集：不得被他人访问、不得组可写；0600/0640/0440 均接受。
+	// （Windows 无 Unix 权限位语义，跳过并如实说明。）
+	if runtime.GOOS != "windows" {
+		perm := info.Mode().Perm()
+		if perm&0o007 != 0 || perm&0o020 != 0 {
+			return nil, fmt.Errorf("凭据文件权限过宽（%o：禁止 world 位与组写；应为 0600，或 K8s Secret+fsGroup 下的 0640）", perm)
+		}
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
