@@ -50,6 +50,18 @@ func newFakeTeeInfer(t *testing.T, rec *teeInferRecorder, usageStatus, quotaStat
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"tenant":"acme","quota":1000000}`))
 	})
+	// S5：对账快照（沿用 usageStatus 作为上游状态开关）
+	mux.HandleFunc("/reconcile", func(w http.ResponseWriter, r *http.Request) {
+		rec.gotQuery = r.URL.Query()
+		rec.gotHeader = r.Header.Get(teeAdminHeader)
+		if usageStatus != http.StatusOK {
+			w.WriteHeader(usageStatus)
+			_, _ = w.Write([]byte("reconcile boom"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"tolerance_tokens":0,"instance_id":"inst-test","chain_intact":true,"billing_blocked":false}`))
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -61,6 +73,7 @@ func newTestUsageMux(s *usageSettings, audit *adminAuditChain) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc(usageAPIBase, authMiddleware(testCfg(), uh.handleUsage))
 	mux.HandleFunc(usageQuotaPath, authMiddleware(testCfg(), uh.handleQuota))
+	mux.HandleFunc(meteringReconcilePath, authMiddleware(testCfg(), uh.handleMeteringReconcile))
 	return mux
 }
 
@@ -100,6 +113,7 @@ func TestUsageUnconfiguredReturns503(t *testing.T) {
 	}{
 		{"usage GET", http.MethodGet, usageAPIBase},
 		{"quota POST", http.MethodPost, usageQuotaPath},
+		{"metering reconcile GET", http.MethodGet, meteringReconcilePath},
 	} {
 		t.Run(tc.name+" 未配置 → 503（不静默空数据）", func(t *testing.T) {
 			rec := doUsage(t, mux, roleAdmin, tc.method, tc.target, nil)
@@ -195,6 +209,63 @@ func TestUsageProxyRolesAndRelay(t *testing.T) {
 		r := doUsage(t, mux, roleAuditor, http.MethodPost, usageQuotaPath, quotaSetRequest{Tenant: "acme", MaxTokens: 100})
 		if r.Code != http.StatusForbidden {
 			t.Fatalf("auditor 写 quota 期望 403，实际 %d", r.Code)
+		}
+	})
+}
+
+// ---------- S5：对账快照代理（只读，auditor 可读） ----------
+
+func TestMeteringReconcileProxy(t *testing.T) {
+	rec := &teeInferRecorder{}
+	srv := newFakeTeeInfer(t, rec, http.StatusOK, http.StatusOK)
+	mux := newTestUsageMux(&usageSettings{url: srv.URL, token: "svc-tok"}, nil)
+
+	t.Run("auditor 可读（只读代理，注入服务间令牌）", func(t *testing.T) {
+		r := doUsage(t, mux, roleAuditor, http.MethodGet, meteringReconcilePath, nil)
+		if r.Code != http.StatusOK {
+			t.Fatalf("auditor 读对账快照期望 200，实际 %d: %s", r.Code, r.Body.String())
+		}
+		if rec.gotHeader != "svc-tok" {
+			t.Fatalf("X-Admin-Token 应注入服务间令牌，实际 %q", rec.gotHeader)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(r.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["ok"] != true || got["tolerance_tokens"] != float64(0) || got["billing_blocked"] != false {
+			t.Fatalf("快照应原样透传，实际 %v", got)
+		}
+	})
+
+	t.Run("非 GET → 405", func(t *testing.T) {
+		if r := doUsage(t, mux, roleAdmin, http.MethodPost, meteringReconcilePath, nil); r.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("期望 405，实际 %d", r.Code)
+		}
+	})
+}
+
+func TestMeteringReconcileUpstreamFailuresReturn503(t *testing.T) {
+	rec := &teeInferRecorder{}
+
+	t.Run("数据源 5xx → 503 且文案指明对账数据源", func(t *testing.T) {
+		srv := newFakeTeeInfer(t, rec, http.StatusInternalServerError, http.StatusOK)
+		mux := newTestUsageMux(&usageSettings{url: srv.URL, token: "tok"}, nil)
+		r := doUsage(t, mux, roleAdmin, http.MethodGet, meteringReconcilePath, nil)
+		if r.Code != http.StatusServiceUnavailable {
+			t.Fatalf("期望 503，实际 %d", r.Code)
+		}
+		if !strings.Contains(r.Body.String(), "对账数据源") {
+			t.Fatalf("文案应指明对账数据源，实际 %s", r.Body.String())
+		}
+	})
+
+	t.Run("数据源不可达 → 503", func(t *testing.T) {
+		srv := newFakeTeeInfer(t, rec, http.StatusOK, http.StatusOK)
+		url := srv.URL
+		srv.Close()
+		mux := newTestUsageMux(&usageSettings{url: url, token: "tok"}, nil)
+		if r := doUsage(t, mux, roleAdmin, http.MethodGet, meteringReconcilePath, nil); r.Code != http.StatusServiceUnavailable {
+			t.Fatalf("期望 503，实际 %d", r.Code)
 		}
 	})
 }

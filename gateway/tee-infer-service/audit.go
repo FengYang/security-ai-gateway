@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -50,6 +51,11 @@ type AuditEvent struct {
 	// tenant 租户账单双口径分离下的第三个维度）。证据字段，不进 hash()。
 	EngineType string `json:"engine_type,omitempty"`
 	Model      string `json:"model,omitempty"`
+	// S5（判据 6）：写入本事件的进程实例标识（证据字段，不进 hash()）。
+	// 用途：对账差异分类——同一审计链中出现**异实例**事件 ⇒ 多实例共写
+	// （multi_instance）。omitempty 保证旧 WORM 行反序列化兼容（旧行无该字段，
+	// 不参与异实例判定）。
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。
@@ -87,13 +93,21 @@ type auditChain struct {
 	file    *os.File  // 非 nil = WORM 持久化模式（只追加）
 	anchor  *os.File  // 非 nil = 锚定文件（只追加）
 	tsa     TSASigner // RFC 3161 可信时间戳服务
+	// S5：本进程实例标识（构造时生成，写入每条事件的 instance_id 证据字段）。
+	// 只读，构造后不再变更。
+	instanceID string
 }
 
+// newInstanceID 生成本进程实例标识（"inst-" + 8 hex）。
+func newInstanceID() string { return "inst-" + randHex(8) }
+
 // newAuditChain 构造内存审计链。
-func newAuditChain() *auditChain { return &auditChain{} }
+func newAuditChain() *auditChain { return &auditChain{instanceID: newInstanceID()} }
 
 // newAuditChainWithTSA 构造内存审计链（绑定 RFC 3161 TSA）。
-func newAuditChainWithTSA(tsa TSASigner) *auditChain { return &auditChain{tsa: tsa} }
+func newAuditChainWithTSA(tsa TSASigner) *auditChain {
+	return &auditChain{tsa: tsa, instanceID: newInstanceID()}
+}
 
 // newAuditChainWORM 构造 WORM 持久化审计链：打开（或创建）事件文件并恢复既有链。
 // 文件以 O_APPEND 只追加打开，任何历史行被篡改都会在 verify() 中断链。
@@ -102,7 +116,7 @@ func newAuditChainWORM(path, anchorPath string) (*auditChain, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: 打开事件文件失败: %w", err)
 	}
-	c := &auditChain{file: f}
+	c := &auditChain{file: f, instanceID: newInstanceID()}
 	if err := c.load(path); err != nil {
 		_ = f.Close()
 		return nil, err
@@ -153,6 +167,9 @@ func (c *auditChain) append(e AuditEvent) AuditEvent {
 	e.Timestamp = time.Now().UnixNano()
 	if e.EventID == "" {
 		e.EventID = fmt.Sprintf("evt-%d", e.Timestamp)
+	}
+	if e.InstanceID == "" {
+		e.InstanceID = c.instanceID // S5：标识写入实例（证据字段，不进 hash）
 	}
 	if c.file != nil {
 		line, _ := json.Marshal(e)
@@ -285,6 +302,29 @@ func (c *auditChain) countByAction(action string) int {
 		}
 	}
 	return n
+}
+
+// instanceIDOf 返回本链的实例标识（构造后不变，无需加锁）。
+func (c *auditChain) instanceIDOf() string { return c.instanceID }
+
+// foreignInstances 返回**窗口内**（Timestamp >= since，UTC 纳秒）由非本实例写入的
+// 实例标识（升序去重）。空标识（旧 WORM 行）不计入。
+// 对账用途：非空 ⇒ 与另一实例**同时**在写同一审计链（多实例共写）；重启前的旧实例
+// 事件已在窗口之外，不会被误判。
+func (c *auditChain) foreignInstances(since int64) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, e := range c.events {
+		if e.InstanceID == "" || e.InstanceID == c.instanceID || e.Timestamp < since || seen[e.InstanceID] {
+			continue
+		}
+		seen[e.InstanceID] = true
+		out = append(out, e.InstanceID)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // sha256hex 负载摘要（审计只记哈希不记内容，）。

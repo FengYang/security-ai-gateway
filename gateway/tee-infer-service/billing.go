@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -96,9 +97,14 @@ type billingWebhook struct {
 	url       string
 	secret    string          // HMAC-SHA256 签名密钥（空 = 不签名，仅内网明文模式）
 	client    *http.Client    // 推送 HTTP 客户端（短超时，不拖垮推理主链）
-	mu        sync.Mutex      // 保护 sent
+	mu        sync.Mutex      // 保护 sent / blockReason
 	sent      map[string]bool // event_id 进程内幂等去重
 	retryWait time.Duration   // 重试退避基数（测试可调小）
+	// S5（判据 6）：对账不一致期间的对外出账阻断。置位时 notify 直接返回
+	// （不推送）——推送可丢可补，计费侧由 /usage?from&to 拉取兜底，**阻断不丢账**。
+	blockedFlag atomic.Bool
+	blockReason string // 最近一次阻断的差异分类（mu 保护）
+	metrics     *otpmaskMetrics
 }
 
 // newBillingWebhook 构造推送器；url 为空返回 nil（推送关闭，拉取为主）。
@@ -131,11 +137,60 @@ type billingEventPayload struct {
 // webhookMaxAttempts 推送重试上限（指数退避：base * 2^n）。
 const webhookMaxAttempts = 3
 
+// block 置位对外出账阻断（reason = 对账差异分类）。返回是否发生状态翻转。
+func (b *billingWebhook) block(reason string) bool {
+	if b == nil {
+		return false
+	}
+	flipped := !b.blockedFlag.Swap(true)
+	b.mu.Lock()
+	b.blockReason = reason
+	b.mu.Unlock()
+	if flipped {
+		if b.metrics != nil {
+			b.metrics.setBillingBlocked(reason, true)
+		}
+		log.Printf("[billing] 对账不一致（%s）：暂停对外出账推送（计费侧 from/to 拉取兜底，不丢账）", reason)
+	}
+	return flipped
+}
+
+// unblock 解除对外出账阻断（对账恢复一致）。返回是否发生状态翻转。
+func (b *billingWebhook) unblock() bool {
+	if b == nil {
+		return false
+	}
+	if !b.blockedFlag.Swap(false) {
+		return false
+	}
+	b.mu.Lock()
+	b.blockReason = ""
+	b.mu.Unlock()
+	if b.metrics != nil {
+		b.metrics.setBillingBlocked("", false)
+	}
+	log.Printf("[billing] 对账恢复一致：恢复对外出账推送")
+	return true
+}
+
+// blocked 返回当前是否阻断对外出账（nil 推送器 = 未配置推送，视为未阻断）。
+func (b *billingWebhook) blocked() bool { return b != nil && b.blockedFlag.Load() }
+
 // notify 推送单笔计费事件：HMAC-SHA256 签名（X-Signature: sha256=<hex>）+
 // 指数退避重试 + event_id 幂等（已推送过不再推）。推送失败仅告警日志，
 // 绝不影响推理主链与审计链（拉取兜底，见 GA-计费接口设计 v2 §2.3）。
+// S5：对账不一致期间（blocked）直接抑制推送并计数。
 func (b *billingWebhook) notify(ev AuditEvent) {
 	if b == nil || ev.Action != "infer" {
+		return
+	}
+	if b.blockedFlag.Load() {
+		b.mu.Lock()
+		reason := b.blockReason
+		b.mu.Unlock()
+		if b.metrics != nil {
+			b.metrics.incBillingSuppressed(reason)
+		}
 		return
 	}
 	b.mu.Lock()

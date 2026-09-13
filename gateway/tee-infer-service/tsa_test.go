@@ -86,23 +86,28 @@ func TestAuditAnchorTST(t *testing.T) {
 	}
 }
 
-// TestReconcilerMismatch 对账器：审计与用量一致 → true；偏差超阈值 → false + 指标。
+// TestReconcilerMismatch 对账器（S5 起容差 0，token 级）：审计与用量一致 → true；
+// 任一偏差 → false + 指标（分类见 reconcile_test.go）。
 func TestReconcilerMismatch(t *testing.T) {
 	audit := newAuditChain()
 	usage := map[string]*usageRecord{}
 	m := newMetrics()
-	rec := newReconciler(audit, usage, &audit.mu, m)
+	rec := newReconciler(audit, usage, &audit.mu, m, nil, time.Now().UnixNano())
 
-	// 一致：审计 2 条 infer + 用量 2 请求
-	audit.append(AuditEvent{EventID: "a", RequestID: "r1", Action: "infer", Result: "ok"})
-	audit.append(AuditEvent{EventID: "b", RequestID: "r2", Action: "infer", Result: "ok"})
-	usage["t1"] = &usageRecord{Requests: 2}
-	if !rec.reconcileOnce(now()) {
-		t.Fatal("一致时应返回 true")
+	// 一致：审计 2 条 infer（in=1/out=1）+ 用量同口径
+	for _, id := range []string{"r1", "r2"} {
+		audit.append(AuditEvent{EventID: id, TenantID: "t1", RequestID: id, Action: "infer", Result: "ok", TokensIn: 1, TokensOut: 1})
 	}
-	// 偏差：审计 2 vs 用量 5（偏差 3 > 阈值）
-	usage["t1"] = &usageRecord{Requests: 5}
+	usage["t1"] = &usageRecord{TokensIn: 2, TokensOut: 2, Requests: 2}
+	if !rec.reconcileOnce(now()) {
+		t.Fatal("一致时应返回 true（容差 0）")
+	}
+	// 偏差：用量少 1 个请求（同源口径下即异常）
+	usage["t1"] = &usageRecord{TokensIn: 2, TokensOut: 2, Requests: 1}
 	if rec.reconcileOnce(now()) {
-		t.Fatal("偏差超阈值应返回 false")
+		t.Fatal("存在偏差应返回 false")
+	}
+	if m.reconcile[reconcileReasonUnknown] == 0 {
+		t.Fatalf("应记录不一致分类（unknown）：%+v", m.reconcile)
 	}
 }

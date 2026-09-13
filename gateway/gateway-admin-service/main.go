@@ -131,6 +131,8 @@ func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *
 	if uh != nil {
 		mux.HandleFunc(usageAPIBase, authMiddleware(cfg, uh.handleUsage))
 		mux.HandleFunc(usageQuotaPath, authMiddleware(cfg, uh.handleQuota))
+		// S5 判据 6：审计-计量对账快照（只读代理；控制台看板数据源）
+		mux.HandleFunc(meteringReconcilePath, authMiddleware(cfg, uh.handleMeteringReconcile))
 	}
 	if ah != nil {
 		mux.HandleFunc(auditEventsPath, authMiddleware(cfg, ah.handle))

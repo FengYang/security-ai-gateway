@@ -22,6 +22,11 @@ tee otpmask_audit_events required
 tee otpmask_denies_total conditional
 tee otpmask_guard_classifier_total conditional
 tee otpmask_reconcile_mismatch_total conditional
+tee otpmask_reconcile_diff_tokens conditional
+tee otpmask_reconcile_last_run_timestamp_seconds conditional
+tee otpmask_billing_blocked required
+tee otpmask_billing_blocked_total conditional
+tee otpmask_billing_suppressed_total conditional
 tee otpmask_attest_token_traffic_total conditional
 tee otpmask_recompute_ops_total conditional
 tee otpmask_recompute_duration_ms_total conditional

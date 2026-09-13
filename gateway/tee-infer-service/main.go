@@ -152,6 +152,7 @@ type teeServer struct {
 	cache            model.SemanticCache    // GF.4.1 精确缓存（演示实现；nil = 关闭）
 	billing          *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
 	meterToken       string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
+	reconciler       *reconciler            // S5 判据 6：审计-计量对账器（/reconcile 快照数据源）
 	mu               sync.Mutex
 }
 
@@ -1329,6 +1330,50 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(view)
 }
 
+// handleReconcile 返回最近一次审计-计量对账快照（S5；判据 6）。
+// 读权限与 /usage 一致：管理令牌或独立只读计量令牌（控制面看板/计费侧只读消费）。
+func (s *teeServer) handleReconcile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkMetering(r) {
+		http.Error(w, "计量认证失败", http.StatusUnauthorized)
+		return
+	}
+	if s.reconciler == nil {
+		http.Error(w, "对账器未启动", http.StatusServiceUnavailable)
+		return
+	}
+	st := s.reconciler.status()
+	if st == nil {
+		http.Error(w, "对账尚未执行", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(st)
+}
+
+// handleReconcileRun 立即执行一次对账（运维/验收用；有副作用 → 仅管理令牌）。
+// 返回 {"ok": 是否一致, "status": 对账快照}。
+func (s *teeServer) handleReconcileRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAdmin(r) {
+		http.Error(w, "管理认证失败", http.StatusUnauthorized)
+		return
+	}
+	if s.reconciler == nil {
+		http.Error(w, "对账器未启动", http.StatusServiceUnavailable)
+		return
+	}
+	ok := s.reconciler.reconcileOnce(time.Now())
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": ok, "status": s.reconciler.status()})
+}
+
 // guardrailConfigRequest Guardrail 运行时变更请求体（M3-B）。
 type guardrailConfigRequest struct {
 	PIIMode string `json:"pii_mode"` // block | mask
@@ -1744,6 +1789,9 @@ func main() {
 	guardClassTimeout := flag.Duration("guard-classifier-timeout", 2*time.Second, "语义分类器侧车调用超时（分类器在请求路径上，须有限且小）")
 	flag.Parse()
 
+	// S5：进程启动时刻（对账判据——链中存在早于此时刻的事件 ⇒ 内存用量计数已在重启时丢失）
+	startedAt := time.Now().UnixNano()
+
 	// 双路线路由配置
 	routeCfg := DefaultRouteConfig()
 	if *routeConfigFile != "" {
@@ -1939,9 +1987,14 @@ func main() {
 		log.Printf("[guardrail] 语义分类器接线：backend=%s url=%s timeout=%s（不可用时回退关键词规则）",
 			model.GuardClassifierBackendHTTP, *guardClassURL, guardClassTimeout.String())
 	}
-	go srv.seenCleanup()                                           // 防重放集合 TTL 清理
-	go srv.sessionCleanup()                                        // 远程证明会话 TTL 清理
-	go newReconciler(audit, srv.usage, &srv.mu, srv.metrics).run() // 审计-计费对账
+	go srv.seenCleanup()    // 防重放集合 TTL 清理
+	go srv.sessionCleanup() // 远程证明会话 TTL 清理
+	// S5 判据 6：审计-计量对账（启动即跑一次 → 状态与出账阻断立即可见，随后按 5 分钟周期）
+	if srv.billing != nil {
+		srv.billing.metrics = srv.metrics // 阻断/抑制计数随 /metrics 暴露
+	}
+	srv.reconciler = newReconciler(audit, srv.usage, &srv.mu, srv.metrics, srv.billing, startedAt)
+	go srv.reconciler.run()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/attest", srv.handleAttest)
 	mux.HandleFunc("/attest/complete", srv.handleAttestComplete)
@@ -1957,6 +2010,8 @@ func main() {
 	mux.HandleFunc("/metrics", srv.handleMetrics)                  // M10 可观测性
 	mux.HandleFunc("/config", srv.handleConfig)                    // M3-B 安全中心：配置只读快照
 	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig) // M3-B 高敏复核：Guardrail 降级生效点
+	mux.HandleFunc("/reconcile", srv.handleReconcile)              // S5 判据 6：对账快照（只读）
+	mux.HandleFunc("/reconcile/run", srv.handleReconcileRun)       // S5 判据 6：即时对账（管理令牌）
 	mux.HandleFunc("/healthz", srv.handleHealthz)                  // 探针与证明状态联动
 	mux.HandleFunc("/healthz/live", srv.handleHealthz)             // liveness
 

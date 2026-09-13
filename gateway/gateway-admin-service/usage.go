@@ -12,6 +12,8 @@
 //	                                 → tee-infer GET /usage（增量聚合，含模型维度与配额视图）
 //	POST /v1/adminext/usage/quota    配额设置（**admin**）
 //	                                 → tee-infer POST /usage/quota；成功后落 G1 审计链 quota_set
+//	GET  /v1/adminext/metering/reconcile  审计-计量对账快照（auditor/admin 可读；S5 判据 6）
+//	                                 → tee-infer GET /reconcile（容差 0/差异分类/出账是否被阻断）
 //
 // 503 语义（完成定义③：不静默返回 0/空数据）：
 //   - ADMIN_TEE_INFER_URL / ADMIN_TEE_INFER_TOKEN 未配置 → 503；
@@ -34,10 +36,11 @@ import (
 	"time"
 )
 
-// usageAPIBase 用量端点前缀；usageQuotaPath 配额子路径。
+// usageAPIBase 用量端点前缀；usageQuotaPath 配额子路径；meteringReconcilePath 对账快照。
 const (
-	usageAPIBase   = "/v1/adminext/usage"
-	usageQuotaPath = usageAPIBase + "/quota"
+	usageAPIBase          = "/v1/adminext/usage"
+	usageQuotaPath        = usageAPIBase + "/quota"
+	meteringReconcilePath = "/v1/adminext/metering/reconcile"
 )
 
 // teeAdminHeader tee-infer 管理端点认证头（服务间令牌，前端不可见）。
@@ -130,7 +133,7 @@ func (h *usageHandler) handleUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		h.relayError(w, resp)
+		h.relayError(w, resp, "usage 数据源")
 		return
 	}
 	h.relay(w, resp)
@@ -177,7 +180,7 @@ func (h *usageHandler) handleQuota(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		h.relayError(w, resp)
+		h.relayError(w, resp, "配额数据源")
 		return
 	}
 
@@ -200,6 +203,40 @@ func (h *usageHandler) handleQuota(w http.ResponseWriter, r *http.Request) {
 	h.relay(w, resp)
 }
 
+// handleMeteringReconcile 审计-计量对账快照：GET /v1/adminext/metering/reconcile（auditor 可读）。
+// → tee-infer GET /reconcile（S5 判据 6：容差/差异分类/对外出账是否被阻断）。
+// 定位同 /usage：**只读代理**，本服务不自算、不落库；作为控制台看板的数据源。
+func (h *usageHandler) handleMeteringReconcile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
+		return
+	}
+	if !requireReadAccess(w, r) {
+		return
+	}
+	if !h.requireDataSource(w) {
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, h.settings.url+"/reconcile", nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "对账请求构造失败")
+		return
+	}
+	req.Header.Set(teeAdminHeader, h.settings.token)
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "对账数据源不可达")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		h.relayError(w, resp, "对账数据源")
+		return
+	}
+	h.relay(w, resp)
+}
+
 // relay 透传数据源 2xx 响应（Content-Type + body 原样）。
 func (h *usageHandler) relay(w http.ResponseWriter, resp *http.Response) {
 	w.Header().Set("Content-Type", "application/json")
@@ -208,12 +245,13 @@ func (h *usageHandler) relay(w http.ResponseWriter, resp *http.Response) {
 }
 
 // relayError 透传数据源错误：400（调用方参数错）原样透传，其余视为数据源异常 → 503。
-func (h *usageHandler) relayError(w http.ResponseWriter, resp *http.Response) {
+// label 用于错误文案（区分用量/对账两类数据源）。
+func (h *usageHandler) relayError(w http.ResponseWriter, resp *http.Response, label string) {
 	if resp.StatusCode == http.StatusBadRequest {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("参数错误: %s", strings.TrimSpace(string(msg))))
 		return
 	}
 	writeError(w, http.StatusServiceUnavailable,
-		fmt.Sprintf("usage 数据源返回异常（HTTP %d）", resp.StatusCode))
+		fmt.Sprintf("%s返回异常（HTTP %d）", label, resp.StatusCode))
 }

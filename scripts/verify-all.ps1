@@ -195,6 +195,11 @@ Write-Host "`n[21] 指标全绿判定（门禁 #9）" -ForegroundColor Yellow
 & powershell -NoProfile -File scripts/check-metrics-green.ps1 -RequireAllSources *> $null
 Check 'Metrics all-green (gate #9)' ($LASTEXITCODE -eq 0) '(scripts/metrics-required.txt：required 缺席即 FAIL；来源不可达在门禁模式亦 FAIL)'
 
+# 22. 审计-计量对账（S5 判据 6）：窗口 0 容差 + 差异分类 + 出账阻断与恢复
+Write-Host "`n[22] 审计-计量对账（S5 / 门禁 #7 判据 6）" -ForegroundColor Yellow
+& $go test ./gateway/tee-infer-service/ -run 'TestReconcile' *> $null
+Check 'Metering reconcile (gate #7 / S5)' ($LASTEXITCODE -eq 0) '(窗口 0 容差 + 分类 chain_broken/usage_reset/multi_instance/audit_behind + 出账阻断与恢复解阻断；实链只读核对见 scripts/verify-metering-reconcile.ps1)'
+
 Pop-Location
 
 # Summary
