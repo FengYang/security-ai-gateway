@@ -35,3 +35,7 @@ waf=2.0.1
 #             Build: scripts/build-qwen3guard-plugin.ps1 (reproducible: -trimpath -buildvcs=false).
 #             Version dir is our convention (matches deploy URL .../plugins/qwen3guard/1.0.0/plugin.wasm).
 qwen3guard=1.0.0
+
+# rpm-shadow: our own plugin (gate #7 boundary A, plaintext-route RPM shadow executor).
+#             Build: GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared (see plugin main.go header).
+rpm-shadow=1.0.0
