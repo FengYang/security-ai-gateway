@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
 	"security-ai-gateway/gateway/gateway-core/internal/route"
 	"security-ai-gateway/gateway/gateway-core/internal/store"
 	"security-ai-gateway/gateway/mcpsec"
@@ -15,19 +16,24 @@ import (
 
 // Server 组合 HTTP 处理器与依赖。
 type Server struct {
-	signer  *route.Signer
-	msigner *mcpsec.Signer
-	store   store.Store
-	token   string // 内网静态鉴权 token
-	mux     *http.ServeMux
+	signer   *route.Signer
+	msigner  *mcpsec.Signer
+	rlsigner *ratelimit.Signer
+	store    store.Store
+	token    string // 内网静态鉴权 token
+	mux      *http.ServeMux
 }
 
-// New 构造 API Server。routerTable 为启动时注入的已签名默认路由表（可为空表）。
-func New(signer *route.Signer, msigner *mcpsec.Signer, st store.Store, authToken string, routerTable *route.RouteTable) *Server {
+// New 构造 API Server。routerTable 为启动时注入的已签名默认路由表（可为空表）；
+// rateLimitTable 为启动时注入的已签名默认限流表（可为空表，Phase 1 门禁 #7）。
+func New(signer *route.Signer, msigner *mcpsec.Signer, rlsigner *ratelimit.Signer, st store.Store, authToken string, routerTable *route.RouteTable, rateLimitTable *ratelimit.Table) *Server {
 	if routerTable != nil {
 		st.SaveRouteTable(routerTable)
 	}
-	s := &Server{signer: signer, msigner: msigner, store: st, token: authToken, mux: http.NewServeMux()}
+	if rateLimitTable != nil {
+		st.SaveRateLimitTable(rateLimitTable)
+	}
+	s := &Server{signer: signer, msigner: msigner, rlsigner: rlsigner, store: st, token: authToken, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -42,6 +48,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /prescriptions/{id}", s.withAuth(s.handleDelete))
 	s.mux.HandleFunc("GET /prescriptions", s.withAuth(s.handleListByTenant))
 	s.mux.HandleFunc("GET /routes", s.withAuth(s.handleGetRoutes))
+	// 限流/预算表（Phase 1 门禁 #7）：GET 下发（拉路径）、PUT 策略源（校验+防回滚+签名）。
+	s.mux.HandleFunc("GET /ratelimits", s.withAuth(s.handleGetRateLimits))
+	s.mux.HandleFunc("PUT /ratelimits", s.withAuth(s.handlePutRateLimits))
 	s.mux.HandleFunc("POST /tools/policy", s.withAuth(s.handleToolPolicy))
 	s.mux.HandleFunc("GET /tools/policy", s.withAuth(s.handleGetToolPolicy))
 	s.mux.HandleFunc("GET /health", s.handleHealth)
@@ -49,11 +58,11 @@ func (s *Server) routes() {
 
 // issueReq 签发请求体。
 type issueReq struct {
-	Tenant        string       `json:"tenant"`
-	Model         string       `json:"model"`
-	PreferredEngine string     `json:"preferred_engine,omitempty"`
-	FallbackEngine  string     `json:"fallback_engine,omitempty"`
-	CostPriority    string     `json:"cost_priority,omitempty"`
+	Tenant          string `json:"tenant"`
+	Model           string `json:"model"`
+	PreferredEngine string `json:"preferred_engine,omitempty"`
+	FallbackEngine  string `json:"fallback_engine,omitempty"`
+	CostPriority    string `json:"cost_priority,omitempty"`
 }
 
 // issueResp 签发响应。

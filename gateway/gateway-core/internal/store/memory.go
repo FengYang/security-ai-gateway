@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 
+	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
 	"security-ai-gateway/gateway/gateway-core/internal/route"
 	"security-ai-gateway/gateway/mcpsec"
 )
@@ -23,6 +24,10 @@ type Store interface {
 	SaveRouteTable(t *route.RouteTable)
 	// GetRouteTable 返回当前默认路由表。
 	GetRouteTable() *route.RouteTable
+	// SaveRateLimitTable 保存签名后的限流/预算表（Phase 1 门禁 #7）。
+	SaveRateLimitTable(t *ratelimit.Table)
+	// GetRateLimitTable 返回当前限流/预算表。
+	GetRateLimitTable() *ratelimit.Table
 	// SaveToolCatalog 保存签名后的工具目录。
 	SaveToolCatalog(c *mcpsec.ToolCatalog)
 	// GetToolCatalog 返回当前工具目录。
@@ -38,12 +43,13 @@ var ErrDup = errors.New("store: 处方已存在")
 
 // Memory 内存实现（MVP）。进程重启丢失，处方量少，重启重发即可。
 type Memory struct {
-	mu        sync.RWMutex
-	byID      map[string]*route.RoutePrescription
-	byT       map[string][]string // tenant → prescriptionID 列表
-	routeTable *route.RouteTable
-	toolCatalog *mcpsec.ToolCatalog
-	rbacPolicy  *mcpsec.RBACPolicy
+	mu             sync.RWMutex
+	byID           map[string]*route.RoutePrescription
+	byT            map[string][]string // tenant → prescriptionID 列表
+	routeTable     *route.RouteTable
+	rateLimitTable *ratelimit.Table
+	toolCatalog    *mcpsec.ToolCatalog
+	rbacPolicy     *mcpsec.RBACPolicy
 }
 
 // NewMemory 构造内存存储。
@@ -115,6 +121,20 @@ func (m *Memory) GetRouteTable() *route.RouteTable {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.routeTable
+}
+
+// SaveRateLimitTable 实现 Store。
+func (m *Memory) SaveRateLimitTable(t *ratelimit.Table) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rateLimitTable = t
+}
+
+// GetRateLimitTable 实现 Store。
+func (m *Memory) GetRateLimitTable() *ratelimit.Table {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.rateLimitTable
 }
 
 // SaveToolCatalog 实现 Store。

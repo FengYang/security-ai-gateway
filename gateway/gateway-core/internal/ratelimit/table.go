@@ -77,9 +77,10 @@ type Rule struct {
 
 // Table 限流/预算表（控制面为事实源，签名后经 pull 通道下发）。
 type Table struct {
-	Version  int    `json:"version"`
-	IssuedAt string `json:"issued_at"` // RFC3339（设计 v1.1 §3）
-	Rules    []Rule `json:"rules"`
+	Version   int    `json:"version"`
+	IssuedAt  string `json:"issued_at"` // RFC3339（设计 v1.1 §3）
+	Rules     []Rule `json:"rules"`
+	Signature []byte `json:"signature,omitempty"` // HMAC over CanonicalBytes（K_rx）
 }
 
 // NewTable 构造空表（rules 由调用方填充）。

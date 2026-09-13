@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
 	"security-ai-gateway/gateway/gateway-core/internal/route"
 	"security-ai-gateway/gateway/gateway-core/internal/store"
 	"security-ai-gateway/gateway/mcpsec"
@@ -25,7 +27,12 @@ func testServer() *Server {
 	if err != nil {
 		panic(err)
 	}
-	return New(sig, msig, store.NewMemory(), "tok", route.NewRouteTable(1, 1725500000))
+	rlsig, err := ratelimit.NewSigner(key)
+	if err != nil {
+		panic(err)
+	}
+	return New(sig, msig, rlsig, store.NewMemory(), "tok",
+		route.NewRouteTable(1, 1725500000), ratelimit.NewTable(1, time.Unix(1725500000, 0)))
 }
 
 func doIssue(s *Server, body, token string) *httptest.ResponseRecorder {

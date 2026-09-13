@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"security-ai-gateway/gateway/gateway-core/internal/api"
+	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
 	"security-ai-gateway/gateway/gateway-core/internal/route"
 	"security-ai-gateway/gateway/gateway-core/internal/store"
 	"security-ai-gateway/gateway/mcpsec"
@@ -58,11 +59,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("构造 MCP 签名器失败: %v", err)
 	}
+	rsigner, err := ratelimit.NewSigner(key) // 限流/预算表与路由表共用同一密钥族（K_rx）
+	if err != nil {
+		log.Fatalf("构造限流签名器失败: %v", err)
+	}
 	st := store.NewMemory()
 	rt := defaultRouteTable(signer)
-	srv := api.New(signer, msigner, st, authToken, rt)
+	rlt := defaultRateLimitTable(rsigner)
+	srv := api.New(signer, msigner, rsigner, st, authToken, rt, rlt)
 
-	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d", addr, authToken != "", rt.Version)
+	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d 限流版本=%d", addr, authToken != "", rt.Version, rlt.Version)
 	// 控制面无流式响应，全量超时；body 上限防资源耗尽（T-1 评审项）
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -87,6 +93,16 @@ func defaultRouteTable(signer *route.Signer) *route.RouteTable {
 	}
 	if err := signer.SignTable(tbl); err != nil {
 		log.Fatalf("路由表签名失败: %v", err)
+	}
+	return tbl
+}
+
+// defaultRateLimitTable 构造并签发默认限流表（MVP：**空表＝不限流**，
+// 由 PUT /ratelimits 递增版本动态更新；空表已签名，保证插件侧 pull 始终拿到可验签表）。
+func defaultRateLimitTable(signer *ratelimit.Signer) *ratelimit.Table {
+	tbl := ratelimit.NewTable(1, time.Now())
+	if err := signer.SignTable(tbl); err != nil {
+		log.Fatalf("限流表签名失败: %v", err)
 	}
 	return tbl
 }
