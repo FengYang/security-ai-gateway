@@ -128,6 +128,8 @@ higress-standalone/wasmplugins/ai-proxy.yaml
 higress-standalone/wasmplugins/ai-proxy.yaml.bak-*
 higress-standalone/wasmplugins/ai-proxy.internal.yaml
 higress-standalone/wasmplugins/ai-statistics-*.yaml
+# key-auth 实例（A 项前置调研/实链用本地凭据；交付清单以 deploy/higress/security-plugins.yaml 为准）
+higress-standalone/wasmplugins/key-auth.yaml
 
 # ai-proxy 多厂商接入（GF.3.2）的 fake-apiserver 运行态：本机按 deploy/higress/ 清单 apply 后
 # 由 apiserver 落盘（含 managedFields/resourceVersion 噪音与厂商路由），入库基线以
