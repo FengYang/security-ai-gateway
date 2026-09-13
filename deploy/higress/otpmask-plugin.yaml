@@ -35,7 +35,7 @@ spec:
   # url 为插件 wasm 拉取地址（OCI 或 HTTP）；按上方说明替换为实际地址。
   # 占位值指向仓库内置镜像（构建后推送真实 registry 时替换）。
   url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/otpmask:1.0.0
-  failStrategy: FAIL_CLOSED
+  failStrategy: FAIL_CLOSE
   defaultConfigDisable: true
   matchRules:
   # 密态路由白名单：仅 infer 走段① 加密；ai-*（/provider/* 明文双轨）与 tee-admin

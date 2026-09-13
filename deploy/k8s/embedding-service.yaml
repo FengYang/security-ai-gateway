@@ -24,6 +24,11 @@ spec:
       - name: embedding-service
         image: otpmask/embedding-service:latest
         imagePullPolicy: IfNotPresent
+        # tiktoken-go 需要可写的词表缓存目录（P0b 实测：readOnlyRootFilesystem 下默认
+        # /tmp/data-gym-cache 创建失败 → init panic）。缓存指向 emptyDir，保持只读根文件系统。
+        env:
+        - name: TIKTOKEN_CACHE_DIR
+          value: /tmp/tiktoken
         ports:
         - containerPort: 18080
           name: http
@@ -53,6 +58,12 @@ spec:
           runAsNonRoot: true
           capabilities:
             drop: ["ALL"]
+        volumeMounts:
+        - name: tiktoken-cache
+          mountPath: /tmp
+      volumes:
+      - name: tiktoken-cache
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

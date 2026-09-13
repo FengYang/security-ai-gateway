@@ -31,7 +31,7 @@ metadata:
     higress.io/wasm-plugin-category: api-provider
 spec:
   url: http://localhost:8002/plugins/ai-proxy/2.0.1/plugin.wasm
-  failStrategy: FAIL_CLOSED
+  failStrategy: FAIL_CLOSE
   defaultConfigDisable: true
   matchRules:
   # ---- 国际 ----

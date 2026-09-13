@@ -21,7 +21,6 @@ spec:
         backend:
           service:
             name: tee-infer-service
-            namespace: otpmask
             port:
               number: 19090
   tls:
@@ -47,7 +46,6 @@ spec:
         backend:
           service:
             name: tee-infer-service
-            namespace: otpmask
             port:
               number: 19090
       - path: /audit
@@ -55,7 +53,6 @@ spec:
         backend:
           service:
             name: tee-infer-service
-            namespace: otpmask
             port:
               number: 19090
   tls:

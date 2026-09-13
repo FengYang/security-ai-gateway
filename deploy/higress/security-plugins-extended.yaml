@@ -48,7 +48,7 @@ metadata:
     higress.io/wasm-plugin-category: security
 spec:
   url: http://localhost:8002/plugins/bot-detect/2.0.0/plugin.wasm
-  failStrategy: FAIL_CLOSED
+  failStrategy: FAIL_CLOSE
   phase: AUTHZ
   priority: 310
   matchRules:
@@ -84,7 +84,7 @@ metadata:
     higress.io/wasm-plugin-category: security
 spec:
   url: http://localhost:8002/plugins/waf/2.0.1/plugin.wasm
-  failStrategy: FAIL_CLOSED
+  failStrategy: FAIL_CLOSE
   phase: AUTHZ
   priority: 330
   matchRules:
@@ -139,7 +139,7 @@ metadata:
     higress.io/wasm-plugin-category: auth
 spec:
   url: http://localhost:8002/plugins/oidc/2.0.1/plugin.wasm
-  failStrategy: FAIL_CLOSED
+  failStrategy: FAIL_CLOSE
   phase: AUTHN
   priority: 350
   matchRules:
@@ -224,7 +224,7 @@ metadata:
     higress.io/wasm-plugin-category: security
 spec:
   url: http://localhost:8002/plugins/qwen3guard/1.0.0/plugin.wasm
-  failStrategy: FAIL_CLOSED
+  failStrategy: FAIL_CLOSE
   defaultConfigDisable: true
   priority: 300 # 默认阶段，**必须早于 ai-proxy**（否则请求/响应的 GJSON Path 取不到原始报文）
   matchRules:

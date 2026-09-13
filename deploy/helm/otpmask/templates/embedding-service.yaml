@@ -27,6 +27,11 @@ spec:
       - name: embedding-service
         image: {{ printf "%s%s:%s" .Values.images.registry .Values.images.embeddingService .Values.images.tag }}
         imagePullPolicy: {{ .Values.images.pullPolicy }}
+        # tiktoken-go 需要可写的词表缓存目录（P0b 实测：readOnlyRootFilesystem 下默认
+        # /tmp/data-gym-cache 创建失败 → init panic）。缓存指向 emptyDir，保持只读根文件系统。
+        env:
+        - name: TIKTOKEN_CACHE_DIR
+          value: /tmp/tiktoken
         ports:
         - containerPort: {{ .Values.embedding.port }}
           name: http
@@ -56,6 +61,12 @@ spec:
           runAsNonRoot: true
           capabilities:
             drop: ["ALL"]
+        volumeMounts:
+        - name: tiktoken-cache
+          mountPath: /tmp
+      volumes:
+      - name: tiktoken-cache
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

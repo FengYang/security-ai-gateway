@@ -34,7 +34,7 @@ metadata:
     higress.io/wasm-plugin-category: auth
 spec:
   url: http://localhost:8002/plugins/key-auth/2.0.0/plugin.wasm
-  failStrategy: FAIL_CLOSED
+  failStrategy: FAIL_CLOSE
   defaultConfig:
     global_auth: true # 实例级：全局生效认证（未列入 allow 的路由/域名亦须认证）
     consumers:
@@ -88,7 +88,7 @@ metadata:
     higress.io/wasm-plugin-category: security
 spec:
   url: http://localhost:8002/plugins/ip-restriction/2.0.1/plugin.wasm
-  failStrategy: FAIL_CLOSED
+  failStrategy: FAIL_CLOSE
   defaultConfigDisable: true
   matchRules:
   - ingress:
@@ -166,7 +166,7 @@ metadata:
     higress.io/wasm-plugin-category: traffic
 spec:
   url: http://localhost:8002/plugins/cluster-key-rate-limit/2.0.1/plugin.wasm
-  failStrategy: FAIL_CLOSED
+  failStrategy: FAIL_CLOSE
   defaultConfigDisable: true
   matchRules:
   - ingress:
@@ -219,7 +219,7 @@ metadata:
     higress.io/wasm-plugin-category: security
 spec:
   url: http://localhost:8002/plugins/cors/2.0.2/plugin.wasm
-  failStrategy: FAIL_CLOSED
+  failStrategy: FAIL_CLOSE
   matchRules:
   - ingress:
     - infer
