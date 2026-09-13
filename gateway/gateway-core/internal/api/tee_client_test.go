@@ -92,15 +92,16 @@ func TestPutRateLimits_teeApplied(t *testing.T) {
 	if !r.TeeApplied || r.TeeUpdates != 1 {
 		t.Fatalf("应成功下发 1 条配额: %+v", r)
 	}
-	if len(stub.got) != 1 || stub.got[0].Tenant != "t-a" || stub.got[0].MaxTokens != 50_000_000 {
-		t.Fatalf("下发内容不符: %+v", stub.got)
+	if len(stub.got) != 1 || stub.got[0].Tenant != "t-a" || stub.got[0].MaxTokens != 50_000_000 ||
+		stub.got[0].Window != "day" {
+		t.Fatalf("下发内容不符（应为 day 窗口）: %+v", stub.got)
 	}
-	// 预算规则在数据面无内容（不下发），并须带语义 gap 说明
+	// 预算规则在数据面无内容（不下发），并须带窗口语义与内存态说明
 	if r.DataPlaneCompiled {
 		t.Fatalf("仅预算规则时数据面不应编译成功: %+v", r)
 	}
-	if len(r.Notes) == 0 || !strings.Contains(strings.Join(r.Notes, "|"), "语义不完全等价") {
-		t.Fatalf("应带语义 gap Note: %+v", r.Notes)
+	if len(r.Notes) == 0 || !strings.Contains(strings.Join(r.Notes, "|"), "UTC+8 自然日窗口") {
+		t.Fatalf("应带窗口语义 Note: %+v", r.Notes)
 	}
 }
 
@@ -153,7 +154,7 @@ func TestNewHTTPTeeQuotaApplier_applies(t *testing.T) {
 	if applier == nil {
 		t.Fatal("URL 非空时应返回下发器")
 	}
-	if err := applier.ApplyQuota(context.Background(), []ratelimit.QuotaUpdate{{Tenant: "t-a", MaxTokens: 50_000_000}}); err != nil {
+	if err := applier.ApplyQuota(context.Background(), []ratelimit.QuotaUpdate{{Tenant: "t-a", MaxTokens: 50_000_000, Window: "day"}}); err != nil {
 		t.Fatalf("下发失败: %v", err)
 	}
 	if gotPath != "/usage/quota" {
@@ -162,8 +163,8 @@ func TestNewHTTPTeeQuotaApplier_applies(t *testing.T) {
 	if gotToken != "admin-token-1" {
 		t.Fatalf("管理头不符: %s", gotToken)
 	}
-	if gotBody["tenant"] != "t-a" || gotBody["max_tokens"] != float64(50_000_000) {
-		t.Fatalf("负载形态不符: %+v", gotBody)
+	if gotBody["tenant"] != "t-a" || gotBody["max_tokens"] != float64(50_000_000) || gotBody["window"] != "day" {
+		t.Fatalf("负载形态不符（须含 window）: %+v", gotBody)
 	}
 }
 
