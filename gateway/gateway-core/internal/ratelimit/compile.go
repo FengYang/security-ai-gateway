@@ -9,14 +9,25 @@ import (
 // cluster-key-rate-limit 2.0.1 的配置（rule_items / global_threshold）。
 //
 // 纪律（避免"字段静默失效"——本项目已因 schema 错配吃过一次实境事故）：
-//   - 只发射**仓库内已实链验证**的字段（rule_name / rule_items / limit_by_per_header /
+//   - 只发射**仓库内已实链验证**的字段（rule_name / rule_items / limit_by_header /
 //     limit_keys.key / limit_keys.query_per_second / show_limit_quota_header /
 //     rejected_code / redis.*）；
 //   - 无证据的字段（burst_multiplier、api_key 维度的分桶头名）**一律不下发**，
 //     改为返回 Note 如实记录，待 S4 实链验证后再纳入；
 //   - global_threshold 有插件报错文本证据、但未实链验证 → 发射并附 Note。
+//
+// 【2026-09-13 实链取证修正】租户维度必须用 **limit_by_header（精确值）**，不可用
+// `limit_by_per_header`：插件对 per 变体只接受 `"*"` 或 `regexp:` 前缀，写租户名会
+// 直接加载失败（gateway.log 原文）：
+//   parse rule config failed: failed to parse rule_item in rule_items:
+//   the "limit_by_per_header" restriction must start with 'regexp:' or be exactly '*' (got "t-a")
+// 语义核对（插件源码 findMatchingItem）：limit_by_header 按 header 取值**精确匹配**
+// limit_keys，未命中该 rule_item 直接跳过（该请求不限流、也不落桶）——正是"仅对已配
+// 租户生效"的期望语义；故多租户可在同一 rule_items 元素内用不同 query_per_second。
+// 已知表达边界：**无法表达"所有租户统一配额"**（deploy 清单里 per_header + "*" 那种
+// 形态；本模型按 target 逐租户下发，未列出的租户不受限）。
 
-// HeaderTenant 租户分桶头（本项目配置中已实链验证：同窗口 t-a 429 / t-b 200）。
+// HeaderTenant 租户分桶头（2026-09-12 实境取证过 per_header 形态；本文件改精确形态后 S4 复验）。
 const HeaderTenant = "x-tenant-id"
 
 // ErrNoEffectiveRules 编译后没有任何可下发规则（插件要求至少一项，否则加载失败）。
@@ -54,8 +65,8 @@ type LimitKey struct {
 
 // RuleItem 一组按头分桶的限流项（插件 schema 要求嵌在 rule_items[]）。
 type RuleItem struct {
-	LimitByPerHeader string     `json:"limit_by_per_header"`
-	LimitKeys        []LimitKey `json:"limit_keys"`
+	LimitByHeader string     `json:"limit_by_header"`
+	LimitKeys     []LimitKey `json:"limit_keys"`
 }
 
 // GlobalThreshold 全局阈值（不按头分桶）。
@@ -172,8 +183,8 @@ func CompileDataPlane(t *Table, opt CompileOptions) (*DataPlaneConfig, []string,
 	}
 	if len(tenantKeys) > 0 {
 		cfg.RuleItems = append(cfg.RuleItems, RuleItem{
-			LimitByPerHeader: HeaderTenant,
-			LimitKeys:        tenantKeys,
+			LimitByHeader: HeaderTenant,
+			LimitKeys:     tenantKeys,
 		})
 	}
 	cfg.GlobalThreshold = global

@@ -49,7 +49,7 @@ func TestPutRateLimits_ok(t *testing.T) {
 	if err := json.Unmarshal(resp.DataPlaneConfig, &cfg); err != nil {
 		t.Fatalf("编译产物解析失败: %v", err)
 	}
-	if len(cfg.RuleItems) != 1 || cfg.RuleItems[0].LimitByPerHeader != "x-tenant-id" ||
+	if len(cfg.RuleItems) != 1 || cfg.RuleItems[0].LimitByHeader != "x-tenant-id" ||
 		cfg.RuleItems[0].LimitKeys[0].QueryPerSecond != 10 {
 		t.Fatalf("编译产物不符: %+v", cfg)
 	}

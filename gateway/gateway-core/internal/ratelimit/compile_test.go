@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -41,8 +42,18 @@ func TestCompileDataPlane_tenant(t *testing.T) {
 	if cfg.Redis.ServiceName != "redis-ratelimit.dns" || cfg.Redis.ServicePort != 6379 || cfg.Redis.Timeout != 500 {
 		t.Fatalf("redis 配置不符: %+v", cfg.Redis)
 	}
-	if len(cfg.RuleItems) != 1 || cfg.RuleItems[0].LimitByPerHeader != HeaderTenant {
+	if len(cfg.RuleItems) != 1 || cfg.RuleItems[0].LimitByHeader != HeaderTenant {
 		t.Fatalf("应合并为一个 x-tenant-id 分桶项: %+v", cfg.RuleItems)
+	}
+	// 线上字段名回归（2026-09-13 实链事故）：租户精确值必须走 limit_by_header；
+	// per 变体只接受 "*"/regexp:，写租户名会被插件拒载（config_fail）。
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	if !strings.Contains(string(raw), `"limit_by_header":"x-tenant-id"`) ||
+		strings.Contains(string(raw), "limit_by_per_header") {
+		t.Fatalf("线上形态不符（须 limit_by_header）: %s", raw)
 	}
 	keys := cfg.RuleItems[0].LimitKeys
 	if len(keys) != 2 || keys[0].Key != "t-a" || keys[0].QueryPerSecond != 10 {
