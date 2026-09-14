@@ -61,7 +61,7 @@ kubectl get wasmplugins -n higress-system
 # 预期：otpmask / key-auth / ip-restriction / local-rate-limit / cors 全部 Ready，failStrategy=FAIL_CLOSED
 
 # 7.（GF.2）生态扩展插件 + 网关 HPA（在 GF.1 验证通过后启用）
-kubectl apply -f deploy/higress/security-plugins-extended.yaml   # WAF(影子模式)/Bot/OAuth(骨架)
+kubectl apply -f deploy/higress/security-plugins-extended.yaml   # WAF(非 CRS 形态，当前不拦截)/Bot/OAuth(骨架)
 kubectl apply -f deploy/higress/gateway-hpa.yaml                 # 网关 HPA（依赖 metrics-server）
 ```
 
@@ -89,7 +89,10 @@ kubectl apply -f deploy/higress/gateway-hpa.yaml                 # 网关 HPA（
 1. 段① 加密：`otpmask` 插件在 key-auth/ip-restriction 之后执行，密文 body 不被安全插件读取；
 2. FAIL_CLOSED：任一插件故障 → 请求拒绝（不降级明文）；
 3. 租户鉴权分层：key-auth（调用方 API Key）→ otpmask 内 JWT（租户 claim），claim 覆盖规则不变；
-4. WAF 边界：推理路径 body 内容检测不适用（密文），WAF 做元数据级防护；内容安全由 tee-infer Guardrail 承担。
+4. WAF 边界：推理路径 body 内容检测不适用（密文），WAF 仅做元数据级防护（URL/Header/UA/Method）。
+   **注意：当前 WAF 为"空转形态"**——`useCRS: false` 且未配自定义规则 → **不拦截任何流量**
+   （只常驻插件 VM，实测 +≈376Mi 内存）；实测与依据见 `security-plugins-extended.yaml` 的 waf 节。
+   内容安全由 tee-infer Guardrail 承担。
 
 ## 6. 密钥注入（sig_key / attest_token 生产化，评审 P0）
 
@@ -164,11 +167,15 @@ kubectl apply -f deploy/higress/gateway-hpa.yaml                 # 网关 HPA（
 
 | 文件 | 用途 | 阶段 |
 | --- | --- | --- |
-| `security-plugins-extended.yaml` | WAF（Coraza，影子模式）、Bot Detect、OAuth/OIDC 接入骨架 | GF.2.1 / GF.2.2 |
+| `security-plugins-extended.yaml` | WAF（Coraza，**非 CRS 形态，当前不拦截**）、Bot Detect、OAuth/OIDC 接入骨架 | GF.2.1 / GF.2.2 |
 | `gateway-hpa.yaml` | 网关 HPA（`higress-gateway`，CPU 阈值 65%，min=2） | GF.2.6 |
 
-- WAF 先 `sec_rule_engine: DetectionOnly` 影子观察，无误杀再切 `On`；推理路径 body 为段① 密文，
-  WAF/Bot 仅做元数据级防护，内容安全由 tee-infer Guardrail 承担（方案 §3.10.4）。
+- WAF 现状（2026-09-14 K3S 实测，证据见清单 waf 节）：2.x 只有 `useCRS`(bool) + `secRules`(array)
+  两个字段（旧写的 `sec_rule_engine` 在 2.x **不存在**）；按官方"观察模式"写的 `useCRS: true` 会触发
+  **失控空转**（节点 CPU 打满 + 内存持续增长；删 CR 不回收已建 VM，须冷重启网关）→ 已改为
+  `useCRS: false` + `SecRuleEngine DetectionOnly`。**该形态下 WAF 不拦截任何流量**，只占资源
+  （实测 +≈376Mi）；补齐 `secRules`（仅限元数据级）后才具备防护能力。
+- 推理路径 body 为段① 密文，WAF/Bot 仅做元数据级防护，内容安全由 tee-infer Guardrail 承担（方案 §3.10.4）。
 - OAuth/OIDC 为接入骨架，client_secret/cookie_secret 走 KMS/Vault（GF.2.5），字段按企业 IdP 填充并核验（GF.1.7）。
 
 ## 9. AI Provider 统一接入（GF.3.2，10+ Provider）

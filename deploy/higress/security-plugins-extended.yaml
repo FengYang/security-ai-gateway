@@ -6,16 +6,20 @@
 # 已按 2.x 修正，依据＝官方文档（higress.cn/docs/latest）+ 镜像实际安装版本：
 #   - bot-detect 1.0.0 → **2.0.0**（配置字段 allow/deny/blocked_code/blocked_message 与官方一致）
 #   - waf        1.0.0 → **2.0.1**，且**配置字段全部纠正**：2.x 只有 `useCRS`(bool) 与 `secRules`(array)，
-#     原写的 `sec_rule_engine` / `default_rule_set` 在 2.x **不存在**；影子模式改为官方写法
-#     `useCRS: true` + `secRules: ["SecRuleEngine DetectionOnly"]`
+#     原写的 `sec_rule_engine` / `default_rule_set` 在 2.x **不存在**。
+#     【2026-09-14 覆盖】上面这条"字段纠正"结论仍成立，但按官方"观察模式"写的 `useCRS: true`
+#     经 K3S 实测**不可用**——会触发失控空转（节点 CPU 打满 + 内存持续增长），详见下方 waf 节；
+#     本文件已据此改为 `useCRS: false`。
 #   - oauth        1.0.0 → **改用 `oidc` 2.0.1**：2.x 的 `oauth` 插件是**OAuth2 Token 签发器**
 #     （consumers[{name,client_id,client_secret}] + auth_path），**不是**接企业 IdP 的客户端
 #
 # 【2026-09-12 覆盖范围决定（原"未核实项"已解决）】明文 Provider 入口 `/provider/<name>/...`
 # （17 条 ai-* ingress）是否纳入本文件的插件，逐插件给出结论与依据：
-#   - **WAF：纳入**。明文入口 body 为**明文**，CRS 可做内容级检测（密态路径只能看元数据），
-#     收益真实；当前保持 `DetectionOnly` 影子模式（只记录不拦截），误报风险可控，
-#     观察无误杀后再切 On。
+#   - **WAF：纳入，但当前为"空转形态"**。原计划用 CRS 对明文 body 做内容级检测（密态路径只能看
+#     元数据）——2026-09-14 实测 `useCRS: true` 在本环境（2C/7.3G 单节点）失控空转，**CRS 路线
+#     暂不可用**（量化证据见下方 waf 节）。现声明为 `useCRS: false` + `SecRuleEngine DetectionOnly`，
+#     且未配自定义规则 → **该插件当前不拦截任何流量**，只占资源（实测 +≈376Mi 内存）。
+#     补齐 secRules 后才具备真实防护能力（TODO：规则集待定，仅限元数据级）。
 #   - **bot-detect：不纳入**。该插件 `allow`/`deny` 为**追加**语义，**无法关闭内置爬虫规则**；
 #     内置规则按 `name/0.0` 形态匹配，正好命中 LLM SDK 与探针 UA
 #     （`curl/x.y.z`、`OpenAI/Python x`、`Anthropic/x`、`Go-http-client`），且 API 入口已有 key-auth
@@ -71,9 +75,25 @@ spec:
 
 ---
 # WAF：Coraza/ModSecurity 规则引擎（AUTHZ，priority 330）
-# 2.x 配置字段：useCRS(bool) + secRules(array)；影子模式见官方示例（下）
-# 覆盖范围：**infer + 17 条 /provider/* 明文入口**（明文 body 可做内容级检测，见文件头）
+# 2.x 配置字段：useCRS(bool) + secRules(array)；本文件用**非 CRS 形态**（见下方 config）
+# 覆盖范围：**infer + 17 条 /provider/* 明文入口**（作用域随密态路由增删同步维护）
 # 边界：密态路径仅元数据级（密文 body 不检测）；先 DetectionOnly 观察，确认无误杀后切 On（GF.2.1）
+#
+# 【2026-09-14 K3S 实测 · 单变量对照（2C/7.3G 单节点）——"CRS 路线暂不可用"的证据】
+#   路径A（useCRS:false + ["SecRuleEngine DetectionOnly"]）：热加载、冷启动（52s Ready）、
+#     稳态（CPU 13~16m；内存 1149Mi，无 waf 基线 773Mi → 插件 VM 常驻 +≈376Mi）、
+#     POST /infer 冒烟 200 + K_enc 信封均正常 → **插件本体加载无问题**。
+#   路径B（仅把 useCRS 翻为 true，其余完全不变）：配置推送后 CPU 16m → 887m → 1360m → 1860m，
+#     **节点 CPU 打满 2000m/100%**；内存 935Mi → 1721Mi 持续抖动上升；4~5 分钟无衰减。
+#     且**删掉 waf CR 后空转不停止**（CPU 仍 1850m、内存继续单调上涨）→ 已创建的 VM 不回收，
+#     必须冷重启网关 Pod 才能清除（回滚顺序：**先删 CR，再删 Pod**）。
+#     这解释了此前观察到的"冷启动永久挂死"：所有 worker 同时空转 + 内存增长把启动路径抢死，
+#     Pod 永不 Ready。
+#   结论：`useCRS: true` 在本环境**必然失控**（热更/冷启一致），**与"配置字段写错"无关**——
+#     本段配置与官方"观察模式"示例逐字一致。上游实现＝`coraza-proxy-wasm` + `coraza-wasilibs`
+#     （init 处 RegisterRX/PM/SQLi/XSS），OWASP CRS 在 Wasm 沙箱内初始化进入不可收敛循环。
+#   证据边界（如实）：① 实测作用域为 **infer 单路由**（本文件作用域为 infer + 17 条 ai-*，
+#     作用域不影响 VM 初始化，故沿用）；② 本结论仅对本环境成立，生产多核环境**未验证**。
 apiVersion: extensions.higress.io/v1alpha1
 kind: WasmPlugin
 metadata:
@@ -91,10 +111,13 @@ spec:
   - ingress:
     - infer
     config: &waf_shadow
-      # 开启 OWASP CRS（核心规则集）
-      useCRS: true
-      # 影子模式：只记录不拦截；稳定无误杀后改为 "SecRuleEngine On"（fail-closed 拦截）
-      # 如需移除误报规则：追加 "SecRuleRemoveById <id>"（官方示例）
+      # 关闭 OWASP CRS：useCRS: true 在本环境触发失控空转（证据见上），暂不可用。
+      useCRS: false
+      # 观察模式：只记录、不拦截。
+      # （注意）useCRS=false 且未配自定义规则时，本插件**不拦截任何流量**，仅常驻 VM 占内存；
+      #   补齐下方 secRules 后才具备防护能力（TODO：规则集待定，仅限元数据级 URL/Header/UA/Method）。
+      # 自定义规则写法（官方示例）：SecRule REQUEST_URI "@streq /admin" "id:101,phase:1,t:lowercase,deny"
+      # 稳定无误杀后改为 "SecRuleEngine On"（fail-closed 拦截）；去误报：SecRuleRemoveById <id>
       secRules:
       - "SecRuleEngine DetectionOnly"
   - ingress:
