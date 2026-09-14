@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"sync"
 
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 
@@ -19,7 +18,6 @@ import (
 var (
 	ruleCache   *ratelimitcache.Cache
 	tableKey    []byte
-	tableOnce   sync.Once
 	tableParams struct {
 		service string
 		port    int64
@@ -106,15 +104,25 @@ func fetchTableOnce() {
 	}
 }
 
-// ensureFetchTick 注册拉取 tick（幂等；凭据未启用时也要拉表，故两条路径都调用）。
+// ensureFetchTick 注册拉取 tick（每个插件上下文一次）。
+//
+// 关键（wasm-go v1.1.2 生命周期，2026-09-14 kind 集群实测 + SDK 源码取证）：
+// OnPluginStart 每次执行（含 ECDS 配置热更新产生的**新插件上下文**）都会先把 SDK 的
+// globalOnTickFuncs 清空（plugin_wrapper.go OnPluginStart：`globalOnTickFuncs = nil`），
+// 随后由 parseConfig 重新登记，并把 tick 绑到**新**上下文；旧上下文随热更新销毁。
+// 因此这里**绝不能用 sync.Once 去重**：Once 在 VM 内只执行一次，热更新后 parseConfig 再执行时
+// 跳过重注册 ⇒ 新上下文零 tick（本机实测：第二次 CR apply 后拉表/凭据 tick 全灭，
+// 各 worker 永久停留旧版本表，table_fetch_* 计数冻结）。
+//
+// 不会重复登记：本插件 defaultConfigDisable + 单条 matchRule，parseConfig 在每次
+// OnPluginStart 中只被调用一次（matcher.ParseRuleConfig：无全局键时仅对唯一 rule 解析一次），
+// 且 SDK 每次 OnPluginStart 也会重置登记表。
 func ensureFetchTick(intervalMs int64) {
 	if intervalMs < 1000 {
 		intervalMs = 1000
 	}
-	tableOnce.Do(func() {
-		wrapper.RegisterTickFunc(intervalMs, onFetchTick)
-		logInfof("rpm-shadow-plugin: 拉取 tick 已注册 period_ms=%d（限流表）", intervalMs)
-	})
+	wrapper.RegisterTickFunc(intervalMs, onFetchTick)
+	logInfof("rpm-shadow-plugin: 拉取 tick 已注册 period_ms=%d（限流表+凭据；每次插件启动/热更新重新注册）", intervalMs)
 }
 
 // onFetchTick 拉取 tick：凭据（若启用）+ 限流表。**失败各自保留旧值**。

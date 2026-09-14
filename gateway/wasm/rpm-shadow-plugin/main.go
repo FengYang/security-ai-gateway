@@ -21,7 +21,6 @@ package main
 
 import (
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
@@ -79,7 +78,6 @@ var (
 	reportQ = newReportQueue(defaultQueueMax)
 	// currentConfig 最近一次 parseConfig 的配置（tick 回调无配置参数，故留副本）。
 	currentConfig PluginConfig
-	flushOnce     sync.Once
 )
 
 func main() {}
@@ -179,15 +177,16 @@ func onHttpRequestHeaders(_ wrapper.HttpContext, cfg PluginConfig, _ logs.Log) t
 	return types.ActionContinue
 }
 
-// ensureFlushTick 注册"窗口结算 + 上报"tick（幂等）。
+// ensureFlushTick 注册"窗口结算 + 上报"tick（每个插件上下文一次）。
+//
+// 生命周期与 ensureFetchTick 相同（wasm-go OnPluginStart 每次热更新会清空 tick 登记表）：
+// **不能用 sync.Once**，否则 CR 热更新后上报 tick 不重注册 ⇒ 窗口汇总永不上报。
 func ensureFlushTick(intervalMs int64) {
 	if intervalMs < 1000 {
 		intervalMs = 1000
 	}
-	flushOnce.Do(func() {
-		wrapper.RegisterTickFunc(intervalMs, onFlushTick)
-		logInfof("rpm-shadow-plugin: 结算/上报 tick 已注册 period_ms=%d", intervalMs)
-	})
+	wrapper.RegisterTickFunc(intervalMs, onFlushTick)
+	logInfof("rpm-shadow-plugin: 结算/上报 tick 已注册 period_ms=%d（每次插件启动/热更新重新注册）", intervalMs)
 }
 
 // onFlushTick 结算已翻转窗口并批量投递（**不在请求路径发 HTTP**；失败由队列重试）。
