@@ -2,7 +2,9 @@
 
 > 目的：生产网关从裸 Envoy（`deploy/k8s/envoy-gateway.yaml`）迁移到 Higress 控制面形态，
 > 在保证段① 加密链与 fail-closed 安全语义的前提下，启用 Higress 插件生态能力
-> （key-auth / IP Restriction / Rate Limit / CORS，后续可加 WAF / Bot / OAuth）。
+> （key-auth / IP Restriction / Rate Limit / CORS 已启用；Bot Detect 限 infer 路由启用；
+> WAF 经实测 CRS 形态在本环境失控、当前仅保留非 CRS 骨架且不拦截流量，规则集待补，详见 §8；
+> OIDC 预留给管理门户等人机入口，机机 API 不走 OIDC）。
 > 前置决策：D-0 = B（2026-09-01 修正）。
 
 ## 0. 集群基线（评审 P1-1，GF.1 启动前填写）
