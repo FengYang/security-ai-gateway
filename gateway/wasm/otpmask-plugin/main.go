@@ -551,11 +551,22 @@ func finishTextFlow(ctx wrapper.HttpContext, config PluginConfig, req *textReque
 		finishTextDirect(ctx, config, req, requestID, seed, nonceHex, log)
 		return
 	}
+	// 统一载荷：messages 形态时 embedding/guardrail 对整体序列化载荷操作
+	// （修复：messages 非空时 req.Text 为空 → embedding 调用失败 503）。
+	payload := req.Text
+	if len(req.Messages) > 0 {
+		messages, err := marshalMessages(req)
+		if err != nil {
+			failClosed(log, err.Error())
+			return
+		}
+		payload = string(messages)
+	}
 	embClient := wrapper.NewClusterClient(wrapper.FQDNCluster{
 		FQDN: config.EmbeddingService,
 		Port: config.EmbeddingPort,
 	})
-	embedBody, _ := json.Marshal(map[string]string{"text": req.Text})
+	embedBody, _ := json.Marshal(map[string]string{"text": payload})
 	err := embClient.Post("/embed",
 		[][2]string{{"Content-Type", "application/json"}},
 		embedBody,
@@ -585,7 +596,7 @@ func finishTextFlow(ctx wrapper.HttpContext, config PluginConfig, req *textReque
 				CipherVectors: toProtocolVectors(cipherVecs),
 			}
 			// M9-4：附加 guardrail 密文文本（域分离掩码流，TEE 内解密检测）
-			if ct, err := maskText(seed, req.Text); err != nil {
+			if ct, err := maskText(seed, payload); err != nil {
 				failClosed(log, fmt.Sprintf("加密 guardrail 文本失败: %v", err))
 				return
 			} else {
@@ -619,7 +630,7 @@ func finishTextFlow(ctx wrapper.HttpContext, config PluginConfig, req *textReque
 				_ = proxywasm.ReplaceHttpRequestHeader("X-Session-ID", Session.SessionID)
 			}
 			log.Infof("otpmask-plugin: 南向协议请求构造完成 text=%d chars tokens=%d dim=%d req=%s",
-				len(req.Text), len(er.Tokens), len(er.Vectors[0]), requestID[:8])
+				len(payload), len(er.Tokens), len(er.Vectors[0]), requestID[:8])
 			if err := proxywasm.ResumeHttpRequest(); err != nil {
 				log.Errorf("otpmask-plugin: ResumeHttpRequest 失败: %v", err)
 			}
