@@ -309,7 +309,7 @@ func TestOutputGuardForcedSplitMetric(t *testing.T) {
 	a := newAuditChain()
 	p := resolveOutputGuardParams(outputGuardParams{MaxUnitRunes: 5, FirstUnitMaxRunes: 3})
 	og, err := newOutputGuard(outputGuardConfig{Mode: outputGuardShadow, Params: p},
-		l1Classifier{g: newGuardrail()}, m, a, "acme", "req-force-1")
+		l1Classifier{g: newGuardrail()}, nil, m, a, "acme", "req-force-1")
 	if err != nil {
 		t.Fatalf("newOutputGuard: %v", err)
 	}

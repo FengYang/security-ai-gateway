@@ -55,7 +55,7 @@ func runThroughOutputGuard(t *testing.T, text string) (hit bool, category string
 	m.setOutputGuardMode(outputGuardShadow, defaultPolicyVersion)
 	a := newAuditChain()
 	og, err := newOutputGuard(testOutputGuardConfig(outputGuardShadow),
-		l1Classifier{g: newGuardrail()}, m, a, "og0-test", "og0-"+t.Name())
+		l1Classifier{g: newGuardrail()}, nil, m, a, "og0-test", "og0-"+t.Name())
 	if err != nil {
 		t.Fatalf("newOutputGuard: %v", err)
 	}

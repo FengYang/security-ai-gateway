@@ -21,7 +21,14 @@
 // 输入侧 model.Classifier 不动，避免交叉回归。
 package main
 
-import "fmt"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+)
 
 // 输出侧审查模式（P-MODE，§5.1）。
 const (
@@ -69,6 +76,7 @@ type outputGuard struct {
 	mode          string
 	policyVersion string
 	l1            OutputClassifier
+	l2            OutputClassifier // nil = 未启用 L2（纯 L1 = 当前行为）；M2 骨架接入，M3 升级联
 	metrics       *otpmaskMetrics
 	audit         *auditChain
 	tenant        string
@@ -102,7 +110,7 @@ func validateOutputGuardMode(mode string) error {
 // newOutputGuard 构造请求级审查管线（§2.3 I1 `outputguard.New(cfg)`）。
 // cfg.Mode=off/空 → 返回 nil（调用侧走原路径，零行为变化）。
 // 非法或在 M1 未实现的 enforcing → 返回错误（fail-closed；启动期已校验，此处为兜底）。
-func newOutputGuard(cfg outputGuardConfig, l1 OutputClassifier, m *otpmaskMetrics, a *auditChain,
+func newOutputGuard(cfg outputGuardConfig, l1 OutputClassifier, l2 OutputClassifier, m *otpmaskMetrics, a *auditChain,
 	tenant, requestID string) (*outputGuard, error) {
 	if err := validateOutputGuardMode(cfg.Mode); err != nil {
 		return nil, err
@@ -118,6 +126,7 @@ func newOutputGuard(cfg outputGuardConfig, l1 OutputClassifier, m *otpmaskMetric
 		mode:          cfg.Mode,
 		policyVersion: pv,
 		l1:            l1,
+		l2:            l2,
 		metrics:       m,
 		audit:         a,
 		tenant:        tenant,
@@ -173,43 +182,100 @@ func (og *outputGuard) Close() {
 	og.buf.Reset()
 }
 
-// classifyUnit 对一个判定单元跑 L1 并落观测（命中→l1_hit；首见类目→would_reject+审计）。
-// 类目一律收敛到内部 ID（附录 A）：词库路径（lexiconRegistry）**已返回内部 ID**，直接采用；
-// guardrail 路径返回 L1 原生标签，经 P-CATEGORY-MAP 映射。未映射 = P-DEGRADE（fail-closed），
-// 记 unmapped 计数但不记 would_reject（因无法归到任何已知类目）。
+// classifyUnit 对一个判定单元跑 L1 + L2（若已配置）并落观测。
+// 流程（shadow 语义，只记不拦；方案 2：L1 与 L2 都跑，类目去重合并，完整画像）：
+//   1. L1 先判；命中 → 归并类目 → 记 l1_hit + recordHit（首见类目记 would_reject）
+//   2. 已配置 L2 → 调 L2；
+//      - L2 调用失败 → degraded 已在 HTTP 封装里记（那里知道 reason），此处直接返回
+//      - L2 未命中 → 记 l2_call/miss，返回
+//      - L2 命中 → 归并类目 → 记 l2_call/hit；若 L1 未命中该类目则记 l2_only_hit；
+//        再走 recordHit（首见类目记 would_reject，已见过则去重）
+//
+// 类目一律收敛到内部 ID（附录 A）：词库路径已返回内部 ID，直接采用；
+// guardrail 路径 / L2 返回原生类目，经 P-CATEGORY-MAP 映射。
+// 未映射 = P-DEGRADE（fail-closed），记 unmapped 诊断但不记 would_reject。
 func (og *outputGuard) classifyUnit(unit string) {
 	if unit == "" {
 		return
 	}
-	if og.l1 == nil {
-		// 防御：分类器未配置时不判定、不崩溃（fail-open 但仅影响检测能力，
-		// 不影响下发——shadow 本来就放行）。调用方应保证 l1 非空。
+	if og.l1 == nil && og.l2 == nil {
+		// 防御：两层都未配置时不判定、不崩溃。调用方应保证至少 L1 非空。
 		return
 	}
-	l1Cat, _, _ := og.l1.Classify(unit)
-	if l1Cat == "" {
+
+	l1Hit := make(map[string]bool)
+
+	// ---- L1 ----
+	if og.l1 != nil {
+		l1Cat, _, _ := og.l1.Classify(unit)
+		if l1Cat != "" {
+			cat := l1Cat
+			if !isValidCategory(cat) {
+				mapped, ok := mapL1Category(cat)
+				if !ok {
+					if og.metrics != nil {
+						og.metrics.incOGUnmapped("l1", cat)
+					}
+					// L1 未映射不影响 L2 继续跑
+					goto runL2
+				}
+				cat = mapped
+			}
+			l1Hit[cat] = true
+			if og.metrics != nil {
+				og.metrics.incOGL1Hit(cat)
+			}
+			og.recordHit(cat)
+		}
+	}
+
+runL2:
+	if og.l2 == nil {
 		return
 	}
-	cat := l1Cat
+	l2Cat, l2Conf, _ := og.l2.Classify(unit)
+	if l2Cat == "" && l2Conf == -1 {
+		// 哨兵：L2 调用失败（unreachable/timeout/bad_response），degraded 已在 HTTP 封装里记
+		// （因为那里知道具体 reason）；此处只做 fallback = L1 已判过，直接返回。
+		return
+	}
+	if l2Cat == "" {
+		if og.metrics != nil {
+			og.metrics.incOGL2Call("", "miss")
+		}
+		return
+	}
+	// L2 命中
+	cat := l2Cat
 	if !isValidCategory(cat) {
-		// L1 原生类目（pii / sql_injection / prompt_injection）→ 内部 ID（OG-2 映射表）。
+		// L2 原生类目 → 内部 ID（M2 暂不做映射表，未映射 = P-DEGRADE，只记 unmapped 诊断）。
 		mapped, ok := mapL1Category(cat)
 		if !ok {
 			if og.metrics != nil {
-				og.metrics.incOGUnmapped("l1", cat)
+				og.metrics.incOGL2Call(cat, "unmapped")
+				og.metrics.incOGUnmapped("l2", cat)
 			}
-			return // 未映射 = P-DEGRADE：不记 would_reject（无类目可归），只记 unmapped 诊断
+			return
 		}
 		cat = mapped
 	}
 	if og.metrics != nil {
-		og.metrics.incOGL1Hit(cat)
+		og.metrics.incOGL2Call(cat, "hit")
+		if !l1Hit[cat] {
+			// L2 独有的命中（L1 未检出该类目）
+			og.metrics.incOGL2OnlyHit(cat)
+		}
 	}
+	og.recordHit(cat)
+}
+
+// recordHit 记录一次命中（L1 或 L2 命中后的公共收尾）：
+// 首见类目 → would_reject 指标 + 审计；记录首次命中信息（chunk-meta 用）。
+func (og *outputGuard) recordHit(cat string) {
 	if og.seenCategory[cat] {
 		return
 	}
 	og.seenCategory[cat] = true
-	// 记录首次命中（供 chunk-meta 终止帧注入使用；M1 shadow 下动作恒为 flag）。
 	if og.firstHitCat == "" {
 		og.firstHitCat = cat
 		og.firstHitAction = catActionForMode(cat, og.mode)
@@ -276,4 +342,105 @@ func (og *outputGuard) BuildGuardMeta() *chunkGuardMeta {
 	gm.Filtered = (og.mode == outputGuardEnforcing) &&
 		(og.firstHitAction == catActionBlock || og.firstHitAction == catActionMask)
 	return gm
+}
+
+// ---- outputL2HTTPClassifier：输出侧 L2 语义分类器 HTTP 侧车实现 ----
+//
+// 契约（v1，与输入侧 model.HTTPClassifier 同构但返回字段不同）：
+//
+//	POST <url>
+//	Content-Type: application/json
+//	{"text": "<待分类文本>"}
+//	→ 200 {"blocked": bool, "category": "...", "confidence": 0.95, "match": "..."}
+//
+// 降级语义（M2 OG-12）：
+//   - 非 200 / 超时 / 网络错误 / JSON 非法 → 视为不可用；
+//   - 调用方回退 L1 并记 degraded_total{backend="l2", reason=...}；
+//   - Classify 返回 ("", -1, "") 作为失败哨兵（confidence=-1 表示调用失败，
+//     区别于正常未命中的 confidence=0）。
+//
+// 与输入侧隔离：不复用 model.HTTPClassifier（接口签名不同），本文件独立实现。
+type outputL2HTTPClassifier struct {
+	url      string
+	key      string
+	client   *http.Client
+	metrics  *otpmaskMetrics
+	onResult func(reason string) // 失败回调，记 degraded；reason=unreachable/timeout/bad_response
+}
+
+// newOutputL2HTTPClassifier 构造输出侧 L2 HTTP 分类器。
+// timeout <= 0 时取 2s（在请求路径上，必须有限且小）。
+// metrics / onResult 均可为 nil。
+func newOutputL2HTTPClassifier(url, key string, timeout time.Duration, m *otpmaskMetrics, onResult func(reason string)) *outputL2HTTPClassifier {
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	return &outputL2HTTPClassifier{
+		url:      url,
+		key:      key,
+		client:   &http.Client{Timeout: timeout},
+		metrics:  m,
+		onResult: onResult,
+	}
+}
+
+type l2ClassifyResponse struct {
+	Blocked    bool    `json:"blocked"`
+	Category   string  `json:"category,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+	Match      string  `json:"match,omitempty"`
+}
+
+// Classify 实现 OutputClassifier。
+// 调用失败时返回 ("", -1, "")——confidence=-1 是失败哨兵，
+// 调用方据此判断走 degraded 路径。
+func (c *outputL2HTTPClassifier) Classify(text string) (string, float64, string) {
+	body, err := json.Marshal(map[string]string{"text": text})
+	if err != nil {
+		c.report("bad_request")
+		return "", -1, ""
+	}
+	req, err := http.NewRequest(http.MethodPost, c.url, bytes.NewReader(body))
+	if err != nil {
+		c.report("unreachable")
+		return "", -1, ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.key != "" {
+		req.Header.Set("Authorization", "Bearer "+c.key)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		// 超时 / 连接拒绝 / DNS 失败 都归到 unreachable
+		c.report("unreachable")
+		return "", -1, ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		c.report("bad_status")
+		return "", -1, ""
+	}
+	var out l2ClassifyResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		c.report("bad_response")
+		return "", -1, ""
+	}
+	if !out.Blocked {
+		return "", 0, ""
+	}
+	conf := out.Confidence
+	if conf <= 0 {
+		conf = 1.0 // 侧车未返回置信度时按 1.0 兜底（规则语义等价）
+	}
+	return out.Category, conf, out.Match
+}
+
+func (c *outputL2HTTPClassifier) report(reason string) {
+	if c.metrics != nil {
+		c.metrics.incOGDegraded("l2", reason)
+	}
+	if c.onResult != nil {
+		c.onResult(reason)
+	}
 }

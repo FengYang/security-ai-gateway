@@ -391,7 +391,7 @@ func TestOutputGuardWithLexiconRegistry(t *testing.T) {
 		Mode:          outputGuardShadow,
 		PolicyVersion: reg.PolicyVersion(),
 		Params:        resolveOutputGuardParams(defaultOutputGuardParams()),
-	}, reg, m, a, "acme", "req-lex-1")
+	}, reg, nil, m, a, "acme", "req-lex-1")
 	if err != nil {
 		t.Fatalf("newOutputGuard: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestOutputGuardWithLexiconRegistry(t *testing.T) {
 		Mode:          outputGuardShadow,
 		PolicyVersion: reg.PolicyVersion(),
 		Params:        resolveOutputGuardParams(defaultOutputGuardParams()),
-	}, reg, m, a, "acme", "req-lex-2")
+	}, reg, nil, m, a, "acme", "req-lex-")
 	if err != nil {
 		t.Fatalf("newOutputGuard: %v", err)
 	}

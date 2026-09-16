@@ -158,6 +158,9 @@ type teeServer struct {
 	// GA-输出侧内容审查（OG-9）：策略目录（-output-guard-policy-dir；空 = 未配置，
 	// /config/policy/reload 将返回 400）。
 	outputGuardPolicyDir string
+	// GA-输出侧内容审查（M2 OG-12）：L2 语义分类器（nil = 未启用，纯 L1 = 当前行为）。
+	// 启用后 shadow 下 L1 未命中再走 L2；L2 不可用自动 fallback L1 + degraded 指标。
+	outputGuardL2 OutputClassifier
 	// GA-输出侧内容审查（OG-9）：策略/词库注册表（nil = 未配置，此时 L1 走既有 guardrail
 	// 包装器，行为与现网一致）。热加载经原子指针无锁换版（请求路径零阻塞）。
 	policyReg atomic.Pointer[lexiconRegistry]
@@ -1434,7 +1437,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		Mode:          s.currentOutputGuardMode(),
 		PolicyVersion: s.policyVersion(),
 		Params:        s.outputGuardParams,
-	}, s.l1Classifier(), s.metrics, s.audit, tenant, requestID)
+	}, s.l1Classifier(), s.outputGuardL2, s.metrics, s.audit, tenant, requestID)
 	if ogErr != nil {
 		return ogErr // fail-closed：模式非法不得静默放行（启动期已校验，此处兜底）
 	}
@@ -2660,6 +2663,9 @@ func main() {
 	outputGuardMode := flag.String("output-guard", "off", "GA-输出侧内容审查模式（OG-3 M1 骨架）：off（缺省，行为与现网逐字节一致）| shadow（跑 L1 只记不拦）；enforcing 属 M4 未实现，配置即拒绝启动")
 	outputGuardCfg := flag.String("output-guard-config", "", "GA-输出侧内容审查运行时配置持久化文件（OG-8：高敏复核写入的 mode）；为空 = 仅进程内生效，重启回退 -output-guard")
 	outputGuardPolicyDir := flag.String("output-guard-policy-dir", "", "GA-输出侧内容审查策略/词库目录（OG-9）：含 manifest.json 的 policy 根目录；为空 = 沿用既有 guardrail 规则（行为与现网一致）；加载失败/哈希不匹配即拒绝启动（fail-closed）")
+	outputGuardL2URL := flag.String("output-guard-l2-url", "", "GA-输出侧内容审查 L2 语义分类器侧车地址（M2 OG-12）：HTTP POST JSON，返回 blocked/category/confidence/match；为空 = 不启用 L2，纯 L1 规则（默认，行为零变化）")
+	outputGuardL2Key := flag.String("output-guard-l2-key", "", "输出侧 L2 语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
+	outputGuardL2Timeout := flag.Duration("output-guard-l2-timeout", 2*time.Second, "输出侧 L2 语义分类器侧车调用超时（在请求路径上，须有限且小；不可用自动 fallback L1 + degraded 指标）")
 	flag.Parse()
 
 	// S5：进程启动时刻（对账判据——链中存在早于此时刻的事件 ⇒ 内存用量计数已在重启时丢失）
@@ -2906,6 +2912,16 @@ func main() {
 		log.Printf("[guardrail] 语义分类器接线：backend=%s url=%s timeout=%s（不可用时回退关键词规则）",
 			model.GuardClassifierBackendHTTP, *guardClassURL, guardClassTimeout.String())
 	}
+	// M2 OG-12：输出侧内容审查 L2 语义分类器接线（默认关闭——未配置 URL 即纯 L1，行为零变化）。
+	// 侧车不可用时自动 fallback L1 + 记 degraded_total{backend=l2, reason=...}；
+	// readiness 不联动 L2 状态（纯 L1 也能服务，安全降水位但不中断）。
+	var outputGuardL2 OutputClassifier
+	if *outputGuardL2URL != "" {
+		outputGuardL2 = newOutputL2HTTPClassifier(*outputGuardL2URL, *outputGuardL2Key, *outputGuardL2Timeout, srv.metrics, nil)
+		log.Printf("[output-guard] L2 语义分类器接线：url=%s timeout=%s（不可用时回退 L1 规则）",
+			*outputGuardL2URL, outputGuardL2Timeout.String())
+	}
+	srv.outputGuardL2 = outputGuardL2
 	go srv.seenCleanup()    // 防重放集合 TTL 清理
 	go srv.sessionCleanup() // 远程证明会话 TTL 清理
 	// S5 判据 6：审计-计量对账（启动即跑一次 → 状态与出账阻断立即可见，随后按 5 分钟周期）

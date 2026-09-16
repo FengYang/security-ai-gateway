@@ -15,7 +15,7 @@ func newTestOutputGuard(t *testing.T, mode, tenant, requestID string) (*outputGu
 	m := newMetrics()
 	m.setOutputGuardMode(mode, defaultPolicyVersion)
 	a := newAuditChain()
-	og, err := newOutputGuard(testOutputGuardConfig(mode), l1Classifier{g: newGuardrail()}, m, a, tenant, requestID)
+	og, err := newOutputGuard(testOutputGuardConfig(mode), l1Classifier{g: newGuardrail()}, nil, m, a, tenant, requestID)
 	if err != nil {
 		t.Fatalf("newOutputGuard(mode=%q): %v", mode, err)
 	}
@@ -54,7 +54,7 @@ func collectThrough(t *testing.T, og *outputGuard, deltas []string) string {
 // TestOutputGuardOffIsNil：off（含未配置空串）→ nil（零开销，调用侧走原路径）。
 func TestOutputGuardOffIsNil(t *testing.T) {
 	for _, mode := range []string{"", outputGuardOff} {
-		og, err := newOutputGuard(testOutputGuardConfig(mode), l1Classifier{g: newGuardrail()}, newMetrics(), newAuditChain(), "t", "r")
+		og, err := newOutputGuard(testOutputGuardConfig(mode), l1Classifier{g: newGuardrail()}, nil, newMetrics(), newAuditChain(), "t", "r")
 		if err != nil {
 			t.Fatalf("mode=%q 期望无错误，实际 %v", mode, err)
 		}
@@ -70,7 +70,7 @@ func TestOutputGuardRejectsInvalidAndUnimplemented(t *testing.T) {
 		if err := validateOutputGuardMode(mode); err == nil {
 			t.Fatalf("validateOutputGuardMode(%q) 期望报错", mode)
 		}
-		if _, err := newOutputGuard(testOutputGuardConfig(mode), l1Classifier{g: newGuardrail()}, newMetrics(), newAuditChain(), "t", "r"); err == nil {
+		if _, err := newOutputGuard(testOutputGuardConfig(mode), l1Classifier{g: newGuardrail()}, nil, newMetrics(), newAuditChain(), "t", "r"); err == nil {
 			t.Fatalf("newOutputGuard(%q) 期望报错", mode)
 		}
 	}
@@ -215,7 +215,7 @@ func TestOutputGuardUnmappedCategory(t *testing.T) {
 	m.setOutputGuardMode(outputGuardShadow, defaultPolicyVersion)
 	a := newAuditChain()
 	og, err := newOutputGuard(testOutputGuardConfig(outputGuardShadow),
-		fakeUnmappedClassifier{cat: "unknown_cat"}, m, a, "acme", "req-unmapped-1")
+		fakeUnmappedClassifier{cat: "unknown_cat"}, nil, m, a, "acme", "req-unmapped-1")
 	if err != nil {
 		t.Fatalf("newOutputGuard: %v", err)
 	}
