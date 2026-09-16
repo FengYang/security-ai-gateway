@@ -77,3 +77,61 @@ func TestAuditWORMTamperDetected(t *testing.T) {
 		t.Fatal("篡改后恢复应失败（哈希链断裂）")
 	}
 }
+
+// TestAuditFilteredTokensEvidenceField：OG-7 filtered_tokens 为证据字段——
+// 不进 hash()（旧链在新代码下可复算）、零值 omitempty 不落盘（等同旧版本行）、
+// 携带该字段的新行经 WORM 恢复后值可读回且全链 verify 通过。
+func TestAuditFilteredTokensEvidenceField(t *testing.T) {
+	// 1) 不进 hash：仅 FilteredTokens 不同的两个事件哈希必须相等。
+	base := testEvent("t1")
+	withTokens := base
+	withTokens.FilteredTokens = 42
+	if base.hash() != withTokens.hash() {
+		t.Fatal("filtered_tokens 为证据字段，不得进入 hash()")
+	}
+
+	dir := t.TempDir()
+	events := filepath.Join(dir, "audit.jsonl")
+
+	// 2) 旧版本行：零值 omitempty，落盘 JSON 不含 filtered_tokens 键。
+	c, err := newAuditChainWORM(events, "")
+	if err != nil {
+		t.Fatalf("初始化失败: %v", err)
+	}
+	c.append(base)
+	oldTail := c.lastHex
+	c.Close()
+
+	raw, err := os.ReadFile(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "filtered_tokens") {
+		t.Fatalf("零值证据字段不应落盘（omitempty）：%s", raw)
+	}
+
+	// 3) 重启恢复旧链（链尾哈希一致）后追加携带 filtered_tokens 的新行（prev_hash 自动衔接）。
+	c2, err := newAuditChainWORM(events, "")
+	if err != nil {
+		t.Fatalf("旧链恢复失败: %v", err)
+	}
+	if c2.lastHex != oldTail {
+		t.Fatalf("旧链尾哈希应一致：got %s want %s", c2.lastHex, oldTail)
+	}
+	c2.append(withTokens)
+	c2.Close()
+
+	// 4) 再次重启：两行全部恢复、链可复算、新字段值读回 42。
+	c3, err := newAuditChainWORM(events, "")
+	if err != nil {
+		t.Fatalf("含 filtered_tokens 新链恢复失败: %v", err)
+	}
+	defer c3.Close()
+	if ok, n := c3.verify(); !ok || n != 2 {
+		t.Fatalf("混合新旧行的审计链应可复算：ok=%v n=%d", ok, n)
+	}
+	got := c3.query("t1")
+	if len(got) != 2 || got[0].FilteredTokens != 0 || got[1].FilteredTokens != 42 {
+		t.Fatalf("字段读回异常：%+v", got)
+	}
+}

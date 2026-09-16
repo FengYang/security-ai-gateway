@@ -71,6 +71,10 @@ type AuditEvent struct {
 	// OGPolicySHA256 ＝ 本次 manifest.json 的自锚定摘要（applied/rolled_back 均尽量携带，供外部锚定追溯）。
 	OGOldVersion   string `json:"old_version,omitempty"`
 	OGPolicySHA256 string `json:"sha256,omitempty"`
+	// OG-7：被拦截/遮蔽的产出量（token 口径，§4.9 计费口径）。证据字段，omitempty、不进 hash()。
+	// 仅 action=output_blocked/output_masked 事件携带（M4 OG-17/18 才有发射点；R3 已裁决）；
+	// M1 只落字段不填值，shadow 事件恒不携带（零值即不序列化）。填值与 /usage 聚合归 M4 OG-19。
+	FilteredTokens int `json:"filtered_tokens,omitempty"`
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。
