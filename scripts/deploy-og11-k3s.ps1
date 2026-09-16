@@ -128,9 +128,12 @@ function Stage-Rollout {
     kubectl -n $ns rollout status deploy/tee-infer-service --timeout=180s
     Assert-Native 'rollout status'
 
-    $logs = kubectl -n $ns logs deploy/tee-infer-service --tail=80
+    # -notmatch on an ARRAY filters elements instead of negating; join to a single string first.
+    $logs = (kubectl -n $ns logs deploy/tee-infer-service --tail=80) -join "`n"
     if ($logs -notmatch 'policy_version=pv2026\.09\.16') { throw 'startup log missing policy load line' }
-    if ($logs -notmatch 'mode=shadow') { throw 'startup log missing shadow mode line' }
+    # ASCII-only assertion: the shadow startup log line uniquely contains "off/shadow"
+    # (Chinese in this file would break PS 5.1 without BOM).
+    if ($logs -notmatch 'off/shadow') { throw 'startup log missing shadow mode line' }
     Write-Host '[accept] startup log: policy pv2026.09.16 loaded + shadow mode' -ForegroundColor Green
 
     # Port-forward for in-cluster service acceptance (same kubeconfig).
@@ -147,7 +150,9 @@ function Stage-Rollout {
         if ($og.l1_rules_total -ne 171) { throw "l1_rules_total=$($og.l1_rules_total), want 171" }
         Write-Host "[accept] /config: mode=shadow pv=pv2026.09.16 cats=30 rules=171" -ForegroundColor Green
 
-        $metrics = (Invoke-WebRequest "http://127.0.0.1:$pfPort/metrics" -TimeoutSec 10).Content
+        # curl.exe: PS 5.1 Invoke-WebRequest throws NullReferenceException (IE engine) on this box.
+        # curl output arrives as a line array; join before -notmatch (array would filter, not negate).
+        $metrics = (curl.exe -s "http://127.0.0.1:$pfPort/metrics") -join "`n"
         if ($metrics -notmatch 'otpmask_output_guard_mode\{[^}]*mode="shadow"') { throw 'metrics missing shadow mode gauge' }
         Write-Host '[accept] /metrics: output_guard shadow gauge present' -ForegroundColor Green
 
