@@ -7,7 +7,8 @@ metadata:
   labels:
     app: tee-infer-service
 spec:
-  replicas: 2
+  # OG-11：单节点 K3s（Higress 已占部分资源，现场长期 1 副本运行）；多副本随扩容恢复。
+  replicas: 1
   selector:
     matchLabels:
       app: tee-infer-service
@@ -22,13 +23,23 @@ spec:
     spec:
       containers:
       - name: tee-infer-service
-        image: otpmask/tee-infer-service:latest
+        image: otpmask/tee-infer-service:og11
         imagePullPolicy: IfNotPresent
         args:
         - "-sig-key"
         - "$(SIG_KEY)"
         - "-attest-token"
         - "$(ATTEST_TOKEN)"
+        # OG-11：输出侧审查 shadow（L1 词库全量跑、只记不拦），策略随镜像烤入 /app/policy
+        - "-output-guard"
+        - "shadow"
+        - "-output-guard-policy-dir"
+        - "/app/policy"
+        # P5/OG-11：Phala C-MaaS 密态大模型（api-key 仅经环境变量，不上命令行）
+        - "-cmaas-url"
+        - "$(CMAAS_URL)"
+        - "-cmaas-model"
+        - "$(CMAAS_MODEL)"
         env:
         - name: SIG_KEY
           valueFrom:
@@ -40,6 +51,21 @@ spec:
             secretKeyRef:
               name: otpmask-keys
               key: attest-token
+        - name: CMAAS_URL
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-cmaas
+              key: url
+        - name: CMAAS_MODEL
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-cmaas
+              key: model
+        - name: CMAAS_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-cmaas
+              key: api-key
         ports:
         - containerPort: 19090
           name: http

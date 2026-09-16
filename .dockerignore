@@ -1,0 +1,13 @@
+# 构建上下文瘦身：以下目录不被任何镜像 Dockerfile COPY。
+# Go 构建在容器内经 GOPROXY 重新拉取模块（vendor/ 与 go.mod 不一致，不参与镜像构建）。
+.git
+.tools
+vllm
+vendor
+tools
+higress-standalone
+**/node_modules
+**/__pycache__
+*.tar
+*.tar.gz
+dist

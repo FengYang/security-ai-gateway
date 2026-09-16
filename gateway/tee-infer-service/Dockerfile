@@ -13,6 +13,11 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/tee-infer-service ./gateway/tee-inf
 
 FROM alpine:3.20
 COPY --from=build /out/tee-infer-service /usr/local/bin/tee-infer-service
+# OG-9 策略/词库资产（31 个 JSON，~76KB）随镜像只读分发；
+# readOnlyRootFilesystem 下只读不冲突，热加载（POST /config/policy/reload）重读同目录。
+COPY gateway/tee-infer-service/policy /app/policy
+# Phala C-MaaS 为 HTTPS：alpine 基础镜像自带 ca-certificates-bundle，此处显式兜底防精简基础镜像。
+RUN apk add --no-cache ca-certificates
 # 非 root 运行：deploy/k8s 与 deploy/tee 清单均置 runAsNonRoot（P0b 实测：镜像默认 root 会被 kubelet 拒绝创建）
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/tee-infer-service"]
