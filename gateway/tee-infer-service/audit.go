@@ -60,6 +60,17 @@ type AuditEvent struct {
 	// 仅 action=shadow、result=would_reject 的事件携带。证据字段，不进 hash()
 	// （链完整性由 Action/Result 段保障：would_reject 本身进 hash）。
 	ShadowRule string `json:"shadow_rule,omitempty"`
+	// GA-输出侧内容审查（OG-3）：输出侧审查证据字段（一律 omitempty、不进 hash()，§4.10）。
+	// OGCategory 取值目标为内部类目 ID（A1-06 形态，§5.8 #2）；OG-2 映射表落地前，
+	// M1 骨架暂存 L1 原生标签，OG-7 的 Result/字段规范化一并收敛。
+	OGCategory      string `json:"category,omitempty"`
+	OGMode          string `json:"mode,omitempty"`           // shadow|enforcing
+	OGPolicyVersion string `json:"policy_version,omitempty"` // 聚合策略版本（manifest.policy_version）
+	// OG-9：策略热加载留痕（仅 action=output_guard_policy_reload 携带；证据字段，不进 hash()，§4.10）。
+	// OGOldVersion ＝ 热加载前在效版本（rolled_back 时即保留版本）；
+	// OGPolicySHA256 ＝ 本次 manifest.json 的自锚定摘要（applied/rolled_back 均尽量携带，供外部锚定追溯）。
+	OGOldVersion   string `json:"old_version,omitempty"`
+	OGPolicySHA256 string `json:"sha256,omitempty"`
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。

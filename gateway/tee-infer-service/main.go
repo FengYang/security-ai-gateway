@@ -146,6 +146,16 @@ type teeServer struct {
 	shadowReports   *shadowReportState
 	audit           *auditChain     // 审计哈希链
 	guard           *guardrail      // 内容安全检测（M9-4）
+	// GA-输出侧内容审查（OG-3）：off|shadow（enforcing 属 M4，配置即拒绝启动；§2.3 I1–I7）。
+	outputGuardMode string
+	// GA-输出侧内容审查（OG-4）：D 组缓冲参数（启动期 resolve＋validate 后只读）。
+	outputGuardParams outputGuardParams
+	// GA-输出侧内容审查（OG-9）：策略目录（-output-guard-policy-dir；空 = 未配置，
+	// /config/policy/reload 将返回 400）。
+	outputGuardPolicyDir string
+	// GA-输出侧内容审查（OG-9）：策略/词库注册表（nil = 未配置，此时 L1 走既有 guardrail
+	// 包装器，行为与现网一致）。热加载经原子指针无锁换版（请求路径零阻塞）。
+	policyReg atomic.Pointer[lexiconRegistry]
 	metrics         *otpmaskMetrics // Prometheus 指标
 	seen            map[string]bool
 	seenAt          map[string]int64       // request_id -> 首见时间戳（TTL 清理用）
@@ -1102,10 +1112,28 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 // ---------- P2/P5：text 载荷推理路径（D1：南向统一 text） ----------
 
 // textStreamChunk 信封内明文分片（与 otpmask-plugin envelope.go 的 streamChunk 一致）。
+//
+// GA-输出侧内容审查（OG-5 chunk-meta，§4.6.1）：新增可选 guard 字段（omitempty）。
+// 不动 wire 信封，所有业务元信息走内层 JSON。旧客户端忽略未知字段即兼容。
 type textStreamChunk struct {
-	Seq    uint64 `json:"seq"`              // 流内序号（1 起严格递增）
-	Delta  string `json:"delta"`            // 增量文本
-	Finish string `json:"finish,omitempty"` // ""=继续 / "stop"=正常结束 / "error"=引擎失败
+	Seq    uint64          `json:"seq"`              // 流内序号（1 起严格递增）
+	Delta  string          `json:"delta"`            // 增量文本
+	Finish string          `json:"finish,omitempty"` // ""=继续 / "stop"=正常结束 / "error"=引擎失败 / "content_filter"=内容安全终止
+	Guard  *chunkGuardMeta `json:"guard,omitempty"`  // 输出侧内容审查元信息（可选；shadow/enforcing 均带）
+}
+
+// chunkGuardMeta 输出侧内容审查 chunk-meta（§4.6.1，M1 冻结项）。
+// 所有字段可选（omitempty）；detected=false 时不应出现 category/rule_version。
+//
+// 红线（§4.6.1）：guard 不得包含命中词、原文片段、正则源码；category 只允许内部类目 ID。
+type chunkGuardMeta struct {
+	Detected     bool   `json:"detected"`               // 本请求至少一次命中（含 shadow 命中）
+	Filtered     bool   `json:"filtered"`               // 实际拦截/遮蔽（enforcing 下的 block/mask）
+	Action       string `json:"action,omitempty"`       // block | mask | flag（与 §4.4 动作四态对齐）
+	Category     string `json:"category,omitempty"`     // 命中时必填：内部类目 ID（A1-06 等）
+	PolicyVersion string `json:"policy_version"`        // 聚合策略版本（manifest.policy_version）
+	RuleVersion  string `json:"rule_version,omitempty"` // 命中时必填：命中条目所在词库版本
+	Mode         string `json:"mode"`                   // shadow | enforcing
 }
 
 // engineFor 按引擎类型返回推理引擎（text 路径）。
@@ -1293,7 +1321,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 
 	// 统一 SSE 信封流输出（seq 严格递增 + finish 分片）；stream=false 语义为单分片聚合。
 	var agg strings.Builder
-	if serr := s.streamTextInfer(w, sess, eng, genReq, &agg); serr != nil {
+	if serr := s.streamTextInfer(w, sess, eng, genReq, &agg, tenant, req.RequestID); serr != nil {
 		log.Printf("[tee] infer(text) 引擎失败 request=%s engine=%s err=%v", req.RequestID, engType, serr)
 		// GA-计费 P0-3/P1-3 失败路径计费口径：
 		// - 已有部分输出（客户端已收到）→ 按实收计费：输入计量保留，输出按 agg
@@ -1367,8 +1395,12 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 
 // streamTextInfer 流式生成并逐块写出加密 SSE（seq 严格递增；finish 分片终止）。
 // 返回非 nil = 流式失败（调用方审计；error 分片已尽力写出）。
+//
+// GA-输出侧内容审查（OG-3）集成点（§2.3 I1–I3）：og 构造 → 回调经 og.Process → og.Finish。
+// mode=off 时 og=nil，走原路径，行为与现网逐字节一致。
 func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
-	eng model.Engine, genReq model.GenerateRequest, agg *strings.Builder) error {
+	eng model.Engine, genReq model.GenerateRequest, agg *strings.Builder,
+	tenant, requestID string) error {
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1392,9 +1424,27 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		}
 		return nil
 	}
+	// I1：构造审查管线（mode=off 返回 nil → 下方走原路径，零行为变化）。
+	og, ogErr := newOutputGuard(outputGuardConfig{
+		Mode:          s.outputGuardMode,
+		PolicyVersion: s.policyVersion(),
+		Params:        s.outputGuardParams,
+	}, s.l1Classifier(), s.metrics, s.audit, tenant, requestID)
+	if ogErr != nil {
+		return ogErr // fail-closed：模式非法不得静默放行（启动期已校验，此处兜底）
+	}
+	if og != nil {
+		defer og.Close() // 幂等释放（C4：请求内生命周期）
+	}
+	// I2 唯一出口：所有写给客户端的内容必须经 emit（防绕过）。
+	emit := func(delta, finish string) error { return writeChunk(delta, finish) }
+
 	genErr := eng.Generate(genReq, func(delta string) error {
 		agg.WriteString(delta)
-		return writeChunk(delta, "")
+		if og == nil {
+			return emit(delta, "") // 未开审查 == 现状路径
+		}
+		return og.Process(delta, emit) // 缓冲 → 判定 → emit（M1 shadow：只记不拦）
 	})
 	if genErr != nil {
 		// 200 已发出无法改状态码：以 error finish 分片终止，
@@ -1403,8 +1453,31 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		return genErr
 	}
-	if err := writeChunk("", "stop"); err != nil {
+	// I3：收尾——OG-4 把缓冲尾部作为最后一个判定单元送判；shadow 无内容需补下发。
+	if og != nil {
+		if err := og.Finish(emit); err != nil {
+			return err
+		}
+	}
+	// 终止帧：带 chunk-meta guard 字段（§4.6.1；og=nil 时不带 guard 字段，与现网逐字节一致）。
+	stopChunk := textStreamChunk{Seq: seq + 1, Finish: "stop"}
+	if og != nil {
+		stopChunk.Guard = og.BuildGuardMeta()
+	}
+	stopJSON, err := json.Marshal(stopChunk)
+	if err != nil {
 		return err
+	}
+	sealedStop, err := sess.sealPayload(protocol.EndpointInfer, stopJSON)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", hex.EncodeToString(sealedStop)); err != nil {
+		return err
+	}
+	seq++ // 保持 seq 计数一致（供可能的后续帧使用；虽然后面没有帧了，但维持变量状态一致）
+	if flusher != nil {
+		flusher.Flush()
 	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	return nil
@@ -1470,6 +1543,59 @@ type secConfigView struct {
 	SystemPromptSet  bool              `json:"system_prompt_set"`
 	AuditEnabled     bool              `json:"audit_enabled"`
 	Guardrail        guardrailSnapshot `json:"guardrail"`
+	// GA-输出侧内容审查（OG-3）：当前模式与策略版本（只读；运行时覆盖/持久化归 OG-8）。
+	OutputGuard outputGuardSnapshot `json:"output_guard"`
+}
+
+// outputGuardSnapshot 输出侧审查配置只读快照（§2.3 I7 / OG-8）。
+// GET /config 返回只读视图；运行时变更走 POST /config/output-guard（M2 实现）。
+type outputGuardSnapshot struct {
+	Mode          string                  `json:"mode"`
+	PolicyVersion string                  `json:"policy_version"`
+	Params        outputGuardParamsSnapshot `json:"params"`
+	// L1Categories：已加载的 L1 规则类目数（词库注册表装载量；未配置 policy 目录时为 0）
+	L1Categories int `json:"l1_categories_loaded"`
+	// L1Rules：已加载的 L1 规则总条数（同上）
+	L1Rules int `json:"l1_rules_total"`
+}
+
+// outputGuardParamsSnapshot 缓冲参数只读快照（D 组参数，§5.4）。
+type outputGuardParamsSnapshot struct {
+	Unit              string `json:"unit"`                // sentence | fixed-window
+	MaxUnitRunes      int    `json:"max_unit_runes"`      // P-MAX-UNIT-RUNES
+	FirstUnitMaxRunes int    `json:"first_unit_max_runes"` // P-FIRST-UNIT-MAX-RUNES
+	MaxBufferBytes    int    `json:"max_buffer_bytes"`    // P-MAX-BUFFER-BYTES
+	WindowMargin      int    `json:"window_margin"`       // P-WINDOW-MARGIN
+	WindowRunes       int    `json:"window_chars"`        // P-WINDOW-CHARS（派生值）
+	MaxKeywordRunes   int    `json:"max_keyword_runes"`   // 词库最长命中长度（P-WINDOW-CHARS 派生输入）
+}
+
+// currentPolicy 返回当前生效的策略注册表（nil = 未配置词库目录）。
+// 热加载经原子指针换版，请求路径无锁读取（OG-9）。
+func (s *teeServer) currentPolicy() *lexiconRegistry { return s.policyReg.Load() }
+
+// setPolicy 原子换版策略注册表（启动加载与热加载 applied 的唯一写入点）。
+func (s *teeServer) setPolicy(reg *lexiconRegistry) { s.policyReg.Store(reg) }
+
+// policyVersion 返回当前策略版本：词库已加载 → manifest 聚合版本；否则骨架默认版本。
+// 用途：审计 OGPolicyVersion、chunk-meta guard.policy_version、mode/policy_version gauge 同源。
+func (s *teeServer) policyVersion() string {
+	if reg := s.currentPolicy(); reg != nil {
+		return reg.PolicyVersion()
+	}
+	return defaultPolicyVersion
+}
+
+// l1Classifier 返回输出侧 L1 分类器：
+//   - 已配置 -output-guard-policy-dir → 词库注册表（返回**内部类目 ID**，如 A4-06）；
+//   - 未配置 → 既有 guardrail 包装器（返回 L1 原生标签，如 pii）。
+//
+// 两者都实现 OutputClassifier；差异由 classifyUnit 的"是否已是内部 ID"判定吸收。
+func (s *teeServer) l1Classifier() OutputClassifier {
+	if reg := s.currentPolicy(); reg != nil {
+		return reg
+	}
+	return l1Classifier{g: s.guard}
 }
 
 // handleConfig 安全配置只读查询：GET /config（管理令牌，M3-B）。
@@ -1501,8 +1627,133 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if s.guard != nil {
 		view.Guardrail = s.guard.snapshot()
 	}
+	ogMode := s.outputGuardMode
+	if ogMode == "" {
+		ogMode = outputGuardOff
+	}
+	view.OutputGuard = outputGuardSnapshot{
+		Mode:          ogMode,
+		PolicyVersion: s.policyVersion(),
+		Params: outputGuardParamsSnapshot{
+			Unit:              s.outputGuardParams.Unit,
+			MaxUnitRunes:      s.outputGuardParams.MaxUnitRunes,
+			FirstUnitMaxRunes: s.outputGuardParams.FirstUnitMaxRunes,
+			MaxBufferBytes:    s.outputGuardParams.MaxBufferBytes,
+			WindowMargin:      s.outputGuardParams.WindowMargin,
+			WindowRunes:       s.outputGuardParams.WindowRunes,
+			MaxKeywordRunes:   s.outputGuardParams.MaxKeywordRunes,
+		},
+	}
+	// 词库已加载时回填实际装载量（OG-9）；未配置 policy 目录则保持 0（走 guardrail 包装器）。
+	if reg := s.currentPolicy(); reg != nil {
+		view.OutputGuard.L1Categories = reg.CategoryCount()
+		view.OutputGuard.L1Rules = reg.RuleCount()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(view)
+}
+
+// policyReloadResponse POST /config/policy/reload 响应体（OG-9 热加载）。
+type policyReloadResponse struct {
+	Status        string `json:"status"`                   // applied | rolled_back
+	PolicyVersion string `json:"policy_version,omitempty"` // applied：新版本
+	OldVersion    string `json:"old_version,omitempty"`    // 换版前在效版本
+	Categories    int    `json:"categories,omitempty"`     // applied：加载类目数
+	Rules         int    `json:"rules,omitempty"`          // applied：加载规则数
+	Reason        string `json:"reason,omitempty"`         // rolled_back：原因枚举（指标 label 同源）
+}
+
+// handlePolicyReload 策略/词库热加载（OG-9，§4.7 运行时覆盖 / §4.8 供应链）：
+//
+//	POST /config/policy/reload（-admin-token 鉴权；无请求体——重读 -output-guard-policy-dir）。
+//
+// 语义（§3.6.4「热加载失败保留上一有效版本 + 回退审计，不静默」）：
+//   - 加载成功 → 原子换版（请求路径零中断）→ 审计 output_guard_policy_reload/applied
+//     （policy_version/old_version/sha256）+ 同步 mode/policy_version gauge；
+//   - 加载失败 → **保留旧注册表继续服务**，指标 policy_rollback_total{reason} 净增，
+//     审计 rolled_back（old_version/sha256），HTTP 409 仅回传原因枚举——
+//     **不回传内部错误全文**（§4.11：加载失败只对外给类别+错误码，json 解析片段不落日志面）；
+//   - 未配置策略目录 → 400（端点不适用）；GET 等非 POST → 405。
+func (s *teeServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAdmin(r) {
+		http.Error(w, "管理认证失败", http.StatusUnauthorized)
+		return
+	}
+	actor := r.Header.Get("X-Admin-Actor")
+	reqID := r.Header.Get("X-Request-ID")
+	oldVersion := s.policyVersion()
+
+	if s.outputGuardPolicyDir == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(policyReloadResponse{
+			Status: "not_configured", OldVersion: oldVersion, Reason: "policy_dir_not_configured",
+		})
+		return
+	}
+
+	reg, err := loadPolicyDir(s.outputGuardPolicyDir)
+	if err != nil {
+		// 回退：旧注册表保持不变（currentPolicy 不动）。
+		kind := PolicyLoadErrorKind(err)
+		if s.metrics != nil {
+			s.metrics.incOGPolicyRollback(kind)
+		}
+		sha := readPolicyManifestSelfSHA(s.outputGuardPolicyDir)
+		log.Printf("[output-guard] 策略热加载失败（保留版本 %s 继续服务）: reason=%s", oldVersion, kind)
+		if s.audit != nil {
+			s.audit.append(AuditEvent{
+				TenantID:        "-",
+				UserID:          actor,
+				RequestID:       reqID,
+				Action:          "output_guard_policy_reload",
+				Result:          "rolled_back",
+				OGOldVersion:    oldVersion,
+				OGPolicySHA256:  sha,
+				PayloadSHA:      sha, // 证据锚定（空串即不影响链；不进 hash 的新字段已独立承载）
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(policyReloadResponse{
+			Status: "rolled_back", OldVersion: oldVersion, Reason: kind,
+		})
+		return
+	}
+
+	// 成功：原子换版 + gauge 同步 + applied 审计。
+	s.setPolicy(reg)
+	ogModeMetric := s.outputGuardMode
+	if ogModeMetric == "" {
+		ogModeMetric = outputGuardOff
+	}
+	if s.metrics != nil {
+		s.metrics.setOutputGuardMode(ogModeMetric, reg.PolicyVersion())
+	}
+	if s.audit != nil {
+		s.audit.append(AuditEvent{
+			TenantID:        "-",
+			UserID:          actor,
+			RequestID:       reqID,
+			Action:          "output_guard_policy_reload",
+			Result:          "applied",
+			OGPolicyVersion: reg.PolicyVersion(),
+			OGOldVersion:    oldVersion,
+			OGPolicySHA256:  reg.ManifestSHA(),
+			PayloadSHA:      reg.ManifestSHA(),
+		})
+	}
+	log.Printf("[output-guard] 策略热加载生效: %s → %s（类目=%d 规则=%d）",
+		oldVersion, reg.PolicyVersion(), reg.CategoryCount(), reg.RuleCount())
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(policyReloadResponse{
+		Status: "applied", PolicyVersion: reg.PolicyVersion(), OldVersion: oldVersion,
+		Categories: reg.CategoryCount(), Rules: reg.RuleCount(),
+	})
 }
 
 // handleReconcile 返回最近一次审计-计量对账快照（S5；判据 6）。
@@ -2271,6 +2522,8 @@ func main() {
 	guardClassURL := flag.String("guard-classifier-url", "", "GF.4.3 语义分类器侧车地址（如 http://127.0.0.1:19091/classify）；为空 = 使用关键词规则分类器（默认，行为不变）")
 	guardClassKey := flag.String("guard-classifier-key", "", "语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
 	guardClassTimeout := flag.Duration("guard-classifier-timeout", 2*time.Second, "语义分类器侧车调用超时（分类器在请求路径上，须有限且小）")
+	outputGuardMode := flag.String("output-guard", "off", "GA-输出侧内容审查模式（OG-3 M1 骨架）：off（缺省，行为与现网逐字节一致）| shadow（跑 L1 只记不拦）；enforcing 属 M4 未实现，配置即拒绝启动")
+	outputGuardPolicyDir := flag.String("output-guard-policy-dir", "", "GA-输出侧内容审查策略/词库目录（OG-9）：含 manifest.json 的 policy 根目录；为空 = 沿用既有 guardrail 规则（行为与现网一致）；加载失败/哈希不匹配即拒绝启动（fail-closed）")
 	flag.Parse()
 
 	// S5：进程启动时刻（对账判据——链中存在早于此时刻的事件 ⇒ 内存用量计数已在重启时丢失）
@@ -2460,6 +2713,48 @@ func main() {
 	}
 	// M3-B：恢复运行时 Guardrail 配置（高敏复核写入的 pii_mode，跨重启保持）。
 	srv.loadGuardrailOverride()
+	// GA-输出侧内容审查（OG-3）：模式校验（非法 / enforcing 未实现 → 拒绝启动，不静默降级）
+	// + 落 mode/policy_version gauge（并为 requests_total 预置零值序列，保门禁 #9 required 常驻）。
+	if err := validateOutputGuardMode(*outputGuardMode); err != nil {
+		log.Fatalf("[output-guard] %v", err)
+	}
+	srv.outputGuardMode = *outputGuardMode
+	// OG-9：策略/词库加载。配置了目录即强校验（schema/哈希/类目/命名），任何失败＝拒绝启动——
+	// 不静默降级为"无词库"（否则会以"以为在审、其实没审"的方式悄悄失效）。
+	srv.outputGuardPolicyDir = *outputGuardPolicyDir
+	if *outputGuardPolicyDir != "" {
+		reg, err := loadPolicyDir(*outputGuardPolicyDir)
+		if err != nil {
+			// 只打原因枚举，不打错误全文（§4.11：json 解析片段可能含词库内容）。
+			log.Fatalf("[output-guard] 策略/词库加载失败（fail-closed，拒绝启动）: reason=%s", PolicyLoadErrorKind(err))
+		}
+		srv.setPolicy(reg)
+		log.Printf("[output-guard] 策略/词库已加载: policy_version=%s 类目=%d 规则=%d 最长关键词=%d rune",
+			reg.PolicyVersion(), reg.CategoryCount(), reg.RuleCount(), reg.MaxKeywordRunes())
+	}
+	ogModeMetric := *outputGuardMode
+	if ogModeMetric == "" {
+		ogModeMetric = outputGuardOff
+	}
+	srv.metrics.setOutputGuardMode(ogModeMetric, srv.policyVersion())
+	// GA-输出侧内容审查（OG-4）：D 组缓冲参数——先校验原始值（非法＝拒绝启动，§5.4），
+	// 再派生（P-WINDOW-CHARS / P-FIRST-UNIT-MAX-RUNES）。词库最长命中长度取"guardrail 关键词"
+	// 与"已加载词库"两者的较大值，保证滑窗足以覆盖任一 L1 路径的最长命中（§5.4 派生口径）。
+	ogParams := defaultOutputGuardParams()
+	ogParams.MaxKeywordRunes = srv.guard.maxKeywordRunes()
+	if reg := srv.currentPolicy(); reg != nil {
+		if v := reg.MaxKeywordRunes(); v > ogParams.MaxKeywordRunes {
+			ogParams.MaxKeywordRunes = v
+		}
+	}
+	if err := validateOutputGuardParams(ogParams); err != nil {
+		log.Fatalf("[output-guard] 缓冲参数非法: %v", err)
+	}
+	srv.outputGuardParams = resolveOutputGuardParams(ogParams)
+	log.Printf("[output-guard] 输出侧内容审查模式=%s（off/shadow）；缓冲参数 unit=%s max_unit_runes=%d first_unit_max_runes=%d max_buffer_bytes=%d window_chars=%d（词库最长 %d + 余量 %d）",
+		ogModeMetric, srv.outputGuardParams.Unit, srv.outputGuardParams.MaxUnitRunes,
+		srv.outputGuardParams.FirstUnitMaxRunes, srv.outputGuardParams.MaxBufferBytes,
+		srv.outputGuardParams.WindowRunes, ogParams.MaxKeywordRunes, srv.outputGuardParams.WindowMargin)
 	// GF.4.3：语义分类器接线（默认关闭——未配置 URL 即保持关键词规则分类器，行为不变）。
 	// 侧车不可用时回退关键词规则并上报降级指标：可用性不中断，但语义检出能力回落到规则水位，
 	// 该水位由基准集量化（见 docs/GA-Guardrail分类器选型.md），必须可观测。
@@ -2498,6 +2793,7 @@ func main() {
 	mux.HandleFunc("/metrics", srv.handleMetrics)                  // M10 可观测性
 	mux.HandleFunc("/config", srv.handleConfig)                    // M3-B 安全中心：配置只读快照
 	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig) // M3-B 高敏复核：Guardrail 降级生效点
+	mux.HandleFunc("/config/policy/reload", srv.handlePolicyReload) // OG-9 策略/词库热加载（applied/rolled_back）
 	mux.HandleFunc("/reconcile", srv.handleReconcile)              // S5 判据 6：对账快照（只读）
 	mux.HandleFunc("/reconcile/run", srv.handleReconcileRun)       // S5 判据 6：即时对账（管理令牌）
 	mux.HandleFunc("/healthz", srv.handleHealthz)                  // 探针与证明状态联动

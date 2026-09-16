@@ -55,6 +55,21 @@ type otpmaskMetrics struct {
 	quotaDenies map[string]int64
 	// A 项：数据面明文影子窗口级上报计数（result=accepted|deduped|rejected）
 	shadowReports map[string]int64
+	// GA-输出侧内容审查（OG-3 M1 骨架；§4.10 唯一目录）
+	ogRequests      map[string]int64 // mode（审查过的请求数）
+	ogL1Hit         map[string]int64 // category（L1 规则层命中）
+	ogWouldReject   map[string]int64 // category（shadow 命中=本该拦截）
+	ogForcedSplit   map[string]int64 // reason（缓冲强切：max_unit|first_unit，OG-4）
+	ogUnmapped      map[string]int64 // backend|category_raw（后端类目未映射，M2）
+	ogBlocked       map[string]int64 // category|mode（命中且动作=block，enforcing）
+	ogMasked        map[string]int64 // category（命中且动作=mask/rewrite）
+	ogPolicyRollback map[string]int64 // reason（策略热加载回退事件）
+	ogDegraded      map[string]int64 // backend|reason（后端降级事件，M2）
+	ogInflightBytes int64            // gauge：在飞缓冲字节数（M1）
+	ogLatencyMs     *histogram       // 单请求审查总延迟（手写桶，M1）
+	ogFirstFrameDelay *histogram     // 首帧延迟增量（M2）
+	ogMode          string           // gauge：当前运行模式（off|shadow|enforcing）
+	ogPolicyVersion string           // gauge：当前生效策略版本
 }
 
 func newMetrics() *otpmaskMetrics {
@@ -75,7 +90,67 @@ func newMetrics() *otpmaskMetrics {
 		shadowWouldReject: make(map[string]int64),
 		quotaDenies:       make(map[string]int64),
 		shadowReports:     make(map[string]int64),
+		ogRequests:        make(map[string]int64),
+		ogL1Hit:           make(map[string]int64),
+		ogWouldReject:     make(map[string]int64),
+		ogForcedSplit:     make(map[string]int64),
+		ogUnmapped:        make(map[string]int64),
+		ogBlocked:         make(map[string]int64),
+		ogMasked:          make(map[string]int64),
+		ogPolicyRollback:  make(map[string]int64),
+		ogDegraded:        make(map[string]int64),
+		ogLatencyMs:       newHistogram(latencyMsBuckets),
+		ogFirstFrameDelay: newHistogram(firstFrameDelayBuckets),
 	}
+}
+
+// setOutputGuardMode 记录当前输出侧审查模式与策略版本（启动时一次；供 mode/policy_version gauge）。
+// 同时为 requests_total 预置当前模式的零值序列——保证 required 指标始终有样本（门禁 #9
+// 要求：来源可达时 required 指标必须存在；零样本会使其缺失而误判为失败，§4.10 零样本可见性）。
+func (m *otpmaskMetrics) setOutputGuardMode(mode, version string) {
+	m.mu.Lock()
+	m.ogMode = mode
+	m.ogPolicyVersion = version
+	if _, ok := m.ogRequests[mode]; !ok {
+		m.ogRequests[mode] = 0
+	}
+	m.mu.Unlock()
+}
+
+// incOGRequest 记录一次被输出侧审查的请求（按模式）。
+func (m *otpmaskMetrics) incOGRequest(mode string) {
+	m.mu.Lock()
+	m.ogRequests[mode]++
+	m.mu.Unlock()
+}
+
+// incOGL1Hit 记录一次 L1 规则层命中（分类目）。
+func (m *otpmaskMetrics) incOGL1Hit(category string) {
+	m.mu.Lock()
+	m.ogL1Hit[category]++
+	m.mu.Unlock()
+}
+
+// incOGWouldReject 记录一次 shadow 命中（本该拦截；分类目）。
+func (m *otpmaskMetrics) incOGWouldReject(category string) {
+	m.mu.Lock()
+	m.ogWouldReject[category]++
+	m.mu.Unlock()
+}
+
+// incOGForcedSplit 记录一次缓冲强切（OG-4；reason=max_unit|first_unit，§4.3.1）。
+func (m *otpmaskMetrics) incOGForcedSplit(reason string) {
+	m.mu.Lock()
+	m.ogForcedSplit[reason]++
+	m.mu.Unlock()
+}
+
+// incOGUnmapped 记录一次后端类目未映射（M2；P-DEGRADE 诊断指标）。
+// label 格式：backend|category_raw（与指标定义一致）。
+func (m *otpmaskMetrics) incOGUnmapped(backend, rawCat string) {
+	m.mu.Lock()
+	m.ogUnmapped[backend+"|"+rawCat]++
+	m.mu.Unlock()
 }
 
 // incShadowWouldReject 记录影子命中（判据 4：只计数不拒绝；rule = rpm|tpm|daily_budget）。
@@ -216,6 +291,31 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	writeCounter(w, "otpmask_attest_token_traffic_total", "token 证明模式流量", m.tokenTraffic, []string{"tenant"})
 	writeCounter(w, "otpmask_recompute_ops_total", "补算调用计数（按算子）", m.recomputeOps, []string{"op"})
 	writeCounter(w, "otpmask_recompute_duration_ms_total", "补算耗时累计（按算子，毫秒）", m.recomputeDur, []string{"op"})
+	// ---- GA-输出侧内容审查（OG-3 M1 骨架；§4.10 唯一目录）----
+	writeCounter(w, "otpmask_output_guard_requests_total", "输出侧内容审查请求计数（按模式）", m.ogRequests, []string{"mode"})
+	writeCounter(w, "otpmask_output_guard_l1_hit_total", "L1 规则层命中次数（按类目）", m.ogL1Hit, []string{"category"})
+	writeCounter(w, "otpmask_output_guard_would_reject_total", "shadow 模式命中（本该拦截）计数（按类目）", m.ogWouldReject, []string{"category"})
+	writeCounter(w, "otpmask_output_guard_blocked_total", "命中且动作=block 的次数（enforcing 生效，按类目与模式）", m.ogBlocked, []string{"category", "mode"})
+	writeCounter(w, "otpmask_output_guard_masked_total", "命中且动作=mask/rewrite 的次数（按类目）", m.ogMasked, []string{"category"})
+	writeCounter(w, "otpmask_output_guard_forced_split_total", "缓冲强制切分次数（按原因：max_unit|first_unit）", m.ogForcedSplit, []string{"reason"})
+	writeCounter(w, "otpmask_output_guard_unmapped_total", "后端返回类目未映射到内部31类的次数（按后端与原生类目）", m.ogUnmapped, []string{"backend", "category_raw"})
+	writeCounter(w, "otpmask_output_guard_degraded_total", "后端降级事件次数（按后端与原因）", m.ogDegraded, []string{"backend", "reason"})
+	writeCounter(w, "otpmask_output_guard_policy_rollback_total", "策略热加载回退事件次数（按原因）", m.ogPolicyRollback, []string{"reason"})
+	// gauge：在飞缓冲字节数（M1，与 P-MAX-INFLIGHT-BYTES 配套）
+	fmt.Fprintf(w, "# HELP otpmask_output_guard_inflight_bytes 当前在飞缓冲字节总数\n# TYPE otpmask_output_guard_inflight_bytes gauge\n")
+	fmt.Fprintf(w, "otpmask_output_guard_inflight_bytes %d\n", m.ogInflightBytes)
+	// histogram：单请求审查总延迟（手写桶）
+	writeHistogram(w, "otpmask_output_guard_latency_ms", "单请求输出侧审查总延迟（毫秒）", m.ogLatencyMs, "")
+	// histogram：首帧延迟增量（M2 启用后才有样本）
+	writeHistogram(w, "otpmask_output_guard_first_frame_delay_seconds", "输出侧审查引入的首帧延迟增量（秒）", m.ogFirstFrameDelay, "")
+	if m.ogMode != "" {
+		fmt.Fprintf(w, "# HELP otpmask_output_guard_mode 当前输出侧内容审查运行模式（1=当前模式）\n# TYPE otpmask_output_guard_mode gauge\n")
+		fmt.Fprintf(w, "otpmask_output_guard_mode{mode=%q} 1\n", m.ogMode)
+	}
+	if m.ogPolicyVersion != "" {
+		fmt.Fprintf(w, "# HELP otpmask_output_guard_policy_version 当前生效的输出侧内容审查策略版本号\n# TYPE otpmask_output_guard_policy_version gauge\n")
+		fmt.Fprintf(w, "otpmask_output_guard_policy_version{version=%q} 1\n", m.ogPolicyVersion)
+	}
 	fmt.Fprintf(w, "# HELP otpmask_billing_blocked 对外出账是否被对账结果阻断（1=阻断）\n# TYPE otpmask_billing_blocked gauge\n")
 	fmt.Fprintf(w, "otpmask_billing_blocked %d\n", m.billingBlocked)
 	if m.reconcileLastRun > 0 {
@@ -267,4 +367,123 @@ func labelPairs(labels, values []string) string {
 		out += fmt.Sprintf("%s=%q", l, values[i])
 	}
 	return out
+}
+
+// ---- histogram（手写桶，零依赖）----
+
+// histogram 直方图指标：累积桶计数 + sum + count。
+// 桶边界由 upperBounds 定义（严格递增，不含 +Inf；渲染时自动追加 +Inf）。
+type histogram struct {
+	upperBounds []float64 // 桶上边界（含）
+	buckets     []int64   // 各桶累计计数（≤ upperBounds[i] 的样本数）
+	sum         float64   // 所有样本值之和
+	count       int64     // 样本总数
+}
+
+// newHistogram 构造空直方图。
+func newHistogram(upperBounds []float64) *histogram {
+	return &histogram{upperBounds: upperBounds, buckets: make([]int64, len(upperBounds))}
+}
+
+// observe 记录一个样本值。
+// 桶计数 =「该桶区间内的样本数」（区间：(prev, curr]；首个桶：(-inf, bound[0]]）。
+// 渲染时按累积输出（Prometheus 格式要求）。
+func (h *histogram) observe(v float64) {
+	h.count++
+	h.sum += v
+	for i, b := range h.upperBounds {
+		if v <= b {
+			h.buckets[i]++
+			return // 只落入第一个满足的桶（区间分桶，互不重叠）
+		}
+	}
+	// 超过所有桶上界 → 只进 +Inf 桶，不进任何命名桶。
+}
+
+// 输出侧审查延迟桶（ms）：1/5/20/50/100/500/1000/5000/+Inf
+// 对齐 §4.10：桶选择覆盖 shadow 预期（P99 < 10ms）与 enforcing 最坏（L2 秒级）。
+var latencyMsBuckets = []float64{1, 5, 20, 50, 100, 500, 1000, 5000}
+
+// 首帧延迟增量桶（秒）：0.01/0.05/0.1/0.2/0.5/0.8/1.0/2.0/+Inf
+// 对齐 §4.5：首帧延迟增量 P50 ≤ 300ms / P99 ≤ 800ms（M3→M4 唯一硬闸门）。
+var firstFrameDelayBuckets = []float64{0.01, 0.05, 0.1, 0.2, 0.5, 0.8, 1.0, 2.0}
+
+// writeHistogram 渲染 histogram（Prometheus text 格式；自动追加 +Inf 桶）。
+func writeHistogram(w io.Writer, name, help string, h *histogram, extraLabels string) {
+	if h == nil || h.count == 0 {
+		return
+	}
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s histogram\n", name, help, name)
+	// 按累积输出：bucket_i = Σ_{0..i} buckets[j]
+	cum := int64(0)
+	for i, b := range h.upperBounds {
+		cum += h.buckets[i]
+		le := fmt.Sprintf("%g", b)
+		labels := `le="` + le + `"`
+		if extraLabels != "" {
+			labels = extraLabels + "," + labels
+		}
+		fmt.Fprintf(w, "%s_bucket{%s} %d\n", name, labels, cum)
+	}
+	labels := `le="+Inf"`
+	if extraLabels != "" {
+		labels = extraLabels + "," + labels
+	}
+	fmt.Fprintf(w, "%s_bucket{%s} %d\n", name, labels, h.count)
+	fmt.Fprintf(w, "%s_sum %g\n", name, h.sum)
+	fmt.Fprintf(w, "%s_count %d\n", name, h.count)
+}
+
+// ---- 输出侧新指标方法 ----
+
+// incOGBlocked 记录一次 block 命中（enforcing 模式；category|mode）。
+func (m *otpmaskMetrics) incOGBlocked(category, mode string) {
+	m.mu.Lock()
+	m.ogBlocked[category+"|"+mode]++
+	m.mu.Unlock()
+}
+
+// incOGMasked 记录一次 mask 命中（按类目）。
+func (m *otpmaskMetrics) incOGMasked(category string) {
+	m.mu.Lock()
+	m.ogMasked[category]++
+	m.mu.Unlock()
+}
+
+// incOGPolicyRollback 记录一次策略热加载回退（按原因）。
+func (m *otpmaskMetrics) incOGPolicyRollback(reason string) {
+	m.mu.Lock()
+	m.ogPolicyRollback[reason]++
+	m.mu.Unlock()
+}
+
+// incOGDegraded 记录一次后端降级事件（M2；P-DEGRADE 诊断）。
+func (m *otpmaskMetrics) incOGDegraded(backend, reason string) {
+	m.mu.Lock()
+	m.ogDegraded[backend+"|"+reason]++
+	m.mu.Unlock()
+}
+
+// addOGInflightBytes 在飞字节增减（正=增加，负=减少）。
+func (m *otpmaskMetrics) addOGInflightBytes(delta int64) {
+	m.mu.Lock()
+	m.ogInflightBytes += delta
+	if m.ogInflightBytes < 0 {
+		m.ogInflightBytes = 0 // 防御：不出现负值
+	}
+	m.mu.Unlock()
+}
+
+// observeOGLatencyMs 记录一次单请求审查总延迟（ms）。
+func (m *otpmaskMetrics) observeOGLatencyMs(ms float64) {
+	m.mu.Lock()
+	m.ogLatencyMs.observe(ms)
+	m.mu.Unlock()
+}
+
+// observeOGFirstFrameDelaySeconds 记录一次首帧延迟增量（秒）。
+func (m *otpmaskMetrics) observeOGFirstFrameDelaySeconds(s float64) {
+	m.mu.Lock()
+	m.ogFirstFrameDelay.observe(s)
+	m.mu.Unlock()
 }

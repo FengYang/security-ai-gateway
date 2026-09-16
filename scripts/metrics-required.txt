@@ -34,6 +34,31 @@ tee otpmask_attest_token_traffic_total conditional
 tee otpmask_recompute_ops_total conditional
 tee otpmask_recompute_duration_ms_total conditional
 
+# ---- output-side content guard (M1+; GA-输出侧内容审查-技术实现方案 §4.10 唯一目录) ----
+# M1 skeleton (off/shadow) — required: always present when output guard is compiled in
+tee otpmask_output_guard_mode required
+tee otpmask_output_guard_policy_version required
+tee otpmask_output_guard_requests_total required
+tee otpmask_output_guard_l1_hit_total conditional
+tee otpmask_output_guard_would_reject_total conditional
+tee otpmask_output_guard_blocked_total conditional
+tee otpmask_output_guard_masked_total conditional
+tee otpmask_output_guard_policy_rollback_total conditional
+tee otpmask_output_guard_inflight_bytes conditional
+tee otpmask_output_guard_latency_ms_bucket conditional
+# M2 (buffer + PII)
+tee otpmask_output_guard_unmapped_total conditional
+tee otpmask_output_guard_degraded_total conditional
+tee otpmask_output_guard_first_frame_delay_seconds conditional
+# M3 (L2 cascade / enforcing)
+tee otpmask_output_guard_l2_call_total conditional
+tee otpmask_output_guard_l2_cascade_ratio conditional
+tee otpmask_output_guard_l2_duration_seconds conditional
+tee otpmask_output_guard_l2_only_hit_total conditional
+tee otpmask_output_guard_buffer_queue_depth conditional
+tee otpmask_output_guard_buffer_full_total conditional
+tee otpmask_output_guard_failclosed_sentences_ratio conditional
+
 # ---- gateway-admin-service (auth / credentials / audit chain) ----
 admin gateway_admin_requests_total required
 admin gateway_admin_auth_rejected_total required

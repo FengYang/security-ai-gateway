@@ -120,6 +120,20 @@ func (g *guardrail) snapshot() guardrailSnapshot {
 	}
 }
 
+// maxKeywordRunes 返回当前 L1 关键词规则的最长命中长度（rune 数）。
+// 用途：OG-4 滑窗模式派生 P-WINDOW-CHARS（= 词库最长命中长度 + P-WINDOW-MARGIN，§5.4）。
+// 现由关键词词表（injTerms）计算；OG-9 词库/AC 自动机落地后改由词库实测值提供
+// （PII/SQL 为 regex 规则，非"词库命中长度"口径，不计入）。
+func (g *guardrail) maxKeywordRunes() int {
+	max := 0
+	for _, term := range g.injTerms {
+		if n := len([]rune(term)); n > max {
+			max = n
+		}
+	}
+	return max
+}
+
 // check 检测文本；命中返回第一个命中项（确定性顺序），否则 nil。
 //
 // 混淆防御（M11 渗透测试发现）：
