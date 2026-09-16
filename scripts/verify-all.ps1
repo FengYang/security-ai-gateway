@@ -19,6 +19,8 @@
 #   13. Attestation  challenge-response + session key agreement + verify chain rejection
 #   14. R2 masked-infer  cipher kernel parity + /v1/recompute + dual-route routing
 #   15. A6 + TSA + reconcile  no-plaintext observability + RFC3161 TST + audit-metering reconcile
+#   16. GA OG-10 framewise e2e  SSE per-frame capture + "hit fragment never in any delivered frame"
+#                                (shadow negative check + enforcing shape contract: per-frame & cross-frame)
 #
 # Usage: powershell -NoProfile -File scripts/verify-all.ps1
 
@@ -199,6 +201,12 @@ Check 'Metrics all-green (gate #9)' ($LASTEXITCODE -eq 0) '(scripts/metrics-requ
 Write-Host "`n[22] 审计-计量对账（S5 / 门禁 #7 判据 6）" -ForegroundColor Yellow
 & $go test ./gateway/tee-infer-service/ -run 'TestReconcile' *> $null
 Check 'Metering reconcile (gate #7 / S5)' ($LASTEXITCODE -eq 0) '(窗口 0 容差 + 分类 chain_broken/usage_reset/multi_instance/audit_behind + 出账阻断与恢复解阻断；实链只读核对见 scripts/verify-metering-reconcile.ps1)'
+
+# 23. GA-输出侧内容审查 OG-10：逐帧 e2e 断言工具（SSE 抓包）
+#     -mod=mod：本仓库 vendor/modules.txt 与 go.mod 不一致（与本文件其余 go test 项的差异见记忆台账）
+Write-Host "`n[23] 输出侧逐帧 e2e 断言（OG-10：命中片段在任何已下发帧零出现）" -ForegroundColor Yellow
+& $go test -mod=mod ./gateway/tee-infer-service/ -run 'TestFramewise|TestOutputGuardFramewise' -count=1 *> $null
+Check 'Output-guard framewise e2e (OG-10)' ($LASTEXITCODE -eq 0) '(shadow 负向验证：工具能检出已下发命中；enforcing 形态：逐帧+跨帧零命中 + content_filter 终止码)'
 
 Pop-Location
 
