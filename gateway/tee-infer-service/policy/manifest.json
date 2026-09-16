@@ -4,7 +4,7 @@
   "files": [
     {
       "path": "categories.json",
-      "sha256": "929d6ed3e6a3b26e37f8218b57c8ee4488cbe3e17fd4fdd7b23ce81aae2fe01d"
+      "sha256": "48e7267c1e855c7ebef1dd244d0bf8ca2d7de804e939fbfa2f2c7f2b73efe193"
     },
     {
       "path": "keywords/a1-01.json",
@@ -127,5 +127,5 @@
       "sha256": "dce193bc157e04195c6d16c8e2a56a3d495e2b16490f4d27b57d529e93a72c27"
     }
   ],
-  "sha256": "155490bbd9f78d9a164c36a46b2e544478a89912ee7624f8d89718590ec75db8"
+  "sha256": "471bf779097551ffd62755b21476db257515dfbe0201546d48d76dd62fbe64b8"
 }

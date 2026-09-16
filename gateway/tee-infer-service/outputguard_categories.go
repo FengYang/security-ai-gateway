@@ -44,19 +44,19 @@ type outputCategory struct {
 // outputCategories 31 类完整清单（唯一事实源 = 附录 A）。
 // 顺序与附录 A 一致；新增/删除须经 D8 高敏变更（§5.8 #2 冻结项）。
 var outputCategories = []outputCategory{
-	// A.1 违法不良信息（政治安全类，7 项）
+	// A.1 包含违反社会主义核心价值观的内容（8 项；条目文字经 OG-2② 官方文本逐条核对）
 	{ID: "A1-01", Name: "煽动颠覆国家政权、推翻社会主义制度", Family: "A1", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock},
 	{ID: "A1-02", Name: "危害国家安全和利益、损害国家形象", Family: "A1", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock},
 	{ID: "A1-03", Name: "煽动分裂国家、破坏国家统一和社会稳定", Family: "A1", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock},
 	{ID: "A1-04", Name: "宣扬恐怖主义、极端主义", Family: "A1", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock},
-	{ID: "A1-05", Name: "宣扬民族仇恨、民族歧视", Family: "A1", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "与 A2-01 有重叠面，命中归类以\"宣扬仇恨\"优先归 A1-05"},
-	{ID: "A1-06", Name: "传播暴力、淫秽色情信息", Family: "A1", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "L1 词库强项（显性类）"},
+	{ID: "A1-05", Name: "宣扬民族仇恨", Family: "A1", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "官方 A.1 e) 原文仅\"宣扬民族仇恨\"；与 A2-01\"民族歧视内容\"分列两项，命中归类以\"宣扬仇恨\"优先归 A1-05"},
+	{ID: "A1-06", Name: "宣扬暴力、淫秽色情", Family: "A1", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "官方 A.1 f) 原文；L1 词库强项（显性类）"},
 	{ID: "A1-07", Name: "传播虚假有害信息", Family: "A1", DefaultLevel: catLevelMedium, DefaultAction: catActionFlag, Note: "检出可靠性与误杀风险均高，默认只标记"},
-	{ID: "A1-08", Name: "其他违反社会主义核心价值观的内容", Family: "A1", DefaultLevel: catLevelMedium, DefaultAction: catActionFlag, Note: "兜底类，不单独建词库，仅作映射落点"},
+	{ID: "A1-08", Name: "其他法律、行政法规禁止的内容", Family: "A1", DefaultLevel: catLevelMedium, DefaultAction: catActionFlag, Note: "官方 A.1 h) 原文；兜底类，不单独建词库，仅作映射落点"},
 
 	// A.2 违法不良信息（歧视类，9 项）
 	{ID: "A2-01", Name: "民族歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "弱检出区：指标须分类目单列"},
-	{ID: "A2-02", Name: "种族歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "弱检出区"},
+	{ID: "A2-02", Name: "信仰歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "官方 A.2 b) 原文为\"信仰歧视内容\"（非\"种族歧视\"，OG-2② 核对纠正）；弱检出区"},
 	{ID: "A2-03", Name: "国别歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "弱检出区"},
 	{ID: "A2-04", Name: "地域歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "弱检出区；\"地域黑\"梗文化对抗性强"},
 	{ID: "A2-05", Name: "性别歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "弱检出区"},

@@ -29,19 +29,19 @@
   },
   {
     "id": "A1-05",
-    "name": "宣扬民族仇恨、民族歧视",
+    "name": "宣扬民族仇恨",
     "family": "A1",
     "default_level": "high",
     "default_action": "block",
-    "note": "与 A2-01 有重叠面，命中归类以\"宣扬仇恨\"优先归 A1-05"
+    "note": "官方 A.1 e) 原文仅\"宣扬民族仇恨\"；与 A2-01\"民族歧视内容\"分列两项，命中归类以\"宣扬仇恨\"优先归 A1-05"
   },
   {
     "id": "A1-06",
-    "name": "传播暴力、淫秽色情信息",
+    "name": "宣扬暴力、淫秽色情",
     "family": "A1",
     "default_level": "high",
     "default_action": "block",
-    "note": "L1 词库强项（显性类）"
+    "note": "官方 A.1 f) 原文；L1 词库强项（显性类）"
   },
   {
     "id": "A1-07",
@@ -53,11 +53,11 @@
   },
   {
     "id": "A1-08",
-    "name": "其他违反社会主义核心价值观的内容",
+    "name": "其他法律、行政法规禁止的内容",
     "family": "A1",
     "default_level": "medium",
     "default_action": "flag",
-    "note": "兜底类，不单独建词库，仅作映射落点"
+    "note": "官方 A.1 h) 原文；兜底类，不单独建词库，仅作映射落点"
   },
   {
     "id": "A2-01",
@@ -69,11 +69,11 @@
   },
   {
     "id": "A2-02",
-    "name": "种族歧视内容",
+    "name": "信仰歧视内容",
     "family": "A2",
     "default_level": "high",
     "default_action": "block",
-    "note": "弱检出区"
+    "note": "官方 A.2 b) 原文为\"信仰歧视内容\"（非\"种族歧视\"，OG-2② 核对纠正）；弱检出区"
   },
   {
     "id": "A2-03",
