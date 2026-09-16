@@ -35,14 +35,20 @@ const (
 
 // unitBuffer 判定单元缓冲（请求级）。
 type unitBuffer struct {
-	unit         string // sentence｜fixed-window
-	maxRunes     int    // 单元上限（sentence：P-MAX-UNIT-RUNES；fixed-window：P-WINDOW-CHARS）
-	firstMax     int    // 首句强切阈值（P-FIRST-UNIT-MAX-RUNES；仅 sentence 生效）
-	maxBufRunes  int    // P-MAX-BUFFER-BYTES 折算的 rune 硬顶（保守：字节数 / UTFMax）
-	pending      []rune // 未判定累积（始终由本文件内的方法维护）
-	sawUnit      bool   // 是否已产出过判定单元（首句阈值只对首个单元生效）
-	state        scanState
+	unit          string // sentence｜fixed-window
+	maxRunes      int    // 单元上限（sentence：P-MAX-UNIT-RUNES；fixed-window：P-WINDOW-CHARS）
+	firstMax      int    // 首句强切阈值（P-FIRST-UNIT-MAX-RUNES；仅 sentence 生效）
+	maxBufRunes   int    // P-MAX-BUFFER-BYTES 折算的 rune 硬顶（保守：字节数 / UTFMax）
+	pending       []rune // 未判定累积（始终由本文件内的方法维护）
+	sawUnit       bool   // 是否已产出过判定单元（首句阈值只对首个单元生效）
+	state         scanState
 	onForcedSplit func(reason string) // 强切计数回调（可为 nil）
+
+	// URL/邮箱保护区间的增量维护（M1 性能优化 R7②），坐标始终相对当前 pending。
+	// 不变式：protSpans 与 protectedRuneRanges(pending) 全量重算结果逐区间相等。
+	protSpans [][2]int // 当前保护区间（左闭右开 rune 下标）
+	lastSep   int      // pending 中最后一个硬分隔符下标（无则 -1）
+	marks     []int    // pending 中 ':' 与 '@' 的全部下标（有序；URL/邮箱的必要字符）
 }
 
 // newUnitBuffer 构造判定单元缓冲。params 须为 resolve 后的取值。
@@ -51,6 +57,7 @@ func newUnitBuffer(params outputGuardParams, onForcedSplit func(reason string)) 
 		unit:          params.Unit,
 		firstMax:      params.FirstUnitMaxRunes,
 		onForcedSplit: onForcedSplit,
+		lastSep:       -1,
 	}
 	if params.Unit == unitFixedWindow {
 		b.maxRunes = params.WindowRunes // 滑窗窗长＝P-WINDOW-CHARS（词库最长词 + 余量）
@@ -72,10 +79,13 @@ func (b *unitBuffer) Push(delta string) []string {
 	if delta == "" {
 		return nil
 	}
-	b.pending = append(b.pending, []rune(delta)...)
+	dr := []rune(delta)
+	oldN := len(b.pending)
+	b.pending = append(b.pending, dr...)
 	if b.unit == unitFixedWindow {
 		return b.drainWindow()
 	}
+	b.extendProtected(oldN, dr)
 	return b.drain(false)
 }
 
@@ -98,6 +108,7 @@ func (b *unitBuffer) Reset() {
 	b.pending = b.pending[:0]
 	b.sawUnit = false
 	b.state = scanState{}
+	b.resetProtected()
 }
 
 // pendingRunes 当前未判定累积长度（可观测/测试用）。
@@ -131,6 +142,7 @@ func (b *unitBuffer) drain(flush bool) []string {
 	if flush && len(b.pending) > 0 {
 		unit := string(b.pending)
 		b.pending = b.pending[:0]
+		b.resetProtected()
 		if strings.TrimSpace(unit) != "" {
 			units = append(units, unit)
 		}
@@ -168,7 +180,7 @@ func (b *unitBuffer) limitAndReason() (int, string) {
 // 无边界返回 0。window 模式下由 drainWindow 处理，不走本函数。
 func (b *unitBuffer) findBoundary(limit int) int {
 	st := b.state
-	spans := protectedRuneRanges(b.pending)
+	spans := b.protSpans
 	for i := 0; i < len(b.pending) && i < limit; i++ {
 		r := b.pending[i]
 		if !inRuneSpans(spans, i) && b.isTerminatorAt(i, st) {
@@ -191,7 +203,7 @@ func (b *unitBuffer) safeCut(limit int) int {
 	if limit > n {
 		limit = n
 	}
-	spans := protectedRuneRanges(b.pending)
+	spans := b.protSpans
 	for cut := limit; cut >= 1; cut-- {
 		if isGraphemeSafeBoundary(b.pending, cut) && !inRuneSpans(spans, cut-1) {
 			return cut
@@ -209,6 +221,91 @@ func (b *unitBuffer) safeCut(limit int) int {
 func (b *unitBuffer) consume(n int) {
 	b.state = b.stateAfter(n)
 	b.pending = append(b.pending[:0], b.pending[n:]...)
+	b.shiftProtected(n)
+}
+
+// resetProtected 清空 URL/邮箱保护的增量状态（pending 被整体释放时调用）。
+func (b *unitBuffer) resetProtected() {
+	b.protSpans = nil
+	b.lastSep = -1
+	b.marks = nil
+}
+
+// extendProtected 在追加 dr（旧 pending 长 oldN）后增量更新保护区间（R7②）。
+// 任何 URL/邮箱匹配都不可能跨过 isHardSplitRune 字符，故只需对「旧 pending
+// 最后一个硬分隔符之后」的后缀窗口重跑正则；窗口内无 ':'/'@' 时正则零调用。
+func (b *unitBuffer) extendProtected(oldN int, dr []rune) {
+	w := b.lastSep + 1 // lastSep=-1 → 0；分隔符只在旧 pending 中取，保证 w ≤ oldN
+	for i, r := range dr {
+		pos := oldN + i
+		if isHardSplitRune(r) {
+			b.lastSep = pos
+		}
+		if r == ':' || r == '@' {
+			b.marks = append(b.marks, pos)
+		}
+	}
+	// 保留完全落在窗口之前的旧区间；其余由窗口重算结果取代。
+	kept := b.protSpans[:0]
+	for _, sp := range b.protSpans {
+		if sp[1] <= w {
+			kept = append(kept, sp)
+		}
+	}
+	hasMark := false
+	for _, p := range b.marks {
+		if p >= w {
+			hasMark = true
+			break
+		}
+	}
+	if !hasMark {
+		b.protSpans = kept
+		return
+	}
+	// 仅对窗口后缀跑两条正则（正则顺序与 FindAll 口径与 protectedRuneRanges 完全一致）。
+	ws := string(b.pending[w:])
+	for _, re := range []*regexp.Regexp{splitURLRe, splitEmailRe} {
+		for _, loc := range re.FindAllStringIndex(ws, -1) {
+			start := w + utf8.RuneCountInString(ws[:loc[0]])
+			kept = append(kept, [2]int{start, start + utf8.RuneCountInString(ws[loc[0]:loc[1]])})
+		}
+	}
+	b.protSpans = kept
+}
+
+// shiftProtected 在 consume 消费前 n 个 rune 后把保护坐标整体左移 n。
+// findBoundary/safeCut 保证切点不落在保护区间内，故跨切点区间理论上不出现；
+// 万一观察到则回退全量重算（正确性优先于性能）。
+func (b *unitBuffer) shiftProtected(n int) {
+	if b.lastSep >= n {
+		b.lastSep -= n
+	} else {
+		b.lastSep = -1
+	}
+	mm := b.marks[:0]
+	for _, p := range b.marks {
+		if p >= n {
+			mm = append(mm, p-n)
+		}
+	}
+	b.marks = mm
+	sp := b.protSpans[:0]
+	fallback := false
+	for _, s := range b.protSpans {
+		switch {
+		case s[1] <= n: // 整个区间随本单元消费
+		case s[0] < n: // 跨切点：不应发生 → 全量重算
+			fallback = true
+		default:
+			sp = append(sp, [2]int{s[0] - n, s[1] - n})
+		}
+	}
+	if fallback {
+		b.protSpans = protectedRuneRanges(b.pending)
+	} else {
+		b.protSpans = sp
+	}
 }
 
 // stateAfter 从当前已提交状态出发，重放 pending[:n] 得到下标 n 处的扫描状态。
@@ -366,6 +463,8 @@ var (
 )
 
 // protectedRuneRanges 返回 pending 中 URL/邮箱覆盖的 rune 区间（左闭右开）。
+// 注意：本函数为全量重算的「正确性基准」（oracle），生产路径由 protSpans 增量
+// 维护（R7②），差分等价性测试 TestBufferProtectedSpansIncremental 锁定两者一致。
 func protectedRuneRanges(rs []rune) [][2]int {
 	if len(rs) == 0 {
 		return nil
@@ -387,6 +486,20 @@ func inRuneSpans(spans [][2]int, i int) bool {
 		if i >= sp[0] && i < sp[1] {
 			return true
 		}
+	}
+	return false
+}
+
+// isHardSplitRune 判定该 rune 是否不可能出现在 URL/邮箱匹配内部。
+// 集合严格对齐 splitURLRe 的排除字符集 [\s。！？；，、）】」"'!?…]；
+// 邮箱可出现字符（字母数字._%+-@）是其真子集，故同一分隔符对两条正则都成立（R7② 依据）。
+func isHardSplitRune(r rune) bool {
+	if unicode.IsSpace(r) {
+		return true
+	}
+	switch r {
+	case '。', '！', '？', '；', '，', '、', '）', '】', '」', '"', '\'', '!', '?', '…':
+		return true
 	}
 	return false
 }

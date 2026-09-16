@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -320,5 +321,70 @@ func TestOutputGuardForcedSplitMetric(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), `otpmask_output_guard_forced_split_total{reason="max_unit"} 2`) {
 		t.Fatalf("后续强切应记 max_unit×2\n---\n%s", buf.String())
+	}
+}
+
+// TestBufferProtectedSpansIncremental R7② 差分等价性：增量维护的 b.protSpans
+// 必须与 protectedRuneRanges(b.pending) 全量重算逐区间相等——每个 delta 之后、
+// 成句消费导致坐标左移之后、Flush 释放之后均断言。覆盖：URL/邮箱跨 delta 拼接、
+// 同一 URL 跨边界延长、':'/'@' 存在但非匹配、双 URL、无标记纯中文、逐 rune 下发。
+func TestBufferProtectedSpansIncremental(t *testing.T) {
+	splitRunes := func(s string) []string {
+		rs := []rune(s)
+		out := make([]string, len(rs))
+		for i, r := range rs {
+			out[i] = string(r)
+		}
+		return out
+	}
+	cases := []struct {
+		name   string
+		deltas []string
+	}{
+		{"url-cross-delta", []string{"见 ht", "tp://a.b.c/x", "。回家。"}},
+		{"url-extends-across-boundary", []string{"https://a.com/", "x 后续。"}},
+		{"email-cross-delta", []string{"联系 a", ".b@c", ".com。谢谢。"}},
+		{"colon-no-match", []string{"比例 3:4 与 5:6。"}},
+		{"at-no-match", []string{"用户@ 提到了。"}},
+		{"two-urls", []string{"https://a.com 与 https://b.com。完。"}},
+		{"url-tail-no-terminator", []string{"链接 http://x.y/z", " 尾部暂不成句"}},
+		{"no-mark-cjk", []string{"甲乙丙丁戊己庚辛壬癸。"}},
+		{"rune-by-rune", splitRunes("访问 https://t.co/abc 收件 a@b.com 好。")},
+		{"rune-by-rune-nomark", splitRunes("甲乙。")},
+	}
+	sameSpans := func(a, b [][2]int) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var forced []string
+			b := newTestBuf(bgParams(500, 200), &forced)
+			assertOracle := func(stage string) {
+				t.Helper()
+				want := protectedRuneRanges(b.pending)
+				if !sameSpans(b.protSpans, want) {
+					t.Fatalf("%s：增量区间 %v != 全量重算 %v（pending=%q）",
+						stage, b.protSpans, want, string(b.pending))
+				}
+			}
+			for i, d := range tc.deltas {
+				b.Push(d)
+				assertOracle("第 " + strconv.Itoa(i+1) + " 个 delta 后")
+			}
+			b.Flush()
+			assertOracle("Flush 后")
+			if len(b.protSpans) != 0 || b.lastSep != -1 || len(b.marks) != 0 {
+				t.Fatalf("Flush 后增量状态未释放：spans=%v lastSep=%d marks=%v",
+					b.protSpans, b.lastSep, b.marks)
+			}
+		})
 	}
 }

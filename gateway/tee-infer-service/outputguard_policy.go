@@ -54,14 +54,14 @@ type policyManifestFile struct {
 // 热加载失败原因（otpmask_output_guard_policy_rollback_total{reason=...} 与
 // output_guard_policy_reload/rolled_back 审计归因；§3.6.4、§4.10 指标目录）。
 const (
-	policyErrHashMismatch     = "hash_mismatch"     // 登记 sha256 与文件字节不一致（篡改/未同步）
-	policyErrInvalidJSON      = "invalid_json"      // manifest/词库 JSON 不可解析
-	policyErrSchemaInvalid    = "schema_invalid"    // schema_version/字段/level 等不合规
-	policyErrCategoryInvalid  = "category_invalid"  // category 不在附录 A 31 类内
-	policyErrUnsafePath       = "unsafe_path"       // 登记路径为绝对路径/含 ".."/盘符
+	policyErrHashMismatch      = "hash_mismatch"      // 登记 sha256 与文件字节不一致（篡改/未同步）
+	policyErrInvalidJSON       = "invalid_json"       // manifest/词库 JSON 不可解析
+	policyErrSchemaInvalid     = "schema_invalid"     // schema_version/字段/level 等不合规
+	policyErrCategoryInvalid   = "category_invalid"   // category 不在附录 A 31 类内
+	policyErrUnsafePath        = "unsafe_path"        // 登记路径为绝对路径/含 ".."/盘符
 	policyErrDuplicateCategory = "duplicate_category" // 同一类目重复登记
-	policyErrRegexInvalid     = "regex_invalid"     // 正则规则不可编译
-	policyErrReadError        = "read_error"        // 文件不可读
+	policyErrRegexInvalid      = "regex_invalid"      // 正则规则不可编译
+	policyErrReadError         = "read_error"         // 文件不可读
 )
 
 // policyLoadError 携带归类原因的加载错误（供热加载回退的指标/审计归因）。
@@ -116,7 +116,7 @@ func classifyLexiconLoadErr(err error) string {
 // 同优先级内按内部类目 ID 升序（顺序确定，可复现）。
 type lexiconRegistry struct {
 	policyVersion string
-	manifestSHA   string // manifest.json 自锚定摘要（§4.2.4；进热加载审计 sha256 附字段）
+	manifestSHA   string               // manifest.json 自锚定摘要（§4.2.4；进热加载审计 sha256 附字段）
 	classifiers   []*lexiconClassifier // 已按优先级排序
 	byCategory    map[string]*lexiconClassifier
 }
@@ -215,9 +215,11 @@ func checkPolicyRelPath(p string) error {
 }
 
 // Classify 实现 OutputClassifier：按优先级顺序取首个命中类目。
+// 归一化只在此处做一次并随级联下传（M1 性能优化 R7①：避免每类目重复 normalizeLexicon）。
 func (r *lexiconRegistry) Classify(text string) (string, float64, string) {
+	norm := normalizeLexicon(text)
 	for _, lc := range r.classifiers {
-		if cat, conf, match := lc.Classify(text); cat != "" {
+		if cat, conf, match := lc.classifyNorm(text, norm); cat != "" {
 			return cat, conf, match
 		}
 	}

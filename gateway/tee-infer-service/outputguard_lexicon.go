@@ -53,10 +53,10 @@ type lexiconRule struct {
 
 // lexiconFile 词库文件顶层结构（JSON schema）。
 type lexiconFile struct {
-	SchemaVersion string       `json:"schema_version"`
-	Category      string       `json:"category"`
-	Version       string       `json:"version"`
-	Level         string       `json:"level"`
+	SchemaVersion string        `json:"schema_version"`
+	Category      string        `json:"category"`
+	Version       string        `json:"version"`
+	Level         string        `json:"level"`
 	Rules         []lexiconRule `json:"rules"`
 }
 
@@ -191,8 +191,13 @@ func newLexiconClassifierFromJSON(data []byte) (*lexiconClassifier, error) {
 // 匹配优先级：exact > contains/variant > regex（一旦命中即返回最高优先级结果；
 // 同层多个命中取权重最高的）。
 func (lc *lexiconClassifier) Classify(text string) (string, float64, string) {
-	norm := normalizeLexicon(text)
+	return lc.classifyNorm(text, normalizeLexicon(text))
+}
 
+// classifyNorm 接收原文与其归一化结果：归一化由 lexiconRegistry 在级联入口
+// 统一做一次后下传，避免同一文本被 30 个类目重复 normalizeLexicon（M1 性能优化 R7①）。
+// raw 供 regex 层使用（正则按原文匹配，不经归一化）。
+func (lc *lexiconClassifier) classifyNorm(raw, norm string) (string, float64, string) {
 	// 1. exact 匹配（O(1)）
 	if r, ok := lc.exactMap[norm]; ok {
 		return lc.category, r.Weight, r.Keyword
@@ -205,9 +210,9 @@ func (lc *lexiconClassifier) Classify(text string) (string, float64, string) {
 		}
 	}
 
-	// 3. regex（逐条匹配）
+	// 3. regex（逐条匹配，按原文）
 	for _, cr := range lc.regexList {
-		if cr.re.MatchString(text) {
+		if cr.re.MatchString(raw) {
 			return lc.category, cr.rule.Weight, cr.rule.Keyword
 		}
 	}
