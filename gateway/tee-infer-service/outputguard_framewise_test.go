@@ -24,6 +24,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -433,4 +435,123 @@ func TestOutputGuardFramewiseE2EShadow(t *testing.T) {
 			t.Fatalf("审计类目/模式不符：%+v", e)
 		}
 	}
+}
+
+// parseOpenAIFrames 解析经 Higress 的北向 OpenAI chat chunk SSE（OG-10 实链抓包形态，
+// scripts/og10-live-capture.ps1 产出）：每帧 `data: {"id":..,"choices":[{"delta":{"content":..},"finish_reason":..}]}`。
+//
+// 与 wire/明文 dump 形态的差异：插件北向重写后**无 seq/guard 字段**（chunk-meta 口径由
+// 本地 wire 实链 TestOutputGuardFramewiseE2EShadow 覆盖）；帧号用行序近似（仅用于违规明细定位）。
+func parseOpenAIFrames(t *testing.T, dump []byte) []deliveredFrame {
+	t.Helper()
+	var oaChunk struct {
+		Choices []struct {
+			Index int `json:"index"`
+			Delta struct {
+				Content string `json:"content"`
+			} `json:"delta"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	var frames []deliveredFrame
+	sawDone := false
+	for _, line := range strings.Split(string(dump), "\n") {
+		line = strings.TrimRight(line, "\r")
+		data, ok := strings.CutPrefix(line, "data:")
+		if !ok {
+			continue
+		}
+		data = strings.TrimSpace(data)
+		if data == "[DONE]" {
+			sawDone = true
+			continue
+		}
+		if err := json.Unmarshal([]byte(data), &oaChunk); err != nil {
+			t.Fatalf("OpenAI chunk JSON 无效: %v", err)
+		}
+		for _, ch := range oaChunk.Choices {
+			if ch.Index != 0 {
+				continue
+			}
+			frames = append(frames, deliveredFrame{
+				Seq:    uint64(len(frames) + 1),
+				Delta:  ch.Delta.Content,
+				Finish: ch.FinishReason,
+			})
+		}
+	}
+	if !sawDone {
+		t.Fatal("OpenAI SSE 流缺 [DONE]（流未正常收尾）")
+	}
+	return frames
+}
+
+// liveForbiddenCorpus 从已入库 policy/keywords/*.json 收集词面全集（exact/contains/variant；
+// regex 规则是模式不是字面量，不做子串比对）——实链断言的禁用语料与审查口径同源。
+func liveForbiddenCorpus(t *testing.T, policyDir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(policyDir, "keywords"))
+	if err != nil {
+		t.Fatalf("读取 policy/keywords 失败: %v", err)
+	}
+	var corpus []string
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(policyDir, "keywords", e.Name()))
+		if err != nil {
+			t.Fatalf("读取词库 %s 失败: %v", e.Name(), err)
+		}
+		var f lexiconFile
+		if err := json.Unmarshal(raw, &f); err != nil {
+			t.Fatalf("词库 %s JSON 无效: %v", e.Name(), err)
+		}
+		for _, r := range f.Rules {
+			if r.Type == ruleTypeExact || r.Type == ruleTypeContains || r.Type == ruleTypeVariant {
+				if r.Keyword != "" {
+					corpus = append(corpus, r.Keyword)
+				}
+			}
+		}
+	}
+	if len(corpus) < 100 {
+		t.Fatalf("禁用语料异常稀少（%d 条），疑似 policy 目录不完整", len(corpus))
+	}
+	return corpus
+}
+
+// TestOutputGuardFramewiseLiveHigress OG-10 实链逐帧断言（经 Higress 真实 SSE 抓帧）：
+// 抓包由 scripts/og10-live-capture.ps1 产出（K3S 真实链路 /v1/infer，C-MaaS 引擎），
+// 经 OG10_LIVE_DUMP 门控注入本测试（缺省 skip，不影响 verify-all 基线）。
+// 判据：真实流逐帧 + 跨帧拼接对 171 规则词面全集**零命中**（shadow 正常放行下无泄漏），
+// 终止码 stop；guard chunk-meta 北向不可校验（插件未透传），该口径归属本地 wire 实链测试。
+func TestOutputGuardFramewiseLiveHigress(t *testing.T) {
+	dumpPath := os.Getenv("OG10_LIVE_DUMP")
+	if dumpPath == "" {
+		t.Skip("OG10_LIVE_DUMP 未设置（实链抓包由 scripts/og10-live-capture.ps1 产出）")
+	}
+	raw, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("读取实链抓包 %s 失败: %v", dumpPath, err)
+	}
+	frames := parseOpenAIFrames(t, raw)
+	// C-MaaS 常一次成文：1 个 content delta 帧 + 1 个 finish 帧即完整流
+	// （0 帧由 checkDeliveredFrames 的 empty_stream 违规兜底）。
+	if len(frames) < 2 {
+		t.Fatalf("实链流帧数过少（%d 帧），疑似抓包不完整", len(frames))
+	}
+
+	// 语料与生产审查同源：直接读已入库 policy 目录（go test cwd = 本包目录）。
+	if _, err := loadPolicyDir("policy"); err != nil {
+		t.Fatalf("生产 policy 目录加载失败（语料与审查口径必须同源）: %v", err)
+	}
+	corpus := liveForbiddenCorpus(t, "policy")
+
+	vs := checkDeliveredFrames(frames, frameCheckOpts{Forbidden: corpus, WantFinish: "stop"})
+	if len(vs) != 0 {
+		t.Fatalf("实链流（shadow 正常放行）发现违规，逐帧断言器检出 %d 条：%+v", len(vs), vs)
+	}
+	t.Logf("实链抓帧 %d 帧、语料 %d 条词面：逐帧+拼接零命中，终止码 stop —— OG-10 实链断言通过",
+		len(frames), len(corpus))
 }
