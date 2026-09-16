@@ -1573,7 +1573,8 @@ type secConfigView struct {
 }
 
 // outputGuardSnapshot 输出侧审查配置只读快照（§2.3 I7 / OG-8）。
-// GET /config 返回只读视图；运行时变更走 POST /config/output-guard（M2 实现）。
+// GET /config 返回只读视图；运行时变更走 POST /config/output-guard（OG-8 已实现；
+// D8 高敏复核链在 gateway-admin-service，见 change.go output_guard_mode 动作）。
 type outputGuardSnapshot struct {
 	Mode          string                  `json:"mode"`
 	ModeSource    string                  `json:"mode_source"` // startup | runtime（OG-8 运行时覆盖来源）
