@@ -70,6 +70,12 @@ type otpmaskMetrics struct {
 	ogFirstFrameDelay *histogram     // 首帧延迟增量（M2）
 	ogMode          string           // gauge：当前运行模式（off|shadow|enforcing）
 	ogPolicyVersion string           // gauge：当前生效策略版本
+	// L2 级联相关（M3 骨架；指标名与标签预定义，零值不可见属正常）
+	ogL2Call          map[string]int64 // category|result（L2 调用次数，M3）
+	ogL2OnlyHit       map[string]int64 // category（L1未命中+L2命中=L2专属贡献，M3）
+	ogBufferFull      int64            // counter：队列溢出/超并发容量阀触发次数（M3）
+	ogBufferQueueDepth int64           // gauge：等待L2结果的句队列深度（M3）
+	ogL2DurationSec   *histogram       // L2 单句调用延迟（秒，手写桶，M3）
 }
 
 func newMetrics() *otpmaskMetrics {
@@ -101,6 +107,9 @@ func newMetrics() *otpmaskMetrics {
 		ogDegraded:        make(map[string]int64),
 		ogLatencyMs:       newHistogram(latencyMsBuckets),
 		ogFirstFrameDelay: newHistogram(firstFrameDelayBuckets),
+		ogL2Call:          make(map[string]int64),
+		ogL2OnlyHit:       make(map[string]int64),
+		ogL2DurationSec:   newHistogram(l2DurationSecBuckets),
 	}
 }
 
@@ -301,6 +310,17 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	writeCounter(w, "otpmask_output_guard_unmapped_total", "后端返回类目未映射到内部31类的次数（按后端与原生类目）", m.ogUnmapped, []string{"backend", "category_raw"})
 	writeCounter(w, "otpmask_output_guard_degraded_total", "后端降级事件次数（按后端与原因）", m.ogDegraded, []string{"backend", "reason"})
 	writeCounter(w, "otpmask_output_guard_policy_rollback_total", "策略热加载回退事件次数（按原因）", m.ogPolicyRollback, []string{"reason"})
+	// ---- L2 级联相关（M3 骨架；零样本时不输出，属正常）----
+	writeCounter(w, "otpmask_output_guard_l2_call_total", "L2 语义层调用次数（按类目与结果：hit/miss/timeout/error）", m.ogL2Call, []string{"category", "result"})
+	writeCounter(w, "otpmask_output_guard_l2_only_hit_total", "L1未命中且L2命中的次数（L2专属贡献，按类目）", m.ogL2OnlyHit, []string{"category"})
+	// gauge：缓冲队列深度（等待 L2 结果的句数，M3）
+	fmt.Fprintf(w, "# HELP otpmask_output_guard_buffer_queue_depth 当前等待L2结果的句队列深度\n# TYPE otpmask_output_guard_buffer_queue_depth gauge\n")
+	fmt.Fprintf(w, "otpmask_output_guard_buffer_queue_depth %d\n", m.ogBufferQueueDepth)
+	// counter：队列溢出/超并发容量阀触发次数
+	fmt.Fprintf(w, "# HELP otpmask_output_guard_buffer_full_total 缓冲队列溢出或超并发容量阀触发次数\n# TYPE otpmask_output_guard_buffer_full_total counter\n")
+	fmt.Fprintf(w, "otpmask_output_guard_buffer_full_total %d\n", m.ogBufferFull)
+	// histogram：L2 单句调用延迟（M3 启用后才有样本）
+	writeHistogram(w, "otpmask_output_guard_l2_duration_seconds", "L2语义层单句调用延迟（秒）", m.ogL2DurationSec, "")
 	// gauge：在飞缓冲字节数（M1，与 P-MAX-INFLIGHT-BYTES 配套）
 	fmt.Fprintf(w, "# HELP otpmask_output_guard_inflight_bytes 当前在飞缓冲字节总数\n# TYPE otpmask_output_guard_inflight_bytes gauge\n")
 	fmt.Fprintf(w, "otpmask_output_guard_inflight_bytes %d\n", m.ogInflightBytes)
@@ -408,6 +428,10 @@ var latencyMsBuckets = []float64{1, 5, 20, 50, 100, 500, 1000, 5000}
 // 对齐 §4.5：首帧延迟增量 P50 ≤ 300ms / P99 ≤ 800ms（M3→M4 唯一硬闸门）。
 var firstFrameDelayBuckets = []float64{0.01, 0.05, 0.1, 0.2, 0.5, 0.8, 1.0, 2.0}
 
+// L2 单句调用延迟桶（秒）：0.05/0.1/0.2/0.5/1.0/2.0/5.0/10.0/+Inf
+// 覆盖 shadow 侧车预期（~500ms）与 enforcing 最坏（秒级），对齐 §4.10 L2 级联指标。
+var l2DurationSecBuckets = []float64{0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0}
+
 // writeHistogram 渲染 histogram（Prometheus text 格式；自动追加 +Inf 桶）。
 func writeHistogram(w io.Writer, name, help string, h *histogram, extraLabels string) {
 	if h == nil || h.count == 0 {
@@ -485,5 +509,42 @@ func (m *otpmaskMetrics) observeOGLatencyMs(ms float64) {
 func (m *otpmaskMetrics) observeOGFirstFrameDelaySeconds(s float64) {
 	m.mu.Lock()
 	m.ogFirstFrameDelay.observe(s)
+	m.mu.Unlock()
+}
+
+// ---- L2 级联指标方法（M3 骨架，M3 接入后才会有非零样本）----
+
+// incOGL2Call 记录一次 L2 语义层调用（按类目与结果：hit/miss/timeout/error）。
+func (m *otpmaskMetrics) incOGL2Call(category, result string) {
+	m.mu.Lock()
+	m.ogL2Call[category+"|"+result]++
+	m.mu.Unlock()
+}
+
+// incOGL2OnlyHit 记录一次 L1 未命中 + L2 命中（L2 专属贡献，评估 L2 增量价值）。
+func (m *otpmaskMetrics) incOGL2OnlyHit(category string) {
+	m.mu.Lock()
+	m.ogL2OnlyHit[category]++
+	m.mu.Unlock()
+}
+
+// incOGBufferFull 记录一次缓冲队列溢出或超并发容量阀触发。
+func (m *otpmaskMetrics) incOGBufferFull() {
+	m.mu.Lock()
+	m.ogBufferFull++
+	m.mu.Unlock()
+}
+
+// setOGBufferQueueDepth 设置当前等待 L2 结果的句队列深度（gauge）。
+func (m *otpmaskMetrics) setOGBufferQueueDepth(d int64) {
+	m.mu.Lock()
+	m.ogBufferQueueDepth = d
+	m.mu.Unlock()
+}
+
+// observeOGL2DurationSeconds 记录一次 L2 单句调用延迟（秒）。
+func (m *otpmaskMetrics) observeOGL2DurationSeconds(s float64) {
+	m.mu.Lock()
+	m.ogL2DurationSec.observe(s)
 	m.mu.Unlock()
 }

@@ -163,3 +163,122 @@ func TestOGLatencyHistogram(t *testing.T) {
 		}
 	}
 }
+
+// ---- L2 级联指标骨架测试（M3；验证指标名/标签/类型与 §4.10 一致）----
+
+// TestOGL2CallMetrics：L2 调用计数按 category|result 维度正确渲染。
+func TestOGL2CallMetrics(t *testing.T) {
+	m := newMetrics()
+	m.incOGL2Call("A1-06", "hit")
+	m.incOGL2Call("A1-06", "miss")
+	m.incOGL2Call("A2-01", "timeout")
+
+	var buf bytes.Buffer
+	m.render(&buf, 0)
+	body := buf.String()
+
+	for _, want := range []string{
+		`otpmask_output_guard_l2_call_total{category="A1-06",result="hit"} 1`,
+		`otpmask_output_guard_l2_call_total{category="A1-06",result="miss"} 1`,
+		`otpmask_output_guard_l2_call_total{category="A2-01",result="timeout"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("l2_call_total 缺失 %q\n---\n%s", want, body)
+		}
+	}
+}
+
+// TestOGL2OnlyHitMetrics：L2 专属贡献计数按 category 维度正确渲染。
+func TestOGL2OnlyHitMetrics(t *testing.T) {
+	m := newMetrics()
+	m.incOGL2OnlyHit("A3-02")
+	m.incOGL2OnlyHit("A3-02")
+	m.incOGL2OnlyHit("A4-06")
+
+	var buf bytes.Buffer
+	m.render(&buf, 0)
+	body := buf.String()
+
+	for _, want := range []string{
+		`otpmask_output_guard_l2_only_hit_total{category="A3-02"} 2`,
+		`otpmask_output_guard_l2_only_hit_total{category="A4-06"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("l2_only_hit_total 缺失 %q\n---\n%s", want, body)
+		}
+	}
+}
+
+// TestOGBufferFullGauge：buffer_full counter 与 buffer_queue_depth gauge 正确渲染。
+func TestOGBufferMetrics(t *testing.T) {
+	m := newMetrics()
+	m.incOGBufferFull()
+	m.incOGBufferFull()
+	m.setOGBufferQueueDepth(7)
+
+	var buf bytes.Buffer
+	m.render(&buf, 0)
+	body := buf.String()
+
+	for _, want := range []string{
+		`otpmask_output_guard_buffer_full_total 2`,
+		`otpmask_output_guard_buffer_queue_depth 7`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("buffer 指标缺失 %q\n---\n%s", want, body)
+		}
+	}
+}
+
+// TestOGL2DurationHistogram：L2 延迟 histogram 有样本时正确输出（秒口径）。
+func TestOGL2DurationHistogram(t *testing.T) {
+	m := newMetrics()
+	m.observeOGL2DurationSeconds(0.08)
+	m.observeOGL2DurationSeconds(0.3)
+	m.observeOGL2DurationSeconds(3.0)
+
+	var buf bytes.Buffer
+	m.render(&buf, 0)
+	body := buf.String()
+
+	for _, want := range []string{
+		`otpmask_output_guard_l2_duration_seconds_bucket{le="0.1"} 1`,
+		`otpmask_output_guard_l2_duration_seconds_bucket{le="0.5"} 2`,
+		`otpmask_output_guard_l2_duration_seconds_bucket{le="5"} 3`,
+		`otpmask_output_guard_l2_duration_seconds_bucket{le="+Inf"} 3`,
+		`otpmask_output_guard_l2_duration_seconds_count 3`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("l2_duration_seconds 缺失 %q\n---\n%s", want, body)
+		}
+	}
+}
+
+// TestOGL2MetricsZeroInvisible：L2 级联指标零样本时不出现在 /metrics（与 writeCounter 行为一致）。
+func TestOGL2MetricsZeroInvisible(t *testing.T) {
+	m := newMetrics()
+	var buf bytes.Buffer
+	m.render(&buf, 0)
+	body := buf.String()
+
+	// counter 型：零样本不可见
+	for _, name := range []string{
+		"otpmask_output_guard_l2_call_total",
+		"otpmask_output_guard_l2_only_hit_total",
+	} {
+		if strings.Contains(body, name) {
+			t.Fatalf("零样本时 %s 不应出现在 /metrics\n---\n%s", name, body)
+		}
+	}
+	// histogram 型：零样本不可见
+	if strings.Contains(body, "otpmask_output_guard_l2_duration_seconds") {
+		t.Fatalf("零样本时 l2_duration_seconds 不应出现在 /metrics\n---\n%s", body)
+	}
+	// gauge 型：始终可见（零值有意义，代表当前无积压）
+	if !strings.Contains(body, "otpmask_output_guard_buffer_queue_depth 0") {
+		t.Fatalf("buffer_queue_depth gauge 零值时也应可见\n---\n%s", body)
+	}
+	if !strings.Contains(body, "otpmask_output_guard_buffer_full_total 0") {
+		t.Fatalf("buffer_full_total counter 零值时也应可见（非 map 型，恒输出）\n---\n%s", body)
+	}
+}
