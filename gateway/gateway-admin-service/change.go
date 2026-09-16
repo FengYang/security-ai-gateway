@@ -7,6 +7,10 @@
 //
 // 本期覆盖动作（高敏清单内的可执行子集）：
 //   - guardrail_pii_mode：Guardrail 降级（block↔mask），执行 = tee-infer POST /config/guardrail；
+//   - output_guard_mode：输出侧审查模式切换（off↔shadow；enforcing 属 M4 不开放），
+//     执行 = tee-infer POST /config/output-guard（OG-8 D8 扩列）；
+//   - output_guard_policy_reload：输出侧策略/词库热加载（重读策略目录，失败由 tee 侧保留旧版），
+//     执行 = tee-infer POST /config/policy/reload（OG-8/OG-9 D8 扩列）；
 //   - credential_rotate：厂商换 Key（**两阶段**：提交时新 Key 落 0600 暂存文件，
 //     复核通过才提升为正式凭据；暂存内容绝不入变更单/日志/审计链，变更单只记指纹）；
 //   - credential_delete：删除厂商凭据。
@@ -43,9 +47,11 @@ const changeAPIBase = "/v1/adminext/changes"
 
 // 变更动作（高敏清单内本期可执行子集）。
 const (
-	changeActionGuardrailPIIMode = "guardrail_pii_mode"
-	changeActionCredentialRotate = "credential_rotate"
-	changeActionCredentialDelete = "credential_delete"
+	changeActionGuardrailPIIMode  = "guardrail_pii_mode"
+	changeActionOutputGuardMode   = "output_guard_mode"
+	changeActionOutputGuardReload = "output_guard_policy_reload"
+	changeActionCredentialRotate  = "credential_rotate"
+	changeActionCredentialDelete  = "credential_delete"
 )
 
 // 变更单状态。
@@ -170,7 +176,11 @@ func (s *changeStore) auditAppend(e adminAuditEvent) {
 // validChangeAction 动作是否在本期可执行子集内。
 func validChangeAction(a string) bool {
 	switch a {
-	case changeActionGuardrailPIIMode, changeActionCredentialRotate, changeActionCredentialDelete:
+	case changeActionGuardrailPIIMode,
+		changeActionOutputGuardMode,
+		changeActionOutputGuardReload,
+		changeActionCredentialRotate,
+		changeActionCredentialDelete:
 		return true
 	}
 	return false
@@ -221,7 +231,7 @@ func (s *changeStore) submit(w http.ResponseWriter, r *http.Request) {
 	}
 	if !validChangeAction(req.Action) {
 		writeError(w, http.StatusBadRequest,
-			"不支持的高敏动作（本期可执行：guardrail_pii_mode / credential_rotate / credential_delete）")
+			"不支持的高敏动作（本期可执行：guardrail_pii_mode / output_guard_mode / output_guard_policy_reload / credential_rotate / credential_delete）")
 		return
 	}
 	sub := operationSub(r)
@@ -243,6 +253,20 @@ func (s *changeStore) submit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.Target = "guardrail"
+	case changeActionOutputGuardMode:
+		if c.Payload == nil {
+			c.Payload = map[string]string{}
+		}
+		mode := c.Payload["mode"]
+		// 与 tee-infer 侧安全闸门一致：仅 off/shadow，enforcing 属 M4 不开放（双闸拒绝）。
+		if mode != "off" && mode != "shadow" {
+			writeError(w, http.StatusBadRequest, "mode 仅允许 off|shadow（enforcing 属 M4，当前不开放）")
+			return
+		}
+		c.Target = "output-guard"
+	case changeActionOutputGuardReload:
+		// 无请求参数：执行 = tee 重读策略目录；失败（409）由 tee 侧保留上一有效版本。
+		c.Target = "output-guard-policy"
 	case changeActionCredentialRotate:
 		if req.Target == "" || req.Secret == "" {
 			writeError(w, http.StatusBadRequest, "credential_rotate 须提供 target 与新 Key")
@@ -465,6 +489,10 @@ func (s *changeStore) execute(c *changeRequest) error {
 	switch c.Action {
 	case changeActionGuardrailPIIMode:
 		return s.execGuardrailPIIMode(c)
+	case changeActionOutputGuardMode:
+		return s.execOutputGuardMode(c)
+	case changeActionOutputGuardReload:
+		return s.execOutputGuardPolicyReload(c)
 	case changeActionCredentialRotate:
 		return s.execCredentialRotate(c)
 	case changeActionCredentialDelete:
@@ -483,6 +511,51 @@ func (s *changeStore) execGuardrailPIIMode(c *changeRequest) error {
 		return err
 	}
 	req, err := http.NewRequest(http.MethodPost, s.teeURL+"/config/guardrail", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(teeAdminHeader, s.token)
+	req.Header.Set("X-Admin-Actor", c.Reviewer)
+	req.Header.Set("X-Request-ID", c.ID)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("tee-infer 不可达: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("tee-infer 拒绝（HTTP %d）: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	return nil
+}
+
+// execOutputGuardMode 调 tee-infer 切换输出侧审查模式（OG-8；仅 off/shadow，提交时已校验）。
+func (s *changeStore) execOutputGuardMode(c *changeRequest) error {
+	return s.postTeeConfig(c, "/config/output-guard", map[string]string{"mode": c.Payload["mode"]})
+}
+
+// execOutputGuardPolicyReload 调 tee-infer 热加载策略/词库（OG-9；无请求体；
+// tee 侧加载失败回 409 并保留上一有效版本，此处按执行失败回写变更单）。
+func (s *changeStore) execOutputGuardPolicyReload(c *changeRequest) error {
+	return s.postTeeConfig(c, "/config/policy/reload", nil)
+}
+
+// postTeeConfig 以复核人身份调 tee-infer 配置端点（输出侧动作共用）：
+// 管理令牌鉴权 + X-Admin-Actor/X-Request-ID 留痕（与 execGuardrailPIIMode 同口径）；非 2xx 即失败。
+func (s *changeStore) postTeeConfig(c *changeRequest, path string, payload interface{}) error {
+	if s.teeURL == "" {
+		return errors.New("tee-infer 未配置（ADMIN_TEE_INFER_URL）")
+	}
+	var body io.Reader
+	if payload != nil {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequest(http.MethodPost, s.teeURL+path, body)
 	if err != nil {
 		return err
 	}
