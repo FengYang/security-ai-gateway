@@ -757,3 +757,212 @@ func TestPolicyLoadErrorKinds(t *testing.T) {
 		})
 	}
 }
+
+// ---- OG-8：运行时 mode 切换测试 ----
+
+// doOutputGuardConfig 直接调用配置 handler（不经 mux；newM9Server 未登记该路由）。
+func doOutputGuardConfig(srv *teeServer, method string, authed bool, body string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(method, "/config/output-guard", bytes.NewBufferString(body))
+	req.Header.Set("X-Request-ID", "req-ogcfg")
+	req.Header.Set("X-Admin-Actor", "tester")
+	if authed {
+		req.Header.Set(adminHeader, "secret-token")
+	}
+	srv.handleOutputGuardConfig(rec, req)
+	return rec
+}
+
+// findOutputGuardConfigEvents 收集 output_guard_config 审计事件。
+func findOutputGuardConfigEvents(srv *teeServer) []AuditEvent {
+	var out []AuditEvent
+	for _, e := range srv.audit.query("") {
+		if e.Action == "output_guard_config" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestOutputGuardConfigApplied off → shadow 切换：运行时覆盖生效、gauge 同步、
+// 持久化文件写入、审计落链、/config 快照 mode_source=runtime。
+func TestOutputGuardConfigApplied(t *testing.T) {
+	srv, _ := newM9Server(t)
+	srv.outputGuardMode = outputGuardOff
+	srv.metrics.setOutputGuardMode(outputGuardOff, srv.policyVersion())
+
+	// 切换前：current mode = off，source = startup
+	if v := srv.currentOutputGuardMode(); v != outputGuardOff {
+		t.Fatalf("切换前 mode=%q，期望 %q", v, outputGuardOff)
+	}
+	if v := srv.outputGuardModeSource(); v != "startup" {
+		t.Fatalf("切换前 source=%q，期望 startup", v)
+	}
+
+	tmpFile := filepath.Join(t.TempDir(), "og-config.json")
+	srv.outputGuardCfgPath = tmpFile
+
+	rec := doOutputGuardConfig(srv, http.MethodPost, true, `{"mode":"shadow"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("切换成功应 200，got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["mode"] != "shadow" || resp["status"] != "applied" || resp["old_mode"] != "off" {
+		t.Fatalf("响应字段不符: %+v", resp)
+	}
+
+	// 运行时覆盖生效
+	if v := srv.currentOutputGuardMode(); v != outputGuardShadow {
+		t.Fatalf("切换后 mode=%q，期望 shadow", v)
+	}
+	if v := srv.outputGuardModeSource(); v != "runtime" {
+		t.Fatalf("切换后 source=%q，期望 runtime", v)
+	}
+
+	// 持久化文件存在且合法
+	raw, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("持久化文件读取失败: %v", err)
+	}
+	var recCfg outputGuardConfigRecord
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &recCfg); err != nil {
+		t.Fatalf("持久化文件解析失败: %v", err)
+	}
+	if recCfg.Mode != "shadow" || recCfg.Actor != "tester" || recCfg.RequestID != "req-ogcfg" {
+		t.Fatalf("持久化记录不符: %+v", recCfg)
+	}
+
+	// 审计落链
+	evs := findOutputGuardConfigEvents(srv)
+	if len(evs) != 1 {
+		t.Fatalf("应落 1 条配置审计，实际 %d", len(evs))
+	}
+	if evs[0].Result != "applied" || evs[0].OGMode != "shadow" {
+		t.Fatalf("applied 审计字段不符: %+v", evs[0])
+	}
+	if ok, broken := srv.audit.verify(); !ok {
+		t.Fatalf("配置审计入链后链断裂于 %d", broken)
+	}
+}
+
+// TestOutputGuardConfigRejectEnforcing enforcing 不开放 → 400。
+func TestOutputGuardConfigRejectEnforcing(t *testing.T) {
+	srv, _ := newM9Server(t)
+	srv.outputGuardMode = outputGuardOff
+
+	rec := doOutputGuardConfig(srv, http.MethodPost, true, `{"mode":"enforcing"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("enforcing 应 400，got %d", rec.Code)
+	}
+	// mode 未变
+	if v := srv.currentOutputGuardMode(); v != outputGuardOff {
+		t.Fatalf("拒绝后 mode 应保持 off，实际 %q", v)
+	}
+}
+
+// TestOutputGuardConfigContract GET → 405；无令牌 → 401；非法 JSON → 400。
+func TestOutputGuardConfigContract(t *testing.T) {
+	srv, _ := newM9Server(t)
+	srv.outputGuardMode = outputGuardOff
+
+	// GET → 405（无鉴权要求即可验证）
+	rec := doOutputGuardConfig(srv, http.MethodGet, true, ``)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET 应 405，got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 以下用例需要验证鉴权，单独设置 adminToken
+	srv.adminToken = "secret-token"
+
+	cases := []struct {
+		name   string
+		authed bool
+		body   string
+		code   int
+	}{
+		{"无管理令牌", false, `{"mode":"shadow"}`, http.StatusUnauthorized},
+		{"非法 JSON", true, `{not-json`, http.StatusBadRequest},
+		{"mode 非法值", true, `{"mode":"bogus"}`, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doOutputGuardConfig(srv, http.MethodPost, tc.authed, tc.body)
+			if rec.Code != tc.code {
+				t.Fatalf("期望 %d，实际 %d body=%s", tc.code, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestOutputGuardConfigPersistenceRecovery 持久化后重启恢复：mode_source=runtime，值正确。
+func TestOutputGuardConfigPersistenceRecovery(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "og-config.json")
+	// 预先写入一条合法记录（模拟上次运行时切换）
+	rec := outputGuardConfigRecord{
+		Mode: "shadow", Actor: "prev-tester", RequestID: "prev-req", UpdatedAt: 12345,
+	}
+	raw, _ := json.Marshal(rec)
+	if err := os.WriteFile(tmpFile, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, _ := newM9Server(t)
+	srv.outputGuardMode = outputGuardOff // 启动参数 = off
+	srv.outputGuardCfgPath = tmpFile
+	srv.loadOutputGuardOverride()
+
+	if v := srv.currentOutputGuardMode(); v != "shadow" {
+		t.Fatalf("恢复后 mode=%q，期望 shadow", v)
+	}
+	if v := srv.outputGuardModeSource(); v != "runtime" {
+		t.Fatalf("恢复后 source=%q，期望 runtime", v)
+	}
+}
+
+// TestOutputGuardConfigPersistenceCorrupt 持久化文件损坏 → 沿用启动参数（不阻断）。
+func TestOutputGuardConfigPersistenceCorrupt(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "og-config.json")
+	if err := os.WriteFile(tmpFile, []byte("garbage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, _ := newM9Server(t)
+	srv.outputGuardMode = outputGuardShadow
+	srv.outputGuardCfgPath = tmpFile
+	srv.loadOutputGuardOverride()
+
+	// 沿用启动参数
+	if v := srv.currentOutputGuardMode(); v != outputGuardShadow {
+		t.Fatalf("损坏后 mode=%q，应沿用启动参数 shadow", v)
+	}
+	if v := srv.outputGuardModeSource(); v != "startup" {
+		t.Fatalf("损坏后 source=%q，期望 startup", v)
+	}
+}
+
+// TestOutputGuardConfigNoPersistence 未配置持久化路径 → 仅进程内生效，重启回退。
+func TestOutputGuardConfigNoPersistence(t *testing.T) {
+	srv, _ := newM9Server(t)
+	srv.outputGuardMode = outputGuardOff
+	srv.outputGuardCfgPath = "" // 不持久化
+
+	rec := doOutputGuardConfig(srv, http.MethodPost, true, `{"mode":"shadow"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("切换应 200，got %d", rec.Code)
+	}
+	// 进程内生效
+	if v := srv.currentOutputGuardMode(); v != outputGuardShadow {
+		t.Fatalf("进程内 mode 应已切换为 shadow，实际 %q", v)
+	}
+	// 模拟重启：新建 server，outputGuardCfgPath 为空 → mode 回到 off
+	srv2, _ := newM9Server(t)
+	srv2.outputGuardMode = outputGuardOff
+	srv2.outputGuardCfgPath = ""
+	srv2.loadOutputGuardOverride()
+	if v := srv2.currentOutputGuardMode(); v != outputGuardOff {
+		t.Fatalf("无持久化路径重启后 mode=%q，期望 off", v)
+	}
+}

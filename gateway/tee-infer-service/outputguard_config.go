@@ -118,3 +118,22 @@ type outputGuardConfig struct {
 	PolicyVersion string            // 策略版本（manifest.policy_version；M1 未接词库，用 defaultPolicyVersion）
 	Params        outputGuardParams // D 组缓冲参数（允许传未 resolve 值，构造时会 resolve）
 }
+
+// ---- OG-8：运行时配置请求 / 持久化记录（与 guardrailConfigRequest 同构）----
+
+// outputGuardConfigRequest POST /config/output-guard 请求体（OG-8 运行时覆盖）。
+// 仅允许切换 mode（off｜shadow）；enforcing 属 M4，此处拒绝（安全闸门不开放）。
+// 治理链在 gateway-admin-service（D8 高敏变更 submitter≠reviewer 复核通过后执行），
+// 本端点只做"配置生效 + 持久化 + 落 tee-infer 审计链"。
+type outputGuardConfigRequest struct {
+	Mode string `json:"mode"`
+}
+
+// outputGuardConfigRecord 持久化记录（JSON 单行，写 0600；与 guardrailConfigRecord 同构）。
+// 启动时读取恢复运行时覆盖（文件缺失/解析失败/取值非法 → 沿用启动参数，不阻断启动）。
+type outputGuardConfigRecord struct {
+	Mode      string `json:"mode"`
+	Actor     string `json:"actor"`
+	RequestID string `json:"request_id"`
+	UpdatedAt int64  `json:"updated_at"` // UTC 纳秒
+}

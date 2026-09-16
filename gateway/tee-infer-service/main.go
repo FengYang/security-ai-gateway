@@ -148,6 +148,11 @@ type teeServer struct {
 	guard           *guardrail      // 内容安全检测（M9-4）
 	// GA-输出侧内容审查（OG-3）：off|shadow（enforcing 属 M4，配置即拒绝启动；§2.3 I1–I7）。
 	outputGuardMode string
+	// OG-8：运行时 mode 覆盖（高敏变更复核通过后写入；空 = 沿用 outputGuardMode 启动参数）。
+	// 只允许在 off/shadow 之间切换，enforcing 在 M4 前不开放（安全边界）。
+	outputGuardModeOverride atomic.Value
+	// OG-8：运行时配置持久化文件（-output-guard-config；空 = 不持久化，重启回退启动参数）。
+	outputGuardCfgPath string
 	// GA-输出侧内容审查（OG-4）：D 组缓冲参数（启动期 resolve＋validate 后只读）。
 	outputGuardParams outputGuardParams
 	// GA-输出侧内容审查（OG-9）：策略目录（-output-guard-policy-dir；空 = 未配置，
@@ -1426,7 +1431,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	}
 	// I1：构造审查管线（mode=off 返回 nil → 下方走原路径，零行为变化）。
 	og, ogErr := newOutputGuard(outputGuardConfig{
-		Mode:          s.outputGuardMode,
+		Mode:          s.currentOutputGuardMode(),
 		PolicyVersion: s.policyVersion(),
 		Params:        s.outputGuardParams,
 	}, s.l1Classifier(), s.metrics, s.audit, tenant, requestID)
@@ -1533,6 +1538,26 @@ func (s *teeServer) currentPiiMode() string {
 	return s.piiMode
 }
 
+// currentOutputGuardMode 当前生效的输出侧审查模式：运行时覆盖（高敏复核后写入）优先，否则启动参数。
+// 与 currentPiiMode 同构（OG-8 运行时覆盖设计对称）。
+func (s *teeServer) currentOutputGuardMode() string {
+	if v, ok := s.outputGuardModeOverride.Load().(string); ok && v != "" {
+		return v
+	}
+	if s.outputGuardMode == "" {
+		return outputGuardOff
+	}
+	return s.outputGuardMode
+}
+
+// outputGuardModeSource 返回当前 mode 来源：startup（启动参数）/ runtime（运行时覆盖）。
+func (s *teeServer) outputGuardModeSource() string {
+	if v, ok := s.outputGuardModeOverride.Load().(string); ok && v != "" {
+		return "runtime"
+	}
+	return "startup"
+}
+
 // secConfigView 安全配置只读快照（M3-B 安全中心「密态链路状态 / Guardrail 策略」数据源）。
 type secConfigView struct {
 	ProtocolVersion  string            `json:"protocol_version"`
@@ -1551,6 +1576,7 @@ type secConfigView struct {
 // GET /config 返回只读视图；运行时变更走 POST /config/output-guard（M2 实现）。
 type outputGuardSnapshot struct {
 	Mode          string                  `json:"mode"`
+	ModeSource    string                  `json:"mode_source"` // startup | runtime（OG-8 运行时覆盖来源）
 	PolicyVersion string                  `json:"policy_version"`
 	Params        outputGuardParamsSnapshot `json:"params"`
 	// L1Categories：已加载的 L1 规则类目数（词库注册表装载量；未配置 policy 目录时为 0）
@@ -1627,12 +1653,10 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if s.guard != nil {
 		view.Guardrail = s.guard.snapshot()
 	}
-	ogMode := s.outputGuardMode
-	if ogMode == "" {
-		ogMode = outputGuardOff
-	}
+	ogMode := s.currentOutputGuardMode()
 	view.OutputGuard = outputGuardSnapshot{
 		Mode:          ogMode,
+		ModeSource:    s.outputGuardModeSource(),
 		PolicyVersion: s.policyVersion(),
 		Params: outputGuardParamsSnapshot{
 			Unit:              s.outputGuardParams.Unit,
@@ -1727,10 +1751,7 @@ func (s *teeServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 
 	// 成功：原子换版 + gauge 同步 + applied 审计。
 	s.setPolicy(reg)
-	ogModeMetric := s.outputGuardMode
-	if ogModeMetric == "" {
-		ogModeMetric = outputGuardOff
-	}
+	ogModeMetric := s.currentOutputGuardMode()
 	if s.metrics != nil {
 		s.metrics.setOutputGuardMode(ogModeMetric, reg.PolicyVersion())
 	}
@@ -1873,6 +1894,108 @@ func (s *teeServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"pii_mode": req.PIIMode, "status": "applied"})
+}
+
+// handleOutputGuardConfig 输出侧审查 mode 运行时切换（OG-8，§4.7 运行时覆盖 / D8 高敏变更）。
+//
+// 语义与边界（与 handleGuardrailConfig 对称设计）：
+//   - 仅允许 mode 在 off/shadow 间切换；**enforcing 属 M4，此处拒绝**（安全边界内不放开关）；
+//   - 治理链在 gateway-admin-service（高敏变更 submitter≠reviewer 复核通过后执行）；
+//     本端点只做"配置生效 + 持久化 + 落 tee-infer 审计链"；
+//   - 持久化文件由 -output-guard-config 指定；未指定则仅进程内生效（重启回退启动参数）；
+//   - 审计落链沿用 tee-infer 既有语义（写失败仅告警，数据面可用性优先）；
+//     治理级 fail-closed 由门户侧 G1 链承担（见 gateway-admin-service change.go）；
+//   - 切换同步更新 mode gauge（与 policy_version gauge 配对，指标门禁 #9 required 常驻）。
+func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAdmin(r) {
+		http.Error(w, "管理认证失败", http.StatusUnauthorized)
+		return
+	}
+	var req outputGuardConfigRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "请求体须为 JSON", http.StatusBadRequest)
+		return
+	}
+	// 安全闸门：仅允许 off/shadow；enforcing 在 M4 前不开放。
+	if req.Mode != outputGuardOff && req.Mode != outputGuardShadow {
+		http.Error(w, "mode 仅允许 off|shadow（enforcing 属 M4，当前不开放）", http.StatusBadRequest)
+		return
+	}
+	actor := r.Header.Get("X-Admin-Actor")
+	reqID := r.Header.Get("X-Request-ID")
+	oldMode := s.currentOutputGuardMode()
+
+	// 持久化（可选）：未配置路径则仅进程内生效。
+	if s.outputGuardCfgPath != "" {
+		rec := outputGuardConfigRecord{
+			Mode: req.Mode, Actor: actor, RequestID: reqID, UpdatedAt: time.Now().UnixNano(),
+		}
+		raw, err := json.Marshal(rec)
+		if err != nil {
+			http.Error(w, "配置序列化失败", http.StatusInternalServerError)
+			return
+		}
+		if err := os.WriteFile(s.outputGuardCfgPath, append(raw, '\n'), 0o600); err != nil {
+			http.Error(w, "配置持久化失败", http.StatusInternalServerError)
+			return
+		}
+	}
+	s.outputGuardModeOverride.Store(req.Mode)
+	// 同步 mode gauge（指标门禁 #9：mode/policy_version 常驻）。
+	if s.metrics != nil {
+		s.metrics.setOutputGuardMode(req.Mode, s.policyVersion())
+	}
+	if s.audit != nil {
+		s.audit.append(AuditEvent{
+			TenantID:  "-",
+			UserID:    actor,
+			RequestID: reqID,
+			Action:    "output_guard_config",
+			Result:    "applied",
+			OGMode:    req.Mode,
+			// 证据锚定：mode 变更摘要（omitempty 字段不进 hash，不影响链完整性）
+			TransformedHash: "output_guard_mode=" + req.Mode,
+		})
+	}
+	log.Printf("[output-guard] 运行时模式变更: %s → %s (source=runtime)", oldMode, req.Mode)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"mode":   req.Mode,
+		"status": "applied",
+		"old_mode": oldMode,
+	})
+}
+
+// loadOutputGuardOverride 启动时恢复运行时输出侧审查配置（OG-8）。
+//
+// 语义（与 loadGuardrailOverride 同构）：
+//   - 文件存在且合法 → 覆盖启动参数（复核结果须跨重启保持，否则 mode 切换会被重启
+//     "悄悄回滚"）；
+//   - 文件缺失/解析失败/取值非法 → 沿用启动参数（不阻断启动，
+//     由 /config 的 mode_source=startup 如实体现）。
+func (s *teeServer) loadOutputGuardOverride() {
+	if s.outputGuardCfgPath == "" {
+		return
+	}
+	raw, err := os.ReadFile(s.outputGuardCfgPath)
+	if err != nil {
+		return
+	}
+	var rec outputGuardConfigRecord
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &rec); err != nil {
+		log.Printf("[output-guard] 运行时配置解析失败（沿用启动参数）：%v", err)
+		return
+	}
+	if rec.Mode != outputGuardOff && rec.Mode != outputGuardShadow {
+		log.Printf("[output-guard] 运行时配置 mode=%q 非法（沿用启动参数）", rec.Mode)
+		return
+	}
+	s.outputGuardModeOverride.Store(rec.Mode)
+	log.Printf("[output-guard] 运行时配置已恢复：mode=%s actor=%s", rec.Mode, rec.Actor)
 }
 
 // loadGuardrailOverride 启动时恢复运行时 Guardrail 配置（M3-B）。
@@ -2523,6 +2646,7 @@ func main() {
 	guardClassKey := flag.String("guard-classifier-key", "", "语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
 	guardClassTimeout := flag.Duration("guard-classifier-timeout", 2*time.Second, "语义分类器侧车调用超时（分类器在请求路径上，须有限且小）")
 	outputGuardMode := flag.String("output-guard", "off", "GA-输出侧内容审查模式（OG-3 M1 骨架）：off（缺省，行为与现网逐字节一致）| shadow（跑 L1 只记不拦）；enforcing 属 M4 未实现，配置即拒绝启动")
+	outputGuardCfg := flag.String("output-guard-config", "", "GA-输出侧内容审查运行时配置持久化文件（OG-8：高敏复核写入的 mode）；为空 = 仅进程内生效，重启回退 -output-guard")
 	outputGuardPolicyDir := flag.String("output-guard-policy-dir", "", "GA-输出侧内容审查策略/词库目录（OG-9）：含 manifest.json 的 policy 根目录；为空 = 沿用既有 guardrail 规则（行为与现网一致）；加载失败/哈希不匹配即拒绝启动（fail-closed）")
 	flag.Parse()
 
@@ -2719,6 +2843,10 @@ func main() {
 		log.Fatalf("[output-guard] %v", err)
 	}
 	srv.outputGuardMode = *outputGuardMode
+	srv.outputGuardCfgPath = *outputGuardCfg
+	// OG-8：恢复运行时 mode 覆盖（高敏变更复核写入的 mode，跨重启保持）。
+	// 注意：放在模式校验之后——恢复的 mode 会另行独立校验，非法则沿用启动参数（不阻断启动）。
+	srv.loadOutputGuardOverride()
 	// OG-9：策略/词库加载。配置了目录即强校验（schema/哈希/类目/命名），任何失败＝拒绝启动——
 	// 不静默降级为"无词库"（否则会以"以为在审、其实没审"的方式悄悄失效）。
 	srv.outputGuardPolicyDir = *outputGuardPolicyDir
@@ -2732,10 +2860,7 @@ func main() {
 		log.Printf("[output-guard] 策略/词库已加载: policy_version=%s 类目=%d 规则=%d 最长关键词=%d rune",
 			reg.PolicyVersion(), reg.CategoryCount(), reg.RuleCount(), reg.MaxKeywordRunes())
 	}
-	ogModeMetric := *outputGuardMode
-	if ogModeMetric == "" {
-		ogModeMetric = outputGuardOff
-	}
+	ogModeMetric := srv.currentOutputGuardMode()
 	srv.metrics.setOutputGuardMode(ogModeMetric, srv.policyVersion())
 	// GA-输出侧内容审查（OG-4）：D 组缓冲参数——先校验原始值（非法＝拒绝启动，§5.4），
 	// 再派生（P-WINDOW-CHARS / P-FIRST-UNIT-MAX-RUNES）。词库最长命中长度取"guardrail 关键词"
@@ -2792,8 +2917,9 @@ func main() {
 	mux.HandleFunc("/audit/anchor", srv.handleAuditAnchor)         // C-5 审计锚定
 	mux.HandleFunc("/metrics", srv.handleMetrics)                  // M10 可观测性
 	mux.HandleFunc("/config", srv.handleConfig)                    // M3-B 安全中心：配置只读快照
-	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig) // M3-B 高敏复核：Guardrail 降级生效点
-	mux.HandleFunc("/config/policy/reload", srv.handlePolicyReload) // OG-9 策略/词库热加载（applied/rolled_back）
+	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig)    // M3-B 高敏复核：Guardrail 降级生效点
+	mux.HandleFunc("/config/output-guard", srv.handleOutputGuardConfig) // OG-8 输出侧审查 mode 运行时切换
+	mux.HandleFunc("/config/policy/reload", srv.handlePolicyReload)  // OG-9 策略/词库热加载（applied/rolled_back）
 	mux.HandleFunc("/reconcile", srv.handleReconcile)              // S5 判据 6：对账快照（只读）
 	mux.HandleFunc("/reconcile/run", srv.handleReconcileRun)       // S5 判据 6：即时对账（管理令牌）
 	mux.HandleFunc("/healthz", srv.handleHealthz)                  // 探针与证明状态联动
