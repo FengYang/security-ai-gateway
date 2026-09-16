@@ -181,6 +181,11 @@ func (og *outputGuard) classifyUnit(unit string) {
 	if unit == "" {
 		return
 	}
+	if og.l1 == nil {
+		// 防御：分类器未配置时不判定、不崩溃（fail-open 但仅影响检测能力，
+		// 不影响下发——shadow 本来就放行）。调用方应保证 l1 非空。
+		return
+	}
 	l1Cat, _, _ := og.l1.Classify(unit)
 	if l1Cat == "" {
 		return

@@ -1954,7 +1954,7 @@ func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Reque
 			TenantID:  "-",
 			UserID:    actor,
 			RequestID: reqID,
-			Action:    "output_guard_config",
+			Action:    "output_guard_mode_change",
 			Result:    "applied",
 			OGMode:    req.Mode,
 			// 证据锚定：mode 变更摘要（omitempty 字段不进 hash，不影响链完整性）

@@ -208,10 +208,13 @@ function Stop-SidecarSim { param($Sc)
 }
 
 # --- S4: sidecar timeout -> service stays healthy (degraded mode) -----------
+# NOTE: injection target = guard-classifier endpoint (input-side).
+#       M3 L2 cascade for output guard (OG-13) must switch to output-side
+#       L2 classifier endpoint and re-validate all three sidecar-fault
+#       scenarios (S4/S5/S6) with the real output-guard degraded path.
 # Core resilience check: server must NOT crash or become unhealthy when the
 # sidecar responds slower than timeout. Classifier fallback semantics are
 # covered by Go unit tests (TestHTTPClassifierDegradesAndFallsBack).
-# M3 note: switch target from guard-classifier to L2 cascade endpoint.
 Write-Host '[S4] sidecar timeout (2000ms delay vs 200ms timeout) -> service still healthy'
 Copy-Policy
 $sidecarPort = 19191

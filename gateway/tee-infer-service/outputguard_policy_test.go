@@ -773,11 +773,11 @@ func doOutputGuardConfig(srv *teeServer, method string, authed bool, body string
 	return rec
 }
 
-// findOutputGuardConfigEvents 收集 output_guard_config 审计事件。
+// findOutputGuardConfigEvents 收集 output_guard_mode_change 审计事件。
 func findOutputGuardConfigEvents(srv *teeServer) []AuditEvent {
 	var out []AuditEvent
 	for _, e := range srv.audit.query("") {
-		if e.Action == "output_guard_config" {
+		if e.Action == "output_guard_mode_change" {
 			out = append(out, e)
 		}
 	}
