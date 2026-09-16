@@ -195,7 +195,9 @@ func TestShadowReportState_ttlAndCap(t *testing.T) {
 		t.Fatal("TTL 过期后应重新接受")
 	}
 
-	// 容量上限：max=2 → 第 3 条进入时淘汰最早者（a），故 a 可再次被接受
+	// 容量上限：max=2 → 第 3 条进入时淘汰最早者（a），故 a 可再次被接受。
+	// 三条共用同一时间戳（对齐生产同请求共用 time.Now）：相等时间按插入序 FIFO
+	// 淘汰，结果必须确定性（R8 回归，禁止退回 map 随机遍历序）。
 	st2 := newShadowReportState(time.Minute, 2)
 	st2.admit("a", now)
 	st2.admit("b", now)

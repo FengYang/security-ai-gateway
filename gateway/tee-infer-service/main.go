@@ -2369,9 +2369,16 @@ func (r *shadowReport) validate() error {
 
 // shadowReportState 窗口级上报的幂等状态（短时集合：TTL + 容量上限，超限按最早淘汰）。
 type shadowReportState struct {
-	seen map[string]time.Time
+	seen map[string]shadowReportSeen
 	ttl  time.Duration
 	max  int
+	seq  uint64 // 单调插入序号：同刻上报（同一请求共用 time.Now()）按 FIFO 确定性淘汰
+}
+
+// shadowReportSeen 幂等集合条目：进入时间与全局插入序号。
+type shadowReportSeen struct {
+	t   time.Time
+	seq uint64
 }
 
 // newShadowReportState 构造幂等状态（ttl<=0 / max<=0 时用缺省）。
@@ -2382,7 +2389,7 @@ func newShadowReportState(ttl time.Duration, max int) *shadowReportState {
 	if max <= 0 {
 		max = shadowReportMax
 	}
-	return &shadowReportState{seen: make(map[string]time.Time, 64), ttl: ttl, max: max}
+	return &shadowReportState{seen: make(map[string]shadowReportSeen, 64), ttl: ttl, max: max}
 }
 
 // admit 幂等判定：首次见到返回 true（并入集合）；TTL 内重复返回 false。调用方须持 s.mu。
@@ -2392,28 +2399,32 @@ func (st *shadowReportState) admit(id string, now time.Time) bool {
 		return true
 	}
 	if st.seen == nil {
-		st.seen = make(map[string]time.Time, 64)
+		st.seen = make(map[string]shadowReportSeen, 64)
 	}
 	st.evict(now)
 	if _, dup := st.seen[id]; dup {
 		return false
 	}
-	st.seen[id] = now
+	st.seq++
+	st.seen[id] = shadowReportSeen{t: now, seq: st.seq}
 	return true
 }
 
 // evict 清理过期项；仍超上限时按最早时间淘汰（保留最新的 max 条）。
+// 时间相同（同一请求批量上报共用一个 now）时按插入序号 FIFO，保证确定性——
+// 不依赖 Go map 随机遍历序（R8 修复）。
 func (st *shadowReportState) evict(now time.Time) {
-	for id, t := range st.seen {
-		if now.Sub(t) > st.ttl {
+	for id, e := range st.seen {
+		if now.Sub(e.t) > st.ttl {
 			delete(st.seen, id)
 		}
 	}
 	for len(st.seen) >= st.max {
-		oldestID, oldest := "", time.Time{}
-		for id, t := range st.seen {
-			if oldestID == "" || t.Before(oldest) {
-				oldestID, oldest = id, t
+		oldestID := ""
+		var oldest shadowReportSeen
+		for id, e := range st.seen {
+			if oldestID == "" || e.t.Before(oldest.t) || (e.t.Equal(oldest.t) && e.seq < oldest.seq) {
+				oldestID, oldest = id, e
 			}
 		}
 		delete(st.seen, oldestID)
