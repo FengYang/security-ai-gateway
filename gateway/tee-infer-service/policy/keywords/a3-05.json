@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0",
+  "category": "A3-05",
+  "version": "v2026.09.16",
+  "level": "低",
+  "rules": [
+    {
+      "id": "kw-a3-05-0001",
+      "keyword": "【A3-05-示例-0001】",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "policy-gen（占位留痕）",
+      "reviewer": "security-team（占位留痕）",
+      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+    },
+    {
+      "id": "kw-a3-05-0002",
+      "keyword": "【A3-05-示例-0002】",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "policy-gen（占位留痕）",
+      "reviewer": "security-team（占位留痕）",
+      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+    },
+    {
+      "id": "kw-a3-05-0003",
+      "keyword": "【A3-05-示例-0003】",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "policy-gen（占位留痕）",
+      "reviewer": "security-team（占位留痕）",
+      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+    },
+    {
+      "id": "kw-a3-05-0004",
+      "keyword": "【A3-05-示例-0004】",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "policy-gen（占位留痕）",
+      "reviewer": "security-team（占位留痕）",
+      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+    },
+    {
+      "id": "kw-a3-05-0005",
+      "keyword": "【A3-05-示例-0005】",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "policy-gen（占位留痕）",
+      "reviewer": "security-team（占位留痕）",
+      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+    }
+  ]
+}

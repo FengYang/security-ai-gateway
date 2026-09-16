@@ -1,0 +1,24 @@
+{
+  "version": "v2026.09.16",
+  "files": [
+    {
+      "path": "positive.json",
+      "kind": "positive",
+      "cases": 500,
+      "sha256": "1d5012e4cac341b93bc0da1b1ff53a89dd5c15fcaecf222c641e565276e3f643"
+    },
+    {
+      "path": "negative.json",
+      "kind": "negative",
+      "cases": 500,
+      "sha256": "0baafd86f2c3f81524d4b147c49e6e50ad5204390845d7a75869a768e0dfce48"
+    },
+    {
+      "path": "refusal.json",
+      "kind": "refusal",
+      "cases": 500,
+      "sha256": "a114720c33000eb0024a9c31e348dc66d28e24806355926f10dab830168d5908"
+    }
+  ],
+  "sha256": "732e1502d1e4b4a6ea49124412d4161f475b07ed2b31e4146e33dff1ba548414"
+}
