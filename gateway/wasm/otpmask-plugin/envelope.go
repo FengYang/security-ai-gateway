@@ -34,9 +34,22 @@ import (
 
 // streamChunk SSE 信封内明文分片。
 type streamChunk struct {
-	Seq    uint64 `json:"seq"`              // 流内序号（1 起严格递增）
-	Delta  string `json:"delta"`            // 增量文本
-	Finish string `json:"finish,omitempty"` // 终止标记（""=继续，"stop"=正常结束）
+	Seq    uint64      `json:"seq"`              // 流内序号（1 起严格递增）
+	Delta  string      `json:"delta"`            // 增量文本
+	Finish string      `json:"finish,omitempty"` // 终止标记（""=继续，"stop"=正常结束，"content_filter"=内容安全终止）
+	Guard  *chunkGuard `json:"guard,omitempty"`  // 输出侧内容审查注解（可选；通常仅终止帧携带，OG-16 透传客户端）
+}
+
+// chunkGuard 输出侧内容审查 chunk-meta（与 tee-infer chunkGuardMeta 同构，§4.6.1）。
+// 字段一律按 wire 原样透传，插件不补充、不改写；红线：不含命中词/原文/正则，category 仅内部类目 ID。
+type chunkGuard struct {
+	Detected      bool   `json:"detected"`               // 本请求至少一次命中（含 shadow 命中）
+	Filtered      bool   `json:"filtered"`               // 实际拦截/遮蔽（enforcing 下 block/mask）
+	Action        string `json:"action,omitempty"`       // block | mask | flag
+	Category      string `json:"category,omitempty"`     // 内部类目 ID（A1-06 等）
+	PolicyVersion string `json:"policy_version"`         // 聚合策略版本
+	RuleVersion   string `json:"rule_version,omitempty"` // 命中条目所在词库版本
+	Mode          string `json:"mode"`                   // shadow | enforcing
 }
 
 // sseDelta OpenAI 流式 delta 载荷（choices[].delta）。
@@ -58,6 +71,7 @@ type sseChunk struct {
 	Created int64       `json:"created"`
 	Model   string      `json:"model"`
 	Choices []sseChoice `json:"choices"`
+	Guard   *chunkGuard `json:"guard,omitempty"` // OG-16：审核注解自定义扩展字段；标准客户端忽略未知键
 }
 
 // sseStreamDecryptor 单条 SSE 流的解密状态（请求级，onResponseBody 内创建）。
@@ -87,7 +101,8 @@ func (d *sseStreamDecryptor) decryptSSEChunk(dataLine string) (*streamChunk, err
 }
 
 // writeSSEChunk 将单个解密分片编译为标准 OpenAI SSE data 行。
-// 正常块：choices[].delta.content = delta；finish=="stop" 块：delta 置空 + finish_reason="stop"。
+// 正常块：choices[].delta.content = delta；finish=="stop"/"content_filter" 块：
+// delta 置空 + 对应 finish_reason（content_filter 块同时透传 guard 注解，OG-16）。
 func writeSSEChunk(sb *strings.Builder, reqID, model string, chunk *streamChunk) error {
 	line, err := sseLine(reqID, model, chunk)
 	if err != nil {
@@ -121,9 +136,13 @@ func decryptSSEBody(body []byte, reqID, model string) ([]byte, error) {
 			return nil, err
 		}
 		if chunk.Finish != "" {
-			// finish="stop" 为正常终止；其他值（如 "error"/"filter"）为异常终止，
-			// 一律 fail-closed（整流拒绝，不输出半截明文，防客户端误判成功）。
-			if chunk.Finish != "stop" {
+			// finish="stop" 为正常终止；finish="content_filter"（OG-16）为内容安全审核终止：
+			// 违规片段不在密文流内，插件以 finish_reason=content_filter + [DONE] 正常收尾，
+			// 客户端可解析、可提示（安全语义不变：不伪装 stop、不下发违规内容）。
+			// 其他值（如 "error"/"filter"）为异常终止，一律 fail-closed（防客户端误判成功）。
+			switch chunk.Finish {
+			case "stop", "content_filter":
+			default:
 				return nil, fmt.Errorf("envelope: SSE 流异常终止（finish=%q）", chunk.Finish)
 			}
 			sb.WriteString("data: [DONE]\n\n")
@@ -158,18 +177,25 @@ func isSSEBody(body []byte) bool {
 // 整流拒绝（err 非 nil，外层不再外发），不输出半截明文；已外发的合法前缀由
 // 外层以 fail-closed 截断丢弃（HTTP 上表现为流中断）。
 type SSEStreamDecoder struct {
-	dec     *sseStreamDecryptor
-	reqID   string
-	model   string
-	done    bool   // 已收到 finish="stop" 并输出 [DONE]
-	first   bool   // 是否已见到首个 data: 行（判空流）
-	pending []byte // 跨 frame 未拼合完整行的残留字节
-	err     error  // 首个不可恢复错误（整流拒绝后不再处理新帧）
+	dec           *sseStreamDecryptor
+	reqID         string
+	model         string
+	done          bool   // 已收到正常终止（stop/content_filter）并输出 [DONE]
+	contentFilter bool   // 已观察到 finish="content_filter"（OG-16 网关层独立指标用）
+	first         bool   // 是否已见到首个 data: 行（判空流）
+	pending       []byte // 跨 frame 未拼合完整行的残留字节
+	err           error  // 首个不可恢复错误（整流拒绝后不再处理新帧）
 }
 
 // NewSSEStreamDecoder 创建增量解密状态机。
 func NewSSEStreamDecoder(reqID, model string) *SSEStreamDecoder {
 	return &SSEStreamDecoder{dec: &sseStreamDecryptor{}, reqID: reqID, model: model}
+}
+
+// ContentFiltered 报告本流是否以 finish="content_filter" 审核终止（OG-16）。
+// 外层在 Feed 正常收尾后读取一次，用于网关层 content_filter 独立计数。
+func (d *SSEStreamDecoder) ContentFiltered() bool {
+	return d.contentFilter
 }
 
 // Feed 喂入一个响应 body 分帧（后续末尾帧的 isLastChunk=true），返回本帧拼合后
@@ -207,9 +233,14 @@ func (d *SSEStreamDecoder) Feed(chunk []byte, isLastChunk bool) ([]byte, error) 
 		}
 		out = append(out, bs...)
 		if sc.Finish != "" {
-			if sc.Finish != "stop" {
+			// stop=正常结束；content_filter=内容安全审核终止（OG-16，正常收尾可提示）；
+			// 其他值（error/未知码）整流拒绝。
+			if sc.Finish != "stop" && sc.Finish != "content_filter" {
 				d.err = fmt.Errorf("envelope: SSE 流异常终止（finish=%q）", sc.Finish)
 				return nil, d.err
+			}
+			if sc.Finish == "content_filter" {
+				d.contentFilter = true
 			}
 			out = append(out, "data: [DONE]\n\n"...)
 			d.done = true
@@ -232,13 +263,18 @@ func (d *SSEStreamDecoder) Feed(chunk []byte, isLastChunk bool) ([]byte, error) 
 }
 
 // sseLine 将单个解密分片编译为标准 OpenAI SSE data 行（含行尾 \n\n）。
-// 正常块：choices[].delta.content = delta；finish=="stop" 块：delta 置空 + finish_reason="stop"。
+// 正常块：choices[].delta.content = delta；finish=="stop"/"content_filter" 块：delta 置空
+// + 同名 finish_reason（OpenAI 标准）；content_filter 块同时在顶层透传 guard 注解。
+// 其他 finish 值（error/未知码）返回错误，由外层整流 fail-closed。
 func sseLine(reqID, model string, chunk *streamChunk) ([]byte, error) {
 	choice := sseChoice{Index: 0}
-	if chunk.Finish == "stop" {
-		choice.FinishReason = "stop"
-	} else {
+	switch chunk.Finish {
+	case "":
 		choice.Delta.Content = chunk.Delta
+	case "stop", "content_filter":
+		choice.FinishReason = chunk.Finish // OpenAI 标准 finish_reason 与内层 finish 同名
+	default:
+		return nil, fmt.Errorf("envelope: SSE 流异常终止（finish=%q）", chunk.Finish)
 	}
 	payload, err := json.Marshal(sseChunk{
 		ID:      reqID,
@@ -246,6 +282,7 @@ func sseLine(reqID, model string, chunk *streamChunk) ([]byte, error) {
 		Created: time.Now().Unix(),
 		Model:   model,
 		Choices: []sseChoice{choice},
+		Guard:   chunk.Guard,
 	})
 	if err != nil {
 		return nil, err
