@@ -28,8 +28,11 @@
 // 画像调用不参与阻塞、不迁移槽位状态，其结果只按 hit/miss 记画像指标；
 // L1 命中遇上并发阀时跳过画像调用（画像非安全判定，不触发 fail-closed）。
 //
-// shadow 语义硬边界：本文件**不含任何删除/改写下发内容的逻辑**——fail-closed 在 M3 只计数与留痕
-// （内容拦截属 M4 enforcing）。终止码/终止帧属 OG-5（管线层），不在本文件。
+// 模式边界（M4 OG-17 起）：
+//   - shadow/浸泡：本文件**不删除/改写下发内容**——fail-closed 只计数与留痕，字节原样下发；
+//   - enforcing：emitReadyLocked 按动作处置——block 整流终止（管线层发 content_filter 终止帧，
+//     本文件只置 blocked 状态）、句级 P-DEGRADE 丢句续传、D5 无槽位可审时 fail-closed 终止。
+//     终止码/终止帧的实际写出仍在管线层（main.go），本文件不含信封构造。
 //
 // 已知限制（诚实标注，登记台账）：`OutputClassifier` 接口签名已冻结（§5.8 #1）不含 context，
 // 故断连时无法真正取消在飞 L2；靠客户端超时（P-TIMEOUT，与 `-output-guard-l2-timeout` 同源）
@@ -110,6 +113,11 @@ type cascade struct {
 	firstHitCat    string          // 首次命中的内部类目 ID（chunk-meta 用）
 	firstHitAction string
 
+	// M4 enforcing 整流终止状态（仅 mode=enforcing 可达；shadow/浸泡路径恒 false）。
+	// blocked 一旦置位单向不回退：其后引擎生成内容一律丢弃（P-BLOCK-CANCEL=false，引擎不取消）。
+	blocked  bool
+	blockCat string // 触发 block 的内部类目（D5 无槽位可审的降级终止时为空：guard.action=block、无类目，§4.10）
+
 	closed  bool // Close 已调用（含 emit 失败）
 	noMore  bool // Finish 已调用：不再有新槽位，未认领 delta 视为放行
 	emitErr error
@@ -151,6 +159,11 @@ func (c *cascade) pushDelta(delta string, units []string, emit outputEmitFunc) e
 	if c.closed {
 		return c.emitErr
 	}
+	if c.blocked {
+		// enforcing 已整流终止：后续生成内容直接丢弃（P-BLOCK-CANCEL=false，引擎继续生成）。
+		// 不入缓冲、不建槽、不起 L2（否则终止后仍刷 would_reject 审计与指标）。
+		return nil
+	}
 	c.beginDeltaLocked(delta)
 	for _, u := range units {
 		c.submitUnitLocked(u)
@@ -167,6 +180,10 @@ func (c *cascade) finish(units []string, emit outputEmitFunc) error {
 	if c.closed {
 		return c.emitErr
 	}
+	if c.blocked {
+		// 已整流终止：尾部单元不再送判、不再等在飞 L2（迟到回调走 blocked 抑制分支，不泄漏）。
+		return nil
+	}
 	for _, u := range units {
 		c.submitUnitLocked(u)
 	}
@@ -177,7 +194,7 @@ func (c *cascade) finish(units []string, emit outputEmitFunc) error {
 	if err := c.emitReadyLocked(); err != nil {
 		return err
 	}
-	for !c.closed && (c.emitIdx < len(c.deltas) || c.inFlight > 0) {
+	for !c.closed && !c.blocked && (c.emitIdx < len(c.deltas) || c.inFlight > 0) {
 		c.cond.Wait()
 	}
 	return c.emitErr
@@ -195,6 +212,14 @@ func (c *cascade) firstHit() (cat, action string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.firstHitCat, c.firstHitAction
+}
+
+// blockInfo 返回 enforcing 整流终止状态与触发 block 的类目（空 = 未终止或 D5 降级终止）。
+// 供管线层选择终止码与 BuildGuardMeta 在同一把锁内取一致快照。
+func (c *cascade) blockInfo() (blocked bool, cat string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.blocked, c.blockCat
 }
 
 // cascadeStats 级联观测快照（测试与浸泡报告用；不含判定内容）。
@@ -236,19 +261,27 @@ func (c *cascade) beginDeltaLocked(delta string) {
 
 // submitUnitLocked 为一个判定单元建槽位并决定判定路径（§3.6.3 提交点）。
 func (c *cascade) submitUnitLocked(unit string) {
-	if unit == "" || c.closed {
+	if unit == "" || c.closed || c.blocked {
 		return
 	}
 	c.sentences++
 	if c.m != nil {
 		c.m.incOGSentence()
 	}
-	// 槽位上限（§3.6.3 细节 5）：不再新建槽位，按 P-DEGRADE 收尾并记指标；
-	// 该单元认领的 delta 直接放行（shadow 不拦内容；enforcing 的截断属 M4）。
+	// 槽位上限（§3.6.3 细节 5）：不再新建槽位，按 P-DEGRADE 收尾并记指标。
 	if len(c.slots) >= c.params.MaxSlots {
 		if c.m != nil {
 			c.m.incOGBufferFull()
 		}
+		if c.mode == outputGuardEnforcing {
+			// D5：无槽位可审 ⇒ 后续字节无法归属任何判决，fail-closed 整流终止
+			//（非静默截断，§5.7"强切当前缓冲并按 P-DEGRADE 收尾"）；无命中类目，
+			// 终止帧 guard.action=block、category 缺省（§4.10 降级例外）。
+			c.failClosedLocked(degradeReasonSlotsFull)
+			c.terminateLocked("", false)
+			return
+		}
+		// shadow：该单元认领的 delta 直接放行（不拦内容，只记 fail-closed）。
 		c.releaseUnitDeltasLocked()
 		c.failClosedLocked(degradeReasonSlotsFull)
 		return
@@ -355,8 +388,10 @@ func (c *cascade) startL2Locked(s *cascadeSlot, profiling bool) {
 		}
 		c.settleInFlightLocked(s)
 		switch {
-		case c.closed:
-			// 断连/收尾后返回：丢弃（记 late，与超时迟到同口径）
+		case c.closed || c.blocked:
+			// 断连/收尾后、或 enforcing 整流终止后返回：丢弃（记 late，与超时迟到同口径）。
+			// blocked 时**不得**再 normalize/finishLocked/recordHit——含画像调用同样抑制，
+			// 否则终止后仍刷命中审计/指标，且可能迁移已停表槽位。
 			if c.m != nil {
 				c.m.incOGL2Call("", "late")
 			}
@@ -443,6 +478,9 @@ func (c *cascade) onSlotTimeout(seq int) {
 		return
 	}
 	s := c.slots[seq]
+	if c.closed || c.blocked {
+		return // 已收尾/已整流终止（terminateLocked 已统一停表，此处为双保险）
+	}
 	if s.state != slotPending || s.profiling {
 		return // 单向无回退：已终态/画像调用无定时器
 	}
@@ -478,31 +516,72 @@ func (c *cascade) settleInFlightLocked(s *cascadeSlot) {
 	c.cond.Broadcast()
 }
 
-// emitReadyLocked 推进下发游标：连续写出所有"归属槽位已终态"的 delta（不跳发、不合并帧）。
-// 阻塞形态下遇 pending/未认领即停（队头阻塞）；非阻塞形态（生产 shadow）不等 pending。
+// emitReadyLocked 推进下发游标：连续写出所有可下发的 delta（不跳发、不合并帧）。
+//
+// 形态：
+//   - enforcing（M4）：发射门控内在开启。按 delta 全部认领槽位的终态处置
+//     （scanDeltaClaimantsLocked，优先级 block > pending > timeout > emit）：
+//     block→整流终止；pending→队头等待；timeout→丢该 delta（句级 P-DEGRADE）；全 pass/flag→原样下发；
+//     未认领略等；gateReleased 仅 Finish 尾部纯空白可达 → 丢弃。
+//   - 阻塞浸泡（BlockEmission=true，shadow）：遇 pending/未认领即停（队头阻塞），终态后**原样下发**
+//     （timeout 也照发，只复刻时序不做内容处置——M3 浸泡语义不变）。
+//   - 生产 shadow：不等 pending，逐 delta 立即原样放行（与 M2 逐字节一致）。
 func (c *cascade) emitReadyLocked() error {
 	if c.emitErr != nil {
 		return c.emitErr
+	}
+	if c.blocked {
+		return nil // 已整流终止：任何入口都不再下发
 	}
 	if c.emit == nil {
 		return nil
 	}
 	for c.emitIdx < len(c.deltas) {
-		if c.params.BlockEmission {
-			switch g := c.deltaGates[c.emitIdx]; {
+		d := c.emitIdx
+		g := c.deltaGates[d]
+		if c.mode == outputGuardEnforcing {
+			switch g {
+			case gateUnclaimed:
+				return nil // 字节尚未构成判定单元：不下发（否则未审内容先出）
+			case gateReleased:
+				// D5 后 slots_full 不再 release；故此处仅 Finish 尾部纯空白可达（非空白尾部
+				// 已被 Flush 合成单元，unitBuffer.drain flush 语义）——fail-closed 丢弃。
+				c.deltas[d] = ""
+				c.emitIdx++
+				c.cond.Broadcast()
+				continue
+			}
+			hasPending, hasTimeout, blockCat := c.scanDeltaClaimantsLocked(d, g)
+			switch {
+			case blockCat != "":
+				// 命中 block：整流终止（幂等；含其后全部 delta，由 pushDelta 早退丢弃）。
+				c.terminateLocked(blockCat, true)
+				return nil
+			case hasPending:
+				return nil // 前序句未决 → 队头等待（§3.6.3 按序下发）
+			case hasTimeout:
+				// 句级 P-DEGRADE（v1.3 #54）：该 delta 含被判降级的句子且字节不可在 delta 内拆分
+				// → 丢整 delta、不整流终止，后续干净句继续。
+				c.deltas[d] = ""
+				c.emitIdx++
+				c.cond.Broadcast()
+				continue
+			}
+		} else if c.params.BlockEmission {
+			switch {
 			case g == gateUnclaimed:
 				return nil // 字节尚未构成判定单元：不下发（否则未审内容先出）
 			case g >= 0 && c.slots[g].state == slotPending:
 				return nil // 前序句未决 → 后续句排队等待（§3.6.3 按序下发）
 			}
 		}
-		payload := c.deltas[c.emitIdx]
+		payload := c.deltas[d]
 		if err := c.emit(payload, ""); err != nil {
 			c.emitErr = err
 			c.markClosedLocked() // 慢客户端：立即释放（§4.3）
 			return err
 		}
-		c.deltas[c.emitIdx] = "" // 已写出：释放负载（帧级缓冲不随输出增长）
+		c.deltas[d] = "" // 已写出：释放负载（帧级缓冲不随输出增长）
 		c.emitIdx++
 		if c.firstEmitAt.IsZero() {
 			c.firstEmitAt = time.Now()
@@ -515,6 +594,70 @@ func (c *cascade) emitReadyLocked() error {
 		c.cond.Broadcast()
 	}
 	return nil
+}
+
+// scanDeltaClaimantsLocked 汇总认领 delta d 的全部槽位（D3' 区间包含谓词）。
+//
+// 认领事实：deltaGates[d]=g 是最后认领者；槽位 [deltaFrom,deltaTo] 单调不减，
+// 故认领 d 的槽位是以 g 为右端点的连续区间——从 g 反向扫描、越过 deltaTo<d 即止。
+// 注意**不能**用 deltaTo==d 判定：半句跨 delta 累积时槽位常覆盖多个 delta
+// （如 push("违规") 无完整句、push("。") 才切出单元"违规。"，槽位区间=[0,1]）。
+func (c *cascade) scanDeltaClaimantsLocked(d, g int) (hasPending, hasTimeout bool, blockCat string) {
+	for k := g; k >= 0 && c.slots[k].deltaTo >= d; k-- {
+		s := c.slots[k]
+		if s.deltaFrom > d {
+			continue // 保守跳过（单调构造下不出现）
+		}
+		switch s.state {
+		case slotPending:
+			hasPending = true
+		case slotTimeout, slotClosed:
+			hasTimeout = true // fail-closed：已关闭槽位认领的字节同样不下发
+		case slotDone:
+			// D6 block>pending：扫描遇已决 block 即由调用方终止，不等其它在判认领者
+			//（在判者后来命中也不改变终止结论）；全部已决时反向扫描终值＝seq 最小者。
+			if s.action == catActionBlock {
+				blockCat = s.category
+			}
+		}
+	}
+	return
+}
+
+// terminateLocked 置位 enforcing 整流终止（幂等，持锁调用）。
+//   - hit=true：命中 block —— 落一条 output_blocked 审计 + blocked_total{category,mode}；
+//   - hit=false：D5 无槽位可审的降级终止 —— 不命中，不发 output_blocked（degraded 口径已记）。
+//
+// 只停 pending 槽定时器，**不迁移槽位 4 态**（冻结状态机）；迟到 L2 回调由
+// startL2Locked 回调的 blocked 分支抑制。
+func (c *cascade) terminateLocked(cat string, hit bool) {
+	if c.blocked {
+		return
+	}
+	c.blocked = true
+	c.blockCat = cat
+	for _, s := range c.slots {
+		if s.state == slotPending && s.timer != nil {
+			s.timer.Stop()
+		}
+	}
+	if hit {
+		if c.m != nil {
+			c.m.incOGBlocked(cat, c.mode)
+		}
+		if c.a != nil {
+			c.a.append(AuditEvent{
+				TenantID:        c.tenant,
+				RequestID:       c.requestID,
+				Action:          "output_blocked",
+				Result:          "blocked_" + cat,
+				OGCategory:      cat,
+				OGMode:          c.mode,
+				OGPolicyVersion: c.policyVersion,
+			})
+		}
+	}
+	c.cond.Broadcast() // 唤醒 finish 等待者（finish 循环条件含 !blocked）
 }
 
 // markClosedLocked 置 closed 并释放：停表、置未决槽位为 closed、丢弃缓冲、唤醒等待者。
