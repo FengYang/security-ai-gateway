@@ -155,6 +155,8 @@ type teeServer struct {
 	outputGuardCfgPath string
 	// GA-输出侧内容审查（OG-4）：D 组缓冲参数（启动期 resolve＋validate 后只读）。
 	outputGuardParams outputGuardParams
+	// GA-输出侧内容审查（OG-13）：E 组级联并发参数（启动期 resolve＋validate 后只读）。
+	outputGuardCascade outputGuardCascadeParams
 	// GA-输出侧内容审查（OG-9）：策略目录（-output-guard-policy-dir；空 = 未配置，
 	// /config/policy/reload 将返回 400）。
 	outputGuardPolicyDir string
@@ -1437,6 +1439,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		Mode:          s.currentOutputGuardMode(),
 		PolicyVersion: s.policyVersion(),
 		Params:        s.outputGuardParams,
+		Cascade:       s.outputGuardCascade, // OG-13：E 组级联参数（槽位/并发阀/超时/预演开关）
 	}, s.l1Classifier(), s.outputGuardL2, s.metrics, s.audit, tenant, requestID)
 	if ogErr != nil {
 		return ogErr // fail-closed：模式非法不得静默放行（启动期已校验，此处兜底）
@@ -1583,6 +1586,8 @@ type outputGuardSnapshot struct {
 	ModeSource    string                  `json:"mode_source"` // startup | runtime（OG-8 运行时覆盖来源）
 	PolicyVersion string                  `json:"policy_version"`
 	Params        outputGuardParamsSnapshot `json:"params"`
+	// Cascade：E 组级联并发参数（OG-13；只读快照，供排障与浸泡脚本核对生效值）
+	Cascade outputGuardCascadeSnapshot `json:"cascade"`
 	// L1Categories：已加载的 L1 规则类目数（词库注册表装载量；未配置 policy 目录时为 0）
 	L1Categories int `json:"l1_categories_loaded"`
 	// L1Rules：已加载的 L1 规则总条数（同上）
@@ -1598,6 +1603,16 @@ type outputGuardParamsSnapshot struct {
 	WindowMargin      int    `json:"window_margin"`       // P-WINDOW-MARGIN
 	WindowRunes       int    `json:"window_chars"`        // P-WINDOW-CHARS（派生值）
 	MaxKeywordRunes   int    `json:"max_keyword_runes"`   // 词库最长命中长度（P-WINDOW-CHARS 派生输入）
+}
+
+// outputGuardCascadeSnapshot 级联参数只读快照（E 组参数，§5.5；OG-13）。
+type outputGuardCascadeSnapshot struct {
+	Timeout       string `json:"timeout"`        // P-TIMEOUT（-output-guard-l2-timeout）
+	Concurrency   int    `json:"concurrency"`    // P-CONCURRENCY（派生后生效值）
+	MaxSlots      int    `json:"max_slots"`      // P-MAX-SLOTS（派生后生效值）
+	BlockCancel   bool   `json:"block_cancel"`   // P-BLOCK-CANCEL（M4 生效）
+	Degrade       string `json:"degrade"`        // P-DEGRADE：fail-closed | fallback-keyword
+	BlockEmission bool   `json:"block_emission"` // 阻塞预演开关（非 §5 参数；默认 false）
 }
 
 // currentPolicy 返回当前生效的策略注册表（nil = 未配置词库目录）。
@@ -1670,6 +1685,14 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			WindowMargin:      s.outputGuardParams.WindowMargin,
 			WindowRunes:       s.outputGuardParams.WindowRunes,
 			MaxKeywordRunes:   s.outputGuardParams.MaxKeywordRunes,
+		},
+		Cascade: outputGuardCascadeSnapshot{
+			Timeout:       s.outputGuardCascade.Timeout.String(),
+			Concurrency:   s.outputGuardCascade.Concurrency,
+			MaxSlots:      s.outputGuardCascade.MaxSlots,
+			BlockCancel:   s.outputGuardCascade.BlockCancel,
+			Degrade:       s.outputGuardCascade.Degrade,
+			BlockEmission: s.outputGuardCascade.BlockEmission,
 		},
 	}
 	// 词库已加载时回填实际装载量（OG-9）；未配置 policy 目录则保持 0（走 guardrail 包装器）。
@@ -2666,6 +2689,12 @@ func main() {
 	outputGuardL2URL := flag.String("output-guard-l2-url", "", "GA-输出侧内容审查 L2 语义分类器侧车地址（M2 OG-12）：HTTP POST JSON，返回 blocked/category/confidence/match；为空 = 不启用 L2，纯 L1 规则（默认，行为零变化）")
 	outputGuardL2Key := flag.String("output-guard-l2-key", "", "输出侧 L2 语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
 	outputGuardL2Timeout := flag.Duration("output-guard-l2-timeout", 2*time.Second, "输出侧 L2 语义分类器侧车调用超时（在请求路径上，须有限且小；不可用自动 fallback L1 + degraded 指标）")
+	// GA-输出侧内容审查（OG-13）：E 组级联并发参数（§5.5）。P-TIMEOUT 复用上面的 -output-guard-l2-timeout（单一事实源）。
+	outputGuardConcurrency := flag.Int("output-guard-concurrency", 0, "P-CONCURRENCY：单请求在飞 L2 句数上限（OG-13 级联）；0＝未配置，按 CPU 核数派生；超限不排队，直接按 P-DEGRADE")
+	outputGuardMaxSlots := flag.Int("output-guard-max-slots", 0, "P-MAX-SLOTS：单请求判定句槽位上限（OG-13 级联，防长输出撑爆内存）；0＝未配置，按 P-MAX-BUFFER-BYTES/平均句长派生")
+	outputGuardBlockCancel := flag.Bool("output-guard-block-cancel", false, "P-BLOCK-CANCEL：命中 block 后是否中断引擎生成（M4 生效；M3 仅落配置与只读快照，不改变 shadow 行为）")
+	outputGuardDegrade := flag.String("output-guard-degrade", degradeFailClosed, "P-DEGRADE：fail-closed（默认）| fallback-keyword（M4 实现，配置即拒绝启动，不静默按 fail-closed 处置）")
+	outputGuardBlockEmission := flag.Bool("output-guard-block-emission", false, "阻塞预演开关（非 §5 参数表参数，仅浸泡期用）：true＝按 enforcing 时序阻塞下发（首帧延迟增量可实测）；false＝shadow 现状（逐 delta 立即放行，业务零影响）")
 	flag.Parse()
 
 	// S5：进程启动时刻（对账判据——链中存在早于此时刻的事件 ⇒ 内存用量计数已在重启时丢失）
@@ -2894,6 +2923,26 @@ func main() {
 		log.Fatalf("[output-guard] 缓冲参数非法: %v", err)
 	}
 	srv.outputGuardParams = resolveOutputGuardParams(ogParams)
+	// GA-输出侧内容审查（OG-13）：E 组级联参数——先校验（非法＝拒绝启动），再派生
+	// （P-CONCURRENCY / P-MAX-SLOTS 兜底列）。P-TIMEOUT 复用 -output-guard-l2-timeout。
+	ogCascParams := defaultOutputGuardCascadeParams()
+	ogCascParams.Timeout = *outputGuardL2Timeout
+	ogCascParams.Concurrency = *outputGuardConcurrency
+	ogCascParams.MaxSlots = *outputGuardMaxSlots
+	ogCascParams.BlockCancel = *outputGuardBlockCancel
+	ogCascParams.Degrade = *outputGuardDegrade
+	ogCascParams.BlockEmission = *outputGuardBlockEmission
+	if err := validateOutputGuardCascadeParams(ogCascParams); err != nil {
+		log.Fatalf("[output-guard] 级联参数非法: %v", err)
+	}
+	srv.outputGuardCascade = resolveOutputGuardCascadeParams(ogCascParams, srv.outputGuardParams)
+	log.Printf("[output-guard] 级联参数（E 组）concurrency=%d max_slots=%d timeout=%s degrade=%s block_cancel=%v",
+		srv.outputGuardCascade.Concurrency, srv.outputGuardCascade.MaxSlots, srv.outputGuardCascade.Timeout,
+		srv.outputGuardCascade.Degrade, srv.outputGuardCascade.BlockCancel)
+	if srv.outputGuardCascade.BlockEmission {
+		// 非生产形态：按 enforcing 时序阻塞下发（只做时序、不改内容），仅供浸泡取首帧延迟增量。
+		log.Printf("[output-guard] 警告：阻塞预演已开启（-output-guard-block-emission=true）——按 enforcing 时序下发，仅限浸泡期使用，勿用于生产 shadow")
+	}
 	log.Printf("[output-guard] 输出侧内容审查模式=%s（off/shadow）；缓冲参数 unit=%s max_unit_runes=%d first_unit_max_runes=%d max_buffer_bytes=%d window_chars=%d（词库最长 %d + 余量 %d）",
 		ogModeMetric, srv.outputGuardParams.Unit, srv.outputGuardParams.MaxUnitRunes,
 		srv.outputGuardParams.FirstUnitMaxRunes, srv.outputGuardParams.MaxBufferBytes,

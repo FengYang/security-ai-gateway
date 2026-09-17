@@ -12,7 +12,12 @@
 //     防止"非法值被兜底逻辑悄悄改成合法值"，使「非法＝启动失败」不被掩蔽（§5.4 兜底列）。
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"runtime"
+	"time"
+	"unicode/utf8"
+)
 
 // paramUnset 未配置哨兵（见文件头约定）。
 const paramUnset = -1
@@ -112,11 +117,98 @@ func validatePositiveRunes(name string, v int) error {
 	return nil
 }
 
+// ---- E 组：级联并发参数（§5.5；M3 OG-13）----
+//
+// 与 D 组同一纪律：未配置＝哨兵语义、显式 0/负非法、resolve 只派生、validate 只校验。
+// 注意：本组由启动 flag 构造，flag 缺省值是 0（无法与"用户显式传 0"区分），故
+// 0 一律按"未配置"处理、负值＝非法——与 D 组 paramUnset 语义等价（D 组由代码路径构造）。
+// P-TIMEOUT 复用既有启动参数 -output-guard-l2-timeout（单一事实源，避免两处取值打架）。
+
+const (
+	defaultAvgSentenceRunes = 64               // P-MAX-SLOTS 派生的平均句长（rune，保守取值）
+	minMaxSlots             = 8                // P-MAX-SLOTS 派生下限
+	defaultCascadeTimeout   = 2 * time.Second   // P-TIMEOUT 兜底默认（与 outputL2HTTPClassifier 客户端默认同源）
+)
+
+// P-DEGRADE 取值（§5 E 组）。
+const (
+	degradeFailClosed = "fail-closed"      // 默认：触发级联的句子按 fail-closed 处置（M3 shadow 下只记不拦，内容拦截属 M4）
+	degradeFallback   = "fallback-keyword" // M4 实现；M3 显式拒绝启动，不静默按 fail-closed 处置
+)
+
+// outputGuardCascadeParams E 组级联并发参数（原始值 + 派生值）。
+type outputGuardCascadeParams struct {
+	Timeout       time.Duration // P-TIMEOUT：L2 单次调用超时（必填；复用 -output-guard-l2-timeout）
+	Concurrency   int           // P-CONCURRENCY：单请求在飞句数上限（未配置＝按 CPU 核数派生）
+	MaxSlots      int           // P-MAX-SLOTS：单请求槽位上限（未配置＝按 P-MAX-BUFFER-BYTES/平均句长派生）
+	BlockCancel   bool          // P-BLOCK-CANCEL：block 后是否中断引擎生成（M4 生效；M3 只落配置与快照）
+	Degrade       string        // P-DEGRADE：fail-closed（默认）｜fallback-keyword（M4 前拒绝启动）
+	BlockEmission bool          // 阻塞预演开关（非 §5 参数表参数，仅浸泡期用）：true＝按 enforcing 时序阻塞下发；false＝shadow 现状（超并发/超时才等待）
+}
+
+// defaultOutputGuardCascadeParams 返回未配置态的 E 组参数。
+func defaultOutputGuardCascadeParams() outputGuardCascadeParams {
+	return outputGuardCascadeParams{
+		Concurrency: 0,
+		MaxSlots:    0,
+		Degrade:     degradeFailClosed,
+	}
+}
+
+// resolveOutputGuardCascadeParams 填入缺省并派生 P-CONCURRENCY / P-MAX-SLOTS（§5.5 兜底列）。
+// params 须为已 resolve 的 D 组参数（P-MAX-SLOTS 派生依赖 P-MAX-BUFFER-BYTES）。
+func resolveOutputGuardCascadeParams(c outputGuardCascadeParams, params outputGuardParams) outputGuardCascadeParams {
+	if c.Timeout <= 0 {
+		// 防御：直接构造（测试/内嵌）可能未给超时；0 值会让 AfterFunc 立刻到期（槽位瞬超时）。
+		// 启动路径已由 validateOutputGuardCascadeParams 保证 > 0，此处仅兜底派生。
+		c.Timeout = defaultCascadeTimeout
+	}
+	if c.Degrade == "" {
+		c.Degrade = degradeFailClosed
+	}
+	if c.Concurrency <= 0 {
+		c.Concurrency = runtime.NumCPU()
+		if c.Concurrency < 1 {
+			c.Concurrency = 1
+		}
+	}
+	if c.MaxSlots <= 0 {
+		// 保守折算：缓冲字节上限 / 平均句长字节（按 UTF-8 单 rune 最多 4 字节计）。
+		c.MaxSlots = params.MaxBufferBytes / (defaultAvgSentenceRunes * utf8.UTFMax)
+		if c.MaxSlots < minMaxSlots {
+			c.MaxSlots = minMaxSlots
+		}
+	}
+	return c
+}
+
+// validateOutputGuardCascadeParams 校验 E 组参数（非法＝拒绝启动，§5.4 纪律）。
+func validateOutputGuardCascadeParams(c outputGuardCascadeParams) error {
+	if c.Timeout <= 0 {
+		return fmt.Errorf("P-TIMEOUT=%s 非法（必须为正；L2 调用超时是首帧预算的直接决定项）", c.Timeout)
+	}
+	if c.Concurrency < 0 {
+		return fmt.Errorf("P-CONCURRENCY=%d 非法（不得为负；未配置请留 0）", c.Concurrency)
+	}
+	if c.MaxSlots < 0 {
+		return fmt.Errorf("P-MAX-SLOTS=%d 非法（不得为负；未配置请留 0）", c.MaxSlots)
+	}
+	switch c.Degrade {
+	case "", degradeFailClosed:
+	case degradeFallback:
+		return fmt.Errorf("P-DEGRADE=%s 尚未实现（M4）；拒绝启动，不静默按 fail-closed 处置", degradeFallback)
+	default:
+		return fmt.Errorf("P-DEGRADE=%q 非法（取值：fail-closed|fallback-keyword）", c.Degrade)
+	}
+	return nil
+}
+
 // outputGuardConfig 审查管线构造配置（§2.3 I1 `outputguard.New(cfg)`）。
 type outputGuardConfig struct {
-	Mode          string            // P-MODE：off｜shadow（enforcing 属 M4）
-	PolicyVersion string            // 策略版本（manifest.policy_version；M1 未接词库，用 defaultPolicyVersion）
-	Params        outputGuardParams // D 组缓冲参数（允许传未 resolve 值，构造时会 resolve）
+	Mode          string                    // P-MODE：off｜shadow（enforcing 属 M4）
+	PolicyVersion string                    // 策略版本（manifest.policy_version；M1 未接词库，用 defaultPolicyVersion）
+	Params        outputGuardParams         // D 组缓冲参数（允许传未 resolve 值，构造时会 resolve）
+	Cascade       outputGuardCascadeParams  // E 组级联并发参数（允许传未 resolve 值，构造时会 resolve）
 }
 
 // ---- OG-8：运行时配置请求 / 持久化记录（与 guardrailConfigRequest 同构）----

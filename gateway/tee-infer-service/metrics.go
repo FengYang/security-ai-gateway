@@ -76,6 +76,10 @@ type otpmaskMetrics struct {
 	ogBufferFull      int64            // counter：队列溢出/超并发容量阀触发次数（M3）
 	ogBufferQueueDepth int64           // gauge：等待L2结果的句队列深度（M3）
 	ogL2DurationSec   *histogram       // L2 单句调用延迟（秒，手写桶，M3）
+	// M3 OG-13：派生 gauge 的分子/分母（不单独暴露指标；§4.10 只有两个派生 gauge）。
+	ogSentences      int64 // 判定句总数（l2_cascade_ratio / failclosed_sentences_ratio 分母）
+	ogFailclosedSent int64 // 按 P-DEGRADE（fail-closed）处置的句数
+	ogL2CallsStarted int64 // 已发起的 L2 调用数（含 L1 命中后的画像调用）
 }
 
 func newMetrics() *otpmaskMetrics {
@@ -321,6 +325,11 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	fmt.Fprintf(w, "otpmask_output_guard_buffer_full_total %d\n", m.ogBufferFull)
 	// histogram：L2 单句调用延迟（M3 启用后才有样本）
 	writeHistogram(w, "otpmask_output_guard_l2_duration_seconds", "L2语义层单句调用延迟（秒）", m.ogL2DurationSec, "")
+	// 派生 gauge（M3 OG-13）：分子/分母为进程级累计（§4.10 诊断指标，不设阈值闸门）。
+	writeDerivedRatioGauge(w, "otpmask_output_guard_l2_cascade_ratio",
+		"L2 调用数 / 总判定句数（级联占比；诊断指标）", m.ogL2CallsStarted, m.ogSentences)
+	writeDerivedRatioGauge(w, "otpmask_output_guard_failclosed_sentences_ratio",
+		"按 P-DEGRADE 处置的句数 / 总判定句数（容量健康度；诊断指标）", m.ogFailclosedSent, m.ogSentences)
 	// gauge：在飞缓冲字节数（M1，与 P-MAX-INFLIGHT-BYTES 配套）
 	fmt.Fprintf(w, "# HELP otpmask_output_guard_inflight_bytes 当前在飞缓冲字节总数\n# TYPE otpmask_output_guard_inflight_bytes gauge\n")
 	fmt.Fprintf(w, "otpmask_output_guard_inflight_bytes %d\n", m.ogInflightBytes)
@@ -547,4 +556,36 @@ func (m *otpmaskMetrics) observeOGL2DurationSeconds(s float64) {
 	m.mu.Lock()
 	m.ogL2DurationSec.observe(s)
 	m.mu.Unlock()
+}
+
+// incOGSentence 记录一次判定句（OG-13 级联；两个派生 gauge 的分母）。
+func (m *otpmaskMetrics) incOGSentence() {
+	m.mu.Lock()
+	m.ogSentences++
+	m.mu.Unlock()
+}
+
+// incOGFailClosedSentence 记录一次按 P-DEGRADE（fail-closed）处置的句
+// （supercapacity/超槽位/超时/L2 失败/类目未映射/置信度缺失；failclosed_sentences_ratio 分子）。
+// 注意：M3 shadow 下 fail-closed 只计数与留痕，内容拦截属 M4 enforcing。
+func (m *otpmaskMetrics) incOGFailClosedSentence() {
+	m.mu.Lock()
+	m.ogFailclosedSent++
+	m.mu.Unlock()
+}
+
+// incOGL2CallStarted 记录一次已发起的 L2 调用（含 L1 命中后的画像调用；l2_cascade_ratio 分子）。
+func (m *otpmaskMetrics) incOGL2CallStarted() {
+	m.mu.Lock()
+	m.ogL2CallsStarted++
+	m.mu.Unlock()
+}
+
+// writeDerivedRatioGauge 输出派生比值 gauge（分母 0 → 0，避免 NaN；§4.10 诊断用，不设阈值闸门）。
+func writeDerivedRatioGauge(w io.Writer, name, help string, num, den int64) {
+	v := 0.0
+	if den > 0 {
+		v = float64(num) / float64(den)
+	}
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %g\n", name, help, name, name, v)
 }

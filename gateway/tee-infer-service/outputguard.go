@@ -76,22 +76,18 @@ type outputGuard struct {
 	mode          string
 	policyVersion string
 	l1            OutputClassifier
-	l2            OutputClassifier // nil = 未启用 L2（纯 L1 = 当前行为）；M2 骨架接入，M3 升级联
+	l2            OutputClassifier // nil = 未启用 L2（纯 L1 = 当前行为）
 	metrics       *otpmaskMetrics
 	audit         *auditChain
 	tenant        string
 	requestID     string
-	// seenCategory：同一请求内同一类目只落一次审计/would_reject，避免重复计数；
-	// 不同类目各自计数，避免丢失 PII/SQL 等并存命中的观测。
-	seenCategory map[string]bool
 	// buf：OG-4 判定单元缓冲（按句/固定窗聚合，§4.3.1）。
 	buf *unitBuffer
+	// casc：OG-13 级联并发控制器（槽位状态机 + 有序下发 + 容量阀 + 指标/留痕）。
+	// 判定与留痕状态（命中去重、首次命中、L2 判定）一律由 cascade 持有——它在锁内并发访问。
+	casc *cascade
 	// closed：已 Close（断连/收尾）；置位后不再缓冲与判定。
 	closed bool
-	// firstHitCat：首次命中的内部类目 ID（供 chunk-meta / 终止帧使用；空=未命中）。
-	firstHitCat string
-	// firstHitAction：首次命中对应的动作（shadow=flag；enforcing=block/mask；M1 shadow 下恒为 flag）。
-	firstHitAction string
 }
 
 // validateOutputGuardMode 校验审查模式（启动期调用；非法/enforcing 未实现即拒绝启动）。
@@ -131,14 +127,16 @@ func newOutputGuard(cfg outputGuardConfig, l1 OutputClassifier, l2 OutputClassif
 		audit:         a,
 		tenant:        tenant,
 		requestID:     requestID,
-		seenCategory:  make(map[string]bool, 4),
 	}
 	// 缓冲参数允许传入未 resolve 的原始值（构造处兜底 resolve，非法值已在启动期拦截）。
-	og.buf = newUnitBuffer(resolveOutputGuardParams(cfg.Params), func(reason string) {
+	params := resolveOutputGuardParams(cfg.Params)
+	og.buf = newUnitBuffer(params, func(reason string) {
 		if og.metrics != nil {
 			og.metrics.incOGForcedSplit(reason)
 		}
 	})
+	// 级联参数（E 组）：P-MAX-SLOTS 派生依赖已 resolve 的 P-MAX-BUFFER-BYTES，故传入 params。
+	og.casc = newCascade(resolveOutputGuardCascadeParams(cfg.Cascade, params), cfg.Mode, l1, l2, m, a, tenant, requestID, pv)
 	if og.metrics != nil {
 		og.metrics.incOGRequest(cfg.Mode) // 审查过的请求数（按模式）
 	}
@@ -147,17 +145,16 @@ func newOutputGuard(cfg outputGuardConfig, l1 OutputClassifier, l2 OutputClassif
 
 // Process 处理引擎下发的一个 delta（§2.3 I2 集成点）。
 //
-// OG-4：delta 先进入判定单元缓冲，完整的句子单元逐个送 L1（命中记指标与审计）；
-// 输出仍**逐 delta 原样放行**（shadow 只记不拦，不改变输出字节与时延）。
+// OG-4/OG-13：delta 先进判定单元缓冲（按句切分），完整单元逐个提交给级联控制器判定；
+// 下发一律经 cascade 的唯一下发游标（按序、不跳发、不合并帧）。
+// 生产 shadow（`BlockEmission=false`）下行为与 M2 逐字节一致：逐 delta 立即原样放行；
+// 阻塞形态（浸泡预演）下遇未决句即停，产出真实首帧延迟增量。
 // 下发失败（慢客户端）→ 立即 Close（停止缓冲）并把错误上抛以终止引擎（§4.3 慢客户端行）。
 func (og *outputGuard) Process(delta string, emit outputEmitFunc) error {
 	if og.closed {
 		return nil // 已断连/关闭：不再缓冲，也不再下发
 	}
-	for _, unit := range og.buf.Push(delta) {
-		og.classifyUnit(unit)
-	}
-	if err := emit(delta, ""); err != nil {
+	if err := og.casc.pushDelta(delta, og.buf.Push(delta), emit); err != nil {
 		og.Close() // 慢客户端：立即释放，不继续缓冲
 		return err
 	}
@@ -165,144 +162,20 @@ func (og *outputGuard) Process(delta string, emit outputEmitFunc) error {
 }
 
 // Finish 收尾（§2.3 I3）：把缓冲尾部作为最后一个判定单元送判（否则末句逃逸审查）；
-// shadow 无内容需补下发（delta 已逐条放行）。enforcing 在此下发已判定剩余内容。
+// 随后等所有在飞 L2 收敛（上限＝P-TIMEOUT，与客户端超时同源）并排空下发（§3.6.3 收尾语义）。
 func (og *outputGuard) Finish(emit outputEmitFunc) error {
 	if og.closed {
 		return nil
 	}
-	for _, unit := range og.buf.Flush() {
-		og.classifyUnit(unit)
-	}
-	return nil
+	return og.casc.finish(og.buf.Flush(), emit)
 }
 
-// Close 幂等释放（§2.3 I1 / C4）：丢弃缓冲与状态；重复调用无副作用。
+// Close 幂等释放（§2.3 I1 / C4）：释放级联（停表、未决槽位置 closed、唤醒等待者）+ 丢弃缓冲；
+// 重复调用无副作用。
 func (og *outputGuard) Close() {
 	og.closed = true
+	og.casc.close()
 	og.buf.Reset()
-}
-
-// classifyUnit 对一个判定单元跑 L1 + L2（若已配置）并落观测。
-// 流程（shadow 语义，只记不拦；方案 2：L1 与 L2 都跑，类目去重合并，完整画像）：
-//   1. L1 先判；命中 → 归并类目 → 记 l1_hit + recordHit（首见类目记 would_reject）
-//   2. 已配置 L2 → 调 L2；
-//      - L2 调用失败 → degraded 已在 HTTP 封装里记（那里知道 reason），此处直接返回
-//      - L2 未命中 → 记 l2_call/miss，返回
-//      - L2 命中 → 归并类目 → 记 l2_call/hit；若 L1 未命中该类目则记 l2_only_hit；
-//        再走 recordHit（首见类目记 would_reject，已见过则去重）
-//
-// 类目一律收敛到内部 ID（附录 A）：词库路径已返回内部 ID，直接采用；
-// guardrail 路径 / L2 返回原生类目，经 P-CATEGORY-MAP 映射。
-// 未映射 = P-DEGRADE（fail-closed），记 unmapped 诊断但不记 would_reject。
-func (og *outputGuard) classifyUnit(unit string) {
-	if unit == "" {
-		return
-	}
-	if og.l1 == nil && og.l2 == nil {
-		// 防御：两层都未配置时不判定、不崩溃。调用方应保证至少 L1 非空。
-		return
-	}
-
-	l1Hit := make(map[string]bool)
-
-	// ---- L1 ----
-	if og.l1 != nil {
-		l1Cat, _, _ := og.l1.Classify(unit)
-		if l1Cat != "" {
-			cat := l1Cat
-			if !isValidCategory(cat) {
-				mapped, ok := mapL1Category(cat)
-				if !ok {
-					if og.metrics != nil {
-						og.metrics.incOGUnmapped("l1", cat)
-					}
-					// L1 未映射不影响 L2 继续跑
-					goto runL2
-				}
-				cat = mapped
-			}
-			l1Hit[cat] = true
-			if og.metrics != nil {
-				og.metrics.incOGL1Hit(cat)
-			}
-			og.recordHit(cat)
-		}
-	}
-
-runL2:
-	if og.l2 == nil {
-		return
-	}
-	l2Cat, l2Conf, _ := og.l2.Classify(unit)
-	if l2Cat == "" && l2Conf == -1 {
-		// 哨兵：L2 调用失败（unreachable/timeout/bad_response），degraded 已在 HTTP 封装里记
-		// （因为那里知道具体 reason）；此处只做 fallback = L1 已判过，直接返回。
-		return
-	}
-	if l2Cat == "" {
-		if og.metrics != nil {
-			og.metrics.incOGL2Call("", "miss")
-		}
-		return
-	}
-	// L2 命中
-	cat := l2Cat
-	if !isValidCategory(cat) {
-		// L2 原生类目 → 内部 ID（M2 暂不做映射表，未映射 = P-DEGRADE，只记 unmapped 诊断）。
-		mapped, ok := mapL1Category(cat)
-		if !ok {
-			if og.metrics != nil {
-				og.metrics.incOGL2Call(cat, "unmapped")
-				og.metrics.incOGUnmapped("l2", cat)
-			}
-			return
-		}
-		cat = mapped
-	}
-	if og.metrics != nil {
-		og.metrics.incOGL2Call(cat, "hit")
-		if !l1Hit[cat] {
-			// L2 独有的命中（L1 未检出该类目）
-			og.metrics.incOGL2OnlyHit(cat)
-		}
-	}
-	og.recordHit(cat)
-}
-
-// recordHit 记录一次命中（L1 或 L2 命中后的公共收尾）：
-// 首见类目 → would_reject 指标 + 审计；记录首次命中信息（chunk-meta 用）。
-func (og *outputGuard) recordHit(cat string) {
-	if og.seenCategory[cat] {
-		return
-	}
-	og.seenCategory[cat] = true
-	if og.firstHitCat == "" {
-		og.firstHitCat = cat
-		og.firstHitAction = catActionForMode(cat, og.mode)
-	}
-	if og.metrics != nil {
-		og.metrics.incOGWouldReject(cat)
-	}
-	og.auditWouldReject(cat)
-}
-
-// auditWouldReject 落 `output_would_reject` 审计事件（§4.10）。
-// Result 取值：`would_reject_<内部类目 ID>`（如 would_reject_A1-07）；
-// OGCategory = 内部类目 ID（如 A1-07，与 chunk-meta guard.category 同源）。
-// 证据字段一律 omitempty、不进 hash()，旧链可复算。
-func (og *outputGuard) auditWouldReject(cat string) {
-	if og.audit == nil {
-		return
-	}
-	og.audit.append(AuditEvent{
-		TenantID:  og.tenant,
-		RequestID: og.requestID,
-		Action:    "output_would_reject",
-		Result:          "would_reject_" + cat,
-		OGCategory:      cat,
-		OGMode:          og.mode,
-		OGPolicyVersion: og.policyVersion,
-	})
 }
 
 // catActionForMode 返回指定类目在指定模式下的动作（用于 chunk-meta action 字段）。
@@ -331,16 +204,17 @@ func (og *outputGuard) BuildGuardMeta() *chunkGuardMeta {
 		PolicyVersion: og.policyVersion,
 		Mode:          og.mode,
 	}
-	if og.firstHitCat == "" {
+	firstHitCat, firstHitAction := og.casc.firstHit() // 命中状态由 cascade 在锁内维护（L2 异步写入）
+	if firstHitCat == "" {
 		return gm // 未命中：detected=false（零值），不带 category/rule_version
 	}
 	gm.Detected = true
-	gm.Action = og.firstHitAction
-	gm.Category = og.firstHitCat
+	gm.Action = firstHitAction
+	gm.Category = firstHitCat
 	// filtered：shadow 下为 false（只标记不拦截）；enforcing 下为 true
 	// （M1 enforcing 未启用，故 filtered 恒为 false；M4 实现 enforcing 后改为按动作判断）
 	gm.Filtered = (og.mode == outputGuardEnforcing) &&
-		(og.firstHitAction == catActionBlock || og.firstHitAction == catActionMask)
+		(firstHitAction == catActionBlock || firstHitAction == catActionMask)
 	return gm
 }
 
@@ -358,6 +232,10 @@ func (og *outputGuard) BuildGuardMeta() *chunkGuardMeta {
 //   - 调用方回退 L1 并记 degraded_total{backend="l2", reason=...}；
 //   - Classify 返回 ("", -1, "") 作为失败哨兵（confidence=-1 表示调用失败，
 //     区别于正常未命中的 confidence=0）。
+//
+// 置信度语义（M3，§5.2 P-CONF-BAND 写死）：命中时置信度是**必带字段**——
+// 侧车只返 category 不返 confidence → 返回 (cat, 0, "")，由调用方按"格式错误＝P-DEGRADE"处置；
+// 本层**不做 1.0 兜底**（M2 曾兜底，M3 修正）。
 //
 // 与输入侧隔离：不复用 model.HTTPClassifier（接口签名不同），本文件独立实现。
 type outputL2HTTPClassifier struct {
@@ -429,11 +307,9 @@ func (c *outputL2HTTPClassifier) Classify(text string) (string, float64, string)
 	if !out.Blocked {
 		return "", 0, ""
 	}
-	conf := out.Confidence
-	if conf <= 0 {
-		conf = 1.0 // 侧车未返回置信度时按 1.0 兜底（规则语义等价）
-	}
-	return out.Category, conf, out.Match
+	// P-CONF-BAND（§5.2 写死）：置信度是命中的必带字段，缺失＝格式错误＝P-DEGRADE。
+	// 故此处**不做兜底猜测**——原样返回，conf<=0 由调用方（cascade）判降级。
+	return out.Category, out.Confidence, out.Match
 }
 
 func (c *outputL2HTTPClassifier) report(reason string) {
