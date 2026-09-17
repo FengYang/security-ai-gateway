@@ -61,6 +61,9 @@ else {
     $l2Timeout = "2s"
 }
 $lambdas = @(0.25, 0.5, 1, 1.5, 2, 3, 5, 8)
+# 多请求 N 网格：GPU 扩到 64 以找容量拐点（P99 样本量=N，N≤16 时 P99≈max）；
+# CPU 保持 5 格（median 2.8s 首帧必破 800ms，只做趋势对照，不追拐点）
+$mrRequests = if ($Profile -eq "gpu") { @(1, 2, 4, 8, 16, 32, 64) } else { @(1, 2, 4, 8, 16) }
 $maxSlots = 512
 $blockStr = if ($Blocking) { "true" } else { "false" }
 
@@ -68,7 +71,7 @@ Write-Host "=== OG-13 浸泡 harness ===" -ForegroundColor Cyan
 Write-Host "  Profile:    $Profile (median=${medianMs}ms, p99=${p99Ms}ms)"
 if ($MultiRequest) {
     Write-Host "  模式:       多请求并发（blocking=true，每请求 λ=1.0 句/s、30 句、c=4）"
-    Write-Host "  N 网格:    1, 2, 4, 8, 16 路并发请求"
+    Write-Host "  N 网格:    $($mrRequests -join ', ') 路并发请求"
 }
 else {
     Write-Host "  模式:       单请求流式"
@@ -122,7 +125,6 @@ if ($MultiRequest) {
     $mrLambda = 1.0        # 每请求句到达速率（句/s）
     $mrSentences = 30      # 每请求句数
     $mrConcurrency = 4     # 每请求 P-CONCURRENCY
-    $mrRequests = @(1, 2, 4, 8, 16)
     foreach ($n in $mrRequests) {
         $cells += [PSCustomObject]@{
             Label = "N=$n"
