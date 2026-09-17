@@ -1,10 +1,16 @@
-﻿# og13-soak.ps1 — OG-13 B2 浸泡 harness 编排脚本
+﻿# og13-soak.ps1 — OG-13 浸泡 harness 编排脚本
 #
-# 作用：启动 L2 stub → 按 λ×c 网格跑 Go soak test → 收集 CSV → 打印摘要表
+# 作用：启动 L2 stub → 按网格跑 Go soak test → 收集 CSV → 打印摘要表
 #
 # 用法（在仓库根目录执行）：
 #   powershell -File scripts\og13-soak.ps1 -Profile cpu
 #   powershell -File scripts\og13-soak.ps1 -Profile gpu -Blocking
+#   powershell -File scripts\og13-soak.ps1 -Profile gpu -MultiRequest
+#
+# 两种模式：
+#   默认（单请求流式）：λ×c 网格，产出降级率 / 队列深度 / 降级原因分解 / L2 占比
+#   -MultiRequest（多请求并发）：N 网格，产出首帧延迟增量 P50/P99（闸门主判据）
+#     与受影响请求占比（OG-13 验收要求）；强制阻塞形态
 #
 # 输出：
 #   .\og13-results\og13-{profile}-{date}.csv   原始 CSV
@@ -20,7 +26,8 @@ param(
     [int]$Warmup = 30,
     [int]$Seed = 20260917,
 
-    [switch]$Blocking,    # 是否阻塞预演（测首帧延迟增量）；默认 shadow 零影响
+    [switch]$Blocking,       # 单请求模式：是否阻塞预演（测首帧延迟增量）；默认 shadow 零影响
+    [switch]$MultiRequest,   # 多请求并发模式（强制 blocking=true）
     [int]$L2Port = 19099,
     [string]$OutputDir = (Join-Path $PWD "og13-results")
 )
@@ -35,7 +42,8 @@ if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir | Out-Null
 }
 $ts = Get-Date -Format "yyyyMMdd-HHmmss"
-$csvPath = Join-Path $OutputDir "og13-$Profile-$($ts).csv"
+$modeTag = if ($MultiRequest) { "mr" } else { "sr" } # sr=单请求流式 / mr=多请求并发
+$csvPath = Join-Path $OutputDir "og13-$Profile-$modeTag-$($ts).csv"
 
 # ---- Profile 参数 ----
 if ($Profile -eq "cpu") {
@@ -58,10 +66,17 @@ $blockStr = if ($Blocking) { "true" } else { "false" }
 
 Write-Host "=== OG-13 浸泡 harness ===" -ForegroundColor Cyan
 Write-Host "  Profile:    $Profile (median=${medianMs}ms, p99=${p99Ms}ms)"
-Write-Host "  Blocking:   $Blocking ($(if ($Blocking) { "阻塞预演" } else { "shadow 零影响" }))"
-Write-Host "  λ 网格:    $($lambdas -join ', ') 句/s"
-Write-Host "  c 网格:    $($concurrencies -join ', ')"
-Write-Host "  每格句数:   $Sentences (预热 $Warmup)"
+if ($MultiRequest) {
+    Write-Host "  模式:       多请求并发（blocking=true，每请求 λ=1.0 句/s、30 句、c=4）"
+    Write-Host "  N 网格:    1, 2, 4, 8, 16 路并发请求"
+}
+else {
+    Write-Host "  模式:       单请求流式"
+    Write-Host "  Blocking:   $Blocking ($(if ($Blocking) { "阻塞预演" } else { "shadow 零影响" }))"
+    Write-Host "  λ 网格:    $($lambdas -join ', ') 句/s"
+    Write-Host "  c 网格:    $($concurrencies -join ', ')"
+    Write-Host "  每格句数:   $Sentences (预热 $Warmup)"
+}
 Write-Host "  种子:      $Seed"
 Write-Host "  输出:      $csvPath"
 Write-Host ""
@@ -94,79 +109,137 @@ if (-not $ready) {
 }
 Write-Host "  L2 stub 就绪 (PID=$($stubProc.Id))" -ForegroundColor Green
 
-# ---- CSV 表头 ----
-$csvHeader = "profile,lambda,concurrency,blocking,sentences,first_latency_ms,throughput_sent_per_sec,queue_depth_p50,queue_depth_p99,failclosed_ratio,l2_call_ratio,l2_timeout_ratio,l2_unavailable_ratio,l2_bad_conf_ratio,l2_unmapped_ratio,erlang_b_pct"
+# ---- 网格定义（两种模式）----
+# 单请求流式（默认）：λ×c 网格，产出降级率/队列深度/降级原因分解。
+# 多请求并发（-MultiRequest）：N 网格，每请求 λ 与句数固定；强制阻塞形态，
+#   产出首帧延迟增量 P50/P99（闸门主判据）与受影响请求占比（OG-13 验收要求）。
+$cells = @()
+if ($MultiRequest) {
+    $blockStr = "true" # 非阻塞下首帧延迟增量恒 ≈ 0，闸门判定无意义
+    # 锚定正则（^...$）：避免 -run 以子串匹配同时命中另一模式的测试函数
+    $testName = '^TestCascadeSoakMultiRequest$'
+    $resultTag = "SOAK_MR_RESULT"
+    $mrLambda = 1.0        # 每请求句到达速率（句/s）
+    $mrSentences = 30      # 每请求句数
+    $mrConcurrency = 4     # 每请求 P-CONCURRENCY
+    $mrRequests = @(1, 2, 4, 8, 16)
+    foreach ($n in $mrRequests) {
+        $cells += [PSCustomObject]@{
+            Label = "N=$n"
+            Req   = $n
+            Env   = @{
+                SOAK_REQUESTS    = "$n"
+                SOAK_LAMBDA      = "$mrLambda"
+                SOAK_CONCURRENCY = "$mrConcurrency"
+                SOAK_SENTENCES   = "$mrSentences"
+            }
+        }
+    }
+    $csvHeader = "profile,requests,lambda_per_req,concurrency,blocking,sentences_per_req,first_frame_p50_ms,first_frame_p99_ms,first_frame_max_ms,affected_req_ratio,failclosed_ratio,l2_call_ratio,l2_calls_total,l2_throughput_per_sec,would_reject_top,erlang_b_per_req_pct"
+}
+else {
+    # 锚定正则：避免同时命中 TestCascadeSoakMultiRequest（-run 为子串匹配）
+    $testName = '^TestCascadeSoak$'
+    $resultTag = "SOAK_RESULT"
+    foreach ($c in $concurrencies) {
+        foreach ($lam in $lambdas) {
+            $cells += [PSCustomObject]@{
+                Label  = "c=$c  λ=$lam"
+                C      = $c
+                Lambda = $lam
+                Env    = @{
+                    SOAK_CONCURRENCY = "$c"
+                    SOAK_LAMBDA      = "$lam"
+                    SOAK_SENTENCES   = "$Sentences"
+                    SOAK_WARMUP      = "$Warmup"
+                }
+            }
+        }
+    }
+    $csvHeader = "profile,lambda,concurrency,blocking,sentences,first_latency_ms,throughput_sent_per_sec,queue_depth_p50,queue_depth_p99,failclosed_ratio,l2_call_ratio,l2_timeout_ratio,l2_unavailable_ratio,l2_bad_conf_ratio,l2_unmapped_ratio,erlang_b_pct"
+}
+$total = $cells.Count
 Set-Content -Path $csvPath -Value $csvHeader -Encoding UTF8
 
 # ---- 跑网格 ----
 Write-Host ""
-Write-Host "[2/3] 浸泡网格 ($($lambdas.Count) × $($concurrencies.Count) = $($lambdas.Count * $concurrencies.Count) 组)..." -ForegroundColor Cyan
+Write-Host "[2/3] 浸泡网格（$total 格，$testName）..." -ForegroundColor Cyan
 
-$total = $lambdas.Count * $concurrencies.Count
 $idx = 0
 $results = @()
 
-foreach ($c in $concurrencies) {
-    foreach ($lam in $lambdas) {
-        $idx++
-        Write-Host "  [$idx/$total] c=$c  λ=$lam  " -NoNewline
+foreach ($cell in $cells) {
+    $idx++
+    Write-Host "  [$idx/$total] $($cell.Label)  " -NoNewline
 
-        $env:SPIKE_SOAK = "1"
-        $env:L2_URL = "http://127.0.0.1:$L2Port/"
-        $env:L2_TIMEOUT = $l2Timeout
-        $env:SOAK_PROFILE = $Profile
-        $env:SOAK_CONCURRENCY = "$c"
-        $env:SOAK_MAX_SLOTS = "$maxSlots"
-        $env:SOAK_BLOCKING = $blockStr
-        $env:SOAK_LAMBDA = "$lam"
-        $env:SOAK_SENTENCES = "$Sentences"
-        $env:SOAK_WARMUP = "$Warmup"
-        $env:SOAK_SEED = "$Seed"
-        $env:SOAK_EXP_SERVICE_S = "$expServiceS"
+    # 公共环境
+    $env:SPIKE_SOAK = "1"
+    $env:L2_URL = "http://127.0.0.1:$L2Port/"
+    $env:L2_TIMEOUT = $l2Timeout
+    $env:SOAK_PROFILE = $Profile
+    $env:SOAK_MAX_SLOTS = "$maxSlots"
+    $env:SOAK_BLOCKING = $blockStr
+    $env:SOAK_SEED = "$Seed"
+    $env:SOAK_EXP_SERVICE_S = "$expServiceS"
+    # 格特有环境
+    foreach ($k in $cell.Env.Keys) { Set-Item -Path "Env:\$k" -Value $cell.Env[$k] }
 
-        # 注意：go test 会输出编译摘要到 stderr，PS 5.1 会把
-        # NativeCommandError 当错误；这里临时放宽 ErrorAction。
-        # -timeout：低 λ 档单格耗时可达 10 分钟以上（句数/λ），必须放宽默认 10m。
-        $prevEAP = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        Push-Location $teeDir
-        try {
-            $out = go test -mod=mod -timeout 30m -run TestCascadeSoak -count=1 2>&1
-        } finally {
-            Pop-Location
-            $ErrorActionPreference = $prevEAP
+    # 注意：go test 会输出编译摘要到 stderr，PS 5.1 会把
+    # NativeCommandError 当错误；这里临时放宽 ErrorAction。
+    # -timeout：低 λ 档单格耗时可达 10 分钟以上（句数/λ），必须放宽默认 10m。
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    Push-Location $teeDir
+    try {
+        $out = go test -mod=mod -timeout 30m -run $testName -count=1 2>&1
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $prevEAP
+    }
+
+    # 清理环境
+    foreach ($k in @("SPIKE_SOAK", "L2_URL", "L2_TIMEOUT", "SOAK_PROFILE", "SOAK_CONCURRENCY",
+            "SOAK_MAX_SLOTS", "SOAK_BLOCKING", "SOAK_LAMBDA", "SOAK_SENTENCES", "SOAK_WARMUP",
+            "SOAK_SEED", "SOAK_EXP_SERVICE_S", "SOAK_REQUESTS")) {
+        Remove-Item "Env:\$k" -ErrorAction SilentlyContinue
+    }
+
+    # 提取结果行（去掉前缀，对齐 CSV 表头）
+    $resultLine = ($out | Where-Object { $_ -match "^$resultTag," })
+    if (-not $resultLine) {
+        Write-Host "FAIL" -ForegroundColor Red
+        Write-Host ($out -join "`n") -ForegroundColor DarkRed
+        continue
+    }
+    $dataLine = $resultLine -replace "^$resultTag,", ""
+
+    # 追加 CSV
+    Add-Content -Path $csvPath -Value $dataLine -Encoding UTF8
+
+    # 解析关键列用于摘要
+    $cols = $dataLine -split ","
+    if ($MultiRequest) {
+        # 0:profile 1:requests 2:lambda_per_req 3:concurrency 4:blocking 5:sentences_per_req
+        # 6:frameP50 7:frameP99 8:frameMax 9:affected 10:fc 11:l2ratio 12:l2calls 13:l2tput
+        # 14:would_reject_top 15:erlang_b_per_req_pct
+        $results += [PSCustomObject]@{
+            req       = $cell.Req
+            p50       = [double]$cols[6]
+            p99       = [double]$cols[7]
+            max       = [double]$cols[8]
+            affected  = [double]$cols[9]
+            fc_pct    = [double]$cols[10] * 100
+            l2_tput   = [double]$cols[13]
+            top       = $cols[14]
+            erl_b_pct = [double]$cols[15]
         }
-
-        # 清理环境
-        Remove-Item Env:\SPIKE_SOAK -ErrorAction SilentlyContinue
-        Remove-Item Env:\L2_URL -ErrorAction SilentlyContinue
-        Remove-Item Env:\L2_TIMEOUT -ErrorAction SilentlyContinue
-        Remove-Item Env:\SOAK_PROFILE -ErrorAction SilentlyContinue
-        Remove-Item Env:\SOAK_CONCURRENCY -ErrorAction SilentlyContinue
-        Remove-Item Env:\SOAK_MAX_SLOTS -ErrorAction SilentlyContinue
-        Remove-Item Env:\SOAK_BLOCKING -ErrorAction SilentlyContinue
-        Remove-Item Env:\SOAK_LAMBDA -ErrorAction SilentlyContinue
-        Remove-Item Env:\SOAK_SENTENCES -ErrorAction SilentlyContinue
-        Remove-Item Env:\SOAK_WARMUP -ErrorAction SilentlyContinue
-        Remove-Item Env:\SOAK_SEED -ErrorAction SilentlyContinue
-        Remove-Item Env:\SOAK_EXP_SERVICE_S -ErrorAction SilentlyContinue
-
-        # 提取 SOAK_RESULT 行（去掉前缀，对齐 CSV 表头 16 列）
-        $resultLine = ($out | Where-Object { $_ -match "^SOAK_RESULT," })
-        if (-not $resultLine) {
-            Write-Host "FAIL" -ForegroundColor Red
-            Write-Host ($out -join "`n") -ForegroundColor DarkRed
-            continue
-        }
-        $dataLine = $resultLine -replace "^SOAK_RESULT,", ""
-
-        # 追加 CSV
-        Add-Content -Path $csvPath -Value $dataLine -Encoding UTF8
-
-        # 解析关键列用于摘要（0:profile 1:lambda 2:concurrency 3:blocking 4:sentences
+        Write-Host ("frameP50={0,7:0.0}ms  P99={1,7:0.0}ms  max={2,7:0.0}ms  affected={3,6:0.0}%  fc={4,5:0.00}%  L2tput={5,6:0.00}/s" -f `
+                [double]$cols[6], [double]$cols[7], [double]$cols[8], ([double]$cols[9] * 100), ([double]$cols[10] * 100), [double]$cols[13])
+    }
+    else {
+        # 0:profile 1:lambda 2:concurrency 3:blocking 4:sentences
         # 5:first_latency_ms 6:throughput 7:qP50 8:qP99 9:fc_ratio 10:l2_ratio
-        # 11:timeout 12:unavail 13:bad_conf 14:unmapped 15:erlang_b_pct）
-        $cols = $dataLine -split ","
+        # 11:timeout 12:unavail 13:bad_conf 14:unmapped 15:erlang_b_pct
         $firstMs = [double]$cols[5]
         $tput = [double]$cols[6]
         $qP99 = [double]$cols[8]
@@ -174,17 +247,17 @@ foreach ($c in $concurrencies) {
         $erlPct = [double]$cols[15]
 
         $results += [PSCustomObject]@{
-            c = $c
-            lambda = $lam
-            first_ms = $firstMs
-            tput = $tput
-            q_p99 = $qP99
-            fc_pct = $fcRatio * 100
+            c         = $cell.C
+            lambda    = $cell.Lambda
+            first_ms  = $firstMs
+            tput      = $tput
+            q_p99     = $qP99
+            fc_pct    = $fcRatio * 100
             erl_b_pct = $erlPct
         }
 
         Write-Host ("first={0,6:0.0}ms  tput={1,5:0.00}  qP99={2,3:0.0}  fc={3,5:0.00}% (ErlB={4,5:0.00}%)" -f `
-            $firstMs, $tput, $qP99, ($fcRatio*100), $erlPct)
+                $firstMs, $tput, $qP99, ($fcRatio * 100), $erlPct)
     }
 }
 
@@ -197,20 +270,35 @@ Write-Host "  done" -ForegroundColor Green
 
 # ---- 摘要表 ----
 Write-Host ""
-Write-Host "=== 摘要表（$Profile / blocking=$Blocking）===" -ForegroundColor Cyan
-Write-Host ("{0,3}  {1,6}  {2,8}  {3,8}  {4,6}  {5,10}  {6,10}" -f `
-    "c", "λ", "first_ms", "tput_s/s", "qP99", "fc_实测%", "fc_ErlB%")
-Write-Host ("-" * 70)
+if ($MultiRequest) {
+    Write-Host "=== 摘要表（$Profile / 多请求并发 / blocking=true）===" -ForegroundColor Cyan
+    Write-Host ("{0,4}  {1,10}  {2,10}  {3,10}  {4,9}  {5,9}  {6,11}  {7,10}  {8}" -f `
+        "N", "frameP50", "frameP99", "frameMax", "affect%", "fc_实测%", "L2tput/s", "fc_ErlB%", "命中分布(top5)")
+    Write-Host ("-" * 132)
 
-foreach ($c in $concurrencies) {
-    foreach ($lam in $lambdas) {
-        $r = $results | Where-Object { $_.c -eq $c -and $_.lambda -eq $lam }
-        if ($r) {
-            Write-Host ("{0,3}  {1,6}  {2,8:0.0}  {3,8:0.00}  {4,6:0.0}  {5,10:0.000}  {6,10:0.000}" -f `
-                $r.c, $r.lambda, $r.first_ms, $r.tput, $r.q_p99, $r.fc_pct, $r.erl_b_pct)
-        }
+    foreach ($r in ($results | Sort-Object req)) {
+        Write-Host ("{0,4}  {1,10:0.0}  {2,10:0.0}  {3,10:0.0}  {4,9:0.00}  {5,9:0.00}  {6,11:0.00}  {7,10:0.00}  {8}" -f `
+            $r.req, $r.p50, $r.p99, $r.max, ($r.affected * 100), $r.fc_pct, $r.l2_tput, $r.erl_b_pct, $r.top)
     }
     Write-Host ""
+    Write-Host "  首帧延迟增量单位 ms（闸门：P99 ≤ 800ms）；affect% = 至少一句 P-DEGRADE 的请求占比" -ForegroundColor DarkGray
+}
+else {
+    Write-Host "=== 摘要表（$Profile / blocking=$Blocking）===" -ForegroundColor Cyan
+    Write-Host ("{0,3}  {1,6}  {2,8}  {3,8}  {4,6}  {5,10}  {6,10}" -f `
+        "c", "λ", "first_ms", "tput_s/s", "qP99", "fc_实测%", "fc_ErlB%")
+    Write-Host ("-" * 70)
+
+    foreach ($c in $concurrencies) {
+        foreach ($lam in $lambdas) {
+            $r = $results | Where-Object { $_.c -eq $c -and $_.lambda -eq $lam }
+            if ($r) {
+                Write-Host ("{0,3}  {1,6}  {2,8:0.0}  {3,8:0.00}  {4,6:0.0}  {5,10:0.000}  {6,10:0.000}" -f `
+                    $r.c, $r.lambda, $r.first_ms, $r.tput, $r.q_p99, $r.fc_pct, $r.erl_b_pct)
+            }
+        }
+        Write-Host ""
+    }
 }
 
 Write-Host ""

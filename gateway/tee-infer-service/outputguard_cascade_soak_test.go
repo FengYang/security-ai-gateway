@@ -36,6 +36,7 @@ import (
 	"math/rand"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -334,6 +335,216 @@ func TestCascadeSoak(t *testing.T) {
 		unavailRatio,
 		badConfRatio,
 		unmappedRatio,
+		erlangBPct,
+	)
+}
+
+// ---- 第二轮：多请求并发浸泡（OG-13 验收：首帧延迟增量 P50/P99 + 受影响请求占比）----
+
+// formatTopCats 把类目命中计数按降序格式化为 "cat:count|cat:count"（用 | 分隔以免破坏 CSV）。
+func formatTopCats(counts map[string]int64, limit int) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	cats := make([]string, 0, len(counts))
+	for c := range counts {
+		cats = append(cats, c)
+	}
+	sort.Slice(cats, func(i, j int) bool {
+		if counts[cats[i]] != counts[cats[j]] {
+			return counts[cats[i]] > counts[cats[j]]
+		}
+		return cats[i] < cats[j] // 计数相同按类目名定序，保证输出确定
+	})
+	if limit > 0 && len(cats) > limit {
+		cats = cats[:limit]
+	}
+	parts := make([]string, 0, len(cats))
+	for _, c := range cats {
+		parts = append(parts, fmt.Sprintf("%s:%d", c, counts[c]))
+	}
+	return strings.Join(parts, "|")
+}
+
+// TestCascadeSoakMultiRequest OG-13 多请求并发浸泡（第二轮）。
+//
+// 与 TestCascadeSoak（单请求流式）的区别：
+//   - N 路并发请求，每路持**独立** outputGuard（独立级联/槽位/容量阀），但**共享**同一
+//     L2 HTTP 客户端 → 侧车侧产生真实竞争，服务时间被排队放大（OG-1 §10 待测「排队分量」）；
+//   - 每路贡献 1 个首帧延迟增量观测 → 可算 P50/P99（OG-13 验收要求，单请求模型拿不到）；
+//   - 可算「受影响请求占比」= 至少一句按 P-DEGRADE 处置的请求数 / N。
+//
+// 默认阻塞形态（SOAK_BLOCKING 缺省 true）：非阻塞下首帧延迟增量恒 ≈ 0，闸门判定无意义。
+//
+// 环境变量：SOAK_REQUESTS(N) / SOAK_LAMBDA(每请求句到达速率) / SOAK_SENTENCES(每请求句数)
+// 加其余与单请求 driver 同名的变量。
+//
+// 输出：stdout 一行 SOAK_MR_RESULT CSV（由 og13-soak.ps1 -MultiRequest 捕获落盘）。
+//
+//	列：profile,requests,lambda_per_req,concurrency,blocking,sentences_per_req,
+//	    first_frame_p50_ms,first_frame_p99_ms,first_frame_max_ms,
+//	    affected_req_ratio,failclosed_ratio,l2_call_ratio,l2_calls_total,
+//	    l2_throughput_per_sec,would_reject_top,erlang_b_per_req_pct
+func TestCascadeSoakMultiRequest(t *testing.T) {
+	if os.Getenv(spikeSoakENV) != "1" {
+		t.Skipf("OG-13 多请求浸泡：设置 %s=1 才执行（需 L2 HTTP stub 运行中）", spikeSoakENV)
+	}
+	l2URL := os.Getenv("L2_URL")
+	if l2URL == "" {
+		t.Fatal("L2_URL 环境变量未设置（需指向 og13-l2-stub.py 地址）")
+	}
+
+	profile := os.Getenv("SOAK_PROFILE")
+	if profile == "" {
+		profile = "custom"
+	}
+	timeout := envDuration("L2_TIMEOUT", 2*time.Second)
+	requests := envInt("SOAK_REQUESTS", 4)
+	lambda := envFloat("SOAK_LAMBDA", 1.0) // 每请求句到达速率
+	numSentences := envInt("SOAK_SENTENCES", 30)
+	concurrency := envInt("SOAK_CONCURRENCY", 4)
+	maxSlots := envInt("SOAK_MAX_SLOTS", 512)
+	blocking := envBool("SOAK_BLOCKING", true)
+	seed := envInt("SOAK_SEED", 20260917)
+	expServiceS := envFloat("SOAK_EXP_SERVICE_S", 0)
+	if requests < 1 {
+		requests = 1
+	}
+
+	m := newMetrics()
+	m.setOutputGuardMode(outputGuardShadow, defaultPolicyVersion)
+	a := newAuditChain()
+	// 共享 L2 客户端：N 路请求竞争同一侧车（本轮要测的效应）
+	l2 := newOutputL2HTTPClassifier(l2URL, "", timeout, m, nil)
+
+	firstFrames := make([]time.Duration, requests) // 各路首帧延迟增量（来自 cascade 口径）
+	failClosedPerReq := make([]int64, requests)    // 各路 P-DEGRADE 句数
+	var wg sync.WaitGroup
+
+	startAt := time.Now()
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			// 每路独立随机流（种子派生）：请求之间到达时刻不同，但整体可复现
+			rng := rand.New(rand.NewSource(int64(seed) + int64(idx)*7919))
+			casc := outputGuardCascadeParams{
+				Timeout:       timeout,
+				Concurrency:   concurrency,
+				MaxSlots:      maxSlots,
+				Degrade:       degradeFailClosed,
+				BlockEmission: blocking,
+			}
+			cfg := outputGuardConfig{
+				Mode:          outputGuardShadow,
+				PolicyVersion: defaultPolicyVersion,
+				Params:        resolveOutputGuardParams(defaultOutputGuardParams()),
+				Cascade:       casc,
+			}
+			og, err := newOutputGuard(cfg, fakeL2Classifier{}, l2, m, a, "acme", fmt.Sprintf("soak-mr-%d", idx))
+			if err != nil {
+				t.Errorf("第 %d 路 newOutputGuard: %v", idx, err) // 子 goroutine 内不用 Fatalf
+				return
+			}
+			defer og.Close()
+
+			sink := &soakEmitter{}
+			intervals := poissonIntervals(rng, lambda, numSentences)
+			for k := 0; k < numSentences; k++ {
+				if k > 0 {
+					time.Sleep(intervals[k])
+				}
+				og.Process(fmt.Sprintf("R%dS%d。", idx, k), sink.emit)
+			}
+			og.Finish(sink.emit)
+
+			st := og.casc.stats()
+			if st.HasFirstFrame {
+				firstFrames[idx] = st.FirstFrameDelay
+			}
+			failClosedPerReq[idx] = st.FailClosed
+		}(i)
+	}
+	wg.Wait()
+	totalDur := time.Since(startAt)
+
+	// 首帧延迟增量分布（每请求一个观测；毫秒）
+	frames := make([]float64, 0, requests)
+	for _, d := range firstFrames {
+		frames = append(frames, float64(d)/float64(time.Millisecond))
+	}
+	sort.Float64s(frames)
+	pct := func(p float64) float64 {
+		if len(frames) == 0 {
+			return 0
+		}
+		i := int(float64(len(frames)-1) * p)
+		if i < 0 {
+			i = 0
+		}
+		if i >= len(frames) {
+			i = len(frames) - 1
+		}
+		return frames[i]
+	}
+	frameP50, frameP99 := pct(0.50), pct(0.99)
+	frameMax := 0.0
+	if len(frames) > 0 {
+		frameMax = frames[len(frames)-1]
+	}
+
+	// 受影响请求占比：至少一句按 P-DEGRADE 处置的请求
+	affected := 0
+	for _, fc := range failClosedPerReq {
+		if fc > 0 {
+			affected++
+		}
+	}
+	affectedRatio := float64(affected) / float64(requests)
+
+	// 全局指标（读结构体字段，不走 Prometheus 文本解析）
+	m.mu.Lock()
+	ogSentencesF := float64(m.ogSentences)
+	failClosedF := float64(m.ogFailclosedSent)
+	l2CallsF := float64(m.ogL2CallsStarted)
+	wouldReject := make(map[string]int64, len(m.ogWouldReject))
+	for k, v := range m.ogWouldReject {
+		wouldReject[k] = v
+	}
+	m.mu.Unlock()
+
+	failClosedRatio, l2Ratio := 0.0, 0.0
+	if ogSentencesF > 0 {
+		failClosedRatio = failClosedF / ogSentencesF
+		l2Ratio = l2CallsF / ogSentencesF
+	}
+	l2Throughput := 0.0
+	if totalDur > 0 {
+		l2Throughput = l2CallsF / totalDur.Seconds()
+	}
+
+	// 每请求 Erlang-B（无侧车竞争的基线；多请求下实测预期更高）
+	erlangBPct := 0.0
+	if expServiceS > 0 && concurrency > 0 {
+		erlangBPct = erlangB(lambda*expServiceS, concurrency) * 100.0
+	}
+
+	fmt.Printf("SOAK_MR_RESULT,%s,%d,%.3f,%d,%t,%d,%.1f,%.1f,%.1f,%.4f,%.4f,%.4f,%.0f,%.2f,%s,%.2f\n",
+		profile,
+		requests,
+		lambda,
+		concurrency,
+		blocking,
+		numSentences,
+		frameP50,
+		frameP99,
+		frameMax,
+		affectedRatio,
+		failClosedRatio,
+		l2Ratio,
+		l2CallsF,
+		l2Throughput,
+		formatTopCats(wouldReject, 5),
 		erlangBPct,
 	)
 }
