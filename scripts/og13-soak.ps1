@@ -124,7 +124,12 @@ foreach ($c in $concurrencies) {
         $env:SOAK_SEED = "$Seed"
         $env:SOAK_EXP_SERVICE_S = "$expServiceS"
 
+        # 注意：go test 会输出编译摘要到 stderr，PS 5.1 会把
+        # NativeCommandError 当错误；这里临时放宽 ErrorAction
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         $out = go test -mod=mod -run TestCascadeSoak -count=1 2>&1
+        $ErrorActionPreference = $prevEAP
 
         # 清理环境
         Remove-Item Env:\SPIKE_SOAK -ErrorAction SilentlyContinue
