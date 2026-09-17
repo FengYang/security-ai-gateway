@@ -52,6 +52,7 @@ var (
 	metricRequests         = &pwCounter{name: "otpmask_request_total"}
 	metricFailClosed       = &pwCounter{name: "otpmask_fail_closed_total"}
 	metricDecryptError     = &pwCounter{name: "otpmask_decrypt_error_total"}
+	metricContentFilter    = &pwCounter{name: "otpmask_content_filter_total"} // OG-16：SSE 流以 finish=content_filter 审核终止次数（与解密失败语义区分）
 	metricKeysIssued       = &pwCounter{name: "otpmask_keys_issued_total"}
 	metricKeysDeleted      = &pwCounter{name: "otpmask_keys_deleted_total"}
 	metricRouteDegraded    = &pwCounter{name: "otpmask_route_degraded_total"}

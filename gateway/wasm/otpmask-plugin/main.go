@@ -710,11 +710,12 @@ func finishTextDirect(ctx wrapper.HttpContext, config PluginConfig, req *textReq
 // respStreamState 请求级响应流式处理状态（跨帧保存于 ctx）。
 // dec 非 nil 表示已判定为 SSE 信封流（增量解密）；否则按整包路径累积到 endOfStream。
 type respStreamState struct {
-	dec    *SSEStreamDecoder // 增量解密状态机（SSE 路径）
-	buf    []byte            // 整包路径累积缓冲（JSON/协议/quote 单信封）
-	first  bool              // 已见首个非空帧（路径判定仅一次）
-	closed bool              // 整流拒绝后闭锁，不再外发任何字节
-	keys   []string          // 本请求在 KeyStore 登记的密钥 key（onStreamDone 兜底删除）
+	dec       *SSEStreamDecoder // 增量解密状态机（SSE 路径）
+	buf       []byte            // 整包路径累积缓冲（JSON/协议/quote 单信封）
+	first     bool              // 已见首个非空帧（路径判定仅一次）
+	closed    bool              // 整流拒绝后闭锁，不再外发任何字节
+	cfCounted bool              // OG-16：content_filter 终止已边沿计数（每流至多一次）
+	keys      []string          // 本请求在 KeyStore 登记的密钥 key（onStreamDone 兜底删除）
 }
 
 // ctxKeyRespStream 请求级响应流状态的上下文键。
@@ -735,6 +736,15 @@ func getRespStream(ctx wrapper.HttpContext) *respStreamState {
 // 状态码取 header 阶段缓存（body 阶段伪头 :status 不可读）。
 func looksLikeSSEEnvelope(ctx wrapper.HttpContext, config PluginConfig, chunk []byte) bool {
 	return config.AttestMode == "quote" && respStatusCached(ctx) == "200" && isSSEBody(chunk)
+}
+
+// noteContentFilter OG-16：每次 Feed 成功后检查 content_filter 终止标志，
+// 边沿上报（置位后解码器恒返回 true，故用 cfCounted 保证每流至多计数一次）。
+func noteContentFilter(st *respStreamState) {
+	if st.dec != nil && st.dec.ContentFiltered() && !st.cfCounted {
+		st.cfCounted = true
+		metricContentFilter.incr()
+	}
 }
 
 // onStreamingResponseBody 响应侧流式解密外发（P1b，取代整包 onResponseBody）：
@@ -762,6 +772,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk
 				log.Errorf("otpmask-plugin: SSE 流解密失败（整流拒绝）: %v", err)
 				return nil
 			}
+			noteContentFilter(st) // OG-16：content_filter 审核终止边沿计数
 			return out
 		}
 	}
@@ -776,6 +787,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk
 			log.Errorf("otpmask-plugin: SSE 流解密失败（整流拒绝）: %v", err)
 			return nil
 		}
+		noteContentFilter(st) // OG-16：content_filter 审核终止边沿计数
 		return out
 	}
 	// 整包路径：累积
