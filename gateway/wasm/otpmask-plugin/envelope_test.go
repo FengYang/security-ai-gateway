@@ -137,6 +137,62 @@ func TestDecryptSSEBodyFinishError(t *testing.T) {
 	}
 }
 
+// TestDecryptSSEBodyContentFilter OG-16：finish="content_filter" 为内容安全审核终止，
+// 插件须正常收尾（finish_reason=content_filter + [DONE]），已外发合法前缀保留，
+// guard 注解顶层透传；不得伪装 stop，终止帧不带 delta 内容。
+func TestDecryptSSEBodyContentFilter(t *testing.T) {
+	_, kenc := newSessionForTest(t)
+	body := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+		{Seq: 1, Delta: "安全前缀"},
+		{Seq: 2, Finish: "content_filter", Guard: &chunkGuard{
+			Detected:      true,
+			Filtered:      true,
+			Action:        "block",
+			Category:      "A1-06",
+			PolicyVersion: "pol-v1",
+			Mode:          "enforcing",
+		}},
+	}, []uint64{1, 2})
+	out, err := decryptSSEBody(body, "reqCF", "mock")
+	if err != nil {
+		t.Fatalf("finish=content_filter 应正常收尾，实际拒绝: %v", err)
+	}
+	s := string(out)
+	for _, want := range []string{
+		`"delta":{"content":"安全前缀"}`,
+		`"finish_reason":"content_filter"`,
+		`"guard":{"detected":true,"filtered":true,"action":"block","category":"A1-06","policy_version":"pol-v1","mode":"enforcing"}`,
+		"data: [DONE]",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("content_filter 重组结果缺 %q: %q", want, s)
+		}
+	}
+	if strings.Contains(s, `"finish_reason":"stop"`) {
+		t.Fatalf("审核终止不得伪装成 stop: %q", s)
+	}
+	// 终止帧 delta 必须为空对象（不得携带任何文本）
+	if strings.Contains(s, `"delta":{"content":`) && strings.LastIndex(s, `"delta":{"content":`) > strings.LastIndex(s, `"finish_reason"`) {
+		t.Fatalf("终止帧不应携带 delta 内容: %q", s)
+	}
+	if !strings.HasSuffix(s, "data: [DONE]\n\n") {
+		t.Fatal("content_filter 流未以 [DONE] 正常终止")
+	}
+}
+
+// TestDecryptSSEBodyUnknownFinish OG-16：除 stop/content_filter 外的终止码
+// （如旧拼写 "filter"）仍 fail-closed，防止未知终止语义被静默放行。
+func TestDecryptSSEBodyUnknownFinish(t *testing.T) {
+	_, kenc := newSessionForTest(t)
+	body := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+		{Seq: 1, Delta: "partial"},
+		{Seq: 2, Delta: "", Finish: "filter"},
+	}, []uint64{1, 2})
+	if out, err := decryptSSEBody(body, "req123", "mock"); err == nil {
+		t.Fatalf("未知 finish 码应拒绝，但返回明文: %q", string(out))
+	}
+}
+
 // TestDecryptSSEFinishReasonPrecise finish=stop 时 delta 为空对象 + finish_reason="stop"。
 func TestDecryptSSEFinishReasonPrecise(t *testing.T) {
 	_, kenc := newSessionForTest(t)
@@ -319,6 +375,72 @@ func TestSSEDecoderIncrementalFinishError(t *testing.T) {
 	}, []uint64{1, 2})
 	if _, err := feedAll(NewSSEStreamDecoder("reqF", "modelF"), body); err == nil {
 		t.Fatal("finish=error 未被拒绝")
+	}
+}
+
+// TestSSEDecoderIncrementalContentFilter OG-16：增量路径 content_filter 正常收尾，
+// guard 顶层透传，ContentFiltered() 标志置位；stop 流标志须保持 false。
+func TestSSEDecoderIncrementalContentFilter(t *testing.T) {
+	_, kenc := newSessionForTest(t)
+	body := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+		{Seq: 1, Delta: "安全前缀"},
+		{Seq: 2, Finish: "content_filter", Guard: &chunkGuard{
+			Detected:      true,
+			Filtered:      true,
+			Action:        "block",
+			Category:      "A1-06",
+			PolicyVersion: "pol-v1",
+			Mode:          "enforcing",
+		}},
+	}, []uint64{1, 2})
+	dec := NewSSEStreamDecoder("reqICF", "modelICF")
+	if dec.ContentFiltered() {
+		t.Fatal("新建解码器 ContentFiltered 应为 false")
+	}
+	out, err := feedAll(dec, body)
+	if err != nil {
+		t.Fatalf("增量 content_filter 应正常收尾，实际拒绝: %v", err)
+	}
+	s := string(out)
+	for _, want := range []string{
+		`"delta":{"content":"安全前缀"}`,
+		`"finish_reason":"content_filter"`,
+		`"category":"A1-06"`,
+		`"mode":"enforcing"`,
+		"data: [DONE]",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("增量 content_filter 重组缺 %q: %q", want, s)
+		}
+	}
+	if !strings.HasSuffix(s, "data: [DONE]\n\n") {
+		t.Fatal("增量 content_filter 流未以 [DONE] 终止")
+	}
+	if !dec.ContentFiltered() {
+		t.Fatal("content_filter 收尾后 ContentFiltered() 应为 true")
+	}
+	// 对照：stop 正常结束的流标志保持 false
+	stopBody := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+		{Seq: 1, Delta: "ok", Finish: "stop"},
+	}, []uint64{3})
+	stopDec := NewSSEStreamDecoder("reqS", "modelS")
+	if _, err := feedAll(stopDec, stopBody); err != nil {
+		t.Fatalf("stop 对照流解密失败: %v", err)
+	}
+	if stopDec.ContentFiltered() {
+		t.Fatal("stop 流 ContentFiltered 不应为 true")
+	}
+}
+
+// TestSSEDecoderIncrementalUnknownFinish OG-16：增量路径未知终止码（"filter"）仍整流拒绝。
+func TestSSEDecoderIncrementalUnknownFinish(t *testing.T) {
+	_, kenc := newSessionForTest(t)
+	body := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+		{Seq: 1, Delta: "partial"},
+		{Seq: 2, Delta: "", Finish: "filter"},
+	}, []uint64{1, 2})
+	if _, err := feedAll(NewSSEStreamDecoder("reqUF", "modelUF"), body); err == nil {
+		t.Fatal("增量路径未知 finish 码未被拒绝")
 	}
 }
 
