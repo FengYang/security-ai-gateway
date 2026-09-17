@@ -178,6 +178,88 @@ func TestCascadeOrderedEmissionUnderOutOfOrderL2(t *testing.T) {
 	}
 }
 
+// TestCascadeQueueDepthAggregatedAcrossRequests OG-13 缺陷2 回归：
+// 两个请求级 cascade 共享同一进程 metrics，L2 门控挂起时 buffer_queue_depth
+// 必须等于全进程在飞总和；一个请求关闭只按自身残留扣减（不覆写全局），
+// 其迟到 L2 回调因 l2InFlight 已销账而 settle no-op（不得重复扣减）；另一请求完成后归零。
+func TestCascadeQueueDepthAggregatedAcrossRequests(t *testing.T) {
+	m := newMetrics()
+	m.setOutputGuardMode(outputGuardShadow, defaultPolicyVersion)
+	a := newAuditChain()
+	cfg := outputGuardConfig{
+		Mode:          outputGuardShadow,
+		PolicyVersion: defaultPolicyVersion,
+		Params:        resolveOutputGuardParams(defaultOutputGuardParams()),
+		Cascade:       cascadeParams(true),
+	}
+	newGuard := func(reqID string, l2 OutputClassifier) *outputGuard {
+		og, err := newOutputGuard(cfg, fakeL2Classifier{}, l2, m, a, "acme", reqID)
+		if err != nil {
+			t.Fatalf("newOutputGuard(%s): %v", reqID, err)
+		}
+		return og
+	}
+	depth := func() int64 {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.ogBufferQueueDepth
+	}
+
+	l2A, l2B := newStubL2(), newStubL2()
+	gA1, gA2 := make(chan struct{}), make(chan struct{})
+	gB1, gB2, gB3 := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	l2A.gates["a1。"] = gA1
+	l2A.gates["a2。"] = gA2
+	l2B.gates["b1。"] = gB1
+	l2B.gates["b2。"] = gB2
+	l2B.gates["b3。"] = gB3
+
+	ogA, ogB := newGuard("reqA", l2A), newGuard("reqB", l2B)
+	recA, recB := &frameRecorder{}, &frameRecorder{}
+	for _, d := range []string{"a1。", "a2。"} {
+		if err := ogA.Process(d, recA.emit); err != nil {
+			t.Fatalf("ogA.Process: %v", err)
+		}
+	}
+	for _, d := range []string{"b1。", "b2。", "b3。"} {
+		if err := ogB.Process(d, recB.emit); err != nil {
+			t.Fatalf("ogB.Process: %v", err)
+		}
+	}
+	waitFor(t, "5 个 L2 调用全部在飞", func() bool { return l2A.callCount()+l2B.callCount() == 5 })
+	if d := depth(); d != 5 {
+		t.Fatalf("全进程在飞总量应为 5（旧 set 覆写口径只会看到最后写入者的本地值 3），实际 %d", d)
+	}
+
+	// A 断连关闭：2 个在飞按残留扣减；B 的 3 个必须保留（旧代码会全局抹 0）
+	ogA.Close()
+	if d := depth(); d != 3 {
+		t.Fatalf("关闭 A 后全局深度应为 3（仅扣 A 残留 2），实际 %d", d)
+	}
+	// A 的迟到回调返回：l2InFlight 已销账 → settle no-op，不得重复扣减
+	close(gA1)
+	close(gA2)
+	waitFor(t, "A 的 2 个迟到回调记 late", func() bool {
+		return strings.Contains(renderMetrics(m, 0), `{category="",result="late"} 2`)
+	})
+	if d := depth(); d != 3 {
+		t.Fatalf("A 迟到回调后深度应仍为 3（销账防双扣），实际 %d", d)
+	}
+
+	// B 三句正常完成：各配对 −1，归零
+	close(gB1)
+	close(gB2)
+	close(gB3)
+	if err := ogB.Finish(recB.emit); err != nil {
+		t.Fatalf("ogB.Finish: %v", err)
+	}
+	waitFor(t, "B 完成后全局深度归零", func() bool { return depth() == 0 })
+	ogB.Close()
+	if d := depth(); d != 0 {
+		t.Fatalf("收尾后深度应为 0，实际 %d", d)
+	}
+}
+
 // TestCascadeNonBlockingKeepsByteStream：生产 shadow（BlockEmission=false）→
 // 逐 delta 立即放行，字节序列与输入完全一致（阻塞开关关闭时行为与 M2 一致）。
 func TestCascadeNonBlockingKeepsByteStream(t *testing.T) {

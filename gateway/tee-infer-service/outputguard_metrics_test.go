@@ -214,7 +214,7 @@ func TestOGBufferMetrics(t *testing.T) {
 	m := newMetrics()
 	m.incOGBufferFull()
 	m.incOGBufferFull()
-	m.setOGBufferQueueDepth(7)
+	m.addOGBufferQueueDepth(7)
 
 	var buf bytes.Buffer
 	m.render(&buf, 0)

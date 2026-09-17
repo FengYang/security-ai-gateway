@@ -56,26 +56,26 @@ type otpmaskMetrics struct {
 	// A 项：数据面明文影子窗口级上报计数（result=accepted|deduped|rejected）
 	shadowReports map[string]int64
 	// GA-输出侧内容审查（OG-3 M1 骨架；§4.10 唯一目录）
-	ogRequests      map[string]int64 // mode（审查过的请求数）
-	ogL1Hit         map[string]int64 // category（L1 规则层命中）
-	ogWouldReject   map[string]int64 // category（shadow 命中=本该拦截）
-	ogForcedSplit   map[string]int64 // reason（缓冲强切：max_unit|first_unit，OG-4）
-	ogUnmapped      map[string]int64 // backend|category_raw（后端类目未映射，M2）
-	ogBlocked       map[string]int64 // category|mode（命中且动作=block，enforcing）
-	ogMasked        map[string]int64 // category（命中且动作=mask/rewrite）
-	ogPolicyRollback map[string]int64 // reason（策略热加载回退事件）
-	ogDegraded      map[string]int64 // backend|reason（后端降级事件，M2）
-	ogInflightBytes int64            // gauge：在飞缓冲字节数（M1）
-	ogLatencyMs     *histogram       // 单请求审查总延迟（手写桶，M1）
-	ogFirstFrameDelay *histogram     // 首帧延迟增量（M2）
-	ogMode          string           // gauge：当前运行模式（off|shadow|enforcing）
-	ogPolicyVersion string           // gauge：当前生效策略版本
+	ogRequests        map[string]int64 // mode（审查过的请求数）
+	ogL1Hit           map[string]int64 // category（L1 规则层命中）
+	ogWouldReject     map[string]int64 // category（shadow 命中=本该拦截）
+	ogForcedSplit     map[string]int64 // reason（缓冲强切：max_unit|first_unit，OG-4）
+	ogUnmapped        map[string]int64 // backend|category_raw（后端类目未映射，M2）
+	ogBlocked         map[string]int64 // category|mode（命中且动作=block，enforcing）
+	ogMasked          map[string]int64 // category（命中且动作=mask/rewrite）
+	ogPolicyRollback  map[string]int64 // reason（策略热加载回退事件）
+	ogDegraded        map[string]int64 // backend|reason（后端降级事件，M2）
+	ogInflightBytes   int64            // gauge：在飞缓冲字节数（M1）
+	ogLatencyMs       *histogram       // 单请求审查总延迟（手写桶，M1）
+	ogFirstFrameDelay *histogram       // 首帧延迟增量（M2）
+	ogMode            string           // gauge：当前运行模式（off|shadow|enforcing）
+	ogPolicyVersion   string           // gauge：当前生效策略版本
 	// L2 级联相关（M3 骨架；指标名与标签预定义，零值不可见属正常）
-	ogL2Call          map[string]int64 // category|result（L2 调用次数，M3）
-	ogL2OnlyHit       map[string]int64 // category（L1未命中+L2命中=L2专属贡献，M3）
-	ogBufferFull      int64            // counter：队列溢出/超并发容量阀触发次数（M3）
-	ogBufferQueueDepth int64           // gauge：等待L2结果的句队列深度（M3）
-	ogL2DurationSec   *histogram       // L2 单句调用延迟（秒，手写桶，M3）
+	ogL2Call           map[string]int64 // category|result（L2 调用次数，M3）
+	ogL2OnlyHit        map[string]int64 // category（L1未命中+L2命中=L2专属贡献，M3）
+	ogBufferFull       int64            // counter：队列溢出/超并发容量阀触发次数（M3）
+	ogBufferQueueDepth int64            // gauge：等待L2结果的句队列深度（M3）
+	ogL2DurationSec    *histogram       // L2 单句调用延迟（秒，手写桶，M3）
 	// M3 OG-13：派生 gauge 的分子/分母（不单独暴露指标；§4.10 只有两个派生 gauge）。
 	ogSentences      int64 // 判定句总数（l2_cascade_ratio / failclosed_sentences_ratio 分母）
 	ogFailclosedSent int64 // 按 P-DEGRADE（fail-closed）处置的句数
@@ -544,10 +544,15 @@ func (m *otpmaskMetrics) incOGBufferFull() {
 	m.mu.Unlock()
 }
 
-// setOGBufferQueueDepth 设置当前等待 L2 结果的句队列深度（gauge）。
-func (m *otpmaskMetrics) setOGBufferQueueDepth(d int64) {
+// addOGBufferQueueDepth 聚合调整全进程当前等待 L2 结果的句队列深度（gauge）。
+// 各请求级 cascade 以发起 +1 / 收敛 −1 / 关闭按残留差值扣减配对记账；
+// 多请求共享同一进程总量（OG-13 缺陷2：原 set 覆写式会被并发请求互相覆盖致失真）。
+func (m *otpmaskMetrics) addOGBufferQueueDepth(delta int64) {
 	m.mu.Lock()
-	m.ogBufferQueueDepth = d
+	m.ogBufferQueueDepth += delta
+	if m.ogBufferQueueDepth < 0 {
+		m.ogBufferQueueDepth = 0 // 守恒兜底：配对正确时不触发
+	}
 	m.mu.Unlock()
 }
 

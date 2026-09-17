@@ -15,7 +15,7 @@
 // 阻塞开关（§3.6.3「M3 打开阻塞只需把开关从 false 改 true，不改数据结构」）：
 //   - `BlockEmission=false`（生产 shadow 缺省）：emitter 不等 pending，行为与 M2 逐字节一致；
 //   - `BlockEmission=true`（浸泡预演，非 §5 参数表参数）：emitter 遇 pending 即停，产出真实首帧延迟增量；
-//   两形态下槽位/定时器/并发计数/指标路径完全相同（§3.6.3 末段要求）。
+//     两形态下槽位/定时器/并发计数/指标路径完全相同（§3.6.3 末段要求）。
 //
 // 容量与降级（§3.6.3 细节 1/2/5、§3.6.4 降级表）：
 //   - 提交前检查并发：`inFlight >= P-CONCURRENCY` → 该句直接按 P-DEGRADE（**不排队**）＋容量阀计数；
@@ -91,10 +91,10 @@ type cascade struct {
 	l2   OutputClassifier // nil = 纯 L1（无级联）
 	emit outputEmitFunc   // 唯一出口（§2.3 I2）
 
-	m       *otpmaskMetrics
-	a       *auditChain
-	tenant  string
-	requestID string
+	m             *otpmaskMetrics
+	a             *auditChain
+	tenant        string
+	requestID     string
 	policyVersion string
 
 	slots    []*cascadeSlot
@@ -117,10 +117,10 @@ type cascade struct {
 	firstDeltaAt time.Time // 首个 delta 进入管线时刻（§4.3.2 首帧延迟增量起点）
 	firstEmitAt  time.Time // 首次写出时刻
 
-	sentences    int64 // 判定句数（派生 gauge 分母）
-	failclosed   int64 // 按 P-DEGRADE 处置的句数（派生 gauge 分子）
-	l2Calls      int64 // 已发起的 L2 调用数（含画像；l2_cascade_ratio 分子）
-	degradedAudit bool // 每请求只落一条 output_guard_degraded（避免长流刷链）
+	sentences     int64 // 判定句数（派生 gauge 分母）
+	failclosed    int64 // 按 P-DEGRADE 处置的句数（派生 gauge 分子）
+	l2Calls       int64 // 已发起的 L2 调用数（含画像；l2_cascade_ratio 分子）
+	degradedAudit bool  // 每请求只落一条 output_guard_degraded（避免长流刷链）
 }
 
 // newCascade 构造请求级级联控制器。params 须为 resolve 后的取值。
@@ -254,11 +254,11 @@ func (c *cascade) submitUnitLocked(unit string) {
 		return
 	}
 	s := &cascadeSlot{
-		seq:      len(c.slots),
-		state:    slotPending,
-		unit:     unit,
-		action:   catActionPass,
-		deltaTo:  len(c.deltas) - 1,
+		seq:       len(c.slots),
+		state:     slotPending,
+		unit:      unit,
+		action:    catActionPass,
+		deltaTo:   len(c.deltas) - 1,
 		deltaFrom: c.claimUntil,
 	}
 	if s.deltaFrom > s.deltaTo {
@@ -337,7 +337,7 @@ func (c *cascade) startL2Locked(s *cascadeSlot, profiling bool) {
 	s.l2InFlight = true
 	s.profiling = profiling
 	if c.m != nil {
-		c.m.setOGBufferQueueDepth(int64(c.inFlight))
+		c.m.addOGBufferQueueDepth(1) // OG-13 缺陷2：进程级聚合 +1（不再以本 cascade 本地值覆写全局）
 		c.m.incOGL2CallStarted()
 	}
 	if !profiling {
@@ -471,9 +471,9 @@ func (c *cascade) settleInFlightLocked(s *cascadeSlot) {
 	s.l2InFlight = false
 	if c.inFlight > 0 {
 		c.inFlight--
-	}
-	if c.m != nil {
-		c.m.setOGBufferQueueDepth(int64(c.inFlight))
+		if c.m != nil {
+			c.m.addOGBufferQueueDepth(-1) // 进程级聚合 −1（与 startL2Locked +1 配对）
+		}
 	}
 	c.cond.Broadcast()
 }
@@ -523,6 +523,7 @@ func (c *cascade) markClosedLocked() {
 		return
 	}
 	c.closed = true
+	residual := c.inFlight // 尚未 settle 的在飞 L2（其 HTTP 回调可能迟到）
 	for _, s := range c.slots {
 		if s.state == slotPending {
 			s.state = slotClosed
@@ -530,10 +531,14 @@ func (c *cascade) markClosedLocked() {
 				s.timer.Stop()
 			}
 		}
+		// 销账：关闭后迟到的 L2 回调 settleInFlightLocked 须为 no-op，
+		// 否则其 −1 与下面的残留扣减重复，导致进程级全局 gauge 漂移为负。
+		s.l2InFlight = false
 	}
 	c.inFlight = 0
-	if c.m != nil {
-		c.m.setOGBufferQueueDepth(0)
+	if c.m != nil && residual > 0 {
+		// OG-13 缺陷2：只扣本 cascade 的残留量，不覆写全局（其他请求的在飞计数保留）。
+		c.m.addOGBufferQueueDepth(-int64(residual))
 	}
 	c.deltas, c.deltaGates = nil, nil
 	c.cond.Broadcast()
