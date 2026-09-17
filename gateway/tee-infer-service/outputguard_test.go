@@ -64,9 +64,9 @@ func TestOutputGuardOffIsNil(t *testing.T) {
 	}
 }
 
-// TestOutputGuardRejectsInvalidAndUnimplemented：非法值 / enforcing（M1 未实现）→ 报错（拒绝启动）。
-func TestOutputGuardRejectsInvalidAndUnimplemented(t *testing.T) {
-	for _, mode := range []string{outputGuardEnforcing, "bogus", "SHADOW", "off "} {
+// TestOutputGuardRejectsInvalidModes：非法值 → 报错（拒绝启动）；enforcing M4 起合法（仅启动参数）。
+func TestOutputGuardRejectsInvalidModes(t *testing.T) {
+	for _, mode := range []string{"bogus", "SHADOW", "off "} {
 		if err := validateOutputGuardMode(mode); err == nil {
 			t.Fatalf("validateOutputGuardMode(%q) 期望报错", mode)
 		}
@@ -74,7 +74,7 @@ func TestOutputGuardRejectsInvalidAndUnimplemented(t *testing.T) {
 			t.Fatalf("newOutputGuard(%q) 期望报错", mode)
 		}
 	}
-	for _, mode := range []string{"", outputGuardOff, outputGuardShadow} {
+	for _, mode := range []string{"", outputGuardOff, outputGuardShadow, outputGuardEnforcing} {
 		if err := validateOutputGuardMode(mode); err != nil {
 			t.Fatalf("validateOutputGuardMode(%q) 期望通过，实际 %v", mode, err)
 		}

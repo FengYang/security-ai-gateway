@@ -863,6 +863,36 @@ func TestOutputGuardConfigRejectEnforcing(t *testing.T) {
 	}
 }
 
+// TestOutputGuardConfigPersistedEnforcingIgnored fail-safe（用例 15，D4'）：
+// 持久化文件中即使存在 enforcing 记录（手工伪造/旧版本遗留），启动恢复也必须忽略——
+// enforcing 只能由启动参数开启，运行时通道（含跨重启恢复）不开放。
+func TestOutputGuardConfigPersistedEnforcingIgnored(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "og-config.json")
+	rec := outputGuardConfigRecord{
+		Mode: outputGuardEnforcing, Actor: "forged", RequestID: "forged-req", UpdatedAt: 12345,
+	}
+	raw, _ := json.Marshal(rec)
+	if err := os.WriteFile(tmpFile, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, _ := newM9Server(t)
+	srv.outputGuardMode = outputGuardShadow // 启动参数 = shadow
+	srv.outputGuardCfgPath = tmpFile
+	srv.loadOutputGuardOverride()
+
+	if v := srv.currentOutputGuardMode(); v != outputGuardShadow {
+		t.Fatalf("持久化的 enforcing 必须被忽略并沿用启动参数，实际 mode=%q", v)
+	}
+	if v := srv.outputGuardModeSource(); v != "startup" {
+		t.Fatalf("忽略后期望 source=startup，实际 %q", v)
+	}
+	// 未应用 → 不得落 mode_change applied 审计
+	if n := srv.audit.countByAction("output_guard_mode_change"); n != 0 {
+		t.Fatalf("忽略 enforcing 记录不得落 mode_change 审计，实际 %d", n)
+	}
+}
+
 // TestOutputGuardConfigContract GET → 405；无令牌 → 401；非法 JSON → 400。
 func TestOutputGuardConfigContract(t *testing.T) {
 	srv, _ := newM9Server(t)

@@ -22,12 +22,14 @@ package main
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"security-ai-gateway/gateway/tee-infer-service/model"
 	"security-ai-gateway/protocol/go"
@@ -434,6 +436,139 @@ func TestOutputGuardFramewiseE2EShadow(t *testing.T) {
 		if e.Action == "output_would_reject" && (e.OGCategory != "A1-07" || e.OGMode != outputGuardShadow) {
 			t.Fatalf("审计类目/模式不符：%+v", e)
 		}
+	}
+}
+
+// framewiseStubEngineThenError 在发完 deltas 后返回错误（用于 genErr 分支实链测试）。
+// waitBlocked 非空时：返回 error 前必须等到 enforcing blocked_total 落定——
+// 否则 L2 回调与引擎返回存在调度竞态（未落定时 genErr 分支按合同发 "error" 而非
+// content_filter），无法确定性验证"block 优先于 error"分支。
+type framewiseStubEngineThenError struct {
+	deltas      []string
+	err         error
+	waitBlocked *otpmaskMetrics
+}
+
+func (framewiseStubEngineThenError) Predict([]float64) int { return -1 }
+
+func (e framewiseStubEngineThenError) Generate(_ model.GenerateRequest, onDelta func(string) error) error {
+	for _, d := range e.deltas {
+		if err := onDelta(d); err != nil {
+			return err
+		}
+	}
+	if e.waitBlocked != nil {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if strings.Contains(renderMetrics(e.waitBlocked, 0), `otpmask_output_guard_blocked_total{category="A1-06",mode="enforcing"} 1`) {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	return e.err
+}
+
+// TestOutputGuardFramewiseE2EEnforcing 实链逐帧 e2e（enforcing，用例 13）：
+// L2 判 block（A1-06）→ 全流零 delta 下发 + 终止帧 content_filter + block chunk-meta；
+// 逐帧+拼接断言器对被拦内容零命中；审计落 output_blocked。
+//
+// L1 三个原生类目（pii/sql_injection/prompt_injection）均映射 flag 档（A4-06/A1-07），
+// 故 enforcing 整流终止只能由 L2 语义层 block 判定触发（与生产路径一致）。
+func TestOutputGuardFramewiseE2EEnforcing(t *testing.T) {
+	srv, ts := newM9Server(t)
+	srv.outputGuardMode = outputGuardEnforcing
+	srv.outputGuardParams = defaultOutputGuardParams()
+	srv.outputGuardCascade = cascadeParams(true)
+	srv.outputGuardL2 = fakeL2Classifier{cat: "A1-06", conf: 0.9}
+	deltas := []string{"好的。", "这是。", "结束。"}
+	srv.model = framewiseStubEngine{deltas: deltas}
+
+	sessionID, ksig, kenc := setupTestSession(t, ts)
+	hr := buildTextInferRequest(t, ts.URL+"/v1/infer", sessionID, ksig, kenc, "请讲个笑话",
+		protocol.EngineTypeTEEGPU, true, 1)
+	resp, err := http.DefaultClient.Do(hr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("enforcing 流 HTTP 状态应 200（拦截体现在终止码），got %d", resp.StatusCode)
+	}
+	frames := parseWireFrames(t, mustReadAll(t, resp.Body), sessionID, kenc)
+
+	for i, f := range frames {
+		if f.Delta != "" {
+			t.Fatalf("block 流不得下发任何 delta（帧 %d 泄漏 %q）", i, f.Delta)
+		}
+	}
+	vs := checkDeliveredFrames(frames, frameCheckOpts{
+		Forbidden: deltas, WantFinish: "content_filter", WantMode: outputGuardEnforcing,
+	})
+	if len(vs) != 0 {
+		t.Fatalf("被拦内容零命中且终止码 content_filter，断言器应零违规：%+v", vs)
+	}
+
+	last := frames[len(frames)-1]
+	if last.Finish != "content_filter" {
+		t.Fatalf("终止码应为 content_filter，实际 %q", last.Finish)
+	}
+	if last.Guard == nil || !last.Guard.Detected || !last.Guard.Filtered ||
+		last.Guard.Action != catActionBlock || last.Guard.Category != "A1-06" {
+		t.Fatalf("终止帧 chunk-meta 应为 block/A1-06：%+v", last.Guard)
+	}
+	if last.Guard.Mode != outputGuardEnforcing || last.Guard.PolicyVersion == "" {
+		t.Fatalf("chunk-meta mode/policy_version 不符：%+v", last.Guard)
+	}
+
+	if n := srv.audit.countByAction("output_blocked"); n != 1 {
+		t.Fatalf("应落 1 条 output_blocked 审计，实际 %d", n)
+	}
+	for _, e := range srv.audit.query("") {
+		if e.Action == "output_blocked" && (e.OGCategory != "A1-06" || e.OGMode != outputGuardEnforcing) {
+			t.Fatalf("output_blocked 审计类目/模式不符：%+v", e)
+		}
+	}
+}
+
+// TestOutputGuardFramewiseE2EEnforcingGenErr 实链 e2e（用例 14）：
+// block 整流终止后引擎返回 error —— block 优先于 error，终止帧合同仍为 content_filter
+// 且零 delta 泄漏（main.go genErr 分支）。
+func TestOutputGuardFramewiseE2EEnforcingGenErr(t *testing.T) {
+	srv, ts := newM9Server(t)
+	srv.outputGuardMode = outputGuardEnforcing
+	srv.outputGuardParams = defaultOutputGuardParams()
+	srv.outputGuardCascade = cascadeParams(true)
+	srv.outputGuardL2 = fakeL2Classifier{cat: "A1-06", conf: 0.9}
+	deltas := []string{"好的。", "这是。"}
+	srv.model = framewiseStubEngineThenError{
+		deltas: deltas, err: errors.New("engine boom"), waitBlocked: srv.metrics,
+	}
+
+	sessionID, ksig, kenc := setupTestSession(t, ts)
+	hr := buildTextInferRequest(t, ts.URL+"/v1/infer", sessionID, ksig, kenc, "请讲个笑话",
+		protocol.EngineTypeTEEGPU, true, 1)
+	resp, err := http.DefaultClient.Do(hr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("genErr 帧已在 200 内写出，got %d", resp.StatusCode)
+	}
+	frames := parseWireFrames(t, mustReadAll(t, resp.Body), sessionID, kenc)
+
+	for i, f := range frames {
+		if f.Delta != "" {
+			t.Fatalf("block+genErr 流不得泄漏 delta（帧 %d 泄漏 %q）", i, f.Delta)
+		}
+	}
+	last := frames[len(frames)-1]
+	if last.Finish != "content_filter" {
+		t.Fatalf("block 优先于 error：终止码应为 content_filter，实际 %q", last.Finish)
+	}
+	if last.Guard == nil || last.Guard.Action != catActionBlock || last.Guard.Category != "A1-06" {
+		t.Fatalf("genErr 终止帧应带 block/A1-06 chunk-meta：%+v", last.Guard)
 	}
 }
 

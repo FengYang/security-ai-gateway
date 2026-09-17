@@ -146,8 +146,9 @@ func TestCatActionForMode(t *testing.T) {
 	if a := catActionForMode("A1-06", outputGuardEnforcing); a != catActionBlock {
 		t.Fatalf("enforcing 下 A1-06 期望 block，实际 %s", a)
 	}
-	if a := catActionForMode("A4-06", outputGuardEnforcing); a != catActionMask {
-		t.Fatalf("enforcing 下 A4-06 期望 mask，实际 %s", a)
+	// D1'：block-only 深度下 PII mask 冲突降为 flag（P-PII-ACTION；改写归 OG-18）。
+	if a := catActionForMode("A4-06", outputGuardEnforcing); a != catActionFlag {
+		t.Fatalf("enforcing 下 A4-06（mask 冲突降档）期望 flag，实际 %s", a)
 	}
 	if a := catActionForMode("A1-07", outputGuardEnforcing); a != catActionFlag {
 		t.Fatalf("enforcing 下 A1-07（中级别）期望 flag，实际 %s", a)
