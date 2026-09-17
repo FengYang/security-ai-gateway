@@ -153,3 +153,6 @@ docs/archive/html-snapshots/
 # corpus.jsonl 由 scripts/build-guardrail-bench.ps1 生成（含第三方数据集内容 + 体积），
 # 入库的是「生成脚本 + sources.json 清单 + README」，复现步骤见该目录 README。
 gateway/tee-infer-service/testdata/guardrail-bench/corpus.jsonl
+
+# ===== OG-13 级联浸泡产物（本地产物，不入库；结论摘录进 B3 报告）=====
+og13-results/
