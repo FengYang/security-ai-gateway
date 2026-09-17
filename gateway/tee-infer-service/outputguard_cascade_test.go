@@ -6,6 +6,8 @@
 package main
 
 import (
+	"fmt"
+	"math/rand"
 	"strings"
 	"sync"
 	"testing"
@@ -491,4 +493,191 @@ func TestCascadeCloseIsIdempotentAndSettlesInflight(t *testing.T) {
 	if n := a.countByAction("output_would_reject"); n != 0 {
 		t.Fatalf("断连后不得产命中留痕，实际 %d", n)
 	}
+}
+
+// ---- OG-13 B2 验收：shadow 字节零变化 + 阻塞预演（§2.3「不改变输出字节」红线）----
+
+// randL2Stub 随机判定 L2 stub：按种子生成随机"判定 + 延迟"，覆盖全部归一化分支
+// （未命中 / 命中 / 置信度缺失 / 类目未映射 / 调用失败）与乱序完成。
+// RNG 取数在锁内完成、睡眠在锁外（并发安全且不串行化调用）。
+type randL2Stub struct {
+	mu     sync.Mutex
+	rng    *rand.Rand
+	jitter time.Duration
+}
+
+func newRandL2Stub(seed int64, jitter time.Duration) *randL2Stub {
+	return &randL2Stub{rng: rand.New(rand.NewSource(seed)), jitter: jitter}
+}
+
+func (s *randL2Stub) Classify(string) (string, float64, string) {
+	s.mu.Lock()
+	roll := s.rng.Intn(5)
+	conf := 0.5 + s.rng.Float64()/2
+	var delay time.Duration
+	if s.jitter > 0 {
+		delay = time.Duration(s.rng.Int63n(int64(s.jitter)))
+	}
+	s.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	switch roll {
+	case 0:
+		return "", 0, "" // 未命中
+	case 1:
+		return "A2-03", conf, "" // 命中
+	case 2:
+		return "A1-07", 0, "" // 命中但置信度缺失 → P-DEGRADE
+	case 3:
+		return "未映射类目", conf, "" // 类目未映射 → P-DEGRADE
+	default:
+		return "", -1, "" // 调用失败 → P-DEGRADE
+	}
+}
+
+// randDeltas 生成随机 delta 序列：含终止句与未终止片段（覆盖"多个 delta 归属同一槽位"
+// 与"delta 无槽位归属"两种形态），含多 rune 字符与空句。
+func randDeltas(rng *rand.Rand, n int) []string {
+	body := []rune("甲乙丙丁戊己庚辛壬癸")
+	tails := []string{"。", "！", "？", "；", "…", "\n", ""}
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		var sb strings.Builder
+		for j, l := 0, 1+rng.Intn(4); j < l; j++ {
+			sb.WriteRune(body[rng.Intn(len(body))])
+		}
+		sb.WriteString(tails[rng.Intn(len(tails))])
+		out = append(out, sb.String())
+	}
+	return out
+}
+
+// fuzzCascadeParams 字节一致性 fuzz 参数：并发/槽位上限放大，让每句都真实走 L2 判定路径
+// （而非被容量阀快速降级），从而覆盖全部分支；超时保持默认（避免 fuzz 变成超时测试）。
+func fuzzCascadeParams(blocking bool) outputGuardCascadeParams {
+	p := cascadeParams(blocking)
+	p.Concurrency = 64
+	p.MaxSlots = 4096
+	return p
+}
+
+// assertEmitFrames 逐帧校验下发序列与输入 delta 序列完全一致：
+// 帧数相等（不跳发、不合并帧）且逐帧字节相同（原样写出、不改内容）。
+func assertEmitFrames(t *testing.T, ctx string, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s：下发帧数 %d ≠ delta 数 %d（跳发或合并帧）\n got=%q\nwant=%q", ctx, len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s：第 %d 帧字节不符\n got=%q\nwant=%q", ctx, i, got[i], want[i])
+		}
+	}
+}
+
+// runCascadeStream 按给定形态跑一遍流式提交，返回下发帧序列。
+func runCascadeStream(t *testing.T, deltas []string, blocking bool, l2 OutputClassifier) []string {
+	t.Helper()
+	og, _, _ := newCascadeGuard(t, fuzzCascadeParams(blocking), fakeL2Classifier{}, l2)
+	rec := &frameRecorder{}
+	for _, d := range deltas {
+		if err := og.Process(d, rec.emit); err != nil {
+			t.Fatalf("blocking=%t Process(%q): %v", blocking, d, err)
+		}
+	}
+	if err := og.Finish(rec.emit); err != nil {
+		t.Fatalf("blocking=%t Finish: %v", blocking, err)
+	}
+	og.Close()
+	return rec.snapshot()
+}
+
+// TestCascadeShadowByteStreamFuzz（B2 验收 1）：生产 shadow（BlockEmission=false）下，
+// 随机 delta 序列 × 随机 L2 判定/延迟/乱序完成 → 下发帧序列与输入逐帧相同（字节零变化）。
+func TestCascadeShadowByteStreamFuzz(t *testing.T) {
+	for seed := int64(1); seed <= 20; seed++ {
+		deltas := randDeltas(rand.New(rand.NewSource(seed)), 40)
+		got := runCascadeStream(t, deltas, false, newRandL2Stub(seed, 12*time.Millisecond))
+		assertEmitFrames(t, fmt.Sprintf("shadow seed=%d", seed), got, deltas)
+	}
+}
+
+// TestCascadeBlockingMatchesShadowBytes（B2 验收 2a）：同一输入、同一 L2 随机序列，
+// 分别在阻塞预演（BlockEmission=true）与生产 shadow 下跑 → 两形态下发帧序列逐帧相同，
+// 且都等于输入（阻塞开关只改时序、不改字节；§3.6.3 末段要求）。
+func TestCascadeBlockingMatchesShadowBytes(t *testing.T) {
+	for seed := int64(1); seed <= 20; seed++ {
+		deltas := randDeltas(rand.New(rand.NewSource(seed)), 40)
+		shadow := runCascadeStream(t, deltas, false, newRandL2Stub(seed, 12*time.Millisecond))
+		blocking := runCascadeStream(t, deltas, true, newRandL2Stub(seed, 12*time.Millisecond))
+		assertEmitFrames(t, fmt.Sprintf("shadow seed=%d", seed), shadow, deltas)
+		assertEmitFrames(t, fmt.Sprintf("blocking seed=%d", seed), blocking, deltas)
+	}
+}
+
+// TestCascadeBlockingStreamingFirstFrameDelay（B2 验收 2b）：阻塞预演下流式提交——
+// 首句 L2 慢、后句 L2 快（后发先回）：后句不得越过首句下发；首帧延迟增量 ≈ 首句 L2 延迟
+// （§4.3.2 首帧延迟增量口径）；收尾后排空且字节与输入一致。
+func TestCascadeBlockingStreamingFirstFrameDelay(t *testing.T) {
+	const l2Delay = 60 * time.Millisecond
+	l2 := newStubL2()
+	l2.delays["首句。"] = l2Delay // 后两句不在 delays 中：立即返回（模拟后发先回）
+
+	og, m, _ := newCascadeGuard(t, cascadeParams(true), fakeL2Classifier{}, l2)
+	rec := &frameRecorder{}
+
+	deltas := []string{"首句。", "次句。", "末句。"}
+	start := time.Now()
+	for _, d := range deltas {
+		if err := og.Process(d, rec.emit); err != nil {
+			t.Fatalf("Process(%q): %v", d, err)
+		}
+	}
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("首句未决时后句不得越过下发，实际 %v", got)
+	}
+	waitFor(t, "三帧按序下发", func() bool { return len(rec.snapshot()) == 3 })
+	if elapsed := time.Since(start); elapsed < l2Delay {
+		t.Fatalf("首帧延迟增量应 ≥ 首句 L2 延迟（%v），实际 %v", l2Delay, elapsed)
+	}
+	if err := og.Finish(rec.emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	og.Close()
+	assertEmitFrames(t, "blocking streaming", rec.snapshot(), deltas)
+
+	st := og.casc.stats()
+	if !st.HasFirstFrame {
+		t.Fatal("未记录首帧时刻（阻塞形态首帧延迟应为真实增量）")
+	}
+	if st.FirstFrameDelay < l2Delay-10*time.Millisecond {
+		t.Fatalf("首帧延迟增量应 ≈ 首句 L2 延迟（%v），实际 %v", l2Delay, st.FirstFrameDelay)
+	}
+	if body := renderMetrics(m, 0); !strings.Contains(body, "otpmask_output_guard_first_frame_delay_seconds_count 1") {
+		t.Fatalf("首帧延迟直方图缺样本\n---\n%s", body)
+	}
+}
+
+// TestCascadeBlockingReleasesUnclaimedTail（B2 验收 2c）：阻塞形态下，尾部 delta 若始终
+// 未构成判定单元（纯空白），Finish 兜底放行后必须真正下发——不得丢字节，
+// 也不得让下发游标永久卡住（否则 Finish 永不返回）。
+func TestCascadeBlockingReleasesUnclaimedTail(t *testing.T) {
+	// 唯一槽位的 L2 立即返回未命中 → 判定完成后无在飞调用（复现"无人在飞"的死锁前提）
+	og, _, _ := newCascadeGuard(t, fuzzCascadeParams(true), fakeL2Classifier{}, fakeL2Classifier{conf: 0.5})
+	rec := &frameRecorder{}
+
+	deltas := []string{"甲。", "\n", " "}
+	for _, d := range deltas {
+		if err := og.Process(d, rec.emit); err != nil {
+			t.Fatalf("Process(%q): %v", d, err)
+		}
+	}
+	// 等首句判定完成并下发：此后 inFlight=0 且无未决槽位，仅剩两个未认领 delta
+	waitFor(t, "首帧下发", func() bool { return len(rec.snapshot()) == 1 })
+	if err := og.Finish(rec.emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	og.Close()
+	assertEmitFrames(t, "blocking unclaimed tail", rec.snapshot(), deltas)
 }

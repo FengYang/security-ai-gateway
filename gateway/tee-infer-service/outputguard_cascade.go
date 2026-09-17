@@ -172,6 +172,11 @@ func (c *cascade) finish(units []string, emit outputEmitFunc) error {
 	}
 	c.noMore = true
 	c.releaseUnclaimedLocked()
+	// 放行未认领 delta 后必须自己推进一次游标：此时可能已无在飞 L2
+	// （无人会再调 emitReadyLocked），否则游标永久卡住、Finish 永不返回。
+	if err := c.emitReadyLocked(); err != nil {
+		return err
+	}
 	for !c.closed && (c.emitIdx < len(c.deltas) || c.inFlight > 0) {
 		c.cond.Wait()
 	}
