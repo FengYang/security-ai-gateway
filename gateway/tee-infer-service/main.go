@@ -1416,9 +1416,9 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	var seq uint64
-	writeChunk := func(delta, finish string) error {
+	writeChunk := func(delta, finish string, guard *chunkGuardMeta) error {
 		seq++
-		chunkJSON, err := json.Marshal(textStreamChunk{Seq: seq, Delta: delta, Finish: finish})
+		chunkJSON, err := json.Marshal(textStreamChunk{Seq: seq, Delta: delta, Finish: finish, Guard: guard})
 		if err != nil {
 			return err
 		}
@@ -1448,33 +1448,49 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		defer og.Close() // 幂等释放（C4：请求内生命周期）
 	}
 	// I2 唯一出口：所有写给客户端的内容必须经 emit（防绕过）。
-	emit := func(delta, finish string) error { return writeChunk(delta, finish) }
+	emit := func(delta, finish string) error { return writeChunk(delta, finish, nil) }
 
 	genErr := eng.Generate(genReq, func(delta string) error {
 		agg.WriteString(delta)
 		if og == nil {
 			return emit(delta, "") // 未开审查 == 现状路径
 		}
-		return og.Process(delta, emit) // 缓冲 → 判定 → emit（M1 shadow：只记不拦）
+		return og.Process(delta, emit) // 缓冲 → 判定 → emit（shadow 只记不拦；enforcing 按动作处置）
 	})
 	if genErr != nil {
 		// 200 已发出无法改状态码：以 error finish 分片终止，
-		// 插件侧（envelope.go）对非 stop 终止整流 fail-closed（不产出半截明文）
-		_ = writeChunk("", "error")
+		// 插件侧（envelope.go）对非 stop 终止整流 fail-closed（不产出半截明文）。
+		// M4：block 优先于 error——若审查已整流终止，终止码合同为 content_filter（§4.6），
+		// 违规内容已在 cascade 内拦下无泄漏；genErr 仍上抛供上游审计（与 §2.3 error 分支解耦）。
+		finishReason := "error"
+		var guard *chunkGuardMeta
+		if og != nil {
+			if blocked, _ := og.BlockInfo(); blocked {
+				finishReason = "content_filter"
+				guard = og.BuildGuardMeta()
+			}
+		}
+		_ = writeChunk("", finishReason, guard)
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		return genErr
 	}
-	// I3：收尾——OG-4 把缓冲尾部作为最后一个判定单元送判；shadow 无内容需补下发。
+	// I3：收尾——OG-4 把缓冲尾部作为最后一个判定单元送判；enforcing 下句级降级/终止在此收敛。
 	if og != nil {
 		if err := og.Finish(emit); err != nil {
 			return err
 		}
 	}
-	// 终止帧：带 chunk-meta guard 字段（§4.6.1；og=nil 时不带 guard 字段，与现网逐字节一致）。
-	stopChunk := textStreamChunk{Seq: seq + 1, Finish: "stop"}
+	// 终止帧：M4 enforcing 已整流终止 → finish=content_filter，否则维持 stop；
+	// 带 chunk-meta guard 字段（§4.6.1；og=nil 时 guard 为 nil，omitempty 与现网逐字节一致）。
+	finishReason := "stop"
+	var guardMeta *chunkGuardMeta
 	if og != nil {
-		stopChunk.Guard = og.BuildGuardMeta()
+		if blocked, _ := og.BlockInfo(); blocked {
+			finishReason = "content_filter"
+		}
+		guardMeta = og.BuildGuardMeta()
 	}
+	stopChunk := textStreamChunk{Seq: seq + 1, Finish: finishReason, Guard: guardMeta}
 	stopJSON, err := json.Marshal(stopChunk)
 	if err != nil {
 		return err
@@ -1926,7 +1942,8 @@ func (s *teeServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 // handleOutputGuardConfig 输出侧审查 mode 运行时切换（OG-8，§4.7 运行时覆盖 / D8 高敏变更）。
 //
 // 语义与边界（与 handleGuardrailConfig 对称设计）：
-//   - 仅允许 mode 在 off/shadow 间切换；**enforcing 属 M4，此处拒绝**（安全边界内不放开关）；
+//   - 仅允许 mode 在 off/shadow 间切换；**enforcing 不经运行时通道开启**（D4'：拦截路径已落地，
+//     但仅启动参数可开，待 admin 鉴权/D8 治理链与外部闸门就绪后另立批次放开）；
 //   - 治理链在 gateway-admin-service（高敏变更 submitter≠reviewer 复核通过后执行）；
 //     本端点只做"配置生效 + 持久化 + 落 tee-infer 审计链"；
 //   - 持久化文件由 -output-guard-config 指定；未指定则仅进程内生效（重启回退启动参数）；
@@ -1947,9 +1964,10 @@ func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "请求体须为 JSON", http.StatusBadRequest)
 		return
 	}
-	// 安全闸门：仅允许 off/shadow；enforcing 在 M4 前不开放。
+	// 安全闸门（D4'）：运行时仅允许 off/shadow 切换。enforcing 拦截路径（M4 OG-17）已落地，
+	// 但经启动参数显式开启；在 admin 鉴权/D8 治理链/外部闸门（台账 G-1/2/3）就绪前不放开运行时通道。
 	if req.Mode != outputGuardOff && req.Mode != outputGuardShadow {
-		http.Error(w, "mode 仅允许 off|shadow（enforcing 属 M4，当前不开放）", http.StatusBadRequest)
+		http.Error(w, "mode 仅允许 off|shadow（enforcing 拦截已实现，但仅能经启动参数开启；运行时切换待治理闸门）", http.StatusBadRequest)
 		return
 	}
 	actor := r.Header.Get("X-Admin-Actor")
@@ -2683,7 +2701,7 @@ func main() {
 	guardClassURL := flag.String("guard-classifier-url", "", "GF.4.3 语义分类器侧车地址（如 http://127.0.0.1:19091/classify）；为空 = 使用关键词规则分类器（默认，行为不变）")
 	guardClassKey := flag.String("guard-classifier-key", "", "语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
 	guardClassTimeout := flag.Duration("guard-classifier-timeout", 2*time.Second, "语义分类器侧车调用超时（分类器在请求路径上，须有限且小）")
-	outputGuardMode := flag.String("output-guard", "off", "GA-输出侧内容审查模式（OG-3 M1 骨架）：off（缺省，行为与现网逐字节一致）| shadow（跑 L1 只记不拦）；enforcing 属 M4 未实现，配置即拒绝启动")
+	outputGuardMode := flag.String("output-guard", "off", "GA-输出侧内容审查模式：off（缺省，行为与现网逐字节一致）| shadow（跑判定只记不拦）| enforcing（M4：缓冲模式 A 拦截，content_filter 终止；仅启动参数可开，运行时热切换仍限 off|shadow）")
 	outputGuardCfg := flag.String("output-guard-config", "", "GA-输出侧内容审查运行时配置持久化文件（OG-8：高敏复核写入的 mode）；为空 = 仅进程内生效，重启回退 -output-guard")
 	outputGuardPolicyDir := flag.String("output-guard-policy-dir", "", "GA-输出侧内容审查策略/词库目录（OG-9）：含 manifest.json 的 policy 根目录；为空 = 沿用既有 guardrail 规则（行为与现网一致）；加载失败/哈希不匹配即拒绝启动（fail-closed）")
 	outputGuardL2URL := flag.String("output-guard-l2-url", "", "GA-输出侧内容审查 L2 语义分类器侧车地址（M2 OG-12）：HTTP POST JSON，返回 blocked/category/confidence/match；为空 = 不启用 L2，纯 L1 规则（默认，行为零变化）")

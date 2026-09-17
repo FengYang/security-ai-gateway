@@ -205,7 +205,7 @@ func validateOutputGuardCascadeParams(c outputGuardCascadeParams) error {
 
 // outputGuardConfig 审查管线构造配置（§2.3 I1 `outputguard.New(cfg)`）。
 type outputGuardConfig struct {
-	Mode          string                    // P-MODE：off｜shadow（enforcing 属 M4）
+	Mode          string                    // P-MODE：off｜shadow｜enforcing（M4 拦截仅启动参数可开；运行时/持久化通道限 off｜shadow）
 	PolicyVersion string                    // 策略版本（manifest.policy_version；M1 未接词库，用 defaultPolicyVersion）
 	Params        outputGuardParams         // D 组缓冲参数（允许传未 resolve 值，构造时会 resolve）
 	Cascade       outputGuardCascadeParams  // E 组级联并发参数（允许传未 resolve 值，构造时会 resolve）
@@ -214,7 +214,8 @@ type outputGuardConfig struct {
 // ---- OG-8：运行时配置请求 / 持久化记录（与 guardrailConfigRequest 同构）----
 
 // outputGuardConfigRequest POST /config/output-guard 请求体（OG-8 运行时覆盖）。
-// 仅允许切换 mode（off｜shadow）；enforcing 属 M4，此处拒绝（安全闸门不开放）。
+// 仅允许切换 mode（off｜shadow）；enforcing 拦截已实现（M4 OG-17）但运行时通道不开放
+// （D4'：仅启动参数可开，待治理闸门批次放开）。
 // 治理链在 gateway-admin-service（D8 高敏变更 submitter≠reviewer 复核通过后执行），
 // 本端点只做"配置生效 + 持久化 + 落 tee-infer 审计链"。
 type outputGuardConfigRequest struct {

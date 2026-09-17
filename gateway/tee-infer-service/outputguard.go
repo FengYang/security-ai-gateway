@@ -5,8 +5,10 @@
 //   - shadow：跑 **OG-4 判定单元缓冲**（按句切分，§4.3.1）→ 每个完整单元跑 L1 规则
 //     （复用既有 guardrail.check），命中记审计 `output_would_reject` + 指标
 //     （l1_hit / would_reject），**输出原样逐 delta 放行**（只记不拦、不改变时延）；
-//   - enforcing：属 M4，M1 未实现——配置为 enforcing 即**拒绝启动**（不静默降级，
-//     避免"以为开了其实没开"，对齐 §5.1 P-MODE 非法值语义）。
+//   - enforcing：M4 OG-17 已实现缓冲模式 A——未决句不下发，命中 block 的句子整流终止
+//     （管线层发 finish=content_filter 终止帧），句级 P-DEGRADE 丢句续传。
+//     **仅启动参数可开启**；运行时热切换与持久化恢复仍只接受 off|shadow（闸门见 main.go），
+//     默认 off，不静默降级（非法值拒绝启动，对齐 §5.1 P-MODE）。
 //
 // 判定单元一致性（关键）：shadow 与 enforcing 使用**同一套缓冲/切分**（§4.3.1 P-UNIT），
 // 否则 shadow 统计的命中率/误杀率不能代表 enforcing 的实况，影子失去意义。
@@ -26,7 +28,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -34,7 +38,7 @@ import (
 const (
 	outputGuardOff       = "off"       // 缺省：完全不介入，行为与现网一致
 	outputGuardShadow    = "shadow"    // 跑完整判定但输出原样放行（只记不拦）
-	outputGuardEnforcing = "enforcing" // 按动作表改写下发/终止（M4，M1 未实现）
+	outputGuardEnforcing = "enforcing" // 按动作表拦截下发/终止（M4 OG-17 缓冲模式 A；仅启动参数可开）
 )
 
 // defaultPolicyVersion M1 骨架策略版本（mode/policy_version gauge 与审计证据字段用）。
@@ -90,22 +94,20 @@ type outputGuard struct {
 	closed bool
 }
 
-// validateOutputGuardMode 校验审查模式（启动期调用；非法/enforcing 未实现即拒绝启动）。
-// 空串按缺省 off 处理（P-MODE：未配置＝off）。
+// validateOutputGuardMode 校验审查模式（启动期调用；空串按缺省 off）。
+// enforcing 经启动参数显式开启即合法；运行时热切换/持久化恢复另有 off|shadow 白名单
+// （main.go，D4' 闸门批次前不放开）。
 func validateOutputGuardMode(mode string) error {
 	switch mode {
-	case "", outputGuardOff, outputGuardShadow:
+	case "", outputGuardOff, outputGuardShadow, outputGuardEnforcing:
 		return nil
-	case outputGuardEnforcing:
-		return fmt.Errorf("output-guard=enforcing 在 M1 骨架未实现（enforcing 属 M4）；拒绝启动，拒绝静默降级为 shadow")
 	default:
-		return fmt.Errorf("output-guard=%q 非法（取值：off|shadow；enforcing 未实现）", mode)
+		return fmt.Errorf("output-guard=%q 非法（取值：off|shadow|enforcing）", mode)
 	}
 }
 
 // newOutputGuard 构造请求级审查管线（§2.3 I1 `outputguard.New(cfg)`）。
-// cfg.Mode=off/空 → 返回 nil（调用侧走原路径，零行为变化）。
-// 非法或在 M1 未实现的 enforcing → 返回错误（fail-closed；启动期已校验，此处为兜底）。
+// cfg.Mode=off/空 → 返回 nil（调用侧走原路径，零行为变化）；非法模式返回错误（启动期已校验，此处兜底）。
 func newOutputGuard(cfg outputGuardConfig, l1 OutputClassifier, l2 OutputClassifier, m *otpmaskMetrics, a *auditChain,
 	tenant, requestID string) (*outputGuard, error) {
 	if err := validateOutputGuardMode(cfg.Mode); err != nil {
@@ -178,31 +180,55 @@ func (og *outputGuard) Close() {
 	og.buf.Reset()
 }
 
-// catActionForMode 返回指定类目在指定模式下的动作（用于 chunk-meta action 字段）。
-// shadow 下恒为 flag（只标记不拦截）；enforcing 下按类目默认动作（M4 实现）。
+// BlockInfo 返回 enforcing 整流终止状态与触发 block 的类目。
+// cat 为空表示未终止，或 D5 无槽位可审的降级终止（终止帧不带 category，§4.10）。
+func (og *outputGuard) BlockInfo() (bool, string) {
+	return og.casc.blockInfo()
+}
+
+// ogMaskDowngradeWarn 保证 PII mask→flag 降级告警每进程只打一行（D1'，P-PII-ACTION）。
+var ogMaskDowngradeWarn sync.Once
+
+// catActionForMode 返回指定类目在指定模式下的**实际生效动作**（用于槽位处置与 chunk-meta）。
+// shadow 下恒为 flag（只标记不拦截）；enforcing 下按类目默认动作（M4）。
+//
+// D1'：当前输出深度为 block-only（改写档三前提未齐），PII 类目的 mask 动作无法执行——
+// 按参数表 P-PII-ACTION 降为 flag（原样下发+留痕）并每进程告警一行；输出改写归 OG-18。
 func catActionForMode(cat, mode string) string {
 	if mode == outputGuardShadow {
 		return catActionFlag
 	}
-	// enforcing 模式下：查类目默认动作（M1 骨架期 enforcing 未启用，此处为前瞻性实现）。
 	c, ok := getCategory(cat)
 	if !ok {
 		return catActionBlock // 兜底：未知类目按 block 处理（fail-closed）
 	}
+	if mode == outputGuardEnforcing && c.DefaultAction == catActionMask {
+		ogMaskDowngradeWarn.Do(func() {
+			log.Printf("[output-guard] PII 类目 %s 默认 mask，但当前为 block-only 输出深度（改写未启用）：按 P-PII-ACTION 降为 flag 放行并留痕（输出改写归 OG-18）", cat)
+		})
+		return catActionFlag
+	}
 	return c.DefaultAction
 }
 
-// BuildGuardMeta 构造 chunk-meta 的 guard 字段（用于首帧/终止帧/周期重复注入）。
-// nil 表示「不带 guard 字段」（omitempty 不输出）。
+// BuildGuardMeta 构造 chunk-meta 的 guard 字段（用于终止帧；og=nil 时由调用方不带该字段）。
 //
-// M1 行为：
-//   - 未命中 → detected=false, filtered=false, 无 category/rule_version
-//   - shadow 命中 → detected=true, filtered=false, action=flag
-//   - enforcing 未实现（启动期已拦截）
+// 语义：
+//   - 未命中 → detected=false, filtered=false, 无 category；
+//   - enforcing 整流终止（blocked，含 D5 降级终止）→ detected=true, filtered=true,
+//     action=block；category 与 output_blocked 审计同源同值（D5 时缺省，§4.10 L1293）；
+//   - 其余命中（shadow 命中、enforcing 下仅 flag/pass）→ detected=true, filtered=false。
 func (og *outputGuard) BuildGuardMeta() *chunkGuardMeta {
 	gm := &chunkGuardMeta{
 		PolicyVersion: og.policyVersion,
 		Mode:          og.mode,
+	}
+	if blocked, blockCat := og.casc.blockInfo(); blocked {
+		gm.Detected = true
+		gm.Filtered = true
+		gm.Action = catActionBlock
+		gm.Category = blockCat // D5 降级终止时为空 → omitempty 不输出（不得伪造类目，§4.10）
+		return gm
 	}
 	firstHitCat, firstHitAction := og.casc.firstHit() // 命中状态由 cascade 在锁内维护（L2 异步写入）
 	if firstHitCat == "" {
@@ -211,10 +237,6 @@ func (og *outputGuard) BuildGuardMeta() *chunkGuardMeta {
 	gm.Detected = true
 	gm.Action = firstHitAction
 	gm.Category = firstHitCat
-	// filtered：shadow 下为 false（只标记不拦截）；enforcing 下为 true
-	// （M1 enforcing 未启用，故 filtered 恒为 false；M4 实现 enforcing 后改为按动作判断）
-	gm.Filtered = (og.mode == outputGuardEnforcing) &&
-		(firstHitAction == catActionBlock || firstHitAction == catActionMask)
 	return gm
 }
 
