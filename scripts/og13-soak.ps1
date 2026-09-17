@@ -128,8 +128,13 @@ foreach ($c in $concurrencies) {
         # NativeCommandError 当错误；这里临时放宽 ErrorAction
         $prevEAP = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
-        $out = go test -mod=mod -run TestCascadeSoak -count=1 2>&1
-        $ErrorActionPreference = $prevEAP
+        Push-Location $teeDir
+        try {
+            $out = go test -mod=mod -run TestCascadeSoak -count=1 2>&1
+        } finally {
+            Pop-Location
+            $ErrorActionPreference = $prevEAP
+        }
 
         # 清理环境
         Remove-Item Env:\SPIKE_SOAK -ErrorAction SilentlyContinue
