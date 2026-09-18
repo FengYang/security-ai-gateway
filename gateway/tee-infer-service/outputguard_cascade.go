@@ -539,17 +539,18 @@ func (c *cascade) emitReadyLocked() error {
 	for c.emitIdx < len(c.deltas) {
 		d := c.emitIdx
 		g := c.deltaGates[d]
+		payload := c.deltas[d]
 		if c.mode == outputGuardEnforcing {
 			switch g {
 			case gateUnclaimed:
 				return nil // 字节尚未构成判定单元：不下发（否则未审内容先出）
 			case gateReleased:
-				// D5 后 slots_full 不再 release；故此处仅 Finish 尾部纯空白可达（非空白尾部
-				// 已被 Flush 合成单元，unitBuffer.drain flush 语义）——fail-closed 丢弃。
+				// I2（评审缺陷修复）：仅 Finish 尾部纯空白可达（unitBuffer 过滤空单元后无槽位认领，
+				// releaseUnclaimedLocked 兜底为 gateReleased）。内容置空后走正常 emit 路径——
+				// 与 shadow/off 帧计数/序号合同一致，避免下游依赖逐 delta 帧的逻辑序号跳变。
+				payload = ""
 				c.deltas[d] = ""
-				c.emitIdx++
-				c.cond.Broadcast()
-				continue
+				goto emitDelta // 跳过 scan/判定，直接下发空帧
 			}
 			hasPending, hasTimeout, blockCat := c.scanDeltaClaimantsLocked(d, g)
 			switch {
@@ -575,7 +576,7 @@ func (c *cascade) emitReadyLocked() error {
 				return nil // 前序句未决 → 后续句排队等待（§3.6.3 按序下发）
 			}
 		}
-		payload := c.deltas[d]
+	emitDelta:
 		if err := c.emit(payload, ""); err != nil {
 			c.emitErr = err
 			c.markClosedLocked() // 慢客户端：立即释放（§4.3）
@@ -603,11 +604,10 @@ func (c *cascade) emitReadyLocked() error {
 // 注意**不能**用 deltaTo==d 判定：半句跨 delta 累积时槽位常覆盖多个 delta
 // （如 push("违规") 无完整句、push("。") 才切出单元"违规。"，槽位区间=[0,1]）。
 func (c *cascade) scanDeltaClaimantsLocked(d, g int) (hasPending, hasTimeout bool, blockCat string) {
+	// 槽位区间单调相邻不相交（claimUntil = 上一槽 deltaTo+1），故反向扫描只访问 g 本身。
+	// 保留循环形式是为将来若变更认领策略（如多槽位同 delta 重叠）时无需改结构。
 	for k := g; k >= 0 && c.slots[k].deltaTo >= d; k-- {
 		s := c.slots[k]
-		if s.deltaFrom > d {
-			continue // 保守跳过（单调构造下不出现）
-		}
 		switch s.state {
 		case slotPending:
 			hasPending = true
@@ -728,7 +728,10 @@ func (c *cascade) failClosedLocked(reason string) {
 	})
 }
 
-// recordHitLocked 记录一次命中（L1/L2 命中共用）：首见类目 → would_reject 指标 + 审计。
+// recordHitLocked 记录一次命中（去重）：
+//   - shadow 模式：落 output_would_reject 审计 + incOGWouldReject 指标（口径 = "本该拦截的影子命中"）
+//   - enforcing 模式：只维护 firstHit / seenCategory 状态（真实拦截由 terminateLocked 的
+//     output_blocked + incOGBlocked 承载，避免同命中重复审计）。
 func (c *cascade) recordHitLocked(cat string) {
 	if c.seenCategory[cat] {
 		return
@@ -738,22 +741,23 @@ func (c *cascade) recordHitLocked(cat string) {
 		c.firstHitCat = cat
 		c.firstHitAction = catActionForMode(cat, c.mode)
 	}
-	if c.m != nil {
-		c.m.incOGWouldReject(cat)
+	// I3（评审缺陷修复）：would_reject 口径回归 shadow-only，enforcing 下不再重复落审计/指标。
+	if c.mode == outputGuardShadow {
+		if c.m != nil {
+			c.m.incOGWouldReject(cat)
+		}
+		if c.a != nil {
+			c.a.append(AuditEvent{
+				TenantID:        c.tenant,
+				RequestID:       c.requestID,
+				Action:          "output_would_reject",
+				Result:          "would_reject_" + cat,
+				OGCategory:      cat,
+				OGMode:          c.mode,
+				OGPolicyVersion: c.policyVersion,
+			})
+		}
 	}
-	if c.a == nil {
-		return
-	}
-	// Result 取值：would_reject_<内部类目 ID>（OG-7 规范化）；证据字段 omitempty、不进 hash。
-	c.a.append(AuditEvent{
-		TenantID:        c.tenant,
-		RequestID:       c.requestID,
-		Action:          "output_would_reject",
-		Result:          "would_reject_" + cat,
-		OGCategory:      cat,
-		OGMode:          c.mode,
-		OGPolicyVersion: c.policyVersion,
-	})
 }
 
 // containsCat 判断内部类目是否在命中集合内。

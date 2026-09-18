@@ -392,8 +392,10 @@ func TestEnforcingMaskDowngradedToFlag(t *testing.T) {
 	if n := a.countByAction("output_blocked"); n != 0 {
 		t.Fatalf("降 flag 不得发 output_blocked，实际 %d", n)
 	}
-	if n := a.countByAction("output_would_reject"); n != 1 {
-		t.Fatalf("flag 命中仍应落 1 条 would_reject，实际 %d", n)
+	// I3 修复后口径：would_reject 仅 shadow 模式下记录（"本该拦截"=shadow 语义）；
+	// enforcing 下 flag 命中只维护 firstHit 状态（BuildGuardMeta 可见），不落 would_reject。
+	if n := a.countByAction("output_would_reject"); n != 0 {
+		t.Fatalf("enforcing 下降 flag 不应落 would_reject（口径回归 shadow-only），实际 %d", n)
 	}
 	if body := renderMetrics(m, a.len()); strings.Contains(body, "blocked_total") {
 		t.Fatalf("降 flag 不得计 blocked：\n%s", body)
@@ -512,5 +514,72 @@ func TestEnforcingMultiSentenceSlotsFull(t *testing.T) {
 	}
 	if got := rec.joined(); got != "" {
 		t.Fatalf("无槽可审必须零下发，实际 %q", got)
+	}
+}
+
+// I2 修复验证：enforcing 下尾部纯空白 delta 也 emit 一帧（内容置空），帧计数与 shadow 一致，
+// 避免下游依赖逐 delta 帧的逻辑序号跳变。帧内容空白符合 enforcing 语义（未判定单元不下发明文）。
+func TestEnforcingTrailingWhitespaceFrameCount(t *testing.T) {
+	og, _, _ := newEnforcingGuard(t, cascadeParams(true), fakeL2Classifier{}, newStubL2())
+	rec := &frameRecorder{}
+
+	// 先发一句完整干净句（构成 1 个 slot），再发一个纯空白 delta（无 slot）
+	if err := og.Process("今天天气好。", rec.emit); err != nil {
+		t.Fatalf("Process(clean): %v", err)
+	}
+	if err := og.Process("   \n\t  ", rec.emit); err != nil {
+		t.Fatalf("Process(whitespace): %v", err)
+	}
+	if err := og.Finish(rec.emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	og.Close()
+
+	// 2 次 Process = 2 帧（首句帧 + 空白帧），帧计数与 shadow 模式对齐
+	frames := rec.snapshot()
+	if len(frames) != 2 {
+		t.Fatalf("帧计数应为 2（与 shadow 对齐），实际 %d", len(frames))
+	}
+	// 首帧内容正确；第二帧为空串（gateReleased 置空后下发，保帧计数不保空白内容）
+	if frames[0] != "今天天气好。" {
+		t.Fatalf("首帧应为 %q，实际 %q", "今天天气好。", frames[0])
+	}
+	if frames[1] != "" {
+		t.Fatalf("空白帧应为空串（gateReleased 置空），实际 %q", frames[1])
+	}
+}
+
+// I3 修复验证：enforcing 下 block 命中只落 output_blocked，不落 output_would_reject
+// （would_reject 口径回归 shadow-only）。
+func TestEnforcingBlockNoWouldReject(t *testing.T) {
+	l2 := newStubL2()
+	l2.verdicts["暴力内容。"] = stubVerdict{cat: "A1-06", conf: 0.95}
+	og, m, a := newEnforcingGuard(t, cascadeParams(true), fakeL2Classifier{}, l2)
+	rec := &frameRecorder{}
+
+	if err := og.Process("暴力内容。", rec.emit); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if err := og.Finish(rec.emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	og.Close()
+
+	if blocked, cat := og.BlockInfo(); !blocked || cat != "A1-06" {
+		t.Fatalf("应为 blocked/A1-06，实际 (%v,%q)", blocked, cat)
+	}
+	if n := a.countByAction("output_blocked"); n != 1 {
+		t.Fatalf("应落 1 条 output_blocked，实际 %d", n)
+	}
+	// I3 核心断言：enforcing 下 block 命中不落 would_reject
+	if n := a.countByAction("output_would_reject"); n != 0 {
+		t.Fatalf("enforcing 下 block 命中不应落 would_reject（口径 shadow-only），实际 %d", n)
+	}
+	body := renderMetrics(m, a.len())
+	if strings.Contains(body, "otpmask_output_guard_would_reject_total") {
+		t.Fatalf("enforcing block 不应有 would_reject 指标：\n%s", body)
+	}
+	if !strings.Contains(body, "otpmask_output_guard_blocked_total") {
+		t.Fatalf("enforcing block 应有 blocked 指标：\n%s", body)
 	}
 }
