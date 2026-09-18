@@ -25,10 +25,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -280,17 +282,69 @@ type outputL2HTTPClassifier struct {
 
 // newOutputL2HTTPClassifier 构造输出侧 L2 HTTP 分类器。
 // timeout <= 0 时取 2s（在请求路径上，必须有限且小）。
+// allowedNets ＝ P-BACKEND-TARGET 可信域白名单（空＝仅 localhost）；连接期按实际对端 IP
+// 校验（§5.3 裁定 A2 双层校验的第二层）。
 // metrics / onResult 均可为 nil。
-func newOutputL2HTTPClassifier(url, key string, timeout time.Duration, m *otpmaskMetrics, onResult func(reason string)) *outputL2HTTPClassifier {
+func newOutputL2HTTPClassifier(url, key string, timeout time.Duration, allowedNets []*net.IPNet, m *otpmaskMetrics, onResult func(reason string)) *outputL2HTTPClassifier {
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
 	return &outputL2HTTPClassifier{
 		url:      url,
 		key:      key,
-		client:   &http.Client{Timeout: timeout},
 		metrics:  m,
 		onResult: onResult,
+		client: &http.Client{
+			Timeout:   timeout,
+			Transport: newL2HTTPTransport(allowedNets),
+			// 不跟随重定向：307/308 会把 body 重发到 Location，等于把被审明文外发到
+			// 可信域外（白名单只约束首次连接，管不住重定向目标）。
+			// 返回 3xx 原响应 → 由调用方按"非 200"处置（bad_status → P-DEGRADE，fail-safe）。
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	}
+}
+
+// newL2HTTPTransport 构造 L2 侧车专用 transport（§5.3 裁定 A2 连接期校验）。
+//   - Proxy 置 nil：不经 HTTP_PROXY/HTTPS_PROXY——代理出口不受白名单约束，等于绕过边界；
+//   - DialContext 先解析、再按**已校验的 IP** 直连，避免"用于校验的解析结果"与
+//     "实际连接的解析结果"不一致（TOCTOU / DNS rebinding）。
+func newL2HTTPTransport(allowedNets []*net.IPNet) *http.Transport {
+	d := &net.Dialer{Timeout: 2 * time.Second}
+	return &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, fmt.Errorf("L2 侧车地址解析失败: %w", err)
+			}
+			var ips []net.IP
+			if ip := net.ParseIP(host); ip != nil {
+				ips = []net.IP{ip}
+			} else {
+				ips, err = net.DefaultResolver.LookupIP(ctx, "ip", host)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("L2 侧车地址 %s 无解析结果", host)
+			}
+			var lastErr error
+			for _, ip := range ips {
+				if !l2TargetIPAllowed(ip, allowedNets) {
+					return nil, fmt.Errorf("L2 侧车对端 %s 不在可信域内，拒绝连接（被审明文不得出可信域）", ip)
+				}
+				conn, derr := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+				if derr == nil {
+					return conn, nil
+				}
+				lastErr = derr
+			}
+			return nil, lastErr
+		},
 	}
 }
 

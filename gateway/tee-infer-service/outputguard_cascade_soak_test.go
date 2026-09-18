@@ -165,7 +165,7 @@ func TestCascadeSoak(t *testing.T) {
 	m := newMetrics()
 	m.setOutputGuardMode(outputGuardShadow, defaultPolicyVersion)
 	a := newAuditChain()
-	l2 := newOutputL2HTTPClassifier(l2URL, "", timeout, m, nil)
+	l2 := newOutputL2HTTPClassifier(l2URL, "", timeout, nil, m, nil)
 
 	casc := outputGuardCascadeParams{
 		Timeout:       timeout,
@@ -415,7 +415,7 @@ func TestCascadeSoakMultiRequest(t *testing.T) {
 	m.setOutputGuardMode(outputGuardShadow, defaultPolicyVersion)
 	a := newAuditChain()
 	// 共享 L2 客户端：N 路请求竞争同一侧车（本轮要测的效应）
-	l2 := newOutputL2HTTPClassifier(l2URL, "", timeout, m, nil)
+	l2 := newOutputL2HTTPClassifier(l2URL, "", timeout, nil, m, nil)
 
 	firstFrames := make([]time.Duration, requests) // 各路首帧延迟增量（来自 cascade 口径）
 	failClosedPerReq := make([]int64, requests)    // 各路 P-DEGRADE 句数

@@ -14,8 +14,11 @@ package main
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"regexp"
 	"runtime"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -232,4 +235,106 @@ type outputGuardConfigRecord struct {
 	Actor     string `json:"actor"`
 	RequestID string `json:"request_id"`
 	UpdatedAt int64  `json:"updated_at"` // UTC 纳秒
+}
+
+// ---- B 组「后端接线」参数：P-BACKEND-TARGET 可信域白名单（§5.3；2026-09-18 裁定 A2）----
+//
+// 安全语义：L2 侧车收到的 body 是**被审查的用户生成明文**。地址若落在可信域外
+// （S3＝飞地外／S2＝客户可信域外），等于把生成明文外发。故：
+//   - 默认仅 localhost（未配白名单时非 localhost 一律启动失败）；
+//   - 跨主机必须用 -output-guard-l2-allowed-cidrs 显式声明可信域 CIDR；
+//   - 双层校验：启动期（本文件）+ 连接期实际对端 IP（outputguard.go newL2HTTPTransport，
+//     防 DNS 漂移/rebinding）；
+//   - 域名按启动期解析结果校验，须**全部**落在可信域内（解析失败亦拒绝）。
+
+// lookupIPFunc 域名解析入口（默认 net.LookupIP；单测可替换，避免依赖真实 DNS）。
+var lookupIPFunc = net.LookupIP
+
+// outputGuardBackendParams B 组参数（L2 侧车地址与可信域白名单）。
+type outputGuardBackendParams struct {
+	Target      string       // P-BACKEND-TARGET：L2 侧车 URL（空＝不启用 L2）
+	AllowedNets []*net.IPNet // 可信域 CIDR 白名单（空＝仅 localhost）
+}
+
+// defaultOutputGuardBackendParams 返回未配置态的 B 组参数。
+func defaultOutputGuardBackendParams() outputGuardBackendParams {
+	return outputGuardBackendParams{}
+}
+
+// parseOutputGuardAllowedCIDRs 解析逗号分隔的 CIDR 白名单（空串＝空白名单）。
+// 非法 CIDR 一律报错——不静默忽略，否则会以"以为配了白名单、其实没配"的方式放开边界。
+func parseOutputGuardAllowedCIDRs(s string) ([]*net.IPNet, error) {
+	var nets []*net.IPNet
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(part)
+		if err != nil {
+			return nil, fmt.Errorf("P-BACKEND-TARGET 白名单 CIDR %q 非法: %v", part, err)
+		}
+		nets = append(nets, n)
+	}
+	return nets, nil
+}
+
+// l2TargetIPAllowed 判定单个 IP 是否落在可信域内（回环 ∪ 白名单）。
+// 启动期与连接期共用同一谓词，避免两处判定漂移。
+func l2TargetIPAllowed(ip net.IP, allowedNets []*net.IPNet) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	for _, n := range allowedNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateOutputGuardBackendParams 校验 L2 侧车地址落点（启动期，fail-closed，§5.3 裁定 A2）。
+// Target 为空＝未启用 L2，直接放行（行为零变化）。
+func validateOutputGuardBackendParams(b outputGuardBackendParams) error {
+	if b.Target == "" {
+		return nil
+	}
+	u, err := url.Parse(b.Target)
+	if err != nil {
+		return fmt.Errorf("P-BACKEND-TARGET %q 不是合法 URL: %v", b.Target, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("P-BACKEND-TARGET %q scheme 非法（仅支持 http|https）", b.Target)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("P-BACKEND-TARGET %q 缺少主机名", b.Target)
+	}
+	if host == "localhost" {
+		return nil // 实际对端由连接期校验（回环）
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if l2TargetIPAllowed(ip, b.AllowedNets) {
+			return nil
+		}
+		return fmt.Errorf("P-BACKEND-TARGET %s 不在可信域内：默认仅 localhost，跨主机请用 "+
+			"-output-guard-l2-allowed-cidrs 显式声明可信域 CIDR（被审明文不得出可信域）", b.Target)
+	}
+	// 域名：启动期解析并校验全部结果；解析失败同样拒绝（无法证明其指向可信域）。
+	ips, err := lookupIPFunc(host)
+	if err != nil {
+		return fmt.Errorf("P-BACKEND-TARGET 域名 %q 解析失败（无法证明其指向可信域，拒绝启动）: %v", host, err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("P-BACKEND-TARGET 域名 %q 无解析结果（拒绝启动）", host)
+	}
+	for _, ip := range ips {
+		if !l2TargetIPAllowed(ip, b.AllowedNets) {
+			return fmt.Errorf("P-BACKEND-TARGET 域名 %q 解析出可信域外地址 %s（拒绝启动；连接期亦会再次校验）", host, ip)
+		}
+	}
+	return nil
 }

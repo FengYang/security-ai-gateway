@@ -2796,6 +2796,7 @@ func main() {
 	outputGuardL2URL := flag.String("output-guard-l2-url", "", "GA-输出侧内容审查 L2 语义分类器侧车地址（M2 OG-12）：HTTP POST JSON，返回 blocked/category/confidence/match；为空 = 不启用 L2，纯 L1 规则（默认，行为零变化）")
 	outputGuardL2Key := flag.String("output-guard-l2-key", "", "输出侧 L2 语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
 	outputGuardL2Timeout := flag.Duration("output-guard-l2-timeout", 2*time.Second, "输出侧 L2 语义分类器侧车调用超时（在请求路径上，须有限且小；不可用自动 fallback L1 + degraded 指标）")
+	outputGuardL2AllowedCIDRs := flag.String("output-guard-l2-allowed-cidrs", "", "P-BACKEND-TARGET 可信域 CIDR 白名单（逗号分隔；默认空＝仅 localhost）：L2 侧车地址须落在回环或白名单内，否则拒绝启动（2026-09-18 裁定 A2，防被审明文外发）")
 	outputGuardMaskEnable := flag.Bool("output-guard-mask-enable", false, "OG-18：PII mask 改写开关（默认 false = block-only 深度，A4-06 降为 flag；true = 实打马赛克后下发）；需 -output-guard=shadow/enforcing 时生效")
 	// GA-输出侧内容审查（OG-13）：E 组级联参数（§5.5）。P-TIMEOUT 复用上面的 -output-guard-l2-timeout（单一事实源）。
 	outputGuardConcurrency := flag.Int("output-guard-concurrency", 0, "P-CONCURRENCY：单请求在飞 L2 句数上限（OG-13 级联）；0＝未配置，按 CPU 核数派生；超限不排队，直接按 P-DEGRADE")
@@ -3003,6 +3004,19 @@ func main() {
 	if *outputGuardMode == outputGuardEnforcing && *outputGuardL2URL == "" {
 		log.Fatalf("[output-guard] enforcing 模式必须配置 -output-guard-l2-url（L1 规则层无 block 类目，纯 L1 = 零拦截）")
 	}
+	// B 组（P-BACKEND-TARGET，2026-09-18 裁定 A2）：L2 侧车地址须落在可信域内——
+	// 默认仅 localhost，跨主机必须显式声明可信域 CIDR。被审内容是**用户生成明文**，
+	// 地址出域即明文外发，故校验失败一律拒绝启动（fail-closed；连接期另有第二层校验）。
+	ogAllowedNets, err := parseOutputGuardAllowedCIDRs(*outputGuardL2AllowedCIDRs)
+	if err != nil {
+		log.Fatalf("[output-guard] %v", err)
+	}
+	if err := validateOutputGuardBackendParams(outputGuardBackendParams{
+		Target:      *outputGuardL2URL,
+		AllowedNets: ogAllowedNets,
+	}); err != nil {
+		log.Fatalf("[output-guard] %v", err)
+	}
 	srv.outputGuardMode = *outputGuardMode
 	srv.outputGuardMaskEnabled = *outputGuardMaskEnable
 	srv.outputGuardCfgPath = *outputGuardCfg
@@ -3081,9 +3095,9 @@ func main() {
 	// readiness 不联动 L2 状态（纯 L1 也能服务，安全降水位但不中断）。
 	var outputGuardL2 OutputClassifier
 	if *outputGuardL2URL != "" {
-		outputGuardL2 = newOutputL2HTTPClassifier(*outputGuardL2URL, *outputGuardL2Key, *outputGuardL2Timeout, srv.metrics, nil)
-		log.Printf("[output-guard] L2 语义分类器接线：url=%s timeout=%s（不可用时回退 L1 规则）",
-			*outputGuardL2URL, outputGuardL2Timeout.String())
+		outputGuardL2 = newOutputL2HTTPClassifier(*outputGuardL2URL, *outputGuardL2Key, *outputGuardL2Timeout, ogAllowedNets, srv.metrics, nil)
+		log.Printf("[output-guard] L2 语义分类器接线：url=%s timeout=%s 可信域白名单=%d 条（不可用时回退 L1 规则）",
+			*outputGuardL2URL, outputGuardL2Timeout.String(), len(ogAllowedNets))
 	}
 	srv.outputGuardL2 = outputGuardL2
 	go srv.seenCleanup()    // 防重放集合 TTL 清理

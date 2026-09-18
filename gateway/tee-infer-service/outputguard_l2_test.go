@@ -14,8 +14,14 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeL2Classifier 可控的 L2 分类器 stub。
@@ -222,5 +228,138 @@ func TestOutputGuardL1HitA_L2HitB(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("指标缺失 %q\n---\n%s", want, body)
 		}
+	}
+}
+
+// ---- P-BACKEND-TARGET 可信域校验（§5.3；2026-09-18 裁定 A2）----
+//
+// 覆盖：默认仅 localhost / 白名单放行与边界 / 非法 CIDR 不静默忽略 /
+// 域名启动期解析（全部须在可信域内）/ 连接期对端 IP 校验 / 重定向不跟随。
+
+// TestOutputGuardL2TargetDefaultLocalhostOnly：默认空白名单 → 仅 localhost 与回环放行。
+func TestOutputGuardL2TargetDefaultLocalhostOnly(t *testing.T) {
+	allow := []string{
+		"http://localhost:8080/v1/classify",
+		"http://127.0.0.1:8080",
+		"http://[::1]:8080",
+	}
+	for _, u := range allow {
+		if err := validateOutputGuardBackendParams(outputGuardBackendParams{Target: u}); err != nil {
+			t.Errorf("默认空白名单下 %s 应放行，实际拒绝: %v", u, err)
+		}
+	}
+	deny := []string{
+		"http://10.1.2.3:8080",    // 非回环 IP 且未配白名单
+		"http://192.168.1.5:8080", // 同上
+		"ftp://127.0.0.1:8080",    // scheme 非法
+		"127.0.0.1:8080",          // 缺 scheme
+		"http://",                 // 缺主机名
+	}
+	for _, u := range deny {
+		if err := validateOutputGuardBackendParams(outputGuardBackendParams{Target: u}); err == nil {
+			t.Errorf("默认空白名单下 %s 应拒绝，实际放行", u)
+		}
+	}
+}
+
+// TestOutputGuardL2AllowedCIDRsWhitelist：白名单解析、放行边界、非法 CIDR、未配置 L2 跳过。
+func TestOutputGuardL2AllowedCIDRsWhitelist(t *testing.T) {
+	nets, err := parseOutputGuardAllowedCIDRs(" 10.0.0.0/8 , 192.168.1.0/24 ")
+	if err != nil {
+		t.Fatalf("合法 CIDR 解析失败: %v", err)
+	}
+	if len(nets) != 2 {
+		t.Fatalf("期望 2 条白名单，实际 %d", len(nets))
+	}
+	for _, u := range []string{"http://10.1.2.3:8080", "http://192.168.1.200:8080"} {
+		if err := validateOutputGuardBackendParams(outputGuardBackendParams{Target: u, AllowedNets: nets}); err != nil {
+			t.Errorf("白名单内 %s 应放行，实际: %v", u, err)
+		}
+	}
+	// 白名单外（未配白名单）→ 拒绝
+	if err := validateOutputGuardBackendParams(outputGuardBackendParams{Target: "http://10.1.2.3:8080"}); err == nil {
+		t.Errorf("未配白名单时非回环地址应拒绝")
+	}
+	// 非法 CIDR 必须报错，不得静默忽略（否则"以为配了白名单、其实没配"）
+	for _, bad := range []string{"10.0.0.0/33", "not-a-cidr", "10.0.0.0"} {
+		if _, err := parseOutputGuardAllowedCIDRs(bad); err == nil {
+			t.Errorf("非法 CIDR %q 应报错", bad)
+		}
+	}
+	// 空串/纯分隔符 ＝ 空白名单，不报错
+	if got, err := parseOutputGuardAllowedCIDRs("  ,  "); err != nil || len(got) != 0 {
+		t.Errorf("空串应解析为空白名单且不报错，实际 nets=%v err=%v", got, err)
+	}
+	// 未配置 L2 URL → 跳过校验（行为零变化）
+	if err := validateOutputGuardBackendParams(outputGuardBackendParams{}); err != nil {
+		t.Errorf("未配置 L2 URL 时应跳过校验，实际: %v", err)
+	}
+}
+
+// TestOutputGuardL2TargetDomainResolved：域名按启动期解析结果校验（全部须在可信域内）。
+func TestOutputGuardL2TargetDomainResolved(t *testing.T) {
+	orig := lookupIPFunc
+	defer func() { lookupIPFunc = orig }()
+	_, allowNet, _ := net.ParseCIDR("10.0.0.0/8")
+	param := outputGuardBackendParams{Target: "http://sidecar.internal:8080", AllowedNets: []*net.IPNet{allowNet}}
+
+	// 解析到可信域外 → 拒绝
+	lookupIPFunc = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("203.0.113.9")}, nil }
+	if err := validateOutputGuardBackendParams(param); err == nil {
+		t.Errorf("域名解析到白名单外地址，应拒绝启动")
+	}
+	// 全部解析结果在可信域内 → 放行
+	lookupIPFunc = func(string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("10.9.8.7"), net.ParseIP("10.9.8.8")}, nil
+	}
+	if err := validateOutputGuardBackendParams(param); err != nil {
+		t.Errorf("域名解析全部落在白名单内，应放行，实际: %v", err)
+	}
+	// 解析失败 → 拒绝（无法证明指向可信域）
+	lookupIPFunc = func(string) ([]net.IP, error) { return nil, fmt.Errorf("no such host") }
+	if err := validateOutputGuardBackendParams(param); err == nil {
+		t.Errorf("域名解析失败应拒绝启动")
+	}
+	// 无解析结果 → 拒绝
+	lookupIPFunc = func(string) ([]net.IP, error) { return nil, nil }
+	if err := validateOutputGuardBackendParams(param); err == nil {
+		t.Errorf("域名无解析结果应拒绝启动")
+	}
+}
+
+// TestOutputGuardL2DialRejectsOutOfDomain：连接期按实际对端 IP 校验（防 DNS 漂移/rebinding）。
+func TestOutputGuardL2DialRejectsOutOfDomain(t *testing.T) {
+	ctx := context.Background()
+	const outOfDomain = "L2 侧车对端"
+
+	// 未配白名单 + 非回环对端 → 拒绝（不实际发起连接）
+	if _, err := newL2HTTPTransport(nil).DialContext(ctx, "tcp", "10.1.2.3:8080"); err == nil ||
+		!strings.Contains(err.Error(), outOfDomain) {
+		t.Fatalf("可信域外对端应被拒绝连接，实际 err=%v", err)
+	}
+	// 白名单内 → 通过校验（连接本身可能失败，但不得是"不在可信域内"）
+	_, allowNet, _ := net.ParseCIDR("10.0.0.0/8")
+	if _, err := newL2HTTPTransport([]*net.IPNet{allowNet}).DialContext(ctx, "tcp", "127.0.0.1:1"); err != nil &&
+		strings.Contains(err.Error(), outOfDomain) {
+		t.Fatalf("回环对端不应被可信域校验拦截，实际 err=%v", err)
+	}
+	// 回环始终放行（空白名单）
+	if _, err := newL2HTTPTransport(nil).DialContext(ctx, "tcp", "127.0.0.1:1"); err != nil &&
+		strings.Contains(err.Error(), outOfDomain) {
+		t.Fatalf("回环对端不应被可信域校验拦截，实际 err=%v", err)
+	}
+}
+
+// TestOutputGuardL2NoRedirect：307/308 会带 body 重发 → 必须拒绝跟随（否则明文外发）。
+func TestOutputGuardL2NoRedirect(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.1:1/steal", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	c := newOutputL2HTTPClassifier(srv.URL, "", time.Second, nil, newMetrics(), nil)
+	cat, conf, _ := c.Classify("被审的用户生成明文")
+	if conf != -1 {
+		t.Fatalf("重定向应被拒绝并按调用失败处置（conf=-1），实际 cat=%q conf=%v", cat, conf)
 	}
 }
