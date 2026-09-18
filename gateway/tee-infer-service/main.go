@@ -2023,8 +2023,8 @@ func (s *teeServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 // handleOutputGuardConfig 输出侧审查 mode 运行时切换（OG-8，§4.7 运行时覆盖 / D8 高敏变更）。
 //
 // 语义与边界（与 handleGuardrailConfig 对称设计）：
-//   - 仅允许 mode 在 off/shadow 间切换；**enforcing 不经运行时通道开启**（D4'：拦截路径已落地，
-//     但仅启动参数可开，待 admin 鉴权/D8 治理链与外部闸门就绪后另立批次放开）；
+//   - 运行时**不允许升为 enforcing**（D4'：仅启动参数可开，待治理闸门就绪后放开）；
+//     允许从 enforcing 降级到 shadow/off（OG-20 回滚演练必需，符合 fail-safe 原则）；
 //   - 治理链在 gateway-admin-service（高敏变更 submitter≠reviewer 复核通过后执行）；
 //     本端点只做"配置生效 + 持久化 + 落 tee-infer 审计链"；
 //   - 持久化文件由 -output-guard-config 指定；未指定则仅进程内生效（重启回退启动参数）；
@@ -2045,15 +2045,21 @@ func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "请求体须为 JSON", http.StatusBadRequest)
 		return
 	}
-	// 安全闸门（D4'）：运行时仅允许 off/shadow 切换。enforcing 拦截路径（M4 OG-17）已落地，
-	// 但经启动参数显式开启；在 admin 鉴权/D8 治理链/外部闸门（台账 G-1/2/3）就绪前不放开运行时通道。
-	if req.Mode != outputGuardOff && req.Mode != outputGuardShadow {
-		http.Error(w, "mode 仅允许 off|shadow（enforcing 拦截已实现，但仅能经启动参数开启；运行时切换待治理闸门）", http.StatusBadRequest)
+	// 安全闸门（D4'）：
+	//   1. 取值必须合法（off | shadow | enforcing），非法值直接拒绝；
+	//   2. 运行时不允许升为 enforcing（拦截路径仅启动参数可开，待治理闸门就绪后放开）；
+	//   3. 允许从 enforcing 降级到 shadow/off（OG-20 回滚演练必备，fail-safe 原则）。
+	if req.Mode != outputGuardOff && req.Mode != outputGuardShadow && req.Mode != outputGuardEnforcing {
+		http.Error(w, "mode 非法（仅支持 off|shadow|enforcing）", http.StatusBadRequest)
+		return
+	}
+	oldMode := s.currentOutputGuardMode()
+	if req.Mode == outputGuardEnforcing && oldMode != outputGuardEnforcing {
+		http.Error(w, "mode 不允许运行时升为 enforcing（拦截仅能经启动参数开启；运行时可从 enforcing 降级到 shadow/off）", http.StatusBadRequest)
 		return
 	}
 	actor := r.Header.Get("X-Admin-Actor")
 	reqID := r.Header.Get("X-Request-ID")
-	oldMode := s.currentOutputGuardMode()
 
 	// 持久化（可选）：未配置路径则仅进程内生效。
 	if s.outputGuardCfgPath != "" {
@@ -2116,6 +2122,8 @@ func (s *teeServer) loadOutputGuardOverride() {
 		log.Printf("[output-guard] 运行时配置解析失败（沿用启动参数）：%v", err)
 		return
 	}
+	// 持久化恢复：非法模式值直接忽略（fail-safe）；
+	// enforcing 也忽略——enforcing 只能由启动参数开启，运行时通道（含跨重启恢复）不开放（D4'）。
 	if rec.Mode != outputGuardOff && rec.Mode != outputGuardShadow {
 		log.Printf("[output-guard] 运行时配置 mode=%q 非法（沿用启动参数）", rec.Mode)
 		return

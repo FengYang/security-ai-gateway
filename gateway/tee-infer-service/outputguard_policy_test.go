@@ -863,6 +863,60 @@ func TestOutputGuardConfigRejectEnforcing(t *testing.T) {
 	}
 }
 
+// TestOutputGuardConfigEnforceToShadow OG-20 回滚演练：enforcing → shadow 降级允许。
+func TestOutputGuardConfigEnforceToShadow(t *testing.T) {
+	srv, _ := newM9Server(t)
+	srv.outputGuardMode = outputGuardEnforcing // 启动参数 = enforcing
+
+	rec := doOutputGuardConfig(srv, http.MethodPost, true, `{"mode":"shadow"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enforcing→shadow 应 200，got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if v := srv.currentOutputGuardMode(); v != outputGuardShadow {
+		t.Fatalf("降级后 mode 应为 shadow，实际 %q", v)
+	}
+	if src := srv.outputGuardModeSource(); src != "runtime" {
+		t.Fatalf("mode 来源应为 runtime，实际 %q", src)
+	}
+	// 审计落链
+	evts := findOutputGuardConfigEvents(srv)
+	if len(evts) < 1 {
+		t.Fatal("应至少 1 条 output_guard_mode_change 审计")
+	}
+}
+
+// TestOutputGuardConfigEnforceToOff OG-20 回滚演练：enforcing → off 完全关闭允许。
+func TestOutputGuardConfigEnforceToOff(t *testing.T) {
+	srv, _ := newM9Server(t)
+	srv.outputGuardMode = outputGuardEnforcing
+
+	rec := doOutputGuardConfig(srv, http.MethodPost, true, `{"mode":"off"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enforcing→off 应 200，got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if v := srv.currentOutputGuardMode(); v != outputGuardOff {
+		t.Fatalf("降级后 mode 应为 off，实际 %q", v)
+	}
+	if src := srv.outputGuardModeSource(); src != "runtime" {
+		t.Fatalf("mode 来源应为 runtime，实际 %q", src)
+	}
+}
+
+// TestOutputGuardConfigShadowToEnforceReject shadow → enforcing 升级仍被拒绝（D4' 闸门）。
+// 与 TestOutputGuardConfigRejectEnforcing 的区别：起点是 shadow（更接近真实回滚后的回切场景）。
+func TestOutputGuardConfigShadowToEnforceReject(t *testing.T) {
+	srv, _ := newM9Server(t)
+	srv.outputGuardMode = outputGuardShadow
+
+	rec := doOutputGuardConfig(srv, http.MethodPost, true, `{"mode":"enforcing"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("shadow→enforcing 应 400，got %d", rec.Code)
+	}
+	if v := srv.currentOutputGuardMode(); v != outputGuardShadow {
+		t.Fatalf("拒绝后 mode 应保持 shadow，实际 %q", v)
+	}
+}
+
 // TestOutputGuardConfigPersistedEnforcingIgnored fail-safe（用例 15，D4'）：
 // 持久化文件中即使存在 enforcing 记录（手工伪造/旧版本遗留），启动恢复也必须忽略——
 // enforcing 只能由启动参数开启，运行时通道（含跨重启恢复）不开放。
