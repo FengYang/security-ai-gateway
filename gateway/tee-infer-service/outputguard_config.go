@@ -14,6 +14,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"runtime"
 	"time"
 	"unicode/utf8"
@@ -209,6 +210,8 @@ type outputGuardConfig struct {
 	PolicyVersion string                    // 策略版本（manifest.policy_version；M1 未接词库，用 defaultPolicyVersion）
 	Params        outputGuardParams         // D 组缓冲参数（允许传未 resolve 值，构造时会 resolve）
 	Cascade       outputGuardCascadeParams  // E 组级联并发参数（允许传未 resolve 值，构造时会 resolve）
+	MaskEnabled   bool                      // OG-18：PII mask 改写开关（默认 false = block-only 深度，mask 降为 flag；true = 启用实打马赛克）
+	MaskRegexps   []*regexp.Regexp          // OG-18：PII 正则切片（与 pii_patterns.json 顺序一致；为空则不改写）
 }
 
 // ---- OG-8：运行时配置请求 / 持久化记录（与 guardrailConfigRequest 同构）----

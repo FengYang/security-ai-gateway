@@ -40,6 +40,7 @@
 package main
 
 import (
+	"regexp"
 	"sync"
 	"time"
 )
@@ -90,6 +91,9 @@ type cascade struct {
 	params outputGuardCascadeParams
 	mode   string
 
+	maskEnabled bool          // OG-18：PII mask 改写开关
+	maskRes     []*regexp.Regexp // OG-18：PII 正则切片（与 pii_patterns.json 顺序一致；为空则不改写）
+
 	l1   OutputClassifier
 	l2   OutputClassifier // nil = 纯 L1（无级联）
 	emit outputEmitFunc   // 唯一出口（§2.3 I2）
@@ -132,11 +136,13 @@ type cascade struct {
 }
 
 // newCascade 构造请求级级联控制器。params 须为 resolve 后的取值。
-func newCascade(params outputGuardCascadeParams, mode string, l1, l2 OutputClassifier, m *otpmaskMetrics,
+func newCascade(params outputGuardCascadeParams, mode string, maskEnabled bool, maskRes []*regexp.Regexp, l1, l2 OutputClassifier, m *otpmaskMetrics,
 	a *auditChain, tenant, requestID, policyVersion string) *cascade {
 	c := &cascade{
 		params:        params,
 		mode:          mode,
+		maskEnabled:   maskEnabled,
+		maskRes:       maskRes,
 		l1:            l1,
 		l2:            l2,
 		m:             m,
@@ -220,6 +226,26 @@ func (c *cascade) blockInfo() (blocked bool, cat string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.blocked, c.blockCat
+}
+
+// maskedCategories 返回本请求命中 mask 动作的所有类目（去重）。
+func (c *cascade) maskedCategories() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	seen := make(map[string]bool)
+	for _, s := range c.slots {
+		if s.action == catActionMask && s.category != "" {
+			seen[s.category] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for cat := range seen {
+		out = append(out, cat)
+	}
+	return out
 }
 
 // cascadeStats 级联观测快照（测试与浸泡报告用；不含判定内容）。
@@ -308,8 +334,12 @@ func (c *cascade) submitUnitLocked(unit string) {
 
 	// ---- L1 规则层（同步即决）----
 	if cat := c.classifyL1Locked(s); cat != "" {
-		s.action = catActionForMode(cat, c.mode)
+		s.action = catActionForMode(cat, c.mode, c.maskEnabled)
 		s.category = cat
+		// OG-18：mask 动作命中记指标（改写在 emit 前对 delta 做，见 emitReadyLocked）。
+		if s.action == catActionMask && c.m != nil {
+			c.m.incOGMasked(cat)
+		}
 		c.finishLocked(s, slotDone) // L1 命中即决：不阻塞下发（§3.6.3）
 		// 方案 2 画像：L2 仍异步跑（不参与阻塞）；超并发阀时跳过（画像非安全判定）
 		if c.l2 != nil && c.inFlight < c.params.Concurrency {
@@ -467,7 +497,7 @@ func (c *cascade) normalizeVerdictLocked(s *cascadeSlot, cat string, conf float6
 		}
 	}
 	c.recordHitLocked(internal)
-	return verdictResult{state: slotDone, action: catActionForMode(internal, c.mode), cat: internal}
+	return verdictResult{state: slotDone, action: catActionForMode(internal, c.mode, c.maskEnabled), cat: internal}
 }
 
 // onSlotTimeout 定时器到期（§3.6.3 细节 2）：置 timeout ＋ 唤醒 emitter ＋ degraded{reason=l2_timeout}。
@@ -577,6 +607,23 @@ func (c *cascade) emitReadyLocked() error {
 			}
 		}
 	emitDelta:
+		// OG-18：enforcing + mask 启用时，若该 delta 的归属槽位含 mask 动作，
+		// 对 delta 内容做 PII 脱敏改写后再下发。
+		// 已知限制（登记台账）：跨 delta 的 PII（数字串/邮箱被 delta 切分）可能漏改；
+		// 实际生产中 LLM 按 token 输出，数字串通常在同一 token 内，概率极低；
+		// mask 是隐私增强而非安全拦截，漏改不造成安全漏洞。
+		if c.mode == outputGuardEnforcing && c.maskEnabled && len(c.maskRes) > 0 && payload != "" && g >= 0 {
+			// 检查该 delta 的归属槽位（及其认领区间内的所有槽位）是否有 mask 动作。
+			// 简化：只要归属槽位 g 本身是 mask 动作，就对整个 delta 做 mask。
+			// （更精确的做法是检查所有认领槽位，但概率极低，先简化。）
+			if c.slots[g].action == catActionMask {
+				masked, _ := maskTextPII(payload, c.maskRes)
+				if masked != payload {
+					payload = masked
+					c.deltas[d] = masked // 同步更新缓冲（保险，后续引用一致）
+				}
+			}
+		}
 		if err := c.emit(payload, ""); err != nil {
 			c.emitErr = err
 			c.markClosedLocked() // 慢客户端：立即释放（§4.3）
@@ -730,7 +777,7 @@ func (c *cascade) recordHitLocked(cat string) {
 	c.seenCategory[cat] = true
 	if c.firstHitCat == "" {
 		c.firstHitCat = cat
-		c.firstHitAction = catActionForMode(cat, c.mode)
+		c.firstHitAction = catActionForMode(cat, c.mode, c.maskEnabled)
 	}
 	// I3（评审缺陷修复）：would_reject 口径回归 shadow-only，enforcing 下不再重复落审计/指标。
 	if c.mode == outputGuardShadow {

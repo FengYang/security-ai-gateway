@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -157,6 +158,8 @@ type teeServer struct {
 	outputGuardParams outputGuardParams
 	// GA-输出侧内容审查（OG-13）：E 组级联并发参数（启动期 resolve＋validate 后只读）。
 	outputGuardCascade outputGuardCascadeParams
+	// GA-输出侧内容审查（OG-18）：PII mask 改写开关（默认 false = block-only 深度，mask 降 flag）。
+	outputGuardMaskEnabled bool
 	// GA-输出侧内容审查（OG-9）：策略目录（-output-guard-policy-dir；空 = 未配置，
 	// /config/policy/reload 将返回 400）。
 	outputGuardPolicyDir string
@@ -1435,11 +1438,18 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		return nil
 	}
 	// I1：构造审查管线（mode=off 返回 nil → 下方走原路径，零行为变化）。
+	// OG-18：mask 改写开关 + PII 正则（仅 lexiconRegistry 有正则，fallback guardrail 无则不改写）。
+	var maskRes []*regexp.Regexp
+	if reg, ok := s.l1Classifier().(*lexiconRegistry); ok {
+		maskRes = reg.CategoryRegexps("A4-06")
+	}
 	og, ogErr := newOutputGuard(outputGuardConfig{
 		Mode:          s.currentOutputGuardMode(),
 		PolicyVersion: s.policyVersion(),
 		Params:        s.outputGuardParams,
 		Cascade:       s.outputGuardCascade, // OG-13：E 组级联参数（槽位/并发阀/超时/预演开关）
+		MaskEnabled:   s.outputGuardMaskEnabled,
+		MaskRegexps:   maskRes,
 	}, s.l1Classifier(), s.outputGuardL2, s.metrics, s.audit, tenant, requestID)
 	if ogErr != nil {
 		return ogErr // fail-closed：模式非法不得静默放行（启动期已校验，此处兜底）
@@ -1558,6 +1568,22 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 			FilteredTokens: filtered,
 			MeteringMode:   s.meteringMode(),
 		})
+	}
+	// OG-18：mask 改写命中 → 在上层发射 output_masked 审计（按类目各一条）。
+	// 仅当 mask 开关开启且实际命中等价类目标记 mask 动作时才发射；mask 未开启时
+	// 即使 PII 类目存在也只计为 flag（由既有 output_flagged 覆盖）。
+	if og != nil {
+		for _, cat := range og.MaskedCategories() {
+			s.audit.append(AuditEvent{
+				TenantID:     tenant,
+				RequestID:    requestID,
+				Action:       "output_masked",
+				Result:       "masked_" + cat,
+				OGCategory:   cat,
+				OGMode:       s.currentOutputGuardMode(),
+				MeteringMode: s.meteringMode(),
+			})
+		}
 	}
 	return nil
 }
@@ -2759,7 +2785,8 @@ func main() {
 	outputGuardL2URL := flag.String("output-guard-l2-url", "", "GA-输出侧内容审查 L2 语义分类器侧车地址（M2 OG-12）：HTTP POST JSON，返回 blocked/category/confidence/match；为空 = 不启用 L2，纯 L1 规则（默认，行为零变化）")
 	outputGuardL2Key := flag.String("output-guard-l2-key", "", "输出侧 L2 语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
 	outputGuardL2Timeout := flag.Duration("output-guard-l2-timeout", 2*time.Second, "输出侧 L2 语义分类器侧车调用超时（在请求路径上，须有限且小；不可用自动 fallback L1 + degraded 指标）")
-	// GA-输出侧内容审查（OG-13）：E 组级联并发参数（§5.5）。P-TIMEOUT 复用上面的 -output-guard-l2-timeout（单一事实源）。
+	outputGuardMaskEnable := flag.Bool("output-guard-mask-enable", false, "OG-18：PII mask 改写开关（默认 false = block-only 深度，A4-06 降为 flag；true = 实打马赛克后下发）；需 -output-guard=shadow/enforcing 时生效")
+	// GA-输出侧内容审查（OG-13）：E 组级联参数（§5.5）。P-TIMEOUT 复用上面的 -output-guard-l2-timeout（单一事实源）。
 	outputGuardConcurrency := flag.Int("output-guard-concurrency", 0, "P-CONCURRENCY：单请求在飞 L2 句数上限（OG-13 级联）；0＝未配置，按 CPU 核数派生；超限不排队，直接按 P-DEGRADE")
 	outputGuardMaxSlots := flag.Int("output-guard-max-slots", 0, "P-MAX-SLOTS：单请求判定句槽位上限（OG-13 级联，防长输出撑爆内存）；0＝未配置，按 P-MAX-BUFFER-BYTES/平均句长派生")
 	outputGuardBlockCancel := flag.Bool("output-guard-block-cancel", false, "P-BLOCK-CANCEL：命中 block 后是否中断引擎生成（M4 生效；M3 仅落配置与只读快照，不改变 shadow 行为）")
@@ -2966,6 +2993,7 @@ func main() {
 		log.Fatalf("[output-guard] enforcing 模式必须配置 -output-guard-l2-url（L1 规则层无 block 类目，纯 L1 = 零拦截）")
 	}
 	srv.outputGuardMode = *outputGuardMode
+	srv.outputGuardMaskEnabled = *outputGuardMaskEnable
 	srv.outputGuardCfgPath = *outputGuardCfg
 	// OG-8：恢复运行时 mode 覆盖（高敏变更复核写入的 mode，跨重启保持）。
 	// 注意：放在模式校验之后——恢复的 mode 会另行独立校验，非法则沿用启动参数（不阻断启动）。

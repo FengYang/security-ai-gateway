@@ -136,21 +136,29 @@ func TestChunkMetaJSONShadowHit(t *testing.T) {
 // TestCatActionForMode：动作映射正确。
 func TestCatActionForMode(t *testing.T) {
 	// shadow 下一律 flag
-	if a := catActionForMode("A1-06", outputGuardShadow); a != catActionFlag {
+	if a := catActionForMode("A1-06", outputGuardShadow, false); a != catActionFlag {
 		t.Fatalf("shadow 下 A1-06 期望 flag，实际 %s", a)
 	}
-	if a := catActionForMode("A4-06", outputGuardShadow); a != catActionFlag {
+	if a := catActionForMode("A4-06", outputGuardShadow, false); a != catActionFlag {
 		t.Fatalf("shadow 下 A4-06 期望 flag，实际 %s", a)
 	}
-	// enforcing 下按类目默认动作
-	if a := catActionForMode("A1-06", outputGuardEnforcing); a != catActionBlock {
+	// enforcing 下按类目默认动作（mask 未启用 = block-only 深度）
+	if a := catActionForMode("A1-06", outputGuardEnforcing, false); a != catActionBlock {
 		t.Fatalf("enforcing 下 A1-06 期望 block，实际 %s", a)
 	}
 	// D1'：block-only 深度下 PII mask 冲突降为 flag（P-PII-ACTION；改写归 OG-18）。
-	if a := catActionForMode("A4-06", outputGuardEnforcing); a != catActionFlag {
+	if a := catActionForMode("A4-06", outputGuardEnforcing, false); a != catActionFlag {
 		t.Fatalf("enforcing 下 A4-06（mask 冲突降档）期望 flag，实际 %s", a)
 	}
-	if a := catActionForMode("A1-07", outputGuardEnforcing); a != catActionFlag {
+	// OG-18：mask 启用时，A4-06 返回 mask（实打马赛克）。
+	if a := catActionForMode("A4-06", outputGuardEnforcing, true); a != catActionMask {
+		t.Fatalf("enforcing+mask 启用下 A4-06 期望 mask，实际 %s", a)
+	}
+	if a := catActionForMode("A1-07", outputGuardEnforcing, false); a != catActionFlag {
 		t.Fatalf("enforcing 下 A1-07（中级别）期望 flag，实际 %s", a)
+	}
+	// mask 启用不影响非 mask 类目
+	if a := catActionForMode("A1-06", outputGuardEnforcing, true); a != catActionBlock {
+		t.Fatalf("enforcing+mask 启用下 A1-06 仍期望 block，实际 %s", a)
 	}
 }

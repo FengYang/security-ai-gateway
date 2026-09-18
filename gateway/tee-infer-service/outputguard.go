@@ -138,7 +138,7 @@ func newOutputGuard(cfg outputGuardConfig, l1 OutputClassifier, l2 OutputClassif
 		}
 	})
 	// 级联参数（E 组）：P-MAX-SLOTS 派生依赖已 resolve 的 P-MAX-BUFFER-BYTES，故传入 params。
-	og.casc = newCascade(resolveOutputGuardCascadeParams(cfg.Cascade, params), cfg.Mode, l1, l2, m, a, tenant, requestID, pv)
+	og.casc = newCascade(resolveOutputGuardCascadeParams(cfg.Cascade, params), cfg.Mode, cfg.MaskEnabled, cfg.MaskRegexps, l1, l2, m, a, tenant, requestID, pv)
 	if og.metrics != nil {
 		og.metrics.incOGRequest(cfg.Mode) // 审查过的请求数（按模式）
 	}
@@ -186,15 +186,20 @@ func (og *outputGuard) BlockInfo() (bool, string) {
 	return og.casc.blockInfo()
 }
 
+// MaskedCategories 返回本请求中命中 mask 动作的所有类目（去重）。
+// 用于上层在请求结束时发射 output_masked 审计事件（OG-18）。
+func (og *outputGuard) MaskedCategories() []string {
+	return og.casc.maskedCategories()
+}
+
 // ogMaskDowngradeWarn 保证 PII mask→flag 降级告警每进程只打一行（D1'，P-PII-ACTION）。
 var ogMaskDowngradeWarn sync.Once
 
 // catActionForMode 返回指定类目在指定模式下的**实际生效动作**（用于槽位处置与 chunk-meta）。
 // shadow 下恒为 flag（只标记不拦截）；enforcing 下按类目默认动作（M4）。
-//
-// D1'：当前输出深度为 block-only（改写档三前提未齐），PII 类目的 mask 动作无法执行——
-// 按参数表 P-PII-ACTION 降为 flag（原样下发+留痕）并每进程告警一行；输出改写归 OG-18。
-func catActionForMode(cat, mode string) string {
+// maskEnabled = true（OG-18）时，mask 类目（A4-06 PII）返回 catActionMask（实打马赛克后下发）；
+// maskEnabled = false（默认，block-only 深度）时，mask 类目降为 flag（D1'，P-PII-ACTION）。
+func catActionForMode(cat, mode string, maskEnabled bool) string {
 	if mode == outputGuardShadow {
 		return catActionFlag
 	}
@@ -203,6 +208,11 @@ func catActionForMode(cat, mode string) string {
 		return catActionBlock // 兜底：未知类目按 block 处理（fail-closed）
 	}
 	if mode == outputGuardEnforcing && c.DefaultAction == catActionMask {
+		if maskEnabled {
+			return catActionMask // OG-18：改写启用，实打马赛克后下发
+		}
+		// D1'：当前输出深度为 block-only（改写未启用），PII 类目的 mask 动作无法执行——
+		// 按参数表 P-PII-ACTION 降为 flag（原样下发+留痕）并每进程告警一行。
 		ogMaskDowngradeWarn.Do(func() {
 			log.Printf("[output-guard] PII 类目 %s 默认 mask，但当前为 block-only 输出深度（改写未启用）：按 P-PII-ACTION 降为 flag 放行并留痕（输出改写归 OG-18）", cat)
 		})

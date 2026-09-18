@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -231,6 +232,23 @@ func (r *lexiconRegistry) PolicyVersion() string { return r.policyVersion }
 
 // ManifestSHA 返回加载时 manifest.json 的自锚定摘要（热加载审计 sha256 附字段）。
 func (r *lexiconRegistry) ManifestSHA() string { return r.manifestSHA }
+
+// CategoryRegexps 返回指定类目的已编译正则列表（用于 OG-18 PII mask 改写）。
+// 类目不存在或无正则则返回 nil。调用方不得修改返回切片（共享只读）。
+func (r *lexiconRegistry) CategoryRegexps(cat string) []*regexp.Regexp {
+	if r == nil {
+		return nil
+	}
+	lc, ok := r.byCategory[cat]
+	if !ok || len(lc.regexList) == 0 {
+		return nil
+	}
+	res := make([]*regexp.Regexp, 0, len(lc.regexList))
+	for _, rr := range lc.regexList {
+		res = append(res, rr.re)
+	}
+	return res
+}
 
 // readPolicyManifestSelfSHA 尽力读取指定策略目录 manifest.json 的自锚定摘要。
 // 仅供**加载失败**回退留痕使用：读取/解析失败一律返回空串（不掩盖真正的加载错误）。
