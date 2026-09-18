@@ -2907,6 +2907,12 @@ func main() {
 	if err := validateOutputGuardMode(*outputGuardMode); err != nil {
 		log.Fatalf("[output-guard] %v", err)
 	}
+	// I1（评审缺陷修复）：enforcing 必须配 L2 语义分类器——L1 规则层仅 2 个类目
+	//（A4-06 默认 mask、A1-07 默认 flag，block-only 深度下均降为 flag/不拦截），
+	// 纯 L1 的 enforcing 零拦截且名字具误导性，属 fail-open 虚假安全感。
+	if *outputGuardMode == outputGuardEnforcing && *outputGuardL2URL == "" {
+		log.Fatalf("[output-guard] enforcing 模式必须配置 -output-guard-l2-url（L1 规则层无 block 类目，纯 L1 = 零拦截）")
+	}
 	srv.outputGuardMode = *outputGuardMode
 	srv.outputGuardCfgPath = *outputGuardCfg
 	// OG-8：恢复运行时 mode 覆盖（高敏变更复核写入的 mode，跨重启保持）。
