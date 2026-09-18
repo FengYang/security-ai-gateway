@@ -93,6 +93,10 @@ type PluginConfig struct {
 	// gateway_core_credential_name 为空 = 沿用静态 gateway_core_token（行为不变）。
 	GatewayCoreCredentialName  string `json:"gateway_core_credential_name"`  // 集合名（如 core-channel）
 	GatewayCoreCredentialToken string `json:"gateway_core_credential_token"` // 该集合的独立读令牌
+	// OG-16 扩展：插件侧 PII mask 改写（两形态第二形态）。
+	// 默认 false（off），不改写内容；开启后对解密后的 delta 做 PII 等长脱敏。
+	// 正则为 builtin（编译进 wasm），与 tee-infer 侧 pii_patterns.json 同源。
+	PIIMaskEnabled bool `json:"pii_mask_enabled"`
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -125,6 +129,8 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.GatewayCoreToken = json.Get("gateway_core_token").String()
 	config.GatewayCoreCredentialName = json.Get("gateway_core_credential_name").String()
 	config.GatewayCoreCredentialToken = json.Get("gateway_core_credential_token").String()
+	config.PIIMaskEnabled = json.Get("pii_mask_enabled").Bool()
+	piiMaskEnabled = config.PIIMaskEnabled // 同步到 envelope 侧全局开关（delta 改写用）
 	if config.GatewayCoreService == "" {
 		// 缺省 FQDN（与 tee_service 同理：FQDNCluster 需完整服务域名，短名不会物化）。
 		config.GatewayCoreService = "gateway-core.higress-system.svc.cluster.local"

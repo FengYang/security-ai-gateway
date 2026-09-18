@@ -16,7 +16,7 @@ func TestMain(m *testing.M) {
 
 func TestMetricIncrGuardedNoop(t *testing.T) {
 	// 守卫下 incr 必须为安全 no-op（不触发 hostcall / 不 panic）。
-	for _, c := range []*pwCounter{metricRequests, metricFailClosed, metricDecryptError, metricContentFilter, metricKeysIssued, metricKeysDeleted} {
+	for _, c := range []*pwCounter{metricRequests, metricFailClosed, metricDecryptError, metricContentFilter, metricKeysIssued, metricKeysDeleted, metricMasked} {
 		c.incr()
 		c.incr()
 	}
@@ -30,6 +30,7 @@ func TestMetricNames(t *testing.T) {
 		"otpmask_content_filter_total": metricContentFilter.name,
 		"otpmask_keys_issued_total":    metricKeysIssued.name,
 		"otpmask_keys_deleted_total":   metricKeysDeleted.name,
+		"otpmask_masked_total":         metricMasked.name,
 	}
 	for name, got := range want {
 		if name != got {

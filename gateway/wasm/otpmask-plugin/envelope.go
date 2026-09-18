@@ -270,7 +270,18 @@ func sseLine(reqID, model string, chunk *streamChunk) ([]byte, error) {
 	choice := sseChoice{Index: 0}
 	switch chunk.Finish {
 	case "":
-		choice.Delta.Content = chunk.Delta
+		delta := chunk.Delta
+		// OG-16 扩展：插件侧 PII mask 改写（两形态第二形态）。
+		// 仅对正常 delta 块改写；finish 块 delta 为空，跳过。
+		// 默认 off（piiMaskEnabled=false），零行为变化。
+		if piiMaskEnabled && delta != "" {
+			masked, hits := maskTextPII(delta)
+			if hits > 0 {
+				delta = masked
+				metricMasked.incr()
+			}
+		}
+		choice.Delta.Content = delta
 	case "stop", "content_filter":
 		choice.FinishReason = chunk.Finish // OpenAI 标准 finish_reason 与内层 finish 同名
 	default:

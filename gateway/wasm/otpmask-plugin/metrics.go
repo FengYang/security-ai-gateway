@@ -74,6 +74,8 @@ var (
 	metricChannelFetchCb     = &pwCounter{name: "otpmask_core_channel_fetch_cb_total"}
 	metricChannelFetchOK     = &pwCounter{name: "otpmask_core_channel_fetch_ok_total"}
 	metricChannelFetchReject = &pwCounter{name: "otpmask_core_channel_fetch_reject_total"}
+	// OG-16 扩展：插件侧 PII mask 改写命中次数（两形态第二形态）。
+	metricMasked = &pwCounter{name: "otpmask_masked_total"}
 )
 
 // 说明（如实）：**不暴露**"当前生效限流表版本"仪表。proxy-wasm 的 MetricGauge 在多 worker
