@@ -1448,7 +1448,16 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		defer og.Close() // 幂等释放（C4：请求内生命周期）
 	}
 	// I2 唯一出口：所有写给客户端的内容必须经 emit（防绕过）。
-	emit := func(delta, finish string) error { return writeChunk(delta, finish, nil) }
+	// OG-19：emittedBuilder 累计已下发明文（不含终止帧空 delta），
+	// 用于 blocked 时精确计算 filtered_tokens = 总生成 − 已下发。
+	var emittedBuilder strings.Builder
+	emit := func(delta, finish string) error {
+		// 只累计内容 delta（非空且非终止帧占位），终止帧/分片不计入内容量。
+		if finish == "" && delta != "" {
+			emittedBuilder.WriteString(delta)
+		}
+		return writeChunk(delta, finish, nil)
+	}
 
 	genErr := eng.Generate(genReq, func(delta string) error {
 		agg.WriteString(delta)
@@ -1464,14 +1473,35 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		// 违规内容已在 cascade 内拦下无泄漏；genErr 仍上抛供上游审计（与 §2.3 error 分支解耦）。
 		finishReason := "error"
 		var guard *chunkGuardMeta
+		blocked := false
+		blockCat := ""
 		if og != nil {
-			if blocked, _ := og.BlockInfo(); blocked {
+			blocked, blockCat = og.BlockInfo()
+			if blocked {
 				finishReason = "content_filter"
 				guard = og.BuildGuardMeta()
 			}
 		}
 		_ = writeChunk("", finishReason, guard)
 		fmt.Fprint(w, "data: [DONE]\n\n")
+		// OG-19：block 命中 → 在上层发射 output_blocked 审计（携带 filtered_tokens）。
+		// cascade 内已记指标；此处补审计事件——在上层可精确算出 filtered_tokens。
+		if blocked && blockCat != "" {
+			filtered := s.countTokens(agg.String()) - s.countTokens(emittedBuilder.String())
+			if filtered < 0 {
+				filtered = 0
+			}
+			s.audit.append(AuditEvent{
+				TenantID:       tenant,
+				RequestID:      requestID,
+				Action:         "output_blocked",
+				Result:         "blocked_" + blockCat,
+				OGCategory:     blockCat,
+				OGMode:         s.currentOutputGuardMode(),
+				FilteredTokens: filtered,
+				MeteringMode:   s.meteringMode(),
+			})
+		}
 		return genErr
 	}
 	// I3：收尾——OG-4 把缓冲尾部作为最后一个判定单元送判；enforcing 下句级降级/终止在此收敛。
@@ -1484,8 +1514,11 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	// 带 chunk-meta guard 字段（§4.6.1；og=nil 时 guard 为 nil，omitempty 与现网逐字节一致）。
 	finishReason := "stop"
 	var guardMeta *chunkGuardMeta
+	blocked := false
+	blockCat := ""
 	if og != nil {
-		if blocked, _ := og.BlockInfo(); blocked {
+		blocked, blockCat = og.BlockInfo()
+		if blocked {
 			finishReason = "content_filter"
 		}
 		guardMeta = og.BuildGuardMeta()
@@ -1507,6 +1540,25 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		flusher.Flush()
 	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
+	// OG-19：block 命中 → 在上层发射 output_blocked 审计（携带 filtered_tokens）。
+	// 正常路径（genErr=nil）的 block 发生在 Finish 或 Process 阶段；D5 降级终止 blockCat 为空，
+	// 不发 output_blocked（与既有 degraded 口径一致）。
+	if blocked && blockCat != "" {
+		filtered := s.countTokens(agg.String()) - s.countTokens(emittedBuilder.String())
+		if filtered < 0 {
+			filtered = 0
+		}
+		s.audit.append(AuditEvent{
+			TenantID:       tenant,
+			RequestID:      requestID,
+			Action:         "output_blocked",
+			Result:         "blocked_" + blockCat,
+			OGCategory:     blockCat,
+			OGMode:         s.currentOutputGuardMode(),
+			FilteredTokens: filtered,
+			MeteringMode:   s.meteringMode(),
+		})
+	}
 	return nil
 }
 

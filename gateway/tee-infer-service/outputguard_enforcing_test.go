@@ -65,7 +65,7 @@ func TestEnforcingCleanStreamPassThrough(t *testing.T) {
 // 2/10. L1 命中 block 类目：首句即终止，后续 Process/Finish 零字节且不再计句。
 func TestEnforcingL1BlockTerminatesZeroBytes(t *testing.T) {
 	// L1 桩恒命中 A1-06（显性 block 类目）；不挂 L2（L1 命中即决不送 L2）。
-	og, m, a := newEnforcingGuard(t, cascadeParams(true), fakeL2Classifier{cat: "A1-06", conf: 1.0}, nil)
+	og, m, _ := newEnforcingGuard(t, cascadeParams(true), fakeL2Classifier{cat: "A1-06", conf: 1.0}, nil)
 	rec := &frameRecorder{}
 
 	if err := og.Process("违规内容。", rec.emit); err != nil {
@@ -90,20 +90,9 @@ func TestEnforcingL1BlockTerminatesZeroBytes(t *testing.T) {
 	if !gm.Detected || !gm.Filtered || gm.Action != catActionBlock || gm.Category != "A1-06" {
 		t.Fatalf("guard meta 应为 block/A1-06：%+v", gm)
 	}
-	if n := a.countByAction("output_blocked"); n != 1 {
-		t.Fatalf("期望 1 条 output_blocked，实际 %d", n)
-	}
-	evs := a.query("acme")
-	var blockedEv *AuditEvent
-	for i := range evs {
-		if evs[i].Action == "output_blocked" {
-			blockedEv = &evs[i]
-		}
-	}
-	if blockedEv == nil || blockedEv.Result != "blocked_A1-06" || blockedEv.OGCategory != "A1-06" || blockedEv.OGMode != outputGuardEnforcing {
-		t.Fatalf("output_blocked 审计事件不符：%+v", blockedEv)
-	}
-	if body := renderMetrics(m, a.len()); !strings.Contains(body, `otpmask_output_guard_blocked_total{category="A1-06",mode="enforcing"} 1`) {
+	// OG-19：output_blocked 审计事件已上移到 streamTextInfer 层发射（以精确计算 filtered_tokens），
+	// cascade 层只记指标。此处用指标 + BlockInfo 验证 block 状态，审计事件在 framewise e2e 中断言。
+	if body := renderMetrics(m, 0); !strings.Contains(body, `otpmask_output_guard_blocked_total{category="A1-06",mode="enforcing"} 1`) {
 		t.Fatalf("blocked 指标缺失：\n%s", body)
 	}
 }
@@ -568,14 +557,12 @@ func TestEnforcingBlockNoWouldReject(t *testing.T) {
 	if blocked, cat := og.BlockInfo(); !blocked || cat != "A1-06" {
 		t.Fatalf("应为 blocked/A1-06，实际 (%v,%q)", blocked, cat)
 	}
-	if n := a.countByAction("output_blocked"); n != 1 {
-		t.Fatalf("应落 1 条 output_blocked，实际 %d", n)
-	}
 	// I3 核心断言：enforcing 下 block 命中不落 would_reject
+	// （output_blocked 审计事件上移到 streamTextInfer 层，cascade 层只记指标）
 	if n := a.countByAction("output_would_reject"); n != 0 {
 		t.Fatalf("enforcing 下 block 命中不应落 would_reject（口径 shadow-only），实际 %d", n)
 	}
-	body := renderMetrics(m, a.len())
+	body := renderMetrics(m, 0)
 	if strings.Contains(body, "otpmask_output_guard_would_reject_total") {
 		t.Fatalf("enforcing block 不应有 would_reject 指标：\n%s", body)
 	}

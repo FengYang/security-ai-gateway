@@ -625,7 +625,9 @@ func (c *cascade) scanDeltaClaimantsLocked(d, g int) (hasPending, hasTimeout boo
 }
 
 // terminateLocked 置位 enforcing 整流终止（幂等，持锁调用）。
-//   - hit=true：命中 block —— 落一条 output_blocked 审计 + blocked_total{category,mode}；
+//   - hit=true：命中 block —— 记 blocked_total{category,mode} 指标；
+//     output_blocked 审计事件由上层发射（OG-19：上层同时持有 agg 与 emitted，
+//     可精确计算 filtered_tokens）。
 //   - hit=false：D5 无槽位可审的降级终止 —— 不命中，不发 output_blocked（degraded 口径已记）。
 //
 // 只停 pending 槽定时器，**不迁移槽位 4 态**（冻结状态机）；迟到 L2 回调由
@@ -644,17 +646,6 @@ func (c *cascade) terminateLocked(cat string, hit bool) {
 	if hit {
 		if c.m != nil {
 			c.m.incOGBlocked(cat, c.mode)
-		}
-		if c.a != nil {
-			c.a.append(AuditEvent{
-				TenantID:        c.tenant,
-				RequestID:       c.requestID,
-				Action:          "output_blocked",
-				Result:          "blocked_" + cat,
-				OGCategory:      cat,
-				OGMode:          c.mode,
-				OGPolicyVersion: c.policyVersion,
-			})
 		}
 	}
 	c.cond.Broadcast() // 唤醒 finish 等待者（finish 循环条件含 !blocked）

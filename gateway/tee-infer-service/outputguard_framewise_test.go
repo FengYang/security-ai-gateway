@@ -524,10 +524,25 @@ func TestOutputGuardFramewiseE2EEnforcing(t *testing.T) {
 	if n := srv.audit.countByAction("output_blocked"); n != 1 {
 		t.Fatalf("应落 1 条 output_blocked 审计，实际 %d", n)
 	}
+	var blockedEv *AuditEvent
 	for _, e := range srv.audit.query("") {
-		if e.Action == "output_blocked" && (e.OGCategory != "A1-06" || e.OGMode != outputGuardEnforcing) {
-			t.Fatalf("output_blocked 审计类目/模式不符：%+v", e)
+		if e.Action == "output_blocked" {
+			blockedEv = &e
+			break
 		}
+	}
+	if blockedEv == nil || blockedEv.OGCategory != "A1-06" || blockedEv.OGMode != outputGuardEnforcing {
+		t.Fatalf("output_blocked 审计类目/模式不符：%+v", blockedEv)
+	}
+	// OG-19：filtered_tokens = 总生成 − 已下发；本例首句即 block，零下发，
+	// 且引擎生成 3 句共 9 个 CJK 字符（句号也是 CJK）→ 9 tokens。
+	wantFiltered := estimateTokensCJK(strings.Join(deltas, ""))
+	if blockedEv.FilteredTokens != wantFiltered {
+		t.Fatalf("filtered_tokens 期望 %d，实际 %d（总生成=%q 9 rune）",
+			wantFiltered, blockedEv.FilteredTokens, strings.Join(deltas, ""))
+	}
+	if blockedEv.MeteringMode == "" {
+		t.Fatal("output_blocked 事件应携带 metering_mode 证据字段")
 	}
 }
 
@@ -569,6 +584,25 @@ func TestOutputGuardFramewiseE2EEnforcingGenErr(t *testing.T) {
 	}
 	if last.Guard == nil || last.Guard.Action != catActionBlock || last.Guard.Category != "A1-06" {
 		t.Fatalf("genErr 终止帧应带 block/A1-06 chunk-meta：%+v", last.Guard)
+	}
+	// OG-19：genErr 分支也应发射 output_blocked 且 filtered_tokens 正确。
+	if n := srv.audit.countByAction("output_blocked"); n != 1 {
+		t.Fatalf("genErr 分支应落 1 条 output_blocked 审计，实际 %d", n)
+	}
+	var blockedEv *AuditEvent
+	for _, e := range srv.audit.query("") {
+		if e.Action == "output_blocked" {
+			blockedEv = &e
+			break
+		}
+	}
+	wantFiltered := estimateTokensCJK(strings.Join(deltas, ""))
+	if blockedEv == nil || blockedEv.FilteredTokens != wantFiltered {
+		t.Fatalf("genErr 分支 filtered_tokens 期望 %d，实际 %v（总生成=%q）",
+			wantFiltered, blockedEv, strings.Join(deltas, ""))
+	}
+	if blockedEv.OGCategory != "A1-06" || blockedEv.OGMode != outputGuardEnforcing {
+		t.Fatalf("genErr 分支 output_blocked 类目/模式不符：%+v", blockedEv)
 	}
 }
 
