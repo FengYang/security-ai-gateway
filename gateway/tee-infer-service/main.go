@@ -1686,6 +1686,8 @@ type outputGuardSnapshot struct {
 	L1Categories int `json:"l1_categories_loaded"`
 	// L1Rules：已加载的 L1 规则总条数（同上）
 	L1Rules int `json:"l1_rules_total"`
+	// MaskEnabled：PII mask 改写开关（OG-18；默认 false = block-only 深度，mask 类目降 flag）
+	MaskEnabled bool `json:"mask_enabled"`
 }
 
 // outputGuardParamsSnapshot 缓冲参数只读快照（D 组参数，§5.4）。
@@ -1771,6 +1773,7 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		Mode:          ogMode,
 		ModeSource:    s.outputGuardModeSource(),
 		PolicyVersion: s.policyVersion(),
+		MaskEnabled:   s.outputGuardMaskEnabled,
 		Params: outputGuardParamsSnapshot{
 			Unit:              s.outputGuardParams.Unit,
 			MaxUnitRunes:      s.outputGuardParams.MaxUnitRunes,
@@ -3047,8 +3050,8 @@ func main() {
 		// 非生产形态：按 enforcing 时序阻塞下发（只做时序、不改内容），仅供浸泡取首帧延迟增量。
 		log.Printf("[output-guard] 警告：阻塞预演已开启（-output-guard-block-emission=true）——按 enforcing 时序下发，仅限浸泡期使用，勿用于生产 shadow")
 	}
-	log.Printf("[output-guard] 输出侧内容审查模式=%s（off/shadow）；缓冲参数 unit=%s max_unit_runes=%d first_unit_max_runes=%d max_buffer_bytes=%d window_chars=%d（词库最长 %d + 余量 %d）",
-		ogModeMetric, srv.outputGuardParams.Unit, srv.outputGuardParams.MaxUnitRunes,
+	log.Printf("[output-guard] 输出侧内容审查模式=%s mask=%t；缓冲参数 unit=%s max_unit_runes=%d first_unit_max_runes=%d max_buffer_bytes=%d window_chars=%d（词库最长 %d + 余量 %d）",
+		ogModeMetric, srv.outputGuardMaskEnabled, srv.outputGuardParams.Unit, srv.outputGuardParams.MaxUnitRunes,
 		srv.outputGuardParams.FirstUnitMaxRunes, srv.outputGuardParams.MaxBufferBytes,
 		srv.outputGuardParams.WindowRunes, ogParams.MaxKeywordRunes, srv.outputGuardParams.WindowMargin)
 	// GF.4.3：语义分类器接线（默认关闭——未配置 URL 即保持关键词规则分类器，行为不变）。

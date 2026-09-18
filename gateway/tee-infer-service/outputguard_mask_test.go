@@ -310,3 +310,122 @@ func TestEnforcingMaskDisabledNoRewrite(t *testing.T) {
 		t.Fatalf("mask 关闭时 MaskedCategories 应为空，实际: %v", cats)
 	}
 }
+
+// TestShadowMaskNoRewrite 验证 shadow 模式下即使 mask 开关开启，
+// PII 类目仍降为 flag（不改写内容）——与 D1' 决策一致。
+// shadow 恒为 flag 是基础约定，不能因 mask 开关而改变。
+func TestShadowMaskNoRewrite(t *testing.T) {
+	res := newTestPIIRegexps(t)
+	l1 := fakeL2Classifier{cat: "A4-06", conf: 0.99, match: "13812345678"}
+	l2 := fakeL2Classifier{}
+
+	m := newMetrics()
+	m.setOutputGuardMode(outputGuardShadow, defaultPolicyVersion)
+	a := newAuditChain()
+
+	cfg := outputGuardConfig{
+		Mode:          outputGuardShadow, // shadow 模式
+		PolicyVersion: defaultPolicyVersion,
+		Params:        resolveOutputGuardParams(defaultOutputGuardParams()),
+		Cascade:       cascadeParams(true),
+		MaskEnabled:   true, // 即使 mask 开关开
+		MaskRegexps:   res,
+	}
+	og, err := newOutputGuard(cfg, l1, l2, m, a, "acme", "req-shadow-mask")
+	if err != nil {
+		t.Fatalf("newOutputGuard: %v", err)
+	}
+	defer og.Close()
+
+	var got strings.Builder
+	emit := func(delta, finish string) error {
+		got.WriteString(delta)
+		return nil
+	}
+
+	input := "我的电话是13812345678，请联系。"
+	if err := og.Process(input, emit); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if err := og.Finish(emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+
+	output := got.String()
+	// shadow 下恒为 flag：PII 明文应保留（不改写）
+	if !strings.Contains(output, "13812345678") {
+		t.Fatalf("shadow 模式下即使 mask 开关开也应保留明文（恒为 flag），实际: %q", output)
+	}
+	// MaskedCategories 应为空（shadow 下 action 是 flag，不是 mask）
+	if cats := og.MaskedCategories(); len(cats) != 0 {
+		t.Fatalf("shadow 模式下 MaskedCategories 应为空，实际: %v", cats)
+	}
+}
+
+// TestEnforcingMaskAuditEvent 验证 enforcing + mask 启用时，
+// MaskedCategories() 返回正确类目（供上层发射 output_masked 审计）。
+// 模拟上层 streamTextInfer 的审计发射逻辑，验证事件构造正确。
+func TestEnforcingMaskAuditEvent(t *testing.T) {
+	res := newTestPIIRegexps(t)
+	l1 := fakeL2Classifier{cat: "A4-06", conf: 0.99, match: "13812345678"}
+	l2 := fakeL2Classifier{}
+
+	m := newMetrics()
+	m.setOutputGuardMode(outputGuardEnforcing, defaultPolicyVersion)
+	a := newAuditChain()
+
+	cfg := outputGuardConfig{
+		Mode:          outputGuardEnforcing,
+		PolicyVersion: defaultPolicyVersion,
+		Params:        resolveOutputGuardParams(defaultOutputGuardParams()),
+		Cascade:       cascadeParams(true),
+		MaskEnabled:   true,
+		MaskRegexps:   res,
+	}
+	og, err := newOutputGuard(cfg, l1, l2, m, a, "acme", "req-mask-audit")
+	if err != nil {
+		t.Fatalf("newOutputGuard: %v", err)
+	}
+	defer og.Close()
+
+	emit := func(delta, finish string) error { return nil }
+	input := "电话13812345678，邮箱 user@test.com。"
+	if err := og.Process(input, emit); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if err := og.Finish(emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+
+	// 模拟上层 streamTextInfer 的审计发射逻辑
+	maskedCats := og.MaskedCategories()
+	auditEvents := make([]AuditEvent, 0)
+	for _, cat := range maskedCats {
+		auditEvents = append(auditEvents, AuditEvent{
+			TenantID:     "acme",
+			RequestID:    "req-mask-audit",
+			Action:       "output_masked",
+			Result:       "masked_" + cat,
+			OGCategory:   cat,
+			OGMode:       outputGuardEnforcing,
+			MeteringMode: "estimate",
+		})
+	}
+
+	// 断言：应至少有 1 条 mask 审计（A4-06）
+	if len(auditEvents) == 0 {
+		t.Fatal("应发射 output_masked 审计事件，实际 0 条")
+	}
+	// 断言：A4-06 必须在其中
+	found := false
+	for _, e := range auditEvents {
+		if e.OGCategory == "A4-06" && e.Action == "output_masked" &&
+			e.Result == "masked_A4-06" && e.OGMode == outputGuardEnforcing {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("未找到 A4-06 的 output_masked 事件，实际: %+v", auditEvents)
+	}
+}
