@@ -171,9 +171,11 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 
 | 项 | 现状 | 生产要求 |
 | --- | --- | --- |
-| TEE 形态 | 模拟飞地（进程隔离） | TDX/SGX 可信执行环境 + 节点亲和 |
+| TEE 形态 | 模拟飞地（进程隔离） | **按场景**：S1 明文路径无 TEE 需求；S2 对接第三方密态模型时 TEE 在厂商侧、我方无须 TEE（tee-infer 落客户可信域）；S3 自建密态推理需 TDX/SGX + 节点亲和。详见《GA-产品场景与可信区域矩阵.md》 |
 | 认证 | `X-Tenant-ID` 客户端自声明 | 网关鉴权签发（JWT） |
 | 密钥 | Secret 演示值 | Vault/KMS + TEE 签名注入 |
 | 审计存储 | 内存哈希链 / WORM 文件（`-audit-file` + `-audit-anchor`，JSON Lines 只追加 + 链尾锚定，篡改检测 fail-closed） | 对象存储/WORM 归档 + 定期锚定公证 |
-| Guardrail | 确定性规则 | 语义分类器（TEE 内轻量模型） |
+| Guardrail | 确定性规则 | 语义分类器（S3 时 TEE 内轻量模型；S2 时可部署于客户可信域同域） |
 | 监控存储 | PVC（C-9：Prometheus 10Gi + Grafana 5Gi，kind 需 local-path provisioner） | 按留存周期扩容 + 归档 |
+
+> **场景与 TEE 需求（2026-09-18 补）**：本表的生产要求列按**具体场景**裁剪，不存在「所有场景都要 TEE」的统一要求。场景 × 可信区域 × TEE 需求的唯一事实源见《GA-产品场景与可信区域矩阵.md》。
