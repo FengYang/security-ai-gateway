@@ -85,6 +85,46 @@ jobs:
         env:
           GO_BIN: go
 
+      # 10. L2 两段式端到端冒烟（Qwen3Guard Q8_0 + 侧车 + HTTP 客户端）
+      #     需自托管 runner 具备 llama-server + GGUF + transformers；
+      #     环境不满足时自动跳过，不阻塞 CI。
+      - name: L2 two-stage smoke (optional)
+        shell: pwsh
+        run: |
+          $gguf = ".tools/models/Qwen3Guard-Gen-0.6B-GGUF/Qwen3Guard-Gen-0.6B.Q8_0.gguf"
+          $llama = ".tools/llamacpp/llama-server.exe"
+          if (-not (Test-Path $gguf) -or -not (Test-Path $llama)) {
+            Write-Host "SKIP: llama-server or GGUF not found (expected at $llama / $gguf)"
+            exit 0
+          }
+          # 起 llama-server（后台）
+          $llamaProc = Start-Process -FilePath $llama `
+            -ArgumentList "-m", $gguf, "--host", "127.0.0.1", "--port", "19110", "-np", "2", "-c", "2048", "-t", "4" `
+            -PassThru -NoNewWindow
+          try {
+            # 等健康检查
+            for ($i = 0; $i -lt 30; $i++) {
+              try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:19110/health" -UseBasicParsing -TimeoutSec 2
+                if ($r.StatusCode -eq 200) { break }
+              } catch { Start-Sleep -Seconds 2 }
+            }
+            # 起侧车
+            $sidecarProc = Start-Process -FilePath "python" `
+              -ArgumentList "scripts/qwen3guard-l2-sidecar.py", "--model-dir", ".tools/models/Qwen3Guard-Gen-0.6B", `
+                "--port", "19112", "--llama-url", "http://127.0.0.1:19110" `
+              -PassThru -NoNewWindow
+            try {
+              Start-Sleep -Seconds 5
+              python scripts/og1b-smoke.py --sidecar http://127.0.0.1:19112
+              if ($LASTEXITCODE -ne 0) { throw "smoke test failed with exit $LASTEXITCODE" }
+            } finally {
+              Stop-Process -Id $sidecarProc.Id -Force -ErrorAction SilentlyContinue
+            }
+          } finally {
+            Stop-Process -Id $llamaProc.Id -Force -ErrorAction SilentlyContinue
+          }
+
       - name: penetration tests
         run: python scripts/pen_test.py
 

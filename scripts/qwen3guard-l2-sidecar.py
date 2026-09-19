@@ -68,6 +68,87 @@ TOK = None  # tokenizer（仅 chat 模板渲染用，不加载模型权重）
 CALLS = 0
 
 
+# ==================== Prometheus 指标（stdlib 极简实现，零额外依赖） ====================
+# 仅用 Counter + Histogram 两种类型，输出符合 Prometheus 文本格式（ exposition format 0.0.4）。
+# 侧车是开发/测试工具，不值得引入 prometheus_client 依赖。
+class _Metric:
+    """进程级指标容器（多线程下用一个简单锁保护）。"""
+    import threading as _th
+    _lock = _th.Lock()
+
+    req_total = {"pass": 0, "block": 0, "error": 0}
+    # Histogram 桶（秒）：覆盖 50ms ~ 30s，适配 L2 分类的典型/长尾延迟
+    dur_buckets = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]
+    dur_counts = [0] * len(dur_buckets)
+    dur_sum = 0.0
+    # 轻段延迟桶（首帧）：10ms ~ 5s
+    light_buckets = [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0]
+    light_counts = [0] * len(light_buckets)
+    light_sum = 0.0
+    upstream_errors = 0
+
+    @classmethod
+    def observe_req(cls, verdict):
+        with cls._lock:
+            cls.req_total[verdict] = cls.req_total.get(verdict, 0) + 1
+
+    @classmethod
+    def observe_dur(cls, seconds):
+        with cls._lock:
+            cls.dur_sum += seconds
+            for i, b in enumerate(cls.dur_buckets):
+                if seconds <= b:
+                    cls.dur_counts[i] += 1
+
+    @classmethod
+    def observe_light(cls, seconds):
+        with cls._lock:
+            cls.light_sum += seconds
+            for i, b in enumerate(cls.light_buckets):
+                if seconds <= b:
+                    cls.light_counts[i] += 1
+
+    @classmethod
+    def inc_upstream_error(cls):
+        with cls._lock:
+            cls.upstream_errors += 1
+
+    @classmethod
+    def render(cls):
+        """返回 Prometheus 文本格式的指标字符串。"""
+        lines = []
+        # 请求总数
+        lines.append("# HELP og_l2_requests_total Total L2 classification requests.")
+        lines.append("# TYPE og_l2_requests_total counter")
+        for verdict, v in sorted(cls.req_total.items()):
+            lines.append('og_l2_requests_total{verdict="%s"} %d' % (verdict, v))
+        # 完整请求延迟
+        lines.append("# HELP og_l2_request_duration_seconds Full request duration (seconds).")
+        lines.append("# TYPE og_l2_request_duration_seconds histogram")
+        cum = 0
+        for i, b in enumerate(cls.dur_buckets):
+            cum += cls.dur_counts[i]
+            lines.append('og_l2_request_duration_seconds_bucket{le="%g"} %d' % (b, cum))
+        lines.append('og_l2_request_duration_seconds_bucket{le="+Inf"} %d' % sum(cls.dur_counts))
+        lines.append("og_l2_request_duration_seconds_sum %g" % cls.dur_sum)
+        lines.append("og_l2_request_duration_seconds_count %d" % sum(cls.dur_counts))
+        # 轻段延迟
+        lines.append("# HELP og_l2_light_segment_duration_seconds Light segment (first frame) latency (seconds).")
+        lines.append("# TYPE og_l2_light_segment_duration_seconds histogram")
+        cum = 0
+        for i, b in enumerate(cls.light_buckets):
+            cum += cls.light_counts[i]
+            lines.append('og_l2_light_segment_duration_seconds_bucket{le="%g"} %d' % (b, cum))
+        lines.append('og_l2_light_segment_duration_seconds_bucket{le="+Inf"} %d' % sum(cls.light_counts))
+        lines.append("og_l2_light_segment_duration_seconds_sum %g" % cls.light_sum)
+        lines.append("og_l2_light_segment_duration_seconds_count %d" % sum(cls.light_counts))
+        # 上游错误
+        lines.append("# HELP og_l2_upstream_errors_total Upstream llama-server errors.")
+        lines.append("# TYPE og_l2_upstream_errors_total counter")
+        lines.append("og_l2_upstream_errors_total %d" % cls.upstream_errors)
+        return "\n".join(lines) + "\n"
+
+
 def render(text):
     """与 scripts/qwen3guard-server.py generate() 完全一致的模板渲染。"""
     msgs = [
@@ -140,7 +221,15 @@ class L2SidecarHandler(BaseHTTPRequestHandler):
     # ---- HTTP 入口 ----
 
     def do_GET(self):  # noqa: N802
-        if self.path.rstrip("/") in ("/healthz", "/"):
+        path = self.path.rstrip("/")
+        if path == "/metrics":
+            body = _Metric.render().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path in ("/healthz", "/"):
             self._send_json(200, {"status": "ok", "backend": "llamacpp-twostage",
                                   "llama_url": CFG["llama_url"]})
         else:
@@ -180,13 +269,34 @@ class L2SidecarHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001  上游不可达/流中断
             self._on_upstream_error(light_sent, light_blocked, exc)
             self._log(text, t_light, None, "error: %s" % exc)
+            # 指标：上游错误
+            _Metric.inc_upstream_error()
+            _Metric.observe_dur(time.perf_counter() - t0)
+            if not light_sent:
+                _Metric.observe_req("error")
+            else:
+                _Metric.observe_req("block" if light_blocked else "pass")
+            if t_light is not None:
+                _Metric.observe_light(t_light)
             return
         self._finish(buf, light_sent, light_blocked, t0, t_light)
         safety = SAFETY_RE.search(buf)
         cats = CATS_RE.search(buf)
-        self._log(text, t_light, time.perf_counter() - t0,
+        t_full = time.perf_counter() - t0
+        self._log(text, t_light, t_full,
                  "safety=%s cats=%s" % (safety.group(1) if safety else None,
                                         cats.group(1).strip() if cats else None))
+        # 指标：正常完成
+        _Metric.observe_dur(t_full)
+        if t_light is not None:
+            _Metric.observe_light(t_light)
+        if safety and safety.group(1) == "Unsafe":
+            _Metric.observe_req("block")
+        elif safety:
+            _Metric.observe_req("pass")
+        else:
+            # _finish 里发了 500（Safety 行缺失）= error
+            _Metric.observe_req("error")
 
     # ---- 两段式状态处置 ----
 
