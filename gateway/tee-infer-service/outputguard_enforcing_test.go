@@ -570,3 +570,81 @@ func TestEnforcingBlockNoWouldReject(t *testing.T) {
 		t.Fatalf("enforcing block 应有 blocked 指标：\n%s", body)
 	}
 }
+
+// ---- S2 两段式早出 × enforcing（D8 T2/T5；2026-09-19 落地）----
+
+// S2-E1 早出 true → held：enforcing 下轻段 true 无类目不能定动作，未决期间零下发；
+// 完整段命中 block 类目 → 整流终止、零泄漏、blocked 指标。
+func TestEnforcingEarlyTrueHeldThenBlock(t *testing.T) {
+	l2 := newStubL2()
+	l2.earlys["违规。"] = true
+	gate := make(chan struct{})
+	l2.gates["违规。"] = gate
+	l2.verdicts["违规。"] = stubVerdict{cat: "A1-06", conf: 0.9}
+	og, m, _ := newEnforcingGuard(t, cascadeParams(true), fakeL2Classifier{}, l2)
+	rec := &frameRecorder{}
+
+	if err := og.Process("违规。", rec.emit); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	waitFor(t, "轻段已到（held）", func() bool { return l2.callCount() == 1 })
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("held 期间必须零下发，实际 %v", got)
+	}
+	close(gate) // 完整段命中 block
+	waitFor(t, "整流终止", func() bool {
+		b, _ := og.BlockInfo()
+		return b
+	})
+	og.Close()
+
+	blocked, cat := og.BlockInfo()
+	if !blocked || cat != "A1-06" {
+		t.Fatalf("应为 blocked/A1-06，实际 (%v,%q)", blocked, cat)
+	}
+	if got := rec.joined(); got != "" {
+		t.Fatalf("block 首句必须零泄漏，实际 %q", got)
+	}
+	if body := renderMetrics(m, 0); !strings.Contains(body, `otpmask_output_guard_blocked_total{category="A1-06",mode="enforcing"} 1`) {
+		t.Fatalf("blocked 指标缺失\n---\n%s", body)
+	}
+}
+
+// S2-E2 early-pass 放行后完整段失败（两段矛盾哨兵）：放行不可撤回（T5：首帧放行只依赖
+// 轻段）、不得扩散为句级丢句/整流终止——后续干净句继续放行，仅记 error 指标。
+func TestEnforcingEarlyPassFullSegmentFailNoRetroBlock(t *testing.T) {
+	l2 := newStubL2()
+	l2.earlys["正常一。"] = false
+	l2.verdicts["正常一。"] = stubVerdict{fail: true} // 完整段矛盾 → 失败哨兵
+	l2.earlys["正常二。"] = false
+	l2.verdicts["正常二。"] = stubVerdict{}
+	og, m, _ := newEnforcingGuard(t, cascadeParams(true), fakeL2Classifier{}, l2)
+	rec := &frameRecorder{}
+
+	if err := og.Process("正常一。", rec.emit); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if err := og.Process("正常二。", rec.emit); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	waitFor(t, "两句均已早出放行", func() bool { return rec.joined() == "正常一。正常二。" })
+	if err := og.Finish(rec.emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	og.Close()
+
+	if blocked, _ := og.BlockInfo(); blocked {
+		t.Fatal("早出已放行的句不可回撤为 block（T5：首帧放行只依赖轻段）")
+	}
+	body := renderMetrics(m, 0)
+	if !strings.Contains(body, `{category="",result="error"} 1`) {
+		t.Fatalf("矛盾哨兵应记 error\n---\n%s", body)
+	}
+	if strings.Contains(body, "otpmask_output_guard_degraded_total") &&
+		strings.Contains(body, "reason=\"l2_unavailable\"") {
+		t.Fatalf("early-pass 完整段失败不得扩散 fail-closed\n---\n%s", body)
+	}
+	if strings.Contains(body, "l2_bad_conf") || strings.Contains(body, "l2_timeout") {
+		t.Fatalf("early-pass 完整段失败不应记超时/坏置信降级\n---\n%s", body)
+	}
+}

@@ -363,3 +363,147 @@ func TestOutputGuardL2NoRedirect(t *testing.T) {
 		t.Fatalf("重定向应被拒绝并按调用失败处置（conf=-1），实际 cat=%q conf=%v", cat, conf)
 	}
 }
+
+// ---- S2 两段式契约（D8 议题一 T1=a / 议题二 T6；2026-09-19 落地）----
+//
+// 覆盖：两段 miss/hit、单段 v1 兼容（零行为变化）、两段矛盾 fail-closed、
+// 轻段后断流（false=miss / true=哨兵）、早出回调恰一次且先于返回。
+
+// newTwoStageL2Server 构造 L2 HTTP 测试服务器（127.0.0.1 回环在默认可信域内），
+// 返回分类器与 degraded 归因收集器（串行调用下无并发写）。
+func newTwoStageL2Server(t *testing.T, handler http.HandlerFunc) (*outputL2HTTPClassifier, *[]string) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	var reasons []string
+	c := newOutputL2HTTPClassifier(srv.URL, "", time.Second, nil, nil, func(reason string) {
+		reasons = append(reasons, reason)
+	})
+	return c, &reasons
+}
+
+// 两段 miss：轻段/完整段均 false → miss；onEarly 恰回调一次 false 且先于返回。
+func TestOutputL2TwoStageMiss(t *testing.T) {
+	c, reasons := newTwoStageL2Server(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"blocked\":false}\n{\"blocked\":false}\n"))
+	})
+	var earlyCalls []bool
+	cat, conf, _ := c.ClassifyWithEarly("正常文本", func(b bool) { earlyCalls = append(earlyCalls, b) })
+	if cat != "" || conf != 0 {
+		t.Fatalf("两段 miss 应返回 (\"\",0)，实际 (%q,%v)", cat, conf)
+	}
+	if len(earlyCalls) != 1 || earlyCalls[0] {
+		t.Fatalf("onEarly 应恰回调一次 false（且在返回前），实际 %v", earlyCalls)
+	}
+	if len(*reasons) != 0 {
+		t.Fatalf("两段 miss 不应记 degraded，实际 %v", *reasons)
+	}
+}
+
+// 两段 hit：轻段 true、完整段 true+类目 → 以完整段为准；onEarly(true) 先于返回。
+func TestOutputL2TwoStageHit(t *testing.T) {
+	c, _ := newTwoStageL2Server(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"blocked\":true}\n{\"blocked\":true,\"category\":\"S1\",\"confidence\":1,\"match\":\"\"}\n"))
+	})
+	var earlyCalls []bool
+	cat, conf, match := c.ClassifyWithEarly("违规文本", func(b bool) { earlyCalls = append(earlyCalls, b) })
+	if cat != "S1" || conf != 1 || match != "" {
+		t.Fatalf("两段 hit 应以完整段为准返回 (S1,1,\"\")，实际 (%q,%v,%q)", cat, conf, match)
+	}
+	if len(earlyCalls) != 1 || !earlyCalls[0] {
+		t.Fatalf("onEarly 应恰回调一次 true，实际 %v", earlyCalls)
+	}
+}
+
+// 单段 v1 兼容：命中形/未命中形单文档 → 与既有行为一致（onEarly 以文档 1 判定回调）。
+func TestOutputL2SingleStageCompat(t *testing.T) {
+	// v1 命中形（单文档含 category）：返回值与 v1 逐字段一致
+	c1, _ := newTwoStageL2Server(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"blocked\":true,\"category\":\"A2-03\",\"confidence\":0.95,\"match\":\"词\"}"))
+	})
+	if cat, conf, match := c1.Classify("违规文本"); cat != "A2-03" || conf != 0.95 || match != "词" {
+		t.Fatalf("v1 命中形行为变化，实际 (%q,%v,%q)", cat, conf, match)
+	}
+	// v1 未命中形（单文档仅 blocked=false，与两段轻段字节同形）：由 EOF 区分为单段
+	c2, _ := newTwoStageL2Server(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"blocked\":false}"))
+	})
+	if cat, conf, _ := c2.Classify("正常文本"); cat != "" || conf != 0 {
+		t.Fatalf("v1 未命中形行为变化，实际 (%q,%v)", cat, conf)
+	}
+	// onEarly 同样回调（单段契约中文档 1 即最终判定，语义兼容）
+	var earlyCalls []bool
+	c2.ClassifyWithEarly("正常文本", func(b bool) { earlyCalls = append(earlyCalls, b) })
+	if len(earlyCalls) != 1 || earlyCalls[0] {
+		t.Fatalf("v1 未命中形 onEarly 应回调一次 false，实际 %v", earlyCalls)
+	}
+}
+
+// 两段 blocked 矛盾（false/true 与 true/false 双向）→ 响应不自洽 → 失败哨兵（fail-closed）。
+func TestOutputL2TwoStageContradiction(t *testing.T) {
+	c1, reasons := newTwoStageL2Server(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"blocked\":false}\n{\"blocked\":true,\"category\":\"S1\",\"confidence\":1}\n"))
+	})
+	if cat, conf, _ := c1.Classify("文本"); conf != -1 || cat != "" {
+		t.Fatalf("轻段 false/完整段 true 矛盾应返回哨兵，实际 (%q,%v)", cat, conf)
+	}
+	c2, _ := newTwoStageL2Server(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"blocked\":true}\n{\"blocked\":false}\n"))
+	})
+	if cat, conf, _ := c2.Classify("文本"); conf != -1 || cat != "" {
+		t.Fatalf("轻段 true/完整段 false 矛盾应返回哨兵，实际 (%q,%v)", cat, conf)
+	}
+	if len(*reasons) != 1 || (*reasons)[0] != "bad_response" {
+		t.Fatalf("矛盾应记 bad_response，实际 %v", *reasons)
+	}
+}
+
+// 轻段 false 后断流 → 正常 miss（判定已由轻段给出、首帧已放行；不记 degraded）。
+func TestOutputL2StreamCutAfterSafeVerdict(t *testing.T) {
+	c, reasons := newTwoStageL2Server(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"blocked\":false}\n"))
+		w.(http.Flusher).Flush()
+		time.Sleep(30 * time.Millisecond)
+		panic(http.ErrAbortHandler) // 断流：完整段未送达且无终止标记
+	})
+	var earlyCalls []bool
+	cat, conf, _ := c.ClassifyWithEarly("正常文本", func(b bool) { earlyCalls = append(earlyCalls, b) })
+	if cat != "" || conf != 0 {
+		t.Fatalf("轻段 false 后断流应按 miss 返回 (\"\",0)，实际 (%q,%v)", cat, conf)
+	}
+	if len(earlyCalls) != 1 || earlyCalls[0] {
+		t.Fatalf("onEarly 应恰回调一次 false，实际 %v", earlyCalls)
+	}
+	if len(*reasons) != 0 {
+		t.Fatalf("轻段 false 后断流不记 degraded，实际 %v", *reasons)
+	}
+}
+
+// 轻段 true 后断流 → 失败哨兵（类目未定，fail-closed，held 槽位超时降级）。
+func TestOutputL2StreamCutAfterBlockedVerdict(t *testing.T) {
+	c, reasons := newTwoStageL2Server(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"blocked\":true}\n"))
+		w.(http.Flusher).Flush()
+		time.Sleep(30 * time.Millisecond)
+		panic(http.ErrAbortHandler)
+	})
+	var earlyCalls []bool
+	cat, conf, _ := c.ClassifyWithEarly("违规文本", func(b bool) { earlyCalls = append(earlyCalls, b) })
+	if cat != "" || conf != -1 {
+		t.Fatalf("轻段 true 后断流应返回失败哨兵 (\"\",-1)，实际 (%q,%v)", cat, conf)
+	}
+	if len(earlyCalls) != 1 || !earlyCalls[0] {
+		t.Fatalf("onEarly 应恰回调一次 true，实际 %v", earlyCalls)
+	}
+	if len(*reasons) != 1 || (*reasons)[0] != "bad_response" {
+		t.Fatalf("轻段 true 后断流应记 bad_response，实际 %v", *reasons)
+	}
+}

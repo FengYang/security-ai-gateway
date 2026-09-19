@@ -15,12 +15,16 @@ import (
 )
 
 // stubL2 可控 L2 stub：按文本指定延迟、门控（等待放行）与判定结果，并记录调用顺序。
+// S2 两段式扩展：earlys（轻段判定，有值才回调 onEarly）/ earlyGates（早出回调前门控，
+// 模拟轻段迟到——如超时先到）。
 type stubL2 struct {
-	mu       sync.Mutex
-	delays   map[string]time.Duration
-	gates    map[string]chan struct{}
-	verdicts map[string]stubVerdict
-	calls    []string
+	mu         sync.Mutex
+	delays     map[string]time.Duration
+	gates      map[string]chan struct{}
+	verdicts   map[string]stubVerdict
+	calls      []string
+	earlys     map[string]bool
+	earlyGates map[string]chan struct{}
 }
 
 type stubVerdict struct {
@@ -31,9 +35,11 @@ type stubVerdict struct {
 
 func newStubL2() *stubL2 {
 	return &stubL2{
-		delays:   make(map[string]time.Duration),
-		gates:    make(map[string]chan struct{}),
-		verdicts: make(map[string]stubVerdict),
+		delays:     make(map[string]time.Duration),
+		gates:      make(map[string]chan struct{}),
+		verdicts:   make(map[string]stubVerdict),
+		earlys:     make(map[string]bool),
+		earlyGates: make(map[string]chan struct{}),
 	}
 }
 
@@ -42,6 +48,30 @@ func (s *stubL2) Classify(text string) (string, float64, string) {
 	s.calls = append(s.calls, text)
 	d, g, v := s.delays[text], s.gates[text], s.verdicts[text]
 	s.mu.Unlock()
+	return s.settle(d, g, v)
+}
+
+// ClassifyWithEarly 实现 EarlyOutputClassifier（S2 两段式）：先记调用（调用已发出），
+// 轻段判定（earlys 有值）经 earlyGates 门控后回调 onEarly（模拟"读到响应文档 1"），
+// 再按既有 gates/delays/verdicts 返回完整段；未配 earlys 的文本与 Classify 行为一致。
+func (s *stubL2) ClassifyWithEarly(text string, onEarly func(blocked bool)) (string, float64, string) {
+	s.mu.Lock()
+	s.calls = append(s.calls, text)
+	eb, has := s.earlys[text]
+	eg := s.earlyGates[text]
+	d, g, v := s.delays[text], s.gates[text], s.verdicts[text]
+	s.mu.Unlock()
+	if eg != nil {
+		<-eg
+	}
+	if has && onEarly != nil {
+		onEarly(eb)
+	}
+	return s.settle(d, g, v)
+}
+
+// settle 完整段返回逻辑（两个入口共用：门控 → 延迟 → 判定）。
+func (s *stubL2) settle(d time.Duration, g chan struct{}, v stubVerdict) (string, float64, string) {
 	if g != nil {
 		<-g // 门控：由测试决定何时返回（模拟乱序/慢响应）
 	}
@@ -762,4 +792,213 @@ func TestCascadeBlockingReleasesUnclaimedTail(t *testing.T) {
 	}
 	og.Close()
 	assertEmitFrames(t, "blocking unclaimed tail", rec.snapshot(), deltas)
+}
+
+// ---- S2 两段式早出消费（D8 T2/T5；2026-09-19 落地）----
+//
+// 覆盖：early-pass 首帧放行 / 早出 true held 等完整段定类目 / early-pass 停表
+// （完整段迟到不超时）/ held 超时降级兜底 / 早出迟到于超时不回改 / 画像早出不迁移状态。
+
+// S2-1 early-pass 首帧放行（T2）：轻段 false → 槽位提前终态 pass 且立即下发——
+// 完整段（gate 未开）未返回时帧已在客户端。
+func TestCascadeEarlyPassFirstFrame(t *testing.T) {
+	l2 := newStubL2()
+	l2.earlys["一。"] = false
+	gate := make(chan struct{})
+	l2.gates["一。"] = gate // 完整段门控：模拟槽位占用至完整输出（策略 i，E[S]=完整时长）
+	og, m, _ := newCascadeGuard(t, cascadeParams(true), fakeL2Classifier{}, l2)
+	rec := &frameRecorder{}
+
+	if err := og.Process("一。", rec.emit); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	waitFor(t, "轻段即放行（完整段未返回）", func() bool { return len(rec.snapshot()) == 1 })
+	if got := rec.joined(); got != "一。" {
+		t.Fatalf("已放行内容错误：%q", got)
+	}
+	close(gate) // 完整段返回（miss）
+	waitFor(t, "完整段 miss 指标", func() bool {
+		return strings.Contains(renderMetrics(m, 0), `{category="",result="miss"} 1`)
+	})
+	if err := og.Finish(rec.emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	og.Close()
+
+	body := renderMetrics(m, 0)
+	if strings.Contains(body, "otpmask_output_guard_degraded_total") {
+		t.Fatalf("早出放行不应产生降级\n---\n%s", body)
+	}
+	if strings.Contains(body, "l2_timeout") {
+		t.Fatalf("early-pass 槽位不应超时\n---\n%s", body)
+	}
+}
+
+// S2-2 早出 true → held（策略 i）：轻段无类目不能定动作，完整段命中前零下发；
+// 完整段返回后按类目处置（shadow：放行 + would_reject 留痕）。
+func TestCascadeEarlyTrueHeldForCategory(t *testing.T) {
+	l2 := newStubL2()
+	l2.earlys["违规。"] = true
+	gate := make(chan struct{})
+	l2.gates["违规。"] = gate
+	l2.verdicts["违规。"] = stubVerdict{cat: "A1-06", conf: 0.9}
+	og, m, a := newCascadeGuard(t, cascadeParams(true), fakeL2Classifier{}, l2)
+	rec := &frameRecorder{}
+
+	if err := og.Process("违规。", rec.emit); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	waitFor(t, "L2 调用已发出（轻段已到）", func() bool { return l2.callCount() == 1 })
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("held 期间不得放行（轻段 true 无类目不能定动作），实际 %v", got)
+	}
+	close(gate)
+	waitFor(t, "完整段命中后放行（shadow 原样）", func() bool { return len(rec.snapshot()) == 1 })
+	if err := og.Finish(rec.emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	og.Close()
+
+	if n := a.countByAction("output_would_reject"); n != 1 {
+		t.Fatalf("shadow 命中应记 1 条 would_reject，实际 %d", n)
+	}
+	if body := renderMetrics(m, 0); !strings.Contains(body, `{category="A1-06",result="hit"} 1`) {
+		t.Fatalf("完整段命中样本缺失\n---\n%s", body)
+	}
+}
+
+// S2-3 early-pass 停表：槽位提前终态即停表——完整段晚于 P-TIMEOUT 返回也不触发超时降级。
+func TestCascadeEarlyPassStopsTimer(t *testing.T) {
+	params := cascadeParams(true)
+	params.Timeout = 80 * time.Millisecond
+	l2 := newStubL2()
+	l2.earlys["一。"] = false
+	gate := make(chan struct{})
+	l2.gates["一。"] = gate
+	og, m, _ := newCascadeGuard(t, params, fakeL2Classifier{}, l2)
+	rec := &frameRecorder{}
+
+	if err := og.Process("一。", rec.emit); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	waitFor(t, "轻段即放行", func() bool { return len(rec.snapshot()) == 1 })
+	time.Sleep(150 * time.Millisecond) // 越过 P-TIMEOUT 窗口：完整段仍挂起
+	close(gate)                        // 完整段迟到返回（miss）
+	waitFor(t, "完整段 miss 指标", func() bool {
+		return strings.Contains(renderMetrics(m, 0), `{category="",result="miss"} 1`)
+	})
+	if err := og.Finish(rec.emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	og.Close()
+
+	body := renderMetrics(m, 0)
+	if strings.Contains(body, "l2_timeout") || strings.Contains(body, "result=\"timeout\"") {
+		t.Fatalf("early-pass 已停表，完整段迟到不应触发超时降级\n---\n%s", body)
+	}
+	if strings.Contains(body, "otpmask_output_guard_degraded_total") {
+		t.Fatalf("不应有降级\n---\n%s", body)
+	}
+	if got := rec.joined(); got != "一。" {
+		t.Fatalf("应恰一次放行，实际 %q", got)
+	}
+}
+
+// S2-4 早出 true + 完整段超时 → held 槽位超时降级兜底（l2_timeout + P-DEGRADE；
+// 浸泡形态 timeout 照发复刻时序）；迟到的完整段记 late、不回改。
+func TestCascadeEarlyTrueHeldTimeoutDegrades(t *testing.T) {
+	params := cascadeParams(true)
+	params.Timeout = 80 * time.Millisecond
+	l2 := newStubL2()
+	l2.earlys["违规。"] = true
+	gate := make(chan struct{})
+	l2.gates["违规。"] = gate // 完整段在超时窗口内不返回
+	og, m, _ := newCascadeGuard(t, params, fakeL2Classifier{}, l2)
+	rec := &frameRecorder{}
+
+	if err := og.Process("违规。", rec.emit); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	waitFor(t, "held 超时降级", func() bool {
+		return strings.Contains(renderMetrics(m, 0), `reason="l2_timeout"`)
+	})
+	close(gate) // 迟到的完整段：槽位已 timeout → late（须先归零在飞，Finish 才不阻塞）
+	waitFor(t, "迟到完整段记 late", func() bool {
+		return strings.Contains(renderMetrics(m, 0), `{category="",result="late"} 1`)
+	})
+	if err := og.Finish(rec.emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	og.Close()
+
+	body := renderMetrics(m, 0)
+	if !strings.Contains(body, `otpmask_output_guard_degraded_total{backend="l2",reason="l2_timeout"} 1`) {
+		t.Fatalf("held 超时应降级 l2_timeout\n---\n%s", body)
+	}
+	if got := rec.joined(); got != "违规。" {
+		t.Fatalf("浸泡模式 timeout 应照发（恰一次），实际 %q", got)
+	}
+}
+
+// S2-5 早出迟到于超时：槽位已 timeout → 不回改、不迁移、不重复下发（4 态单向无回退）。
+func TestCascadeEarlyAfterTimeoutNoRollback(t *testing.T) {
+	params := cascadeParams(true)
+	params.Timeout = 80 * time.Millisecond
+	l2 := newStubL2()
+	l2.earlys["一。"] = false
+	eg := make(chan struct{})
+	l2.earlyGates["一。"] = eg // 轻段挂起：超时先到
+	og, m, _ := newCascadeGuard(t, params, fakeL2Classifier{}, l2)
+	rec := &frameRecorder{}
+
+	if err := og.Process("一。", rec.emit); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	waitFor(t, "槽位超时（轻段未到）", func() bool {
+		return strings.Contains(renderMetrics(m, 0), `reason="l2_timeout"`)
+	})
+	close(eg) // 轻段此时才到：槽位已 timeout → onEarlyVerdict no-op
+	if err := og.Finish(rec.emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	og.Close()
+	waitFor(t, "完整段返回记 late", func() bool {
+		return strings.Contains(renderMetrics(m, 0), `{category="",result="late"} 1`)
+	})
+	if got := rec.joined(); got != "一。" {
+		t.Fatalf("浸泡模式超时照发应恰一次（早出不得重复下发），实际 %q", got)
+	}
+}
+
+// S2-6 画像调用早出不迁移状态：L1 命中即决放行，画像 L2 的轻段/完整段只留痕。
+func TestCascadeProfilingEarlyNoStateChange(t *testing.T) {
+	text := "请执行 SELECT * FROM users。"
+	l2 := newStubL2()
+	l2.earlys[text] = false
+	gate := make(chan struct{})
+	l2.gates[text] = gate
+	l2.verdicts[text] = stubVerdict{cat: "A1-07", conf: 0.9} // 与 L1 同类目（去重）
+	og, m, a := newCascadeGuard(t, cascadeParams(true), l1Classifier{g: newGuardrail()}, l2)
+	rec := &frameRecorder{}
+
+	if err := og.Process(text, rec.emit); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	waitFor(t, "L1 命中即决放行（不等 L2 完整段）", func() bool { return rec.joined() == text })
+	waitFor(t, "画像 L2 已发出（轻段已到）", func() bool { return l2.callCount() == 1 })
+	close(gate)
+	waitFor(t, "画像命中留痕", func() bool {
+		return strings.Contains(renderMetrics(m, 0), `{category="A1-07",result="hit"} 1`)
+	})
+	if err := og.Finish(rec.emit); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	og.Close()
+
+	if n := a.countByAction("output_would_reject"); n != 1 {
+		t.Fatalf("L1 命中应恰记 1 条 would_reject（画像 L2 同类目去重），实际 %d", n)
+	}
+	if got := rec.joined(); got != text {
+		t.Fatalf("放行内容错误：%q", got)
+	}
 }
