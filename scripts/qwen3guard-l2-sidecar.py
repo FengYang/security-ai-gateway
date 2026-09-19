@@ -181,7 +181,7 @@ class L2SidecarHandler(BaseHTTPRequestHandler):
             self._on_upstream_error(light_sent, light_blocked, exc)
             self._log(text, t_light, None, "error: %s" % exc)
             return
-        self._finish(buf, light_sent, light_blocked)
+        self._finish(buf, light_sent, light_blocked, t0, t_light)
         safety = SAFETY_RE.search(buf)
         cats = CATS_RE.search(buf)
         self._log(text, t_light, time.perf_counter() - t0,
