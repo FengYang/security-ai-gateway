@@ -81,6 +81,7 @@ type cascadeSlot struct {
 	timer              *time.Timer
 	l2InFlight         bool // 该槽位有在飞 L2（含画像调用）：决定 inFlight 是否回补
 	profiling          bool // 画像调用（L1 命中后仍在飞的 L2）：结果只留痕，不迁移状态
+	earlyPass          bool // 两段式轻段已提前放行（D8 T2/S2）：完整段到达只记指标，不迁移状态、不回改已下发内容
 }
 
 // cascade 单请求级联控制器（`[]slot` + `sync.Cond`，§5.8 #9）。
@@ -408,7 +409,16 @@ func (c *cascade) startL2Locked(s *cascadeSlot, profiling bool) {
 	}
 	go func() {
 		start := time.Now()
-		cat, conf, _ := c.l2.Classify(s.unit)
+		// 两段式早出（D8 T6/S2）：后端实现 EarlyOutputClassifier 时经 ClassifyWithEarly
+		// 消费——读到轻段 {"blocked"} 即回调 onEarlyVerdict（false=提前终态 pass 首帧放行
+		// T2；true=held 等完整段类目定动作）；未实现则回退 Classify，零行为变化。
+		var cat string
+		var conf float64
+		if ec, ok := c.l2.(EarlyOutputClassifier); ok {
+			cat, conf, _ = ec.ClassifyWithEarly(s.unit, func(blocked bool) { c.onEarlyVerdict(s, blocked) })
+		} else {
+			cat, conf, _ = c.l2.Classify(s.unit)
+		}
 		elapsed := time.Since(start).Seconds()
 
 		c.mu.Lock()
@@ -424,6 +434,21 @@ func (c *cascade) startL2Locked(s *cascadeSlot, profiling bool) {
 			// 否则终止后仍刷命中审计/指标，且可能迁移已停表槽位。
 			if c.m != nil {
 				c.m.incOGL2Call("", "late")
+			}
+		case s.earlyPass:
+			// 早出已放行（轻段 false 提前终态，D8 T2）：完整段仅为审计确认——
+			// 不迁移状态、不回改已下发内容（放行不可撤回是 T5 已裁定接受项）。
+			// miss（两段一致/轻段后断流）→ miss；矛盾哨兵 → error
+			// （degraded 已由 HTTP 层按 bad_response 记录）。
+			switch {
+			case conf < 0:
+				if c.m != nil {
+					c.m.incOGL2Call("", "error")
+				}
+			case cat == "":
+				if c.m != nil {
+					c.m.incOGL2Call("", "miss")
+				}
 			}
 		case s.profiling:
 			// 画像调用：结果只留痕（hit/miss/error/unmapped），不迁移槽位状态
@@ -443,6 +468,30 @@ func (c *cascade) startL2Locked(s *cascadeSlot, profiling bool) {
 		}
 		c.emitReadyLocked()
 	}()
+}
+
+// onEarlyVerdict 两段式轻段回调（D8 T2/T5，S2 批次）：在 ClassifyWithEarly 返回前、
+// HTTP 流读到响应文档 1 时被适配层同步调用（本方法自带锁；不得在持锁状态下调 L2）。
+//   - blocked=false 且槽位 pending 非画像：提前终态 pass（early-pass）＋ emitReady——
+//     首帧放行只依赖轻段（T2），完整段（类目/审计确认）到达后仅记指标；
+//   - blocked=true：不迁移（held）——动作与类目必须由完整段决定（策略 i，E[S]=完整时长），
+//     槽位停留在 pending，P-TIMEOUT 到期走 onSlotTimeout 既有降级路径（§3.6.3 边界表）。
+func (c *cascade) onEarlyVerdict(s *cascadeSlot, blocked bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if blocked {
+		return // held：等完整段定类目/动作；超时兜底走 onSlotTimeout
+	}
+	if c.closed || c.blocked {
+		return // 断连/终止后丢弃（与完整段迟到同口径）
+	}
+	if s.profiling || s.state != slotPending {
+		return // 画像不迁移；已终态（如超时先到）不回改——4 态单向无回退
+	}
+	s.earlyPass = true
+	s.action = catActionPass
+	c.finishLocked(s, slotDone) // 停表：判定已由轻段给出，无需再等完整段超时
+	c.emitReadyLocked()         // 首帧放行（T2）：enforcing/阻塞浸泡/生产 shadow 均按 slotDone 放行
 }
 
 // verdictResult L2 判定归一化结果（槽位迁移 + 画像留痕共用）。

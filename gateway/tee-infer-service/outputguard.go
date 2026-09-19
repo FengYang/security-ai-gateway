@@ -27,6 +27,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -57,6 +58,21 @@ const defaultPolicyVersion = "v0"
 // 注意：**不与输入侧 model.Classifier 共用**（输入侧二元返回保持原状）。
 type OutputClassifier interface {
 	Classify(text string) (category string, confidence float64, match string)
+}
+
+// EarlyOutputClassifier 支持两段式响应的输出侧 L2 分类器（D8 议题二 T6，S2 批次）。
+//
+// 冻结物 #1 主签名 Classify 不变；本接口是可选能力扩展，由适配层实现、
+// 级联按 type-assert 消费（未实现时级联回退为完整段一处置，零行为变化）：
+//
+//	ClassifyWithEarly(text, onEarly)
+//	  读到响应文档 1（轻段 {"blocked":bool}）时同步回调 onEarly 一次：
+//	  - onEarly(false)：轻段判 safe → 级联可将槽位提前终态 pass（首帧放行，T2）；
+//	  - onEarly(true) ：轻段判 unsafe → 槽位 held，等完整段类目定动作（策略 i）。
+//	onEarly 可为 nil（等价 Classify）；回调至多一次，且发生在返回前。
+type EarlyOutputClassifier interface {
+	OutputClassifier
+	ClassifyWithEarly(text string, onEarly func(blocked bool)) (category string, confidence float64, match string)
 }
 
 // l1Classifier 将既有 guardrail 规则包装为 OutputClassifier（L1 规则/词库层）。
@@ -254,12 +270,22 @@ func (og *outputGuard) BuildGuardMeta() *chunkGuardMeta {
 
 // ---- outputL2HTTPClassifier：输出侧 L2 语义分类器 HTTP 侧车实现 ----
 //
-// 契约（v1，与输入侧 model.HTTPClassifier 同构但返回字段不同）：
+// 契约（v2，D8 两段式 T1=a；v1 单段向后兼容）：
 //
 //	POST <url>
 //	Content-Type: application/json
 //	{"text": "<待分类文本>"}
-//	→ 200 {"blocked": bool, "category": "...", "confidence": 0.95, "match": "..."}
+//	→ 200，响应体为换行分隔的 1 或 2 个 JSON 文档：
+//
+//	单段（v1 旧契约，stub/浸泡口径保持不改）：一个文档，命中时
+//	  {"blocked": bool, "category": "...", "confidence": 0.95, "match": "..."}
+//	  （未命中时仅 {"blocked": false}——与两段轻段字节同形，由"其后是否还有
+//	  文档"区分，见 ClassifyWithEarly 解析顺序）
+//	两段（v2，D8 议题一 T1=a）：
+//	  文档 1（轻段）：Safety 行即出即 flush，{"blocked": bool}；
+//	  文档 2（完整段）：完整输出后，{"blocked": bool, "category": "<Qwen 原生类目>",
+//	                   "confidence": 1.0, "match": ""}（命中置信度固定 1.0：
+//	                   贪心解码＝模型硬决策，无数值置信度输出）
 //
 // 降级语义（M2 OG-12；2026-09-19 与实现对齐）：
 //   - 非 200 / 超时 / 网络错误 / JSON 非法 → 视为不可用；
@@ -269,6 +295,9 @@ func (og *outputGuard) BuildGuardMeta() *chunkGuardMeta {
 //   - 失败同时记 degraded_total{backend="l2", reason=...}；
 //   - Classify 返回 ("", -1, "") 作为失败哨兵（confidence=-1 表示调用失败，
 //     区别于正常未命中的 confidence=0）。
+//   - 两段式特例（S2 批次，D8 T5）：轻段 false 后文档 2 断流 → **正常 miss**
+//     （判定已由轻段给出且首帧已放行，第二段仅补审计，不记 degraded）；
+//     轻段 true 后断流 → 失败哨兵（类目未定，held 槽位超时降级）。
 //
 // 置信度语义（M3，§5.2 P-CONF-BAND 写死）：命中时置信度是**必带字段**——
 // 侧车只返 category 不返 confidence → 返回 (cat, 0, "")，由调用方按"格式错误＝P-DEGRADE"处置；
@@ -358,10 +387,26 @@ type l2ClassifyResponse struct {
 	Match      string  `json:"match,omitempty"`
 }
 
-// Classify 实现 OutputClassifier。
+// Classify 实现 OutputClassifier（无早出回调；解析逻辑与 ClassifyWithEarly 一致）。
 // 调用失败时返回 ("", -1, "")——confidence=-1 是失败哨兵，
 // 调用方据此判断走 degraded 路径。
 func (c *outputL2HTTPClassifier) Classify(text string) (string, float64, string) {
+	return c.ClassifyWithEarly(text, nil)
+}
+
+// ClassifyWithEarly 实现 EarlyOutputClassifier（两段式解析，D8 T1=a/T6）。
+//
+// 解析顺序：按 JSON 文档边界顺序解码——文档 1 解码成功即回调 onEarly（轻段已到）；
+// 再尝试解码文档 2，以其结果区分契约形态：
+//   - 文档 2 存在（两段式）：两段 blocked 必须一致，矛盾 = bad_response（fail-closed）；
+//     一致则以文档 2（完整段）为准返回；
+//   - 文档 2 为 EOF（单段 v1 旧契约）：文档 1 即完整结果，按 v1 语义返回（零行为变化）；
+//   - 文档 2 解码失败（断流/超时/非法 JSON）：轻段 false → 正常 miss（D8 T5，
+//     判定已由轻段给出、首帧已放行，第二段仅补审计）；轻段 true → 失败哨兵
+//     （类目未定，fail-closed，held 槽位超时降级）。
+//
+// 调用失败时同样返回 ("", -1, "") 失败哨兵。
+func (c *outputL2HTTPClassifier) ClassifyWithEarly(text string, onEarly func(blocked bool)) (string, float64, string) {
 	body, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
 		c.report("bad_request")
@@ -388,17 +433,44 @@ func (c *outputL2HTTPClassifier) Classify(text string) (string, float64, string)
 		c.report("bad_status")
 		return "", -1, ""
 	}
-	var out l2ClassifyResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+	dec := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
+	var light l2ClassifyResponse
+	if err := dec.Decode(&light); err != nil {
 		c.report("bad_response")
 		return "", -1, ""
 	}
-	if !out.Blocked {
-		return "", 0, ""
+	if onEarly != nil {
+		onEarly(light.Blocked)
 	}
-	// P-CONF-BAND（§5.2 写死）：置信度是命中的必带字段，缺失＝格式错误＝P-DEGRADE。
-	// 故此处**不做兜底猜测**——原样返回，conf<=0 由调用方（cascade）判降级。
-	return out.Category, out.Confidence, out.Match
+	var full l2ClassifyResponse
+	switch err := dec.Decode(&full); {
+	case err == nil:
+		// 两段式（v2）：文档 2 为完整段——两段 blocked 矛盾 = 响应不自洽，fail-closed。
+		if full.Blocked != light.Blocked {
+			c.report("bad_response")
+			return "", -1, ""
+		}
+		if !full.Blocked {
+			return "", 0, ""
+		}
+		// P-CONF-BAND（§5.2 写死）：置信度是命中的必带字段，缺失＝格式错误＝P-DEGRADE。
+		// 故此处**不做兜底猜测**——原样返回，conf<=0 由调用方（cascade）判降级。
+		return full.Category, full.Confidence, full.Match
+	case errors.Is(err, io.EOF):
+		// 单段（v1 旧契约）：文档 1 即完整结果，与既有行为逐字节一致。
+		if !light.Blocked {
+			return "", 0, ""
+		}
+		return light.Category, light.Confidence, light.Match
+	default:
+		// 文档 2 断流/超时/非法：轻段 false → 判定已给出（且首帧已放行），按 miss；
+		// 轻段 true → 类目未定，失败哨兵（held 槽位超时降级）。
+		if !light.Blocked {
+			return "", 0, ""
+		}
+		c.report("bad_response")
+		return "", -1, ""
+	}
 }
 
 func (c *outputL2HTTPClassifier) report(reason string) {
