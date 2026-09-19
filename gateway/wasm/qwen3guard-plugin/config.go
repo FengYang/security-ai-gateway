@@ -14,7 +14,7 @@ const (
 	pluginName = "qwen3guard"
 
 	defaultAPIKey                           = "EMPTY"
-	defaultModel                            = "Qwen/Qwen3Guard-Gen-4B"
+	defaultModel                            = "Qwen/Qwen3Guard-Gen-0.6B"
 	defaultTimeoutMS                        = 2000
 	defaultRequestPath                      = "/v1/chat/completions"
 	defaultRequestContentJSONPath           = "messages.@reverse.0.content"

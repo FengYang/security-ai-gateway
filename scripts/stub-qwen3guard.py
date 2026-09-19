@@ -78,7 +78,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, {
             "id": "chatcmpl-stub-%d" % Handler.calls,
             "object": "chat.completion",
-            "model": req.get("model") or "Qwen/Qwen3Guard-Gen-4B",
+            "model": req.get("model") or "Qwen/Qwen3Guard-Gen-0.6B",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         })
