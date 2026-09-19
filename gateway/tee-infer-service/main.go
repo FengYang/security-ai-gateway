@@ -156,7 +156,7 @@ type teeServer struct {
 	outputGuardCfgPath string
 	// GA-输出侧内容审查（OG-4）：D 组缓冲参数（启动期 resolve＋validate 后只读）。
 	outputGuardParams outputGuardParams
-	// GA-输出侧内容审查（OG-13）：E 组级联并发参数（启动期 resolve＋validate 后只读）。
+	// GA-输出侧内容审查（OG-13）：级联并发参数（跨 §5.3–5.5 多组；启动期 resolve＋validate 后只读）。
 	outputGuardCascade outputGuardCascadeParams
 	// GA-输出侧内容审查（OG-18）：PII mask 改写开关（默认 false = block-only 深度，mask 降 flag）。
 	outputGuardMaskEnabled bool
@@ -1447,7 +1447,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		Mode:          s.currentOutputGuardMode(),
 		PolicyVersion: s.policyVersion(),
 		Params:        s.outputGuardParams,
-		Cascade:       s.outputGuardCascade, // OG-13：E 组级联参数（槽位/并发阀/超时/预演开关）
+		Cascade:       s.outputGuardCascade, // OG-13：级联参数（槽位/并发阀/超时/预演开关）
 		MaskEnabled:   s.outputGuardMaskEnabled,
 		MaskRegexps:   maskRes,
 	}, s.l1Classifier(), s.outputGuardL2, s.metrics, s.audit, tenant, requestID)
@@ -1680,7 +1680,7 @@ type outputGuardSnapshot struct {
 	ModeSource    string                  `json:"mode_source"` // startup | runtime（OG-8 运行时覆盖来源）
 	PolicyVersion string                  `json:"policy_version"`
 	Params        outputGuardParamsSnapshot `json:"params"`
-	// Cascade：E 组级联并发参数（OG-13；只读快照，供排障与浸泡脚本核对生效值）
+	// Cascade：级联并发参数（OG-13；只读快照，供排障与浸泡脚本核对生效值）
 	Cascade outputGuardCascadeSnapshot `json:"cascade"`
 	// L1Categories：已加载的 L1 规则类目数（词库注册表装载量；未配置 policy 目录时为 0）
 	L1Categories int `json:"l1_categories_loaded"`
@@ -1701,7 +1701,7 @@ type outputGuardParamsSnapshot struct {
 	MaxKeywordRunes   int    `json:"max_keyword_runes"`   // 词库最长命中长度（P-WINDOW-CHARS 派生输入）
 }
 
-// outputGuardCascadeSnapshot 级联参数只读快照（E 组参数，§5.5；OG-13）。
+// outputGuardCascadeSnapshot 级联参数只读快照（跨 §5.3–5.5 多组；OG-13）。
 type outputGuardCascadeSnapshot struct {
 	Timeout       string `json:"timeout"`        // P-TIMEOUT（-output-guard-l2-timeout）
 	Concurrency   int    `json:"concurrency"`    // P-CONCURRENCY（派生后生效值）
@@ -2798,7 +2798,7 @@ func main() {
 	outputGuardL2Timeout := flag.Duration("output-guard-l2-timeout", 2*time.Second, "输出侧 L2 语义分类器侧车调用超时（在请求路径上，须有限且小；不可用自动 fallback L1 + degraded 指标）")
 	outputGuardL2AllowedCIDRs := flag.String("output-guard-l2-allowed-cidrs", "", "P-BACKEND-TARGET 可信域 CIDR 白名单（逗号分隔；默认空＝仅 localhost）：L2 侧车地址须落在回环或白名单内，否则拒绝启动（2026-09-18 裁定 A2，防被审明文外发）")
 	outputGuardMaskEnable := flag.Bool("output-guard-mask-enable", false, "OG-18：PII mask 改写开关（默认 false = block-only 深度，A4-06 降为 flag；true = 实打马赛克后下发）；需 -output-guard=shadow/enforcing 时生效")
-	// GA-输出侧内容审查（OG-13）：E 组级联参数（§5.5）。P-TIMEOUT 复用上面的 -output-guard-l2-timeout（单一事实源）。
+	// GA-输出侧内容审查（OG-13）：级联参数（跨 §5.3–5.5 多组）。P-TIMEOUT 复用上面的 -output-guard-l2-timeout（单一事实源）。
 	outputGuardConcurrency := flag.Int("output-guard-concurrency", 0, "P-CONCURRENCY：单请求在飞 L2 句数上限（OG-13 级联）；0＝未配置，按 CPU 核数派生；超限不排队，直接按 P-DEGRADE")
 	outputGuardMaxSlots := flag.Int("output-guard-max-slots", 0, "P-MAX-SLOTS：单请求判定句槽位上限（OG-13 级联，防长输出撑爆内存）；0＝未配置，按 P-MAX-BUFFER-BYTES/平均句长派生")
 	outputGuardBlockCancel := flag.Bool("output-guard-block-cancel", false, "P-BLOCK-CANCEL：命中 block 后是否中断引擎生成（M4 生效；M3 仅落配置与只读快照，不改变 shadow 行为）")
@@ -3052,7 +3052,7 @@ func main() {
 		log.Fatalf("[output-guard] 缓冲参数非法: %v", err)
 	}
 	srv.outputGuardParams = resolveOutputGuardParams(ogParams)
-	// GA-输出侧内容审查（OG-13）：E 组级联参数——先校验（非法＝拒绝启动），再派生
+	// GA-输出侧内容审查（OG-13）：级联参数——先校验（非法＝拒绝启动），再派生
 	// （P-CONCURRENCY / P-MAX-SLOTS 兜底列）。P-TIMEOUT 复用 -output-guard-l2-timeout。
 	ogCascParams := defaultOutputGuardCascadeParams()
 	ogCascParams.Timeout = *outputGuardL2Timeout

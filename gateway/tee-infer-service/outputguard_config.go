@@ -121,7 +121,7 @@ func validatePositiveRunes(name string, v int) error {
 	return nil
 }
 
-// ---- E 组：级联并发参数（§5.5；M3 OG-13）----
+// ---- 级联并发参数（跨 §5.3–5.5 多组；M3 OG-13）----
 //
 // 与 D 组同一纪律：未配置＝哨兵语义、显式 0/负非法、resolve 只派生、validate 只校验。
 // 注意：本组由启动 flag 构造，flag 缺省值是 0（无法与"用户显式传 0"区分），故
@@ -134,13 +134,13 @@ const (
 	defaultCascadeTimeout   = 2 * time.Second   // P-TIMEOUT 兜底默认（与 outputL2HTTPClassifier 客户端默认同源）
 )
 
-// P-DEGRADE 取值（§5 E 组）。
+// P-DEGRADE 取值（§5.3 C 组）。
 const (
 	degradeFailClosed = "fail-closed"      // 默认（当前唯一生效值）：触发级联的句子按 fail-closed 处置（shadow 只记不拦；enforcing 丢该句、不整流终止）
-	degradeFallback   = "fallback-keyword" // **尚未实现**（§5 E 组取值之一）；配置即拒绝启动，不静默按 fail-closed 处置
+	degradeFallback   = "fallback-keyword" // **尚未实现**（§5.3 C 组取值之一）；配置即拒绝启动，不静默按 fail-closed 处置
 )
 
-// outputGuardCascadeParams E 组级联并发参数（原始值 + 派生值）。
+// outputGuardCascadeParams 级联并发参数（原始值 + 派生值）。
 type outputGuardCascadeParams struct {
 	Timeout       time.Duration // P-TIMEOUT：L2 单次调用超时（必填；复用 -output-guard-l2-timeout）
 	Concurrency   int           // P-CONCURRENCY：单请求在飞句数上限（未配置＝按 CPU 核数派生）
@@ -150,7 +150,7 @@ type outputGuardCascadeParams struct {
 	BlockEmission bool          // 阻塞预演开关（非 §5 参数表参数，仅浸泡期用）：true＝按 enforcing 时序阻塞下发；false＝shadow 现状（超并发/超时才等待）
 }
 
-// defaultOutputGuardCascadeParams 返回未配置态的 E 组参数。
+// defaultOutputGuardCascadeParams 返回未配置态的级联参数。
 func defaultOutputGuardCascadeParams() outputGuardCascadeParams {
 	return outputGuardCascadeParams{
 		Concurrency: 0,
@@ -159,7 +159,7 @@ func defaultOutputGuardCascadeParams() outputGuardCascadeParams {
 	}
 }
 
-// resolveOutputGuardCascadeParams 填入缺省并派生 P-CONCURRENCY / P-MAX-SLOTS（§5.5 兜底列）。
+// resolveOutputGuardCascadeParams 填入缺省并派生 P-CONCURRENCY / P-MAX-SLOTS（兜底列）。
 // params 须为已 resolve 的 D 组参数（P-MAX-SLOTS 派生依赖 P-MAX-BUFFER-BYTES）。
 func resolveOutputGuardCascadeParams(c outputGuardCascadeParams, params outputGuardParams) outputGuardCascadeParams {
 	if c.Timeout <= 0 {
@@ -186,7 +186,7 @@ func resolveOutputGuardCascadeParams(c outputGuardCascadeParams, params outputGu
 	return c
 }
 
-// validateOutputGuardCascadeParams 校验 E 组参数（非法＝拒绝启动，§5.4 纪律）。
+// validateOutputGuardCascadeParams 校验级联参数（非法＝拒绝启动，§5.4 纪律）。
 func validateOutputGuardCascadeParams(c outputGuardCascadeParams) error {
 	if c.Timeout <= 0 {
 		return fmt.Errorf("P-TIMEOUT=%s 非法（必须为正；L2 调用超时是首帧预算的直接决定项）", c.Timeout)
@@ -212,7 +212,7 @@ type outputGuardConfig struct {
 	Mode          string                    // P-MODE：off｜shadow｜enforcing（M4 拦截仅启动参数可开；运行时/持久化通道限 off｜shadow）
 	PolicyVersion string                    // 策略版本（manifest.policy_version；M1 未接词库，用 defaultPolicyVersion）
 	Params        outputGuardParams         // D 组缓冲参数（允许传未 resolve 值，构造时会 resolve）
-	Cascade       outputGuardCascadeParams  // E 组级联并发参数（允许传未 resolve 值，构造时会 resolve）
+	Cascade       outputGuardCascadeParams  // 级联并发参数（允许传未 resolve 值，构造时会 resolve）
 	MaskEnabled   bool                      // OG-18：PII mask 改写开关（默认 false = block-only 深度，mask 降为 flag；true = 启用实打马赛克）
 	MaskRegexps   []*regexp.Regexp          // OG-18：PII 正则切片（与 pii_patterns.json 顺序一致；为空则不改写）
 }

@@ -139,7 +139,7 @@ func newOutputGuard(cfg outputGuardConfig, l1 OutputClassifier, l2 OutputClassif
 			og.metrics.incOGForcedSplit(reason)
 		}
 	})
-	// 级联参数（E 组）：P-MAX-SLOTS 派生依赖已 resolve 的 P-MAX-BUFFER-BYTES，故传入 params。
+	// 级联参数：P-MAX-SLOTS 派生依赖已 resolve 的 P-MAX-BUFFER-BYTES，故传入 params。
 	og.casc = newCascade(resolveOutputGuardCascadeParams(cfg.Cascade, params), cfg.Mode, cfg.MaskEnabled, cfg.MaskRegexps, l1, l2, m, a, tenant, requestID, pv)
 	if og.metrics != nil {
 		og.metrics.incOGRequest(cfg.Mode) // 审查过的请求数（按模式）
