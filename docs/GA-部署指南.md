@@ -176,6 +176,7 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 | 密钥 | Secret 演示值 | Vault/KMS + TEE 签名注入 |
 | 审计存储 | 内存哈希链 / WORM 文件（`-audit-file` + `-audit-anchor`，JSON Lines 只追加 + 链尾锚定，篡改检测 fail-closed） | 对象存储/WORM 归档 + 定期锚定公证 |
 | Guardrail | 确定性规则 | 语义分类器（S3 时 TEE 内轻量模型；S2 时可部署于客户可信域同域） |
+| 输出侧 L2 与明文侧审核服务**实例分离** | 未强制 | **两实例必须不同主机 / 不同 Service**；`-output-guard-l2-url` **不得**等于明文侧审核服务地址（A2 白名单校验不了"同实例"，须部署层兜住）；部署清单逐项打勾。详见《GA-输出侧内容审查-技术实现方案.md》§3.5.5 |
 | 监控存储 | PVC（C-9：Prometheus 10Gi + Grafana 5Gi，kind 需 local-path provisioner） | 按留存周期扩容 + 归档 |
 
 > **场景与 TEE 需求（2026-09-18 补）**：本表的生产要求列按**具体场景**裁剪，不存在「所有场景都要 TEE」的统一要求。场景 × 可信区域 × TEE 需求的唯一事实源见《GA-产品场景与可信区域矩阵.md》。
