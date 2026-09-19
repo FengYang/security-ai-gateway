@@ -229,6 +229,8 @@ spec:
 #
 # 【timeoutMs 必须按部署形态调（重要）】默认 2000ms 是 GPU 场景的取值；**CPU 推理下必须放大**
 #   （实测需 ≥30000–60000ms），否则每次外呼超时 → 插件 fail-open 放行 → 表现为"配了但永不拦截"。
+#   【本清单取值】下方 matchRules 内为 `timeoutMs: 30000`（CPU 形态安全值）。该值须同时覆盖「冷启动 + 单次审核」；
+#   **模型或部署形态变更后必须重新实测再定值**，不得回退到默认 2000。
 #
 # 【辅助脚本（本仓库）】
 #   - scripts/qwen3guard-server.py：真实模型 OpenAI 兼容服务（CPU；权重来自 ModelScope
@@ -275,8 +277,8 @@ spec:
       servicePort: 8080 # CHANGE_ME：Qwen3Guard 服务端口
       domain: qwen3guard.otpmask.svc.cluster.local # CHANGE_ME：dns 类型必填，同时作为外呼 Host
       requestPath: /v1/chat/completions
-      model: Qwen/Qwen3Guard-Gen-4B
-      timeoutMs: 3000
+      model: Qwen/Qwen3Guard-Gen-0.6B # 须与侧车实际加载的模型一致（本仓库 CPU 实测即 0.6B）；换更大模型须重测上方 timeoutMs
+      timeoutMs: 30000 # CHANGE_ME：CPU 形态安全值（实测单次 2.5–3.1s，另须覆盖冷启动）；GPU 形态可下调至 3000–5000；**严禁沿用默认 2000**
       checkRequest: true # 输入检测
       checkResponse: true # 输出检测（注意上文的流式与编码副作用）
       riskLevelBar: Unsafe # Unsafe 或 Controversial（后者更严）
