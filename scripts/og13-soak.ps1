@@ -1,4 +1,4 @@
-﻿# og13-soak.ps1 — OG-13 浸泡 harness 编排脚本
+# og13-soak.ps1 — OG-13 浸泡 harness 编排脚本
 #
 # 作用：启动 L2 stub → 按网格跑 Go soak test → 收集 CSV → 打印摘要表
 #
@@ -29,7 +29,14 @@ param(
     [switch]$Blocking,       # 单请求模式：是否阻塞预演（测首帧延迟增量）；默认 shadow 零影响
     [switch]$MultiRequest,   # 多请求并发模式（强制 blocking=true）
     [int]$L2Port = 19099,
-    [string]$OutputDir = (Join-Path $PWD "og13-results")
+    [string]$OutputDir = (Join-Path $PWD "og13-results"),
+
+    # 画像参数覆盖（G-1b 真机回填用，OG-13 §5.5.4 回填路径第 1 步）；
+    # 留空则取 Profile 默认值（cpu=2800/4500，gpu=200/500）。
+    [int]$MedianMs = 0,
+    [int]$P99Ms = 0,
+    # 并发度 c 网格覆盖：逗号分隔整数，如 "2,4,8,16"；留空用 Profile 默认
+    [string]$Concurrences = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,6 +67,17 @@ else {
     $expServiceS = 0.2
     $l2Timeout = "2s"
 }
+# 覆盖参数（G-1b 真机回填用）
+if ($MedianMs -gt 0) { $medianMs = $MedianMs }
+if ($P99Ms -gt 0)   { $p99Ms    = $P99Ms }
+if ($Concurrences) {
+    $concurrencies = $Concurrences -split "," | ForEach-Object { [int]$_.Trim() } | Where-Object { $_ -gt 0 }
+    if (-not $concurrencies) { Write-Warning "-Concurrences 解析为空，使用 Profile 默认"; $concurrencies = $concurrencies }
+}
+# E[S] 重算（对数正态均值 = exp(μ+σ²/2)，μ=ln(median), σ=(ln(p99)-μ)/2.3263）
+$mu  = [math]::Log($medianMs / 1000.0)
+$sig = ([math]::Log($p99Ms / 1000.0) - $mu) / 2.3263478740408408
+$expServiceS = [math]::Exp($mu + $sig * $sig / 2.0)
 $lambdas = @(0.25, 0.5, 1, 1.5, 2, 3, 5, 8)
 # 多请求 N 网格：GPU 扩到 64 以找容量拐点（P99 样本量=N，N≤16 时 P99≈max）；
 # CPU 保持 5 格（median 2.8s 首帧必破 800ms，只做趋势对照，不追拐点）
