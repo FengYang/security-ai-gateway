@@ -136,8 +136,8 @@ const (
 
 // P-DEGRADE 取值（§5 E 组）。
 const (
-	degradeFailClosed = "fail-closed"      // 默认：触发级联的句子按 fail-closed 处置（M3 shadow 下只记不拦，内容拦截属 M4）
-	degradeFallback   = "fallback-keyword" // M4 实现；M3 显式拒绝启动，不静默按 fail-closed 处置
+	degradeFailClosed = "fail-closed"      // 默认（当前唯一生效值）：触发级联的句子按 fail-closed 处置（shadow 只记不拦；enforcing 丢该句、不整流终止）
+	degradeFallback   = "fallback-keyword" // **尚未实现**（§5 E 组取值之一）；配置即拒绝启动，不静默按 fail-closed 处置
 )
 
 // outputGuardCascadeParams E 组级联并发参数（原始值 + 派生值）。
@@ -146,7 +146,7 @@ type outputGuardCascadeParams struct {
 	Concurrency   int           // P-CONCURRENCY：单请求在飞句数上限（未配置＝按 CPU 核数派生）
 	MaxSlots      int           // P-MAX-SLOTS：单请求槽位上限（未配置＝按 P-MAX-BUFFER-BYTES/平均句长派生）
 	BlockCancel   bool          // P-BLOCK-CANCEL：block 后是否中断引擎生成（M4 生效；M3 只落配置与快照）
-	Degrade       string        // P-DEGRADE：fail-closed（默认）｜fallback-keyword（M4 前拒绝启动）
+	Degrade       string        // P-DEGRADE：fail-closed（默认，当前唯一生效值）｜fallback-keyword（尚未实现，配置即拒绝启动）
 	BlockEmission bool          // 阻塞预演开关（非 §5 参数表参数，仅浸泡期用）：true＝按 enforcing 时序阻塞下发；false＝shadow 现状（超并发/超时才等待）
 }
 
@@ -200,7 +200,7 @@ func validateOutputGuardCascadeParams(c outputGuardCascadeParams) error {
 	switch c.Degrade {
 	case "", degradeFailClosed:
 	case degradeFallback:
-		return fmt.Errorf("P-DEGRADE=%s 尚未实现（M4）；拒绝启动，不静默按 fail-closed 处置", degradeFallback)
+		return fmt.Errorf("P-DEGRADE=%s 尚未实现；拒绝启动，不静默按 fail-closed 处置", degradeFallback)
 	default:
 		return fmt.Errorf("P-DEGRADE=%q 非法（取值：fail-closed|fallback-keyword）", c.Degrade)
 	}

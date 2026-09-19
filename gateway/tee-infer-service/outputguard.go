@@ -261,9 +261,12 @@ func (og *outputGuard) BuildGuardMeta() *chunkGuardMeta {
 //	{"text": "<待分类文本>"}
 //	→ 200 {"blocked": bool, "category": "...", "confidence": 0.95, "match": "..."}
 //
-// 降级语义（M2 OG-12）：
+// 降级语义（M2 OG-12；2026-09-19 与实现对齐）：
 //   - 非 200 / 超时 / 网络错误 / JSON 非法 → 视为不可用；
-//   - 调用方回退 L1 并记 degraded_total{backend="l2", reason=...}；
+//   - 调用方按 P-DEGRADE 处置：fail-closed（当前唯一生效值）下 enforcing **丢该句**
+//     （不整流终止、后续干净句继续，§3.6.3 细节 1 / §4.5 变更记录 #54）、shadow 只记不拦；
+//     **不回退 L1 关键词重判**（P-DEGRADE=fallback-keyword 尚未实现，配置即拒绝启动）；
+//   - 失败同时记 degraded_total{backend="l2", reason=...}；
 //   - Classify 返回 ("", -1, "") 作为失败哨兵（confidence=-1 表示调用失败，
 //     区别于正常未命中的 confidence=0）。
 //

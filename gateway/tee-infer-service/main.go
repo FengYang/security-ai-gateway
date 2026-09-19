@@ -2802,7 +2802,7 @@ func main() {
 	outputGuardConcurrency := flag.Int("output-guard-concurrency", 0, "P-CONCURRENCY：单请求在飞 L2 句数上限（OG-13 级联）；0＝未配置，按 CPU 核数派生；超限不排队，直接按 P-DEGRADE")
 	outputGuardMaxSlots := flag.Int("output-guard-max-slots", 0, "P-MAX-SLOTS：单请求判定句槽位上限（OG-13 级联，防长输出撑爆内存）；0＝未配置，按 P-MAX-BUFFER-BYTES/平均句长派生")
 	outputGuardBlockCancel := flag.Bool("output-guard-block-cancel", false, "P-BLOCK-CANCEL：命中 block 后是否中断引擎生成（M4 生效；M3 仅落配置与只读快照，不改变 shadow 行为）")
-	outputGuardDegrade := flag.String("output-guard-degrade", degradeFailClosed, "P-DEGRADE：fail-closed（默认）| fallback-keyword（M4 实现，配置即拒绝启动，不静默按 fail-closed 处置）")
+	outputGuardDegrade := flag.String("output-guard-degrade", degradeFailClosed, "P-DEGRADE：fail-closed（默认，当前唯一生效值）| fallback-keyword（尚未实现，配置即拒绝启动，不静默按 fail-closed 处置）")
 	outputGuardBlockEmission := flag.Bool("output-guard-block-emission", false, "阻塞预演开关（非 §5 参数表参数，仅浸泡期用）：true＝按 enforcing 时序阻塞下发（首帧延迟增量可实测）；false＝shadow 现状（逐 delta 立即放行，业务零影响）")
 	flag.Parse()
 
@@ -3091,12 +3091,12 @@ func main() {
 			model.GuardClassifierBackendHTTP, *guardClassURL, guardClassTimeout.String())
 	}
 	// M2 OG-12：输出侧内容审查 L2 语义分类器接线（默认关闭——未配置 URL 即纯 L1，行为零变化）。
-	// 侧车不可用时自动 fallback L1 + 记 degraded_total{backend=l2, reason=...}；
+	// 侧车不可用时该句按 P-DEGRADE fail-closed 处置（enforcing 丢该句、不整流终止）+ 记 degraded_total{backend=l2, reason=...}；
 	// readiness 不联动 L2 状态（纯 L1 也能服务，安全降水位但不中断）。
 	var outputGuardL2 OutputClassifier
 	if *outputGuardL2URL != "" {
 		outputGuardL2 = newOutputL2HTTPClassifier(*outputGuardL2URL, *outputGuardL2Key, *outputGuardL2Timeout, ogAllowedNets, srv.metrics, nil)
-		log.Printf("[output-guard] L2 语义分类器接线：url=%s timeout=%s 可信域白名单=%d 条（不可用时回退 L1 规则）",
+		log.Printf("[output-guard] L2 语义分类器接线：url=%s timeout=%s 可信域白名单=%d 条（不可用时该句按 P-DEGRADE fail-closed 处置，不回退 L1）",
 			*outputGuardL2URL, outputGuardL2Timeout.String(), len(ogAllowedNets))
 	}
 	srv.outputGuardL2 = outputGuardL2
