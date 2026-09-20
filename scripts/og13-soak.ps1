@@ -7,6 +7,10 @@
 #   powershell -File scripts\og13-soak.ps1 -Profile gpu -Blocking
 #   powershell -File scripts\og13-soak.ps1 -Profile gpu -MultiRequest
 #
+#   # 端到端抽查（§5.5.4 第 2 步）：L2 用真模型侧车（Qwen3Guard Q8_0 + llama.cpp）
+#   powershell -File scripts\og13-soak.ps1 -Profile cpu -L2Url http://127.0.0.1:19112/
+#   powershell -File scripts\og13-soak.ps1 -Profile cpu -MultiRequest -L2Url http://127.0.0.1:19112/
+#
 # 两种模式：
 #   默认（单请求流式）：λ×c 网格，产出降级率 / 队列深度 / 降级原因分解 / L2 占比
 #   -MultiRequest（多请求并发）：N 网格，产出首帧延迟增量 P50/P99（闸门主判据）
@@ -29,6 +33,9 @@ param(
     [switch]$Blocking,       # 单请求模式：是否阻塞预演（测首帧延迟增量）；默认 shadow 零影响
     [switch]$MultiRequest,   # 多请求并发模式（强制 blocking=true）
     [int]$L2Port = 19099,
+    # 外部 L2（真模型侧车，如 http://127.0.0.1:19112/）：提供时跳过内置 stub，
+    # 直接把该 URL 透传给 Go 测试的 L2_URL —— 供 §5.5.4 第 2 步端到端抽查用。
+    [string]$L2Url = "",
     [string]$OutputDir = (Join-Path $PWD "og13-results"),
 
     # 画像参数覆盖（G-1b 真机回填用，OG-13 §5.5.4 回填路径第 1 步）；
@@ -119,40 +126,52 @@ Write-Host "  种子:      $Seed"
 Write-Host "  输出:      $csvPath"
 Write-Host ""
 
-# ---- 启动 L2 stub ----
-Write-Host "[1/3] 启动 L2 stub (port=$L2Port)..." -ForegroundColor Cyan
-$stubOut = Join-Path $env:TEMP "og13-l2stub-out.txt"
-$stubErr = Join-Path $env:TEMP "og13-l2stub-err.txt"
-# G-1b 回填（§5.5.4 第 1 步）：-MedianMs/-P99Ms 覆盖时 stub 必须同样用真机画像
-# （--profile custom 才吃 --median-ms/--p99-ms），否则网格实测仍按 Profile 默认延迟，
-# 与摘要表的 E[S] 口径不一致。
-$stubProfileArgs = if ($MedianMsOverride -gt 0 -and $P99MsOverride -gt 0) {
-    @("--profile", "custom", "--median-ms", "$medianMs", "--p99-ms", "$p99Ms")
+# ---- L2 后端：内置 stub 或外部（真模型侧车）----
+$stubProc = $null
+if ($L2Url) {
+    # §5.5.4 第 2 步：以真模型侧车（qwen3guard-l2-sidecar 接 llama.cpp）接入级联实跑
+    $l2Base = $L2Url.TrimEnd("/") + "/"
+    Write-Host "[1/3] 使用外部 L2（跳过内置 stub）: $l2Base" -ForegroundColor Cyan
 } else {
-    @("--profile", $Profile)
+    Write-Host "[1/3] 启动 L2 stub (port=$L2Port)..." -ForegroundColor Cyan
+    $stubOut = Join-Path $env:TEMP "og13-l2stub-out.txt"
+    $stubErr = Join-Path $env:TEMP "og13-l2stub-err.txt"
+    # G-1b 回填（§5.5.4 第 1 步）：-MedianMs/-P99Ms 覆盖时 stub 必须同样用真机画像
+    # （--profile custom 才吃 --median-ms/--p99-ms），否则网格实测仍按 Profile 默认延迟，
+    # 与摘要表的 E[S] 口径不一致。
+    $stubProfileArgs = if ($MedianMsOverride -gt 0 -and $P99MsOverride -gt 0) {
+        @("--profile", "custom", "--median-ms", "$medianMs", "--p99-ms", "$p99Ms")
+    } else {
+        @("--profile", $Profile)
+    }
+    $stubProc = Start-Process python -ArgumentList (@(
+        "-u", $stubPy,
+        "--port", $L2Port,
+        "--hit-rate", "0.05",
+        "--seed", $Seed
+    ) + $stubProfileArgs) -PassThru -NoNewWindow -RedirectStandardOutput $stubOut -RedirectStandardError $stubErr -WorkingDirectory $root
+    $l2Base = "http://127.0.0.1:$L2Port/"
 }
-$stubProc = Start-Process python -ArgumentList (@(
-    "-u", $stubPy,
-    "--port", $L2Port,
-    "--hit-rate", "0.05",
-    "--seed", $Seed
-) + $stubProfileArgs) -PassThru -NoNewWindow -RedirectStandardOutput $stubOut -RedirectStandardError $stubErr -WorkingDirectory $root
 
-# 等 stub 就绪
+# 等 L2 就绪（内置 stub / 外部侧车均为 /healthz）
 $ready = $false
 for ($i = 0; $i -lt 30; $i++) {
     try {
-        $r = Invoke-WebRequest -Uri "http://127.0.0.1:$L2Port/healthz" -Method Get -TimeoutSec 2 -UseBasicParsing
+        $r = Invoke-WebRequest -Uri ($l2Base + "healthz") -Method Get -TimeoutSec 2 -UseBasicParsing
         if ($r.StatusCode -eq 200) { $ready = $true; break }
     } catch {}
     Start-Sleep -Milliseconds 200
 }
 if (-not $ready) {
-    Write-Host "  FAIL: L2 stub 启动失败" -ForegroundColor Red
-    Get-Content $stubErr -ErrorAction SilentlyContinue | Write-Host
+    Write-Host "  FAIL: L2 后端不可达: $l2Base" -ForegroundColor Red
+    if ($stubProc) { Get-Content $stubErr -ErrorAction SilentlyContinue | Write-Host }
     exit 1
 }
-Write-Host "  L2 stub 就绪 (PID=$($stubProc.Id))" -ForegroundColor Green
+if ($stubProc) {
+    Write-Host "  L2 stub 就绪 (PID=$($stubProc.Id))" -ForegroundColor Green
+} else {
+    Write-Host "  外部 L2 就绪: $l2Base" -ForegroundColor Green
+}
 
 # ---- 网格定义（两种模式）----
 # 单请求流式（默认）：λ×c 网格，产出降级率/队列深度/降级原因分解。
@@ -218,7 +237,7 @@ foreach ($cell in $cells) {
 
     # 公共环境
     $env:SPIKE_SOAK = "1"
-    $env:L2_URL = "http://127.0.0.1:$L2Port/"
+    $env:L2_URL = $l2Base
     $env:L2_TIMEOUT = $l2Timeout
     $env:SOAK_PROFILE = $Profile
     $env:SOAK_MAX_SLOTS = "$maxSlots"
@@ -307,10 +326,14 @@ foreach ($cell in $cells) {
 
 # ---- 关 stub ----
 Write-Host ""
-Write-Host "[3/3] 关闭 L2 stub..." -ForegroundColor Cyan
-Stop-Process -Id $stubProc.Id -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 200
-Write-Host "  done" -ForegroundColor Green
+if ($stubProc) {
+    Write-Host "[3/3] 关闭 L2 stub..." -ForegroundColor Cyan
+    Stop-Process -Id $stubProc.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 200
+    Write-Host "  done" -ForegroundColor Green
+} else {
+    Write-Host "[3/3] 外部 L2 由调用方管理，本脚本不关闭" -ForegroundColor DarkGray
+}
 
 # ---- 摘要表 ----
 Write-Host ""
