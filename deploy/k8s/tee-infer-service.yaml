@@ -93,6 +93,10 @@ spec:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           runAsNonRoot: true
+          # 身份钉死：镜像 USER 65532:65532 仅数字，而 alpine 的 /etc/group 无 65532 条目，
+          # 运行时会把未登记数值 gid 回落为 0(root)，故此处显式声明 user/group。
+          runAsUser: 65532
+          runAsGroup: 65532
           capabilities:
             drop: ["ALL"]
 ---
