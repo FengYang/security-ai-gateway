@@ -1,4 +1,4 @@
-# og13-soak.ps1 — OG-13 浸泡 harness 编排脚本
+﻿# og13-soak.ps1 — OG-13 浸泡 harness 编排脚本
 #
 # 作用：启动 L2 stub → 按网格跑 Go soak test → 收集 CSV → 打印摘要表
 #
@@ -36,10 +36,22 @@ param(
     [int]$MedianMs = 0,
     [int]$P99Ms = 0,
     # 并发度 c 网格覆盖：逗号分隔整数，如 "2,4,8,16"；留空用 Profile 默认
-    [string]$Concurrences = ""
+    [string]$Concurrences = "",
+    # λ 网格覆盖：逗号分隔（如 "0.5,1,2,3"）；留空用 Profile 默认（§5.5.1 全网格）
+    [string]$Lambdas = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+# G-1b 回填参数副本（必须）：PowerShell 变量名不区分大小写，参数 $MedianMs/$P99Ms/
+# $Concurrences/$Lambdas 与同名局部变量（$medianMs/$p99Ms/$lambdaGrid）是同一变量时，
+# 会被 Profile 默认值赋值覆盖，且参数的类型约束（如 [string]）会作用于后续赋值
+# → 覆盖参数静默失效（λ 参数与局部同名时数组会被强制转成字符串）。故先取副本，
+# 且 λ 网格局部变量改名 $lambdaGrid 以避免与参数 $Lambdas 同名。
+$MedianMsOverride = $MedianMs
+$P99MsOverride = $P99Ms
+$ConcurrencesOverride = $Concurrences
+$LambdasOverride = $Lambdas
 
 # ---- 路径 ----
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -67,18 +79,23 @@ else {
     $expServiceS = 0.2
     $l2Timeout = "2s"
 }
-# 覆盖参数（G-1b 真机回填用）
-if ($MedianMs -gt 0) { $medianMs = $MedianMs }
-if ($P99Ms -gt 0)   { $p99Ms    = $P99Ms }
-if ($Concurrences) {
-    $concurrencies = $Concurrences -split "," | ForEach-Object { [int]$_.Trim() } | Where-Object { $_ -gt 0 }
+# 覆盖参数（G-1b 真机回填用；读副本，见上方"参数副本"注释）
+if ($MedianMsOverride -gt 0) { $medianMs = $MedianMsOverride }
+if ($P99MsOverride -gt 0)   { $p99Ms    = $P99MsOverride }
+if ($ConcurrencesOverride) {
+    $concurrencies = $ConcurrencesOverride -split "," | ForEach-Object { [int]$_.Trim() } | Where-Object { $_ -gt 0 }
     if (-not $concurrencies) { Write-Warning "-Concurrences 解析为空，使用 Profile 默认"; $concurrencies = $concurrencies }
 }
 # E[S] 重算（对数正态均值 = exp(μ+σ²/2)，μ=ln(median), σ=(ln(p99)-μ)/2.3263）
 $mu  = [math]::Log($medianMs / 1000.0)
 $sig = ([math]::Log($p99Ms / 1000.0) - $mu) / 2.3263478740408408
 $expServiceS = [math]::Exp($mu + $sig * $sig / 2.0)
-$lambdas = @(0.25, 0.5, 1, 1.5, 2, 3, 5, 8)
+$lambdaGrid = @(0.25, 0.5, 1, 1.5, 2, 3, 5, 8)
+# λ 网格覆盖（G-1b 精简网格用；实时仿真下 λ 网格直接决定时长）
+if ($LambdasOverride) {
+    $lambdaGrid = @($LambdasOverride.Split(",") | ForEach-Object { [double]$_.Trim() } | Where-Object { $_ -gt 0 })
+    if (-not $lambdaGrid) { Write-Warning "-Lambdas 解析为空，使用 Profile 默认"; $lambdaGrid = @(0.25, 0.5, 1, 1.5, 2, 3, 5, 8) }
+}
 # 多请求 N 网格：GPU 扩到 64 以找容量拐点（P99 样本量=N，N≤16 时 P99≈max）；
 # CPU 保持 5 格（median 2.8s 首帧必破 800ms，只做趋势对照，不追拐点）
 $mrRequests = if ($Profile -eq "gpu") { @(1, 2, 4, 8, 16, 32, 64) } else { @(1, 2, 4, 8, 16) }
@@ -94,7 +111,7 @@ if ($MultiRequest) {
 else {
     Write-Host "  模式:       单请求流式"
     Write-Host "  Blocking:   $Blocking ($(if ($Blocking) { "阻塞预演" } else { "shadow 零影响" }))"
-    Write-Host "  λ 网格:    $($lambdas -join ', ') 句/s"
+    Write-Host "  λ 网格:    $($lambdaGrid -join ', ') 句/s"
     Write-Host "  c 网格:    $($concurrencies -join ', ')"
     Write-Host "  每格句数:   $Sentences (预热 $Warmup)"
 }
@@ -106,13 +123,20 @@ Write-Host ""
 Write-Host "[1/3] 启动 L2 stub (port=$L2Port)..." -ForegroundColor Cyan
 $stubOut = Join-Path $env:TEMP "og13-l2stub-out.txt"
 $stubErr = Join-Path $env:TEMP "og13-l2stub-err.txt"
-$stubProc = Start-Process python -ArgumentList @(
+# G-1b 回填（§5.5.4 第 1 步）：-MedianMs/-P99Ms 覆盖时 stub 必须同样用真机画像
+# （--profile custom 才吃 --median-ms/--p99-ms），否则网格实测仍按 Profile 默认延迟，
+# 与摘要表的 E[S] 口径不一致。
+$stubProfileArgs = if ($MedianMsOverride -gt 0 -and $P99MsOverride -gt 0) {
+    @("--profile", "custom", "--median-ms", "$medianMs", "--p99-ms", "$p99Ms")
+} else {
+    @("--profile", $Profile)
+}
+$stubProc = Start-Process python -ArgumentList (@(
     "-u", $stubPy,
-    "--profile", $Profile,
     "--port", $L2Port,
     "--hit-rate", "0.05",
     "--seed", $Seed
-) -PassThru -NoNewWindow -RedirectStandardOutput $stubOut -RedirectStandardError $stubErr -WorkingDirectory $root
+) + $stubProfileArgs) -PassThru -NoNewWindow -RedirectStandardOutput $stubOut -RedirectStandardError $stubErr -WorkingDirectory $root
 
 # 等 stub 就绪
 $ready = $false
@@ -162,7 +186,7 @@ else {
     $testName = '^TestCascadeSoak$'
     $resultTag = "SOAK_RESULT"
     foreach ($c in $concurrencies) {
-        foreach ($lam in $lambdas) {
+        foreach ($lam in $lambdaGrid) {
             $cells += [PSCustomObject]@{
                 Label  = "c=$c  λ=$lam"
                 C      = $c
@@ -310,7 +334,7 @@ else {
     Write-Host ("-" * 70)
 
     foreach ($c in $concurrencies) {
-        foreach ($lam in $lambdas) {
+        foreach ($lam in $lambdaGrid) {
             $r = $results | Where-Object { $_.c -eq $c -and $_.lambda -eq $lam }
             if ($r) {
                 Write-Host ("{0,3}  {1,6}  {2,8:0.0}  {3,8:0.00}  {4,6:0.0}  {5,10:0.000}  {6,10:0.000}" -f `
