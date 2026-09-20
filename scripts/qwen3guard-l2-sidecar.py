@@ -30,7 +30,9 @@ D8 议题二 T1=a 两段式契约＋议题三运行时（Q8_0＋两段式＋前�
 用法：
   # 1) 先起 llama-server（Q8_0；slot 前缀缓存常驻；-np 并发＝槽位数）：
   #    llama-server -m <Qwen3Guard-Gen-0.6B-Q8_0.gguf> --host 127.0.0.1 --port 19110 \
-  #                  -np 8 -c 2048 --slot-save-path <dir> -fa
+  #                  -np 8 -c 8192 --slot-save-path <dir> -fa auto
+  #    注：每槽上下文 = -c / -np（审查 prompt 429–486 token，需 -c ≥8192）；
+  #        b11046 的 -fa 需显式取值（on|off|auto）。
   # 2) 起本侧车（tokenizer 仅用于 chat 模板渲染，与 qwen3guard-server.py 同源）：
   #    python scripts/qwen3guard-l2-sidecar.py --port 19112
   # 3) tee-infer 接线：-output-guard-l2-url http://127.0.0.1:19112

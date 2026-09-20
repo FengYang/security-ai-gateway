@@ -17,8 +17,11 @@
 
 部署前提（D8 §3.3）：
   llama-server 启动时带公共前缀 slot 缓存常驻：
-    llama-server -m <gguf> -c 2048 -np 8 --slot-save-path <dir> -fa \\
+    llama-server -m <gguf> -c 8192 -np 8 --slot-save-path <dir> -fa auto \\
                  --host 127.0.0.1 --port 19110
+  注：① 每槽上下文 = -c / -np，取数句 prompt 长 429–486 token，故 -c 需 ≥8192
+        （-c 2048 / -np 8 每槽仅 256，会超槽）；② `-fa` 在 b11046 需显式取值
+        （on|off|auto），裸写 `-fa` 报 "expected value for argument"。
 
   预热（首帧过 219 token 公共前缀）：本工具第 ① 步会自动完成一次污染式预热，
   但 slot 缓存文件的持久化由 llama-server 的 --slot-save-path 承担（运维）。
@@ -56,7 +59,7 @@
 
   # 含冷启动（会重启 llama-server：--llama-restart-cmd 给启动命令）
   python scripts/og1b-collect.py --cold-start \\
-      --llama-restart-cmd "llama-server -m model.gguf -c 2048 -np 8 --slot-save-path slots"
+      --llama-restart-cmd "llama-server -m model.gguf -c 8192 -np 8 --slot-save-path slots -fa auto"
 
   # 只跑某几项
   python scripts/og1b-collect.py --skip spec,extend,cold-start
@@ -111,8 +114,18 @@ def _post_json(url, payload, timeout=120.0):
         return json.loads(r.read().decode("utf-8"))
 
 
-def llama_completion_stream(base_url, prompt, n_predict, timeout=120.0):
-    """流式逐 token 产出增量 content，返回 (增量列表, stop=True)。"""
+def _get_json(url, timeout=10.0):
+    """GET 取 JSON。/health、/props 在本构建（b11046）为 GET-only：POST 返回 404/501。"""
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def llama_completion_stream(base_url, prompt, n_predict, timeout=120.0, on_chunk=None):
+    """流式逐 token 产出增量 content，返回增量列表。
+
+    on_chunk(content, t_since_start)：增量到达时**立即**回调（首帧计时用；
+    若整流收完再回头打时间戳，首帧会恒等于完整输出时间）。
+    """
     payload = json.dumps({
         "prompt": prompt, "n_predict": n_predict,
         "temperature": 0.0, "top_k": 1, "stream": True,
@@ -120,6 +133,7 @@ def llama_completion_stream(base_url, prompt, n_predict, timeout=120.0):
     req = urllib.request.Request(base_url + "/completion", data=payload,
                                  headers={"Content-Type": "application/json"})
     chunks = []
+    t0 = time.perf_counter()
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -134,6 +148,8 @@ def llama_completion_stream(base_url, prompt, n_predict, timeout=120.0):
                 continue
             if ev.get("content"):
                 chunks.append(ev["content"])
+                if on_chunk is not None:
+                    on_chunk(ev["content"], time.perf_counter() - t0)
             if ev.get("stop") is True:
                 break
     return chunks
@@ -142,14 +158,16 @@ def llama_completion_stream(base_url, prompt, n_predict, timeout=120.0):
 def measure_one(base_url, prompt, n_predict):
     """单次完整调用，返回含两段式首帧时间的测量结果。"""
     t0 = time.perf_counter()
-    buf = ""
-    t_light = None
-    chunks = llama_completion_stream(base_url, prompt, n_predict)
-    for ch in chunks:
-        buf += ch
-        if t_light is None:
-            if SAFETY_LINE_DONE_RE.search(buf):
-                t_light = time.perf_counter() - t0
+    state = {"buf": "", "light": None}
+
+    def on_chunk(ch, _dt):
+        state["buf"] += ch
+        if state["light"] is None and SAFETY_LINE_DONE_RE.search(state["buf"]):
+            state["light"] = time.perf_counter() - t0  # Safety: 行完整时刻（真首帧）
+
+    llama_completion_stream(base_url, prompt, n_predict, on_chunk=on_chunk)
+    buf = state["buf"]
+    t_light = state["light"]
     t_full = time.perf_counter() - t0
     if t_light is None:
         # 末行 Safety 无换行即 EOS：补上
@@ -211,21 +229,25 @@ def stats(vals):
 
 def collect_spec(args):
     try:
-        info = _post_json(args.llama_url + "/props", {}, timeout=10)
+        info = _get_json(args.llama_url + "/props", timeout=10)
     except Exception:
         info = {"error": "props endpoint not available (llama.cpp older build)"}
     try:
-        h = _post_json(args.llama_url + "/health", {}, timeout=10)
+        h = _get_json(args.llama_url + "/health", timeout=10)
     except Exception:
         h = {"error": "health endpoint not available"}
     cpu_info = {}
     try:
         if platform.system() == "Windows":
-            out = subprocess.check_output(["wmic", "cpu", "get", "Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed",
-                                            "/format:list"], text=True)
+            # wmic 自 Windows 11 26200 起已移除 → 改用 PowerShell CIM
+            out = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Processor | Select-Object -First 1 "
+                 "Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed | Format-List"],
+                text=True)
             for line in out.strip().splitlines():
-                if "=" in line:
-                    k, v = line.split("=", 1)
+                if ":" in line:
+                    k, v = line.split(":", 1)
                     cpu_info[k.strip()] = v.strip()
         elif platform.system() == "Linux":
             with open("/proc/cpuinfo") as f:
@@ -237,11 +259,13 @@ def collect_spec(args):
     mem_info = {}
     try:
         if platform.system() == "Windows":
-            out = subprocess.check_output(["wmic", "ComputerSystem", "get", "TotalPhysicalMemory",
-                                            "/format:list"], text=True)
+            out = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory | Format-List"],
+                text=True)
             for line in out.strip().splitlines():
-                if "=" in line:
-                    k, v = line.split("=", 1)
+                if ":" in line:
+                    k, v = line.split(":", 1)
                     mem_info[k.strip()] = v.strip()
         elif platform.system() == "Linux":
             with open("/proc/meminfo") as f:
@@ -269,8 +293,25 @@ def collect_spec(args):
 
 # ---- ② 单流画像 ----
 
+def erase_all_slots(base_url):
+    """清空全部 slot KV（冷形态用；对齐 .tools/og1-llamacpp/cold_llamacpp.py）。"""
+    with urllib.request.urlopen(base_url + "/slots", timeout=10) as r:
+        slots = json.loads(r.read().decode("utf-8"))
+    for s in slots:
+        req = urllib.request.Request(
+            base_url + "/slots/%d?action=erase" % s["id"], data=b"{}", method="POST",
+            headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10).read()
+    return len(slots)
+
+
 def collect_single_stream(args, tok, sentences, label, n_samples, warmup=3, mode="steady"):
-    """单流画像：mode ∈ {hot, cold, steady}。"""
+    """单流画像：mode ∈ {hot, cold, steady}（口径对齐 OG-1 §10.1/§10.4 与批次 2b 参考实现）。
+
+    - hot    ：同句重复 → 全前缀命中（先发一次同句预热，被测请求即为全命中）
+    - steady ：单 slot 交替污染 → 固定前缀命中 ＋ 变量段重算
+    - cold   ：每次测量前 erase 全部 slot → 全量 prefill（保守上限）
+    """
     results = []
     if mode == "steady":
         for _ in range(warmup):
@@ -280,6 +321,11 @@ def collect_single_stream(args, tok, sentences, label, n_samples, warmup=3, mode
         prompt = render(tok, sent)
         if mode == "steady":
             pollute_cache(args.llama_url, tok, render, args.n_predict)
+        elif mode == "hot":
+            # 同句重复：先发一次同句（不计入），使被测请求命中全前缀
+            measure_one(args.llama_url, prompt, args.n_predict)
+        elif mode == "cold":
+            erase_all_slots(args.llama_url)
         m = measure_one(args.llama_url, prompt, args.n_predict)
         m.update({"id": sid, "kind": kind, "tier": tier, "sentence": sent})
         results.append(m)
@@ -423,7 +469,7 @@ def collect_cold_start(args, tok):
         ready = False
         for i in range(60):
             try:
-                r = _post_json(args.llama_url + "/health", {}, timeout=2)
+                r = _get_json(args.llama_url + "/health", timeout=2)
                 if r.get("status") == "ok" or r.get("state"):
                     ready = True
                     break
@@ -493,7 +539,7 @@ def main():
 
     # 检查 llama 连通
     try:
-        _post_json(args.llama_url + "/health", {}, timeout=10)
+        _get_json(args.llama_url + "/health", timeout=10)
     except Exception as exc:
         print(f"[og1b] llama-server 不可达 ({args.llama_url}): {exc}", flush=True)
         return 1
