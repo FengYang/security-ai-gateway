@@ -11,8 +11,10 @@
     请求检测时插件只发一条 user 消息；响应检测时发 user(原始提问)+assistant(待检回复) 两条。
   - 出参：HTTP 200 + OpenAI 兼容 JSON，**判定文本必须位于 choices[0].message.content**，
     且匹配 (?mi)^Safety:\\s*(Safe|Unsafe|Controversial)\\b —— 即"S中标签必须出现在行首"。
-  - 任何失败（非 200 / 解析不出 Safety / 超时）都会让插件 **fail-open（放行）**，
-    因此联调时若全部放行，优先怀疑本替身未返回合规格式。
+  - 失败语义（**2026-09-20 B3 起改为 fail-closed**）：非 200 / 解析不出 Safety / 超时 / 构造送检体
+    失败时，插件**一律不放行**（请求/响应路径即时拒答，流式路径整流终止），并计入
+    qwen3guard_failclosed_total。因此联调时若出现拒答，优先检查本替身是否返回合规格式、
+    以及插件 timeout_ms 是否足够。
 
 用法：
   python scripts/stub-qwen3guard.py --port 19100

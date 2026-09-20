@@ -25,6 +25,35 @@ const (
 
 func main() {}
 
+// ---- B3（合规达标最小集 G13）：明文侧 fail-closed 收口 ----
+//
+// 口径：审核服务**不可用**（分发失败 / 超时 / 非 200 / 解析失败 / 构造送检体失败）
+// ⇒ **一律不放行**。此前为 fail-open 放行，与项目 fail-closed 哲学及备案口径冲突。
+// 处置：请求/响应路径以 denyCode + denyMessage 即时拒答；流式路径整流终止（注入拒答 SSE）。
+// 例外（不属"不可用"，保持原行为）：请求/响应取不到配置的 content path ⇒ 跳过送检（无可检内容）；
+// max_body_bytes 超限 bypass 属资源防护，另行登记，不在此列。
+// 可观测：qwen3guard_failclosed_total + Warnf（stage/cause），供告警与趋势观测。
+func failClosedDeny(c pluginConfig, lg log.Log, stage, cause string) {
+	metricFailClosed.incr()
+	lg.Warnf("qwen3guard: %s moderation unavailable (%s), fail closed: deny code=%d", stage, cause, c.denyCode)
+	_ = proxywasm.SendHttpResponse(
+		uint32(c.denyCode),
+		[][2]string{{"content-type", "application/json"}},
+		buildChatDenyBody(c.denyMessage),
+		-1,
+	)
+}
+
+// failClosedBlockStream 流式路径整流终止（与命中拦截同形：注入拒答 SSE 并结束流）。
+func failClosedBlockStream(ctx wrapper.HttpContext, c pluginConfig, lg log.Log, cause string) {
+	metricFailClosed.incr()
+	lg.Warnf("qwen3guard: streaming moderation unavailable (%s), fail closed: terminate stream", cause)
+	ctx.SetContext(ctxStreamBlocked, true)
+	ctx.SetContext(ctxStreamPending, "")
+	ctx.SetContext(ctxUncheckedText, "")
+	proxywasm.InjectEncodedDataToFilterChain(buildStreamDenyBody(c.denyMessage), true)
+}
+
 func init() {
 	wrapper.SetCtx(
 		pluginName,
@@ -71,15 +100,14 @@ func onHttpRequestBody(ctx wrapper.HttpContext, c pluginConfig, body []byte, log
 
 	requestBody, err := buildPromptModerationBody(c.model, prompt)
 	if err != nil {
-		log.Warnf("qwen3guard: build request moderation body failed, fail open: %v", err)
-		return types.ActionContinue
+		failClosedDeny(c, log, "request", "build_body")
+		return types.ActionPause
 	}
 	if err := c.client.Post(c.requestPath, buildGuardHeaders(c.apiKey), requestBody,
 		func(statusCode int, _ http.Header, responseBody []byte) {
 			result, err := parseGuardHTTPResponse(statusCode, responseBody)
 			if err != nil {
-				log.Warnf("qwen3guard: request moderation failed, fail open: %v", err)
-				proxywasm.ResumeHttpRequest()
+				failClosedDeny(c, log, "request", "bad_response")
 				return
 			}
 			if shouldBlockRisk(result.Safety, c.riskLevelBar) {
@@ -94,8 +122,8 @@ func onHttpRequestBody(ctx wrapper.HttpContext, c pluginConfig, body []byte, log
 			}
 			proxywasm.ResumeHttpRequest()
 		}, c.timeoutMS); err != nil {
-		log.Warnf("qwen3guard: dispatch request moderation failed, fail open: %v", err)
-		return types.ActionContinue
+		failClosedDeny(c, log, "request", "dispatch")
+		return types.ActionPause
 	}
 	return types.ActionPause
 }
@@ -129,21 +157,20 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, c pluginConfig, log log.Log)
 func onHttpResponseBody(ctx wrapper.HttpContext, c pluginConfig, body []byte, log log.Log) types.Action {
 	responseText, ok := extractJSONText(body, c.responseContentJSONPath)
 	if !ok {
-		log.Warnf("qwen3guard: response content path %q not found, fail open", c.responseContentJSONPath)
+		log.Warnf("qwen3guard: response content path %q not found, skip moderation (无可检内容)", c.responseContentJSONPath)
 		return types.ActionContinue
 	}
 
 	requestBody, err := buildResponseModerationBody(c.model, ctx.GetStringContext(ctxRequestPrompt, ""), responseText)
 	if err != nil {
-		log.Warnf("qwen3guard: build response moderation body failed, fail open: %v", err)
-		return types.ActionContinue
+		failClosedDeny(c, log, "response", "build_body")
+		return types.ActionPause
 	}
 	if err := c.client.Post(c.requestPath, buildGuardHeaders(c.apiKey), requestBody,
 		func(statusCode int, _ http.Header, responseBody []byte) {
 			result, err := parseGuardHTTPResponse(statusCode, responseBody)
 			if err != nil {
-				log.Warnf("qwen3guard: response moderation failed, fail open: %v", err)
-				proxywasm.ResumeHttpResponse()
+				failClosedDeny(c, log, "response", "bad_response")
 				return
 			}
 			if shouldBlockRisk(result.Safety, c.riskLevelBar) {
@@ -157,8 +184,8 @@ func onHttpResponseBody(ctx wrapper.HttpContext, c pluginConfig, body []byte, lo
 			}
 			proxywasm.ResumeHttpResponse()
 		}, c.timeoutMS); err != nil {
-		log.Warnf("qwen3guard: dispatch response moderation failed, fail open: %v", err)
-		return types.ActionContinue
+		failClosedDeny(c, log, "response", "dispatch")
+		return types.ActionPause
 	}
 	return types.ActionPause
 }
@@ -236,8 +263,7 @@ func checkStreamingResponse(ctx wrapper.HttpContext, c pluginConfig, log log.Log
 		ctx.GetStringContext(ctxResponseText, ""),
 	)
 	if err != nil {
-		log.Warnf("qwen3guard: build streaming response moderation body failed, fail open: %v", err)
-		releasePendingStream(ctx, false)
+		failClosedBlockStream(ctx, c, log, "build_body")
 		return
 	}
 	ctx.SetContext(ctxDuringCall, true)
@@ -249,9 +275,7 @@ func checkStreamingResponse(ctx wrapper.HttpContext, c pluginConfig, log log.Log
 			}
 			result, err := parseGuardHTTPResponse(statusCode, responseBody)
 			if err != nil {
-				log.Warnf("qwen3guard: streaming response moderation failed, fail open: %v", err)
-				ctx.SetContext(ctxUncheckedText, "")
-				releasePendingStream(ctx, false)
+				failClosedBlockStream(ctx, c, log, "bad_response")
 				return
 			}
 			if shouldBlockRisk(result.Safety, c.riskLevelBar) {
@@ -265,8 +289,7 @@ func checkStreamingResponse(ctx wrapper.HttpContext, c pluginConfig, log log.Log
 			releasePendingStream(ctx, false)
 		}, c.timeoutMS); err != nil {
 		ctx.SetContext(ctxDuringCall, false)
-		log.Warnf("qwen3guard: dispatch streaming response moderation failed, fail open: %v", err)
-		releasePendingStream(ctx, false)
+		failClosedBlockStream(ctx, c, log, "dispatch")
 	}
 }
 

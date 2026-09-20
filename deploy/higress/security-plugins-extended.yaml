@@ -211,8 +211,14 @@ spec:
 #
 # 【已知行为（如实标注，勿忽略）】
 #   - 仅 `Safety: Unsafe` 拦截（`Controversial` 默认放行；可用 riskLevelBar 调为更严）；
-#   - **安全服务不可用 / 超时 / 返回非 200 / 解析不出 Safety → fail-open（放行）**：
-#     与项目 fail-closed 哲学不一致，生产**必须**为安全服务可用率、超时与插件错误日志配告警；
+#   - **fail-closed（2026-09-20 B3 起，G13 收口）**：安全服务**不可用 / 超时 / 返回非 200 /
+#     解析不出 Safety / 构造送检体失败** ⇒ **一律不放行**——请求/响应路径以 `denyCode` +
+#     `denyMessage` 即时拒答，流式路径整流终止（注入拒答 SSE）；计数 `qwen3guard_failclosed_total`，
+#     原因（stage/cause）入插件 Warnf 日志。**生产必须为该计数与插件错误日志配告警**，
+#     并保证安全服务可用率（fail-closed 下服务不可用 = 该路由全部拒答，属备案口径要求；
+#     此前为 fail-open 放行）。
+#     例外（不属"不可用"）：`maxBodyBytes` 超限 bypass（资源防护类，已登记为已知限制）；
+#     请求/响应取不到配置的 content path ⇒ 跳过送检（无可检内容）。
 #   - `denyCode` 取默认 200 时返回 OpenAI 兼容拒答体（内容＝denyMessage）；**实测设为 403 时
 #     响应体为空**（仅状态码，content-type 仍为 application/json）——按客户端容错能力选择；
 #   - 启用 checkResponse 会移除请求的 Accept-Encoding，且流式响应按 `streamBufferChars`
@@ -228,9 +234,10 @@ spec:
 #   - 单次审核耗时 ≈ **2.5–3.1s**（CPU / 0.6B / 64 tokens）。
 #
 # 【timeoutMs 必须按部署形态调（重要）】默认 2000ms 是 GPU 场景的取值；**CPU 推理下必须放大**
-#   （实测需 ≥30000–60000ms），否则每次外呼超时 → 插件 fail-open 放行 → 表现为"配了但永不拦截"。
-#   【本清单取值】下方 matchRules 内为 `timeoutMs: 30000`（CPU 形态安全值）。该值须同时覆盖「冷启动 + 单次审核」；
-#   **模型或部署形态变更后必须重新实测再定值**，不得回退到默认 2000。
+#   （实测需 ≥30000–60000ms）。B3 起失败语义为 fail-closed：**timeoutMs 过小 ⇒ 每次外呼超时
+#   ⇒ 该路由全部拒答**（而非此前的"配了但永不拦截"），故该值属可用性关键参数，
+#   且必须覆盖「冷启动 + 单次审核」。**模型或部署形态变更后必须重新实测再定值**，不得回退到默认 2000。
+#   【本清单取值】下方 matchRules 内为 `timeoutMs: 30000`（CPU 形态安全值）。
 #
 # 【辅助脚本（本仓库）】
 #   - scripts/qwen3guard-server.py：真实模型 OpenAI 兼容服务（CPU；权重来自 ModelScope

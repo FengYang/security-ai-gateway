@@ -57,8 +57,11 @@ LICENSE.upstream      22bf8276b611d32982cd0dbb7a997a5ff9e7419079607f17af54899a4f
 2. 服务发现：dns 模式下 Envoy cluster 名为 outbound|<servicePort>||<serviceName>.dns，
    因此 serviceName 不要写 `.dns`（否则变成 `.dns.dns`）。
 3. 插件 ABI：Proxy-Wasm 0.2.100（本仓库使用的 Higress 2.x 数据面满足）。
-4. **fail-open**：安全服务不可用/超时/返回非 200/解析不出 Safety 标签时放行当前请求；
-   与项目 fail-closed 哲学不一致，生产必须为可用率、超时与插件错误日志配置告警。
+4. **fail-closed（2026-09-20 B3 起）**：安全服务不可用/超时/返回非 200/解析不出 Safety 标签，
+   以及构造送检体失败时，**一律不放行**——请求/响应路径以 denyCode+denyMessage 即时拒答，
+   流式路径整流终止（注入拒答 SSE）；计数 qwen3guard_failclosed_total，原因入 Warnf 日志。
+   生产必须为可用率、超时与该计数配置告警（此为备案口径要求；此前为 fail-open 放行）。
+   例外（不属"不可用"）：max_body_bytes 超限 bypass（资源防护）；取不到配置 content path ⇒ 跳过送检。
 5. denyCode 语义（本机实测）：默认 200 时返回 OpenAI 兼容拒答体（内容=denyMessage）；
    设为 403 时**响应体为空**（仅状态码）。按客户端容错能力选择。
 
