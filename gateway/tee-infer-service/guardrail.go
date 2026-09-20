@@ -14,6 +14,7 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -219,4 +220,22 @@ func compactText(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// maskForLog 日志脱敏（合规留存口径 R3-1：日志零原文）：
+// 仅保留首 3 与末 2 个 rune，并以 (len=N) 标注原文 rune 长度；
+// 不足 6 个 rune 时全掩（短串保留首尾即可还原，故不保留）；空串标注 empty。
+//
+// 用途：guardrail 命中的 match 属受保护内容（可能含 PII 原文），
+// 日志/审计只留可定位的痕迹；判定的类目由 category 承担。
+func maskForLog(s string) string {
+	r := []rune(s)
+	n := len(r)
+	if n == 0 {
+		return "(empty,len=0)"
+	}
+	if n <= 5 {
+		return strings.Repeat("*", n) + fmt.Sprintf("(len=%d)", n)
+	}
+	return string(r[:3]) + "***" + string(r[n-2:]) + fmt.Sprintf("(len=%d)", n)
 }

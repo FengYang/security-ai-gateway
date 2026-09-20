@@ -1021,8 +1021,8 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		}
 		if hit := s.guard.check(text); hit != nil {
 			s.denyAndAudit(tenant, req.RequestID, "guardrail_"+hit.Category, payloadSHA)
-			log.Printf("[tee] guardrail 拦截 tenant=%s req=%s category=%s match=%q",
-				tenant, req.RequestID, hit.Category, hit.Match)
+			log.Printf("[tee] guardrail 拦截 tenant=%s req=%s category=%s match=%s",
+				tenant, req.RequestID, hit.Category, maskForLog(hit.Match))
 			http.Error(w, fmt.Sprintf("内容安全拦截（%s）", hit.Category), http.StatusForbidden)
 			return
 		}
