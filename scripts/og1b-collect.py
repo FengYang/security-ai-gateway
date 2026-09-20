@@ -407,15 +407,27 @@ def collect_extend(args, tok):
 # ---- ⑤ 并发膨胀 ----
 
 def collect_concurrency(args, tok):
-    sent = SENTS[0][3]  # 用 s1 当基准句
-    prompt = render(tok, sent)
+    """⑤ 并发膨胀：n ∈ {1,2,4,8}，每档 n*5 次调用。
+
+    --concurrency-mode same  ：全部请求同一句 ⇒ 热路径（全前缀命中）；原口径
+    --concurrency-mode rotate：句集轮转 ⇒ 每请求变量段不同、仅命中固定前缀
+                               ＝ 稳态口径（生产可比，用于定有效并行度 p）
+    """
+    mode = getattr(args, "concurrency_mode", "same")
+    prompts_same = render(tok, SENTS[0][3])  # same 模式基准句 s1
     out = {}
     for n in (1, 2, 4, 8):
         t0 = time.perf_counter()
         full_ms_list = []
         light_ms_list = []
         with ThreadPoolExecutor(max_workers=n) as ex:
-            futs = [ex.submit(measure_one, args.llama_url, prompt, args.n_predict) for _ in range(n * 5)]
+            futs = []
+            for k in range(n * 5):
+                if mode == "rotate":
+                    _, _, _, sent = SENTS[k % len(SENTS)]
+                    futs.append(ex.submit(measure_one, args.llama_url, render(tok, sent), args.n_predict))
+                else:
+                    futs.append(ex.submit(measure_one, args.llama_url, prompts_same, args.n_predict))
             for fut in as_completed(futs):
                 m = fut.result()
                 if m["full_ms"]:
@@ -427,6 +439,7 @@ def collect_concurrency(args, tok):
         tput = round(n_total / dt, 3)
         per_s = round(dt / n_total * 1000, 2)  # 平均每句 wall ms
         out[f"n={n}"] = {
+            "mode": mode,
             "concurrency": n,
             "total_calls": n_total,
             "wall_total_s": round(dt, 3),
@@ -435,7 +448,7 @@ def collect_concurrency(args, tok):
             "full_ms_stats": stats(full_ms_list),
             "light_ms_stats": stats(light_ms_list),
         }
-        print(f"  [concurrency] n={n}  tput={tput}/s  avg={per_s}ms  "
+        print(f"  [concurrency-{mode}] n={n}  tput={tput}/s  avg={per_s}ms  "
               f"full_p50={out[f'n={n}']['full_ms_stats']['p50']}ms  "
               f"full_p90={out[f'n={n}']['full_ms_stats']['p90']}ms", flush=True)
     return out
@@ -513,6 +526,9 @@ def main():
                     help="输出根目录 (default: ./og1b-results)")
     ap.add_argument("--truth-json", default="",
                     help="fp32 真值 JSON 路径（保真比对用；缺省跳过真值列）")
+    ap.add_argument("--concurrency-mode", choices=["same", "rotate"], default="same",
+                    help="⑤ 并发口径：same=同句重复（热路径，原口径）；"
+                         "rotate=句集轮转（稳态口径，定 p 用）")
     ap.add_argument("--cold-start", action="store_true",
                     help="是否执行冷启动项⑥（会重启 llama-server，需 --llama-restart-cmd）")
     ap.add_argument("--llama-restart-cmd", default="",
@@ -598,7 +614,7 @@ def main():
             json.dump(conc, f, ensure_ascii=False, indent=2)
         best = conc.get("n=1", {}).get("throughput_sent_per_sec", 0)
         summary_lines.append(
-            f"⑤ 并发：n=1 tput={conc['n=1']['throughput_sent_per_sec']}/s，"
+            f"⑤ 并发（口径={conc['n=1'].get('mode', 'same')}）：n=1 tput={conc['n=1']['throughput_sent_per_sec']}/s，"
             f"n=8 tput={conc['n=8']['throughput_sent_per_sec']}/s "
             f"（8×放大={round(conc['n=8']['throughput_sent_per_sec'] / max(best, 1e-9), 2)}×）")
 
