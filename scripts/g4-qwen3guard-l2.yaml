@@ -1,0 +1,125 @@
+# G-4 OG-16 批 5：qwen3guard L2 侧车 + llama-server 部署清单
+# 命名空间：otpmask（和 tee-infer 同一个 ns）
+# 模型路径：/opt/og16-g4/gguf/Qwen3Guard-Gen-0.6B.Q8_0.gguf (hostPath)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen3guard-l2
+  namespace: otpmask
+  labels:
+    app: qwen3guard-l2
+    og-batch: g4
+spec:
+  selector:
+    app: qwen3guard-l2
+  ports:
+    - name: sidecar
+      port: 19112
+      targetPort: 19112
+      protocol: TCP
+    - name: llama
+      port: 19110
+      targetPort: 19110
+      protocol: TCP
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen3guard-l2
+  namespace: otpmask
+  labels:
+    app: qwen3guard-l2
+    og-batch: g4
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qwen3guard-l2
+  template:
+    metadata:
+      labels:
+        app: qwen3guard-l2
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: feng-nuc7cjyh
+      containers:
+        # llama-server
+        - name: llama-server
+          image: alpine:3.20
+          command: ["/opt/llama/llama-server"]
+          args:
+            - "-m"
+            - "/opt/gguf/Qwen3Guard-Gen-0.6B.Q8_0.gguf"
+            - "--port"
+            - "19110"
+            - "-np"
+            - "2"
+            - "-c"
+            - "2048"
+            - "--host"
+            - "0.0.0.0"
+          ports:
+            - containerPort: 19110
+              name: llama
+          volumeMounts:
+            - name: llama-bin
+              mountPath: /opt/llama
+            - name: gguf
+              mountPath: /opt/gguf
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "1500m"
+              memory: "2Gi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 19110
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 20
+        # qwen3guard-l2 sidecar
+        - name: sidecar
+          image: python:3.12-alpine
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --no-cache-dir httpx transformers 2>&1 | tail -1
+              exec python3 /opt/sidecar/qwen3guard-l2-sidecar.py --port 19112 --llama-url http://127.0.0.1:19110
+          ports:
+            - containerPort: 19112
+              name: sidecar
+          volumeMounts:
+            - name: sidecar
+              mountPath: /opt/sidecar
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 19112
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            failureThreshold: 30
+      volumes:
+        - name: llama-bin
+          hostPath:
+            path: /opt/og16-g4/llama
+            type: Directory
+        - name: gguf
+          hostPath:
+            path: /opt/og16-g4/gguf
+            type: Directory
+        - name: sidecar
+          hostPath:
+            path: /opt/og16-g4/sidecar
+            type: Directory

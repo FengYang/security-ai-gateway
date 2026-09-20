@@ -7,6 +7,9 @@
 *.dylib
 *.test
 *.out
+# 交叉编译 Linux 二进制（tee-infer-service 本地产物）
+tee-infer-service-linux
+tee-infer-service-darwin
 
 # 覆盖率
 coverage
