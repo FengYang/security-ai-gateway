@@ -134,6 +134,7 @@ docs/            里程碑文档（M1-M12）
 | `docs/GA-路线1发布规划.md` | 路线 1 总纲（P1-P5，已验收，历史主线） |
 | `docs/GA-路线1研发落地验收报告.md` | 路线 1 验收证据（M1-M3 冻结）与遗留项（M4） |
 | `docs/GA-AI网关能力补齐方案.md` | 网关功能面方案（v4，实施中） |
+| `docs/supply-chain/GA-供应链与出境登记.md` | B6 本体：provider 主体＋境内/出境核查、模型许可/revision/量化/引擎登记与离线重建 |
 | `ai-gateway-roadmap/ai-gateway-roadmap.html` | **战略路线图（管理层视图）**：三阶段策略/时间轴/验收/资源；进度单一事实源见 `docs/GA-项目总览与路线图.md` |
 | `docs/GA-CMAAS对接设计.md` | C-MaaS 引擎对接设计 |
 | `docs/总体技术方案-v2.md` | 架构基线 v3.0（含 §2.4/§3.10 网关功能面） |
