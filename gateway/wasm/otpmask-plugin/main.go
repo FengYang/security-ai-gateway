@@ -97,6 +97,11 @@ type PluginConfig struct {
 	// 默认 false（off），不改写内容；开启后对解密后的 delta 做 PII 等长脱敏。
 	// 正则为 builtin（编译进 wasm），与 tee-infer 侧 pii_patterns.json 同源。
 	PIIMaskEnabled bool `json:"pii_mask_enabled"`
+	// B1 强标标识（GB 45438-2025）：密态路径出站兜底注入。
+	// 默认 false（off），零行为变化；推荐注入点为 tee-infer（密态路径），
+	// 本插件仅在启用且上游未带 label meta（SawLabel=false）时于流首注入一次（去重语义）。
+	ContentLabelEnabled bool   `json:"content_label_enabled"`
+	ContentLabelText    string `json:"content_label_text"` // 空 = 缺省「内容由人工智能生成」
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -131,6 +136,12 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.GatewayCoreCredentialToken = json.Get("gateway_core_credential_token").String()
 	config.PIIMaskEnabled = json.Get("pii_mask_enabled").Bool()
 	piiMaskEnabled = config.PIIMaskEnabled // 同步到 envelope 侧全局开关（delta 改写用）
+	// B1 强标标识（默认 off；空文案兜底缺省，文案合规性由注入点侧 fail-closed 校验承担）。
+	config.ContentLabelEnabled = json.Get("content_label_enabled").Bool()
+	config.ContentLabelText = json.Get("content_label_text").String()
+	if config.ContentLabelText == "" {
+		config.ContentLabelText = defaultContentLabelText
+	}
 	if config.GatewayCoreService == "" {
 		// 缺省 FQDN（与 tee_service 同理：FQDNCluster 需完整服务域名，短名不会物化）。
 		config.GatewayCoreService = "gateway-core.higress-system.svc.cluster.local"
@@ -721,7 +732,9 @@ type respStreamState struct {
 	first     bool              // 已见首个非空帧（路径判定仅一次）
 	closed    bool              // 整流拒绝后闭锁，不再外发任何字节
 	cfCounted bool              // OG-16：content_filter 终止已边沿计数（每流至多一次）
-	keys      []string          // 本请求在 KeyStore 登记的密钥 key（onStreamDone 兜底删除）
+	// B1：强标标识已注入（每流至多一次；上游 SawLabel 时不注入——单一注入点规则兜底）。
+	labelInjected bool
+	keys          []string // 本请求在 KeyStore 登记的密钥 key（onStreamDone 兜底删除）
 }
 
 // ctxKeyRespStream 请求级响应流状态的上下文键。
@@ -753,6 +766,24 @@ func noteContentFilter(st *respStreamState) {
 	}
 }
 
+// maybeInjectContentLabel B1 强标标识流首注入（去重语义，每流至多一次）：
+//
+//   - 配置关闭 / 已注入 / 本帧无外发内容 → 原样返回；
+//   - 上游 tee-infer 已带 label meta（SawLabel）→ 不注入（单一注入点规则的可执行兜底：
+//     密态路径推荐 tee-infer 为注入点，本插件仅兜底，双开不会产生双份首标）；
+//   - 否则于首个外发内容帧之前插入 head 标识帧（标准 OpenAI chunk 形态，客户端可解析）。
+func maybeInjectContentLabel(st *respStreamState, config PluginConfig, out []byte) []byte {
+	if !config.ContentLabelEnabled || st.labelInjected || len(out) == 0 {
+		return out
+	}
+	st.labelInjected = true
+	if st.dec != nil && st.dec.SawLabel() {
+		return out
+	}
+	metricContentLabelInjected.incr()
+	return append(buildLabelSSELine(config.ContentLabelText, labelPositionHead, pendingRequestID, config.Model), out...)
+}
+
 // onStreamingResponseBody 响应侧流式解密外发（P1b，取代整包 onResponseBody）：
 //
 //	SSE 信封流（quote 200）：SSEStreamDecoder 逐帧增量解密，逐片外发，规避 §4.2 响应整体缓冲限制；
@@ -779,7 +810,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk
 				return nil
 			}
 			noteContentFilter(st) // OG-16：content_filter 审核终止边沿计数
-			return out
+			return maybeInjectContentLabel(st, config, out)
 		}
 	}
 	if st.dec != nil {
@@ -794,7 +825,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk
 			return nil
 		}
 		noteContentFilter(st) // OG-16：content_filter 审核终止边沿计数
-		return out
+		return maybeInjectContentLabel(st, config, out)
 	}
 	// 整包路径：累积
 	st.buf = append(st.buf, chunk...)

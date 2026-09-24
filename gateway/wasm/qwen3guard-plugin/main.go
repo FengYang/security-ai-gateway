@@ -21,6 +21,8 @@ const (
 	ctxStreamBlocked = "qwen3guard.stream_blocked"
 	ctxStreamBypass  = "qwen3guard.stream_bypass"
 	ctxDuringCall    = "qwen3guard.during_call"
+	// B1 强标标识（GB 45438-2025）：本流是否已注入标识帧（每流至多一次）。
+	ctxStreamLabelled = "qwen3guard.stream_labelled"
 )
 
 func main() {}
@@ -45,13 +47,34 @@ func failClosedDeny(c pluginConfig, lg log.Log, stage, cause string) {
 }
 
 // failClosedBlockStream 流式路径整流终止（与命中拦截同形：注入拒答 SSE 并结束流）。
+// B1：content_label_on_deny 开启时拒答首帧携带强标标识 meta（拒答文案是否属标识口径由法务定，默认不带）。
 func failClosedBlockStream(ctx wrapper.HttpContext, c pluginConfig, lg log.Log, cause string) {
 	metricFailClosed.incr()
 	lg.Warnf("qwen3guard: streaming moderation unavailable (%s), fail closed: terminate stream", cause)
 	ctx.SetContext(ctxStreamBlocked, true)
 	ctx.SetContext(ctxStreamPending, "")
 	ctx.SetContext(ctxUncheckedText, "")
-	proxywasm.InjectEncodedDataToFilterChain(buildStreamDenyBody(c.denyMessage), true)
+	proxywasm.InjectEncodedDataToFilterChain(buildStreamDenyBodyWithLabel(c.denyMessage, streamDenyLabel(c)), true)
+}
+
+// streamDenyLabel B1：on_deny 开启时返回拒答帧应携带的标识 meta，否则 nil。
+func streamDenyLabel(c pluginConfig) *labelMeta {
+	if !c.contentLabelOnDeny {
+		return nil
+	}
+	return &labelMeta{Std: defaultContentLabelStd, Position: labelPositionHead}
+}
+
+// maybeInjectStreamLabel B1：流首注入判定（每流至多一次）。返回 true 表示本次应注入
+// （调用方负责 hostcall 与计数；本函数仅置位，便于宿主单测不触 hostcall）。
+// 去重语义：上游已带 label meta 的流本插件无从感知（明文侧无内层信封），qwen3guard 为明文
+// 路径的注入点；与 tee-infer/otpmask 同开属双链路部署，按文档单一注入点规则配置。
+func maybeInjectStreamLabel(ctx wrapper.HttpContext, c pluginConfig) bool {
+	if !c.contentLabelEnabled || ctx.GetBoolContext(ctxStreamLabelled, false) {
+		return false
+	}
+	ctx.SetContext(ctxStreamLabelled, true)
+	return true
 }
 
 func init() {
@@ -198,6 +221,13 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, c pluginConfig, data [
 		return data
 	}
 
+	// B1 强标标识（GB 45438-2025）：流首注入标识帧（blocked/bypass 检查之后；
+	// 标识帧先行下发，序为 标识→内容，deny 时与拒答帧共存语义正确）。
+	if maybeInjectStreamLabel(ctx, c) {
+		metricContentLabelInjected.incr()
+		proxywasm.InjectEncodedDataToFilterChain(buildStreamLabelBody(c.contentLabelText), false)
+	}
+
 	pending := ctx.GetStringContext(ctxStreamPending, "")
 	combined := ctx.GetStringContext(ctxStreamPartial, "") + string(data)
 	if exceedsByteLimit(len(pending), len(combined), c.maxBodyBytes) {
@@ -282,7 +312,7 @@ func checkStreamingResponse(ctx wrapper.HttpContext, c pluginConfig, log log.Log
 				ctx.SetContext(ctxStreamBlocked, true)
 				ctx.SetContext(ctxStreamPending, "")
 				ctx.SetContext(ctxUncheckedText, "")
-				proxywasm.InjectEncodedDataToFilterChain(buildStreamDenyBody(c.denyMessage), true)
+				proxywasm.InjectEncodedDataToFilterChain(buildStreamDenyBodyWithLabel(c.denyMessage, streamDenyLabel(c)), true)
 				return
 			}
 			ctx.SetContext(ctxUncheckedText, "")

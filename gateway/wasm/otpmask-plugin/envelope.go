@@ -38,6 +38,9 @@ type streamChunk struct {
 	Delta  string      `json:"delta"`            // 增量文本
 	Finish string      `json:"finish,omitempty"` // 终止标记（""=继续，"stop"=正常结束，"content_filter"=内容安全终止）
 	Guard  *chunkGuard `json:"guard,omitempty"`  // 输出侧内容审查注解（可选；通常仅终止帧携带，OG-16 透传客户端）
+	// B1 强标标识（GB 45438-2025）：合规标识随标识帧走（head/repeat/tail），独立字段不并入 guard。
+	// omitempty 透传，旧版本插件忽略未知字段（混部时隐式标识丢失但不 fail-closed）。
+	Label *chunkLabel `json:"content_label,omitempty"`
 }
 
 // chunkGuard 输出侧内容审查 chunk-meta（与 tee-infer chunkGuardMeta 同构，§4.6.1）。
@@ -50,6 +53,13 @@ type chunkGuard struct {
 	PolicyVersion string `json:"policy_version"`         // 聚合策略版本
 	RuleVersion   string `json:"rule_version,omitempty"` // 命中条目所在词库版本
 	Mode          string `json:"mode"`                   // shadow | enforcing
+}
+
+// chunkLabel 强标标识 chunk-meta（B1；与 tee-infer chunkLabelMeta 同构）。
+// 不含文案（与 delta 冗余防漂移）、不含用户内容。
+type chunkLabel struct {
+	Std      string `json:"std"`      // 标准号（默认 GB45438-2025）
+	Position string `json:"position"` // head | repeat | tail
 }
 
 // sseDelta OpenAI 流式 delta 载荷（choices[].delta）。
@@ -72,6 +82,36 @@ type sseChunk struct {
 	Model   string      `json:"model"`
 	Choices []sseChoice `json:"choices"`
 	Guard   *chunkGuard `json:"guard,omitempty"` // OG-16：审核注解自定义扩展字段；标准客户端忽略未知键
+	Label   *chunkLabel `json:"content_label,omitempty"` // B1：强标标识自定义扩展字段；标准客户端忽略未知键
+}
+
+// B1：标识位置（与 tee-infer labelPosition* 同构）。
+const (
+	labelPositionHead   = "head"
+	labelPositionRepeat = "repeat"
+	labelPositionTail   = "tail"
+)
+
+// defaultContentLabelText 缺省标识文案（与 tee-infer 缺省同源；空配置兜底）。
+const defaultContentLabelText = "内容由人工智能生成"
+
+// buildLabelSSELine 构造一帧强标标识 OpenAI SSE data 行（head 注入用）。
+// 复用 sseChunk 标准形态：choices[].delta.content = 标识文案 + 顶层 label 注解；
+// 文案为平台固定文本，不参与 PII mask 改写（mask 只作用于引擎 delta）。
+func buildLabelSSELine(text, position, reqID, model string) []byte {
+	payload, _ := json.Marshal(sseChunk{
+		ID:      reqID,
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []sseChoice{{Index: 0, Delta: sseDelta{Content: text}}},
+		Label:   &chunkLabel{Std: "GB45438-2025", Position: position},
+	})
+	line := make([]byte, 0, len(payload)+len("data: ")+2)
+	line = append(line, "data: "...)
+	line = append(line, payload...)
+	line = append(line, '\n', '\n')
+	return line
 }
 
 // sseStreamDecryptor 单条 SSE 流的解密状态（请求级，onResponseBody 内创建）。
@@ -182,6 +222,7 @@ type SSEStreamDecoder struct {
 	model         string
 	done          bool   // 已收到正常终止（stop/content_filter）并输出 [DONE]
 	contentFilter bool   // 已观察到 finish="content_filter"（OG-16 网关层独立指标用）
+	labelSeen     bool   // B1：上游已携带 label meta（SawLabel 去重注入的依据）
 	first         bool   // 是否已见到首个 data: 行（判空流）
 	pending       []byte // 跨 frame 未拼合完整行的残留字节
 	err           error  // 首个不可恢复错误（整流拒绝后不再处理新帧）
@@ -196,6 +237,12 @@ func NewSSEStreamDecoder(reqID, model string) *SSEStreamDecoder {
 // 外层在 Feed 正常收尾后读取一次，用于网关层 content_filter 独立计数。
 func (d *SSEStreamDecoder) ContentFiltered() bool {
 	return d.contentFilter
+}
+
+// SawLabel 报告上游流是否已携带强标标识 label meta（B1 去重语义）：
+// 上游 tee-infer 已注入标识时，本插件不得重复注入（单一注入点规则的可执行兜底）。
+func (d *SSEStreamDecoder) SawLabel() bool {
+	return d.labelSeen
 }
 
 // Feed 喂入一个响应 body 分帧（后续末尾帧的 isLastChunk=true），返回本帧拼合后
@@ -226,6 +273,9 @@ func (d *SSEStreamDecoder) Feed(chunk []byte, isLastChunk bool) ([]byte, error) 
 			return nil, err
 		}
 		d.first = true
+		if sc.Label != nil {
+			d.labelSeen = true // B1：上游已带标识（head/repeat/tail 任一）
+		}
 		bs, err := sseLine(d.reqID, d.model, sc)
 		if err != nil {
 			d.err = err
@@ -294,6 +344,7 @@ func sseLine(reqID, model string, chunk *streamChunk) ([]byte, error) {
 		Model:   model,
 		Choices: []sseChoice{choice},
 		Guard:   chunk.Guard,
+		Label:   chunk.Label, // B1：label meta 按 wire 原样透传（sseLine 透传义务）
 	})
 	if err != nil {
 		return nil, err

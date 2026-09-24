@@ -25,6 +25,9 @@ const (
 	defaultRiskLevelBar                     = riskLevelUnsafe
 	defaultDenyCode                         = 200
 	defaultDenyMessage                      = "很抱歉，我无法回答您的问题"
+	// B1 强标标识（GB 45438-2025）缺省文案/标准号（qwen3guard 明文路径；法务 D-LLM-6 未定，配置化留口）。
+	defaultContentLabelText = "内容由人工智能生成"
+	defaultContentLabelStd  = "GB45438-2025"
 )
 
 const (
@@ -54,6 +57,10 @@ type pluginConfig struct {
 	denyCode                         int
 	denyMessage                      string
 	maxBodyBytes                     uint32
+	// B1 强标标识（GB 45438-2025）：明文流式路径注入开关 + 文案 + 拒答帧是否带标识（默认全关）。
+	contentLabelEnabled bool
+	contentLabelText    string
+	contentLabelOnDeny  bool
 }
 
 func parseConfig(json gjson.Result, c *pluginConfig, log log.Log) error {
@@ -88,6 +95,13 @@ func parseConfig(json gjson.Result, c *pluginConfig, log log.Log) error {
 		return err
 	}
 	setString(json, "deny_message", "denyMessage", &c.denyMessage)
+	// B1 强标标识（GB 45438-2025）：snake + camel 双键；文案空则兜底缺省。
+	setBool(json, "content_label_enabled", "contentLabelEnabled", &c.contentLabelEnabled)
+	setString(json, "content_label_text", "contentLabelText", &c.contentLabelText)
+	setBool(json, "content_label_on_deny", "contentLabelOnDeny", &c.contentLabelOnDeny)
+	if c.contentLabelText == "" {
+		c.contentLabelText = defaultContentLabelText
+	}
 	timeout, timeoutSet := getPositiveInt(json, "timeout_ms", "timeoutMs")
 	if timeoutSet {
 		if timeout <= 0 {
@@ -147,6 +161,7 @@ func defaultConfig() *pluginConfig {
 		denyCode:                         defaultDenyCode,
 		denyMessage:                      defaultDenyMessage,
 		maxBodyBytes:                     defaultMaxBodyBytes,
+		contentLabelText:                 defaultContentLabelText,
 	}
 }
 
@@ -180,6 +195,12 @@ func (c *pluginConfig) validate() error {
 	}
 	if c.maxBodyBytes == 0 {
 		return errors.New("max_body_bytes must be greater than 0")
+	}
+	// B1 强标标识（GB 45438-2025）：启用时文案须同时含「人工智能」与「生成」子串（fail-closed，
+	// 不合规文案不得静默生效）；off 态不校验文案（配置留口）。
+	if c.contentLabelEnabled &&
+		(!strings.Contains(c.contentLabelText, "人工智能") || !strings.Contains(c.contentLabelText, "生成")) {
+		return errors.New("content_label_text 须同时含「人工智能」与「生成」（GB 45438-2025 显式标识文案）")
 	}
 	return nil
 }

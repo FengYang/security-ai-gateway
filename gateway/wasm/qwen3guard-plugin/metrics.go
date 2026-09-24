@@ -39,4 +39,8 @@ func (m *pwCounter) incr() {
 }
 
 // 插件计数器。
-var metricFailClosed = &pwCounter{name: "qwen3guard_failclosed_total"}
+var (
+	metricFailClosed = &pwCounter{name: "qwen3guard_failclosed_total"}
+	// B1 强标标识（GB 45438-2025）：流首标识帧注入次数（每流至多一次，去重后实际注入的流数）。
+	metricContentLabelInjected = &pwCounter{name: "qwen3guard_content_label_injected_total"}
+)
