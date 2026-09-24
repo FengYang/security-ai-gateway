@@ -80,6 +80,10 @@ type otpmaskMetrics struct {
 	ogSentences      int64 // 判定句总数（l2_cascade_ratio / failclosed_sentences_ratio 分母）
 	ogFailclosedSent int64 // 按 P-DEGRADE（fail-closed）处置的句数
 	ogL2CallsStarted int64 // 已发起的 L2 调用数（含 L1 命中后的画像调用）
+	// B1 强标标识（GB 45438-2025）：enabled gauge（required 常驻）+ 请求/标识帧计数（conditional）。
+	contentLabelEnabled  int64            // gauge 0/1：当前是否启用强标标识
+	contentLabelRequests int64            // counter：启用标识的请求数（conditional）
+	contentLabelFrames   map[string]int64 // position（head|repeat|tail；conditional）
 }
 
 func newMetrics() *otpmaskMetrics {
@@ -114,6 +118,7 @@ func newMetrics() *otpmaskMetrics {
 		ogL2Call:          make(map[string]int64),
 		ogL2OnlyHit:       make(map[string]int64),
 		ogL2DurationSec:   newHistogram(l2DurationSecBuckets),
+		contentLabelFrames: make(map[string]int64),
 	}
 }
 
@@ -134,6 +139,31 @@ func (m *otpmaskMetrics) setOutputGuardMode(mode, version string) {
 func (m *otpmaskMetrics) incOGRequest(mode string) {
 	m.mu.Lock()
 	m.ogRequests[mode]++
+	m.mu.Unlock()
+}
+
+// setContentLabelEnabled 记录强标标识开关（B1 gauge；启动与热切换时调用，required 常驻）。
+func (m *otpmaskMetrics) setContentLabelEnabled(enabled bool) {
+	m.mu.Lock()
+	if enabled {
+		m.contentLabelEnabled = 1
+	} else {
+		m.contentLabelEnabled = 0
+	}
+	m.mu.Unlock()
+}
+
+// incContentLabelRequest 记录一次启用强标标识的请求（B1 conditional counter）。
+func (m *otpmaskMetrics) incContentLabelRequest() {
+	m.mu.Lock()
+	m.contentLabelRequests++
+	m.mu.Unlock()
+}
+
+// incContentLabelFrame 记录一帧强标标识（B1 conditional counter，按位置：head|repeat|tail）。
+func (m *otpmaskMetrics) incContentLabelFrame(position string) {
+	m.mu.Lock()
+	m.contentLabelFrames[position]++
 	m.mu.Unlock()
 }
 
@@ -345,6 +375,15 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 		fmt.Fprintf(w, "# HELP otpmask_output_guard_policy_version 当前生效的输出侧内容审查策略版本号\n# TYPE otpmask_output_guard_policy_version gauge\n")
 		fmt.Fprintf(w, "otpmask_output_guard_policy_version{version=%q} 1\n", m.ogPolicyVersion)
 	}
+	// ---- B1 强标标识（GB 45438-2025）----
+	// enabled gauge 常驻（required，门禁 #9）；请求/标识帧计数 conditional（零样本不输出属正常）。
+	fmt.Fprintf(w, "# HELP otpmask_content_label_enabled 强标标识（GB 45438-2025）是否启用\n# TYPE otpmask_content_label_enabled gauge\n")
+	fmt.Fprintf(w, "otpmask_content_label_enabled %d\n", m.contentLabelEnabled)
+	if m.contentLabelRequests > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_content_label_requests_total 启用强标标识的请求计数\n# TYPE otpmask_content_label_requests_total counter\n")
+		fmt.Fprintf(w, "otpmask_content_label_requests_total %d\n", m.contentLabelRequests)
+	}
+	writeCounter(w, "otpmask_content_label_frames_total", "强标标识帧计数（按位置 head|repeat|tail）", m.contentLabelFrames, []string{"position"})
 	fmt.Fprintf(w, "# HELP otpmask_billing_blocked 对外出账是否被对账结果阻断（1=阻断）\n# TYPE otpmask_billing_blocked gauge\n")
 	fmt.Fprintf(w, "otpmask_billing_blocked %d\n", m.billingBlocked)
 	if m.reconcileLastRun > 0 {

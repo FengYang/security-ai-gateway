@@ -41,6 +41,7 @@ type deliveredFrame struct {
 	Delta  string
 	Finish string
 	Guard  *chunkGuardMeta
+	Label  *chunkLabelMeta // B1 强标标识 meta（label off/旧插件时为 nil）
 }
 
 // frameCheckOpts 断言选项。
@@ -198,7 +199,7 @@ func parseWireFrames(t *testing.T, body []byte, sessionID string, kenc []byte) [
 		if err := json.Unmarshal(pt, &chunk); err != nil {
 			t.Fatalf("分片 JSON 无效: %v", err)
 		}
-		frames = append(frames, deliveredFrame{Seq: chunk.Seq, Delta: chunk.Delta, Finish: chunk.Finish, Guard: chunk.Guard})
+		frames = append(frames, deliveredFrame{Seq: chunk.Seq, Delta: chunk.Delta, Finish: chunk.Finish, Guard: chunk.Guard, Label: chunk.Label})
 	}
 	if !sawDone {
 		t.Fatal("SSE 流缺 [DONE]（流未正常收尾）")
@@ -228,7 +229,7 @@ func parsePlaintextFrames(t *testing.T, dump []byte) []deliveredFrame {
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			t.Fatalf("明文 dump 分片 JSON 无效: %v", err)
 		}
-		frames = append(frames, deliveredFrame{Seq: chunk.Seq, Delta: chunk.Delta, Finish: chunk.Finish, Guard: chunk.Guard})
+		frames = append(frames, deliveredFrame{Seq: chunk.Seq, Delta: chunk.Delta, Finish: chunk.Finish, Guard: chunk.Guard, Label: chunk.Label})
 	}
 	if !sawDone {
 		t.Fatal("明文 dump 缺 [DONE]（流未正常收尾）")

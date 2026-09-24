@@ -169,6 +169,12 @@ type teeServer struct {
 	// GA-输出侧内容审查（OG-9）：策略/词库注册表（nil = 未配置，此时 L1 走既有 guardrail
 	// 包装器，行为与现网一致）。热加载经原子指针无锁换版（请求路径零阻塞）。
 	policyReg atomic.Pointer[lexiconRegistry]
+	// B1 强标标识（GB 45438-2025）：启动配置（启动期 resolve＋validate 后只读）。
+	contentLabelCfg contentLabelConfig
+	// B1：运行时覆盖（热切换写入；空 = 沿用启动参数）。标识非拦截语义 → on/off 双向可切。
+	contentLabelOverride atomic.Value
+	// B1：运行时配置持久化文件（-content-label-config；空 = 不持久化，重启回退启动参数）。
+	contentLabelCfgPath string
 	metrics         *otpmaskMetrics // Prometheus 指标
 	seen            map[string]bool
 	seenAt          map[string]int64       // request_id -> 首见时间戳（TTL 清理用）
@@ -1133,6 +1139,18 @@ type textStreamChunk struct {
 	Delta  string          `json:"delta"`            // 增量文本
 	Finish string          `json:"finish,omitempty"` // ""=继续 / "stop"=正常结束 / "error"=引擎失败 / "content_filter"=内容安全终止
 	Guard  *chunkGuardMeta `json:"guard,omitempty"`  // 输出侧内容审查元信息（可选；shadow/enforcing 均带）
+	// B1 强标标识（GB 45438-2025）：合规标识随标识帧走，独立字段不并入 guard
+	//（guard 是审查语义仅终止帧携带；content_label 是合规标识）。wire 键取 content_label：
+	// §4.6.1 冻结清单已预留 label{synthetic,provider,content_id}（隐式标识/出处，P-LABEL=none），
+	// B1 不占用该冻结键。omitempty，旧插件忽略未知字段。
+	Label *chunkLabelMeta `json:"content_label,omitempty"`
+}
+
+// chunkLabelMeta 强标标识 chunk-meta（B1；与 otpmask-plugin envelope.go 的 chunkLabel 同构）。
+// 不含文案（与 delta 冗余防漂移）、不含用户内容（不触 §4.6.1 红线）。
+type chunkLabelMeta struct {
+	Std      string `json:"std"`      // 标准号（默认 GB45438-2025）
+	Position string `json:"position"` // head | repeat | tail（终止帧固定 tail）
 }
 
 // chunkGuardMeta 输出侧内容审查 chunk-meta（§4.6.1，M1 冻结项）。
@@ -1419,9 +1437,9 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	var seq uint64
-	writeChunk := func(delta, finish string, guard *chunkGuardMeta) error {
+	writeChunk := func(delta, finish string, guard *chunkGuardMeta, label *chunkLabelMeta) error {
 		seq++
-		chunkJSON, err := json.Marshal(textStreamChunk{Seq: seq, Delta: delta, Finish: finish, Guard: guard})
+		chunkJSON, err := json.Marshal(textStreamChunk{Seq: seq, Delta: delta, Finish: finish, Guard: guard, Label: label})
 		if err != nil {
 			return err
 		}
@@ -1461,20 +1479,50 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	// OG-19：emittedBuilder 累计已下发明文（不含终止帧空 delta），
 	// 用于 blocked 时精确计算 filtered_tokens = 总生成 − 已下发。
 	var emittedBuilder strings.Builder
-	emit := func(delta, finish string) error {
-		// 只累计内容 delta（非空且非终止帧占位），终止帧/分片不计入内容量。
-		if finish == "" && delta != "" {
+	// emitAccounting 发射记账统一出口：count=true 计入 emittedBuilder（内容帧），
+	// count=false 不计（B1 标识帧——标识文本不进 tokens_out / filtered_tokens 口径）。
+	// 不旁路 writeChunk：seq 唯一分配点，标识帧经它发射天然 seq 连续。
+	emitAccounting := func(delta, finish string, count bool, label *chunkLabelMeta) error {
+		if count && finish == "" && delta != "" {
 			emittedBuilder.WriteString(delta)
 		}
-		return writeChunk(delta, finish, nil)
+		return writeChunk(delta, finish, nil, label)
+	}
+	emit := func(delta, finish string) error {
+		return emitAccounting(delta, finish, true, nil)
+	}
+	// B1 强标标识发射：count=false（不写 emittedBuilder → 标识不计费），带 label meta。
+	emitLabel := func(text string, meta *chunkLabelMeta) error {
+		if s.metrics != nil && meta != nil {
+			s.metrics.incContentLabelFrame(meta.Position)
+		}
+		return emitAccounting(text, "", false, meta)
+	}
+	// B1：解析当前生效配置（off → nil labeler，全路径零行为变化）。
+	lbl := newContentLabeler(s.currentContentLabelConfigPtr(), emitLabel)
+	if lbl != nil {
+		// 流首标识：先于引擎任何输出（首帧 seq=1）；
+		// replayEngine 缓存路径走同一 streamTextInfer，注入点放发射层自动覆盖。
+		if err := lbl.emitHead(); err != nil {
+			return err
+		}
+		s.metrics.incContentLabelRequest()
+	}
+	// emitWrapped：内容帧出口包装——发射后按 repeat 间隔插重复标识帧
+	//（og.Process/og.Finish 与 og=nil 原路径统一经此，计数口径与下发口径一致）。
+	emitWrapped := func(delta, finish string) error {
+		if err := emit(delta, finish); err != nil {
+			return err
+		}
+		return lbl.afterContent(delta, finish)
 	}
 
 	genErr := eng.Generate(genReq, func(delta string) error {
 		agg.WriteString(delta)
 		if og == nil {
-			return emit(delta, "") // 未开审查 == 现状路径
+			return emitWrapped(delta, "") // 未开审查 == 现状路径（B1 标识经 emitWrapped 注入）
 		}
-		return og.Process(delta, emit) // 缓冲 → 判定 → emit（shadow 只记不拦；enforcing 按动作处置）
+		return og.Process(delta, emitWrapped) // 缓冲 → 判定 → emit（shadow 只记不拦；enforcing 按动作处置）
 	})
 	if genErr != nil {
 		// 200 已发出无法改状态码：以 error finish 分片终止，
@@ -1492,7 +1540,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 				guard = og.BuildGuardMeta()
 			}
 		}
-		_ = writeChunk("", finishReason, guard)
+		_ = writeChunk("", finishReason, guard, nil) // B1：error 分支不注入 tail（明文不出，标识无意义）
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		// OG-19：block 命中 → 在上层发射 output_blocked 审计（携带 filtered_tokens）。
 		// cascade 内已记指标；此处补审计事件——在上层可精确算出 filtered_tokens。
@@ -1516,9 +1564,14 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	}
 	// I3：收尾——OG-4 把缓冲尾部作为最后一个判定单元送判；enforcing 下句级降级/终止在此收敛。
 	if og != nil {
-		if err := og.Finish(emit); err != nil {
+		if err := og.Finish(emitWrapped); err != nil {
 			return err
 		}
+	}
+	// B1：流尾标识——必须在 stopChunk 构造之前发射（seq 连续：尾标帧先于终止帧）。
+	// 尾标帧若因连接截断丢失，下方终止帧仍恒带 label{position:"tail"} 兜底隐式标识。
+	if err := lbl.emitTail(); err != nil {
+		return err
 	}
 	// 终止帧：M4 enforcing 已整流终止 → finish=content_filter，否则维持 stop；
 	// 带 chunk-meta guard 字段（§4.6.1；og=nil 时 guard 为 nil，omitempty 与现网逐字节一致）。
@@ -1533,7 +1586,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		}
 		guardMeta = og.BuildGuardMeta()
 	}
-	stopChunk := textStreamChunk{Seq: seq + 1, Finish: finishReason, Guard: guardMeta}
+	stopChunk := textStreamChunk{Seq: seq + 1, Finish: finishReason, Guard: guardMeta, Label: lbl.tailMeta()}
 	stopJSON, err := json.Marshal(stopChunk)
 	if err != nil {
 		return err
@@ -1658,6 +1711,33 @@ func (s *teeServer) outputGuardModeSource() string {
 	return "startup"
 }
 
+// ---- B1 强标标识（GB 45438-2025）配置访问 ----
+
+// currentContentLabelConfig 当前生效的标识配置：运行时覆盖优先，否则启动参数（均 resolve 兜底）。
+func (s *teeServer) currentContentLabelConfig() contentLabelConfig {
+	if v, ok := s.contentLabelOverride.Load().(contentLabelConfig); ok {
+		return resolveContentLabelConfig(v)
+	}
+	return resolveContentLabelConfig(s.contentLabelCfg)
+}
+
+// currentContentLabelConfigPtr 生效配置指针（Enabled=false → nil，供 newContentLabeler 判空）。
+func (s *teeServer) currentContentLabelConfigPtr() *contentLabelConfig {
+	c := s.currentContentLabelConfig()
+	if !c.Enabled {
+		return nil
+	}
+	return &c
+}
+
+// contentLabelSource 返回当前标识配置来源：startup | runtime。
+func (s *teeServer) contentLabelSource() string {
+	if _, ok := s.contentLabelOverride.Load().(contentLabelConfig); ok {
+		return "runtime"
+	}
+	return "startup"
+}
+
 // secConfigView 安全配置只读快照（M3-B 安全中心「密态链路状态 / Guardrail 策略」数据源）。
 type secConfigView struct {
 	ProtocolVersion  string            `json:"protocol_version"`
@@ -1670,6 +1750,8 @@ type secConfigView struct {
 	Guardrail        guardrailSnapshot `json:"guardrail"`
 	// GA-输出侧内容审查（OG-3）：当前模式与策略版本（只读；运行时覆盖/持久化归 OG-8）。
 	OutputGuard outputGuardSnapshot `json:"output_guard"`
+	// B1 强标标识（GB 45438-2025）：只读快照（运行时变更走 POST /config/content-label）。
+	ContentLabel contentLabelSnapshot `json:"content_label"`
 }
 
 // outputGuardSnapshot 输出侧审查配置只读快照（§2.3 I7 / OG-8）。
@@ -1796,6 +1878,15 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if reg := s.currentPolicy(); reg != nil {
 		view.OutputGuard.L1Categories = reg.CategoryCount()
 		view.OutputGuard.L1Rules = reg.RuleCount()
+	}
+	// B1：强标标识只读快照（enabled/source/text/repeat/std 与生效配置同源）。
+	clc := s.currentContentLabelConfig()
+	view.ContentLabel = contentLabelSnapshot{
+		Enabled: clc.Enabled,
+		Source:  s.contentLabelSource(),
+		Text:    clc.Text,
+		Repeat:  clc.Repeat,
+		Std:     clc.Std,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(view)
@@ -2130,6 +2221,123 @@ func (s *teeServer) loadOutputGuardOverride() {
 	}
 	s.outputGuardModeOverride.Store(rec.Mode)
 	log.Printf("[output-guard] 运行时配置已恢复：mode=%s actor=%s", rec.Mode, rec.Actor)
+}
+
+// handleContentLabelConfig 强标标识运行时切换：POST /config/content-label（B1，管理令牌）。
+//
+// 语义与边界（与 handleOutputGuardConfig 对称，差异在闸门）：
+//   - 标识非拦截语义 → **on/off 双向均可热切换**（无 enforcing 式单向闸门）；
+//   - 请求体字段全可选：提供的覆盖当前生效值，未提供的保持现状；
+//   - 校验 fail-closed：生效配置文案必须同时含"人工智能"与"生成"（GB 45438-2025），
+//     非法即 400——不合规文案不得静默生效；
+//   - 持久化文件由 -content-label-config 指定；未指定则仅进程内生效（重启回退启动参数）；
+//   - 审计 content_label_change（证据走 TransformedHash 摘要，omitempty 不进 hash）；
+//   - 切换同步更新 enabled gauge（指标门禁 #9 required 常驻）。
+func (s *teeServer) handleContentLabelConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAdmin(r) {
+		http.Error(w, "管理认证失败", http.StatusUnauthorized)
+		return
+	}
+	var req contentLabelConfigRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "请求体须为 JSON", http.StatusBadRequest)
+		return
+	}
+	// 部分覆盖：以当前生效值为基底，仅替换请求中显式提供的字段。
+	next := s.currentContentLabelConfig()
+	if req.Enabled != nil {
+		next.Enabled = *req.Enabled
+	}
+	if req.Text != nil {
+		next.Text = *req.Text
+	}
+	if req.Repeat != nil {
+		next.Repeat = *req.Repeat
+	}
+	next = resolveContentLabelConfig(next)
+	if err := validateContentLabelConfig(next); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	oldEnabled := s.currentContentLabelConfig().Enabled
+	actor := r.Header.Get("X-Admin-Actor")
+	reqID := r.Header.Get("X-Request-ID")
+
+	// 持久化（可选）：未配置路径则仅进程内生效。
+	if s.contentLabelCfgPath != "" {
+		rec := contentLabelConfigRecord{
+			Enabled: next.Enabled, Text: next.Text, Repeat: next.Repeat, Std: next.Std,
+			Actor: actor, RequestID: reqID, UpdatedAt: time.Now().UnixNano(),
+		}
+		raw, err := json.Marshal(rec)
+		if err != nil {
+			http.Error(w, "配置序列化失败", http.StatusInternalServerError)
+			return
+		}
+		if err := os.WriteFile(s.contentLabelCfgPath, append(raw, '\n'), 0o600); err != nil {
+			http.Error(w, "配置持久化失败", http.StatusInternalServerError)
+			return
+		}
+	}
+	s.contentLabelOverride.Store(next)
+	if s.metrics != nil {
+		s.metrics.setContentLabelEnabled(next.Enabled)
+	}
+	if s.audit != nil {
+		s.audit.append(AuditEvent{
+			TenantID:  "-",
+			UserID:    actor,
+			RequestID: reqID,
+			Action:    "content_label_change",
+			Result:    "applied",
+			// 证据锚定：变更摘要（omitempty 字段不进 hash，与 output_guard_mode_change 同构）
+			TransformedHash: fmt.Sprintf("content_label=%t,text=%q,repeat=%d", next.Enabled, next.Text, next.Repeat),
+		})
+	}
+	log.Printf("[content-label] 运行时配置变更: enabled=%t → %t (source=runtime)", oldEnabled, next.Enabled)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"enabled":    next.Enabled,
+		"status":     "applied",
+		"old_enabled": oldEnabled,
+		"text":       next.Text,
+		"repeat":     next.Repeat,
+		"std":        next.Std,
+	})
+}
+
+// loadContentLabelOverride 启动时恢复运行时强标标识配置（B1）。
+//
+// 语义（与 loadOutputGuardOverride 同构，差异在闸门）：
+//   - 文件存在且合法 → 覆盖启动参数（热切换结果须跨重启保持）；
+//   - 文件缺失/解析失败/取值非法 → 沿用启动参数（不阻断启动，由 /config 的 source=startup 如实体现）；
+//   - on/off 双向均可恢复——标识非拦截语义，无 enforcing 式单向闸门。
+func (s *teeServer) loadContentLabelOverride() {
+	if s.contentLabelCfgPath == "" {
+		return
+	}
+	raw, err := os.ReadFile(s.contentLabelCfgPath)
+	if err != nil {
+		return
+	}
+	var rec contentLabelConfigRecord
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &rec); err != nil {
+		log.Printf("[content-label] 运行时配置解析失败（沿用启动参数）：%v", err)
+		return
+	}
+	cfg := resolveContentLabelConfig(contentLabelConfig{
+		Enabled: rec.Enabled, Text: rec.Text, Repeat: rec.Repeat, Std: rec.Std,
+	})
+	if err := validateContentLabelConfig(cfg); err != nil {
+		log.Printf("[content-label] 运行时配置非法（沿用启动参数）：%v", err)
+		return
+	}
+	s.contentLabelOverride.Store(cfg)
+	log.Printf("[content-label] 运行时配置已恢复：enabled=%t actor=%s", cfg.Enabled, rec.Actor)
 }
 
 // loadGuardrailOverride 启动时恢复运行时 Guardrail 配置（M3-B）。
@@ -2804,6 +3012,13 @@ func main() {
 	outputGuardBlockCancel := flag.Bool("output-guard-block-cancel", false, "P-BLOCK-CANCEL：命中 block 后是否中断引擎生成（M4 生效；M3 仅落配置与只读快照，不改变 shadow 行为）")
 	outputGuardDegrade := flag.String("output-guard-degrade", degradeFailClosed, "P-DEGRADE：fail-closed（默认，当前唯一生效值）| fallback-keyword（尚未实现，配置即拒绝启动，不静默按 fail-closed 处置）")
 	outputGuardBlockEmission := flag.Bool("output-guard-block-emission", false, "阻塞预演开关（非 §5 参数表参数，仅浸泡期用）：true＝按 enforcing 时序阻塞下发（首帧延迟增量可实测）；false＝shadow 现状（逐 delta 立即放行，业务零影响）")
+	// B1 强标标识（GB 45438-2025，2025-09-01 已实施）：默认 off，off 时与现网逐字节一致。
+	// 法务 D-LLM-6（API 文本流标识落点）未定 → 文案/落点/重复间隔全配置化留口。
+	contentLabel := flag.String("content-label", contentLabelOff, "B1 强标标识（GB 45438-2025）开关：off（缺省，零行为变化）| on（流首+流尾双标，终止帧恒带 tail meta 兜底）；运行时热切换走 POST /config/content-label（on/off 双向可切）")
+	contentLabelText := flag.String("content-label-text", "", "B1 标识文案（缺省「内容由人工智能生成」；启用时必须同时含「人工智能」与「生成」子串，否则启动失败 fail-closed）")
+	contentLabelRepeat := flag.Int("content-label-repeat", 0, "B1 每 N 个内容帧插一次重复标识（0=仅首尾；取值 ∈[0,1000]）")
+	contentLabelStd := flag.String("content-label-std", "", "B1 标准号声明（缺省 GB45438-2025；chunkLabelMeta.Std 与 /config 快照同源）")
+	contentLabelCfg := flag.String("content-label-config", "", "B1 强标标识运行时配置持久化文件（热切换写入的 enabled/text/repeat/std）；为空 = 仅进程内生效，重启回退 -content-label* 启动参数")
 	flag.Parse()
 
 	// S5：进程启动时刻（对账判据——链中存在早于此时刻的事件 ⇒ 内存用量计数已在重启时丢失）
@@ -3076,6 +3291,30 @@ func main() {
 		ogModeMetric, srv.outputGuardMaskEnabled, srv.outputGuardParams.Unit, srv.outputGuardParams.MaxUnitRunes,
 		srv.outputGuardParams.FirstUnitMaxRunes, srv.outputGuardParams.MaxBufferBytes,
 		srv.outputGuardParams.WindowRunes, ogParams.MaxKeywordRunes, srv.outputGuardParams.WindowMargin)
+	// B1 强标标识（GB 45438-2025）：先校验原始值（非法＝拒绝启动，fail-closed），再 resolve。
+	// 文案子串仅启用时校验（off 态不参与发射）；repeat 范围常校。
+	clCfg := defaultContentLabelConfig()
+	switch *contentLabel {
+	case contentLabelOff:
+	case contentLabelOn:
+		clCfg.Enabled = true
+	default:
+		log.Fatalf("[content-label] -content-label=%q 非法（取值：off|on）", *contentLabel)
+	}
+	clCfg.Text = *contentLabelText
+	clCfg.Repeat = *contentLabelRepeat
+	clCfg.Std = *contentLabelStd
+	if err := validateContentLabelConfig(clCfg); err != nil {
+		log.Fatalf("[content-label] %v", err)
+	}
+	srv.contentLabelCfg = resolveContentLabelConfig(clCfg)
+	srv.contentLabelCfgPath = *contentLabelCfg
+	// B1：恢复运行时覆盖（热切换结果跨重启保持；on/off 双向均可恢复）。
+	srv.loadContentLabelOverride()
+	srv.metrics.setContentLabelEnabled(srv.currentContentLabelConfig().Enabled)
+	log.Printf("[content-label] 强标标识 enabled=%t text=%q repeat=%d std=%s（source=%s）",
+		srv.currentContentLabelConfig().Enabled, srv.currentContentLabelConfig().Text,
+		srv.currentContentLabelConfig().Repeat, srv.currentContentLabelConfig().Std, srv.contentLabelSource())
 	// GF.4.3：语义分类器接线（默认关闭——未配置 URL 即保持关键词规则分类器，行为不变）。
 	// 侧车不可用时回退关键词规则并上报降级指标：可用性不中断，但语义检出能力回落到规则水位，
 	// 该水位由基准集量化（见 docs/GA-Guardrail分类器选型.md），必须可观测。
@@ -3125,6 +3364,7 @@ func main() {
 	mux.HandleFunc("/config", srv.handleConfig)                    // M3-B 安全中心：配置只读快照
 	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig)    // M3-B 高敏复核：Guardrail 降级生效点
 	mux.HandleFunc("/config/output-guard", srv.handleOutputGuardConfig) // OG-8 输出侧审查 mode 运行时切换
+	mux.HandleFunc("/config/content-label", srv.handleContentLabelConfig) // B1 强标标识运行时热切换（on/off 双向）
 	mux.HandleFunc("/config/policy/reload", srv.handlePolicyReload)  // OG-9 策略/词库热加载（applied/rolled_back）
 	mux.HandleFunc("/reconcile", srv.handleReconcile)              // S5 判据 6：对账快照（只读）
 	mux.HandleFunc("/reconcile/run", srv.handleReconcileRun)       // S5 判据 6：即时对账（管理令牌）
