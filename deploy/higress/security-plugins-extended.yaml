@@ -293,3 +293,10 @@ spec:
       denyMessage: "内容不合规，已被网关安全策略拦截"
       maxBodyBytes: 10485760
       streamBufferChars: 1000
+      # B1 强标标识（GB 45438-2025）：明文流式路径流首注入标识帧（默认关＝现网零变化）。
+      # contentLabelEnabled: true 时 contentLabelText 须同时含「人工智能」与「生成」，否则插件加载失败（fail-closed）。
+      # contentLabelOnDeny: 拒答帧是否带标识（拒答文案是否属标识口径由法务 D-LLM-6 定，默认不带）。
+      # 注意：与 tee-infer 密态路径的标识是**两条独立链路**，按文档"单一注入点规则"配置，勿双开。
+      contentLabelEnabled: false
+      contentLabelText: "内容由人工智能生成"
+      contentLabelOnDeny: false

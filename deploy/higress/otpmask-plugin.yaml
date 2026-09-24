@@ -101,3 +101,9 @@ spec:
       gateway_core_credential_name: "core-channel"
       gateway_core_credential_token: "__CORE_CHANNEL_TOKEN__"
       gateway_core_token: ""
+      # ---- B1 强标标识（GB 45438-2025）密态路径出站兜底（默认关＝现网零变化）----
+      # 启用后：上游流未携带 label meta 时，插件在首个明文输出帧前注入 head 标识帧
+      # （上游 tee-infer 已带标识 → SawLabel 去重，不重复注入；每流至多一次）。
+      # 密态路径推荐以 tee-infer 为注入点，本插件仅兜底；两路同开由 SawLabel 去重防双份。
+      content_label_enabled: "false"
+      content_label_text: "内容由人工智能生成"

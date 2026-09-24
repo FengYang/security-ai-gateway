@@ -34,6 +34,19 @@ tee otpmask_attest_token_traffic_total conditional
 tee otpmask_recompute_ops_total conditional
 tee otpmask_recompute_duration_ms_total conditional
 
+# ---- B1 strong-label (GB 45438-2025); tee = issuer, plugins = fallback injectors ----
+# enabled gauge is always rendered when compiled in (like otpmask_output_guard_mode);
+# requests/frames counters are lazy (first labeled request).
+tee otpmask_content_label_enabled required
+tee otpmask_content_label_requests_total conditional
+tee otpmask_content_label_frames_total conditional
+plugin otpmask_content_label_injected_total conditional
+plugin qwen3guard_content_label_injected_total conditional
+# backfill: registered earlier, missing from manifest
+plugin otpmask_content_filter_total conditional
+plugin otpmask_masked_total conditional
+plugin qwen3guard_failclosed_total conditional
+
 # ---- output-side content guard (M1+; GA-输出侧内容审查-技术实现方案 §4.10 唯一目录) ----
 # M1 skeleton (off/shadow) — required: always present when output guard is compiled in
 tee otpmask_output_guard_mode required
