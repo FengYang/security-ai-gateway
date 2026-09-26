@@ -11,7 +11,7 @@
 // otpmask_denies_total{tenant,reason}              拒绝计数（bad_signature/replay/guardrail_* 等）
 // otpmask_quota_denies_total{tenant,window}        配额拒绝计数（按触发维度归因：minute|day|total，B 项）
 // otpmask_shadow_reports_total{result}             数据面明文影子窗口级上报计数（accepted/deduped/rejected，A 项）
-// otpmask_guard_classifier_total{backend,result}   语义分类器调用（ok=侧车判定可用 / degraded=不可用已回退）
+// otpmask_guard_classifier_total{backend,result}   语义分类器调用（ok=侧车判定可用 / degraded=侧车不可用，已按 fail-closed 拒答）
 // otpmask_key_issue_total{tenant}                  密钥签发计数
 // otpmask_reconcile_mismatch_total{reason}         审计-计量对账不一致次数（按差异分类，S5）
 // otpmask_shadow_would_reject_total{tenant,rule}   影子命中计数（只计数不拒绝，S5 判据 4）
@@ -43,6 +43,11 @@ type otpmaskMetrics struct {
 	recomputeOps    map[string]int64 // op（补算调用计数）
 	recomputeDur    map[string]int64 // op（补算耗时累计，毫秒）
 	guardClassifier map[string]int64 // backend|result（语义分类器调用）
+	// 侧车不可用已按 fail-closed 拒答的计数（backend|reason；2026-09-26）。
+	guardFailClosed map[string]int64
+	// 输入侧侧车健康状态 gauge（未配置侧车时不输出该指标；2026-09-26）。
+	guardSidecarConfigured bool
+	guardSidecarHealthy    int64
 	// S5（判据 6）对账/出账阻断可观测
 	reconcileDiff     map[string]int64 // reason（偏差 token 量级累计）
 	reconcileLastRun  int64            // gauge：上次对账时刻（UTC 秒）
@@ -98,6 +103,7 @@ func newMetrics() *otpmaskMetrics {
 		recomputeOps:      make(map[string]int64),
 		recomputeDur:      make(map[string]int64),
 		guardClassifier:   make(map[string]int64),
+		guardFailClosed:   make(map[string]int64),
 		reconcileDiff:     make(map[string]int64),
 		billingBlockCount: make(map[string]int64),
 		billingSuppressed: make(map[string]int64),
@@ -204,11 +210,31 @@ func (m *otpmaskMetrics) incShadowWouldReject(tenant, rule string) {
 }
 
 // incGuardClassifier 记录语义分类器调用结果（GF.4.3）。
-// result=ok：侧车判定可用；result=degraded：侧车不可用并已回退关键词规则
-// （此时语义检出能力回落到关键词水位，须可观测、可告警）。
+// result=ok：侧车判定可用；result=degraded：侧车不可用，**已按 fail-closed 拒答**
+// （2026-09-26 收口：不再回退关键词规则；须可观测、可告警）。
 func (m *otpmaskMetrics) incGuardClassifier(backend, result string) {
 	m.mu.Lock()
 	m.guardClassifier[backend+"|"+result]++
+	m.mu.Unlock()
+}
+
+// incGuardFailClosed 记录一次"侧车不可用 → fail-closed 拒答"（按后端与归因）。
+func (m *otpmaskMetrics) incGuardFailClosed(backend, reason string) {
+	m.mu.Lock()
+	m.guardFailClosed[backend+"|"+reason]++
+	m.mu.Unlock()
+}
+
+// setGuardSidecarHealthy 更新输入侧语义分类器侧车健康状态（"侧车故障→readiness 摘流"
+// 必须可被指标观测，否则运维只能靠日志推断）。
+func (m *otpmaskMetrics) setGuardSidecarHealthy(healthy bool) {
+	m.mu.Lock()
+	m.guardSidecarConfigured = true
+	if healthy {
+		m.guardSidecarHealthy = 1
+	} else {
+		m.guardSidecarHealthy = 0
+	}
 	m.mu.Unlock()
 }
 
@@ -324,7 +350,12 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	writeCounter(w, "otpmask_denies_total", "拒绝计数（按租户与原因）", m.denies, []string{"tenant", "reason"})
 	writeCounter(w, "otpmask_quota_denies_total", "配额拒绝计数（按租户与触发维度：minute|day|total）", m.quotaDenies, []string{"tenant", "window"})
 	writeCounter(w, "otpmask_shadow_reports_total", "数据面明文影子窗口级上报计数（accepted/deduped/rejected）", m.shadowReports, []string{"result"})
-	writeCounter(w, "otpmask_guard_classifier_total", "语义分类器调用（ok=侧车判定可用 / degraded=不可用已回退关键词规则）", m.guardClassifier, []string{"backend", "result"})
+	writeCounter(w, "otpmask_guard_classifier_total", "语义分类器调用（ok=侧车判定可用 / degraded=侧车不可用已按 fail-closed 拒答）", m.guardClassifier, []string{"backend", "result"})
+	writeCounter(w, "otpmask_guard_failclosed_total", "侧车不可用导致 fail-closed 拒答的次数（按后端与归因：unreachable|timeout|http_status|bad_response）", m.guardFailClosed, []string{"backend", "reason"})
+	if m.guardSidecarConfigured {
+		fmt.Fprintf(w, "# HELP otpmask_guard_sidecar_healthy 输入侧语义分类器侧车健康（1=健康；0=不健康，实例按 readiness 摘流）\n# TYPE otpmask_guard_sidecar_healthy gauge\n")
+		fmt.Fprintf(w, "otpmask_guard_sidecar_healthy %d\n", m.guardSidecarHealthy)
+	}
 	writeCounter(w, "otpmask_key_issue_total", "密钥签发计数（按租户）", m.keyIssues, []string{"tenant"})
 	writeCounter(w, "otpmask_reconcile_mismatch_total", "审计-计量对账不一致次数（按差异分类）", m.reconcile, []string{"reason"})
 	writeCounter(w, "otpmask_shadow_would_reject_total", "影子命中计数（只计数不拒绝；按租户与维度）", m.shadowWouldReject, []string{"tenant", "rule"})

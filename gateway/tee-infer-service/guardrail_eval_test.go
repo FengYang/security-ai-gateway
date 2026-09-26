@@ -395,7 +395,7 @@ func TestGuardrailEvalExternalScorer(t *testing.T) {
 	}
 	sc := &httpEvalScorer{
 		id: id,
-		c:  model.NewHTTPClassifier(url, os.Getenv("GUARDRAIL_EVAL_SCORER_KEY"), 5*time.Second, nil, nil),
+		c:  model.NewHTTPClassifier(url, os.Getenv("GUARDRAIL_EVAL_SCORER_KEY"), 5*time.Second, nil),
 	}
 	rep := runGuardrailEval(t, sc)
 	if len(rep.Errors) > 0 {
@@ -429,7 +429,7 @@ func TestGuardrailEvalContractWithStub(t *testing.T) {
 
 	t.Setenv("GUARDRAIL_EVAL_OUT", t.TempDir())
 	t.Setenv("GUARDRAIL_EVAL_WRITE", "1")
-	sc := &httpEvalScorer{id: "stub-candidate", c: model.NewHTTPClassifier(srv.URL, "", 2*time.Second, nil, nil)}
+	sc := &httpEvalScorer{id: "stub-candidate", c: model.NewHTTPClassifier(srv.URL, "", 2*time.Second, nil)}
 	rep := runGuardrailEval(t, sc)
 	if len(rep.Errors) > 0 {
 		t.Fatalf("stub 契约不应有调用错误：%v", rep.Errors)

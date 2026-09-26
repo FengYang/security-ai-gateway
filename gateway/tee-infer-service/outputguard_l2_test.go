@@ -3,7 +3,7 @@
 // 覆盖：
 //   - L2 命中 → l2_call/hit + l2_only_hit + would_reject + 审计
 //   - L2 未命中 → l2_call/miss，无 would_reject
-//   - L2 调用失败 → degraded{backend=l2, reason=...} + fallback L1
+//   - L2 调用失败 → degraded{backend=l2, reason=...} + 该句按 P-DEGRADE fail-closed（不回退 L1）
 //   - L2 返回未映射类目 → unmapped{backend=l2}，不记 would_reject
 //   - L1 命中 + L2 也命中同一类目 → 不重复计数
 //   - L1 命中 A 类 + L2 命中 B 类 → 各自计数（不丢并存命中）

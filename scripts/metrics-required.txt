@@ -23,6 +23,10 @@ tee otpmask_denies_total conditional
 # boundary B (gate #7): quota denies attributed by enforced dimension (minute|day|total)
 tee otpmask_quota_denies_total conditional
 tee otpmask_guard_classifier_total conditional
+# classifier sidecar unavailable -> fail-closed deny (by backend|reason)
+tee otpmask_guard_failclosed_total conditional
+# input-side classifier sidecar health gauge (emitted only when sidecar configured)
+tee otpmask_guard_sidecar_healthy conditional
 tee otpmask_reconcile_mismatch_total conditional
 tee otpmask_shadow_would_reject_total conditional
 tee otpmask_reconcile_diff_tokens conditional

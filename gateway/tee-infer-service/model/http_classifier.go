@@ -18,14 +18,14 @@
 //   - blocked=true → 命中，category 为空时按 "prompt_injection" 处理（Guardrail 既有类别名）；
 //   - blocked=false → 未命中；
 //   - resources 为**可选**字段（候选侧资源占用，仅供评测跑道采集）；
-//   - 非 200 / 超时 / 网络错误 / JSON 非法 → 视为**不可用**，走降级路径（见下）。
+//   - 非 200 / 超时 / 网络错误 / JSON 非法 → 视为**不可用**，按 fail-closed 处置（见下）。
 //
-// 降级策略（安全取舍，须与"Guardrail 不可降级"边界区分）：分类器不可用时
-// **回退到关键词规则分类器**（fallback），并以 onResult("degraded") 上报指标；
-// 即：可用性不因侧车故障而中断，但语义检出能力会回落到关键词基线（该水位由
-// 基准集量化：公开集语义越狱检出 ~12%），必须可观测、可告警。
-// fallback 为 nil 时按 fail-closed 处理：返回命中并标注 classifier_unavailable
-// （宁可拒绝，不可静默放行）——生产接线必须传入规则分类器作为 fallback。
+// 不可用语义（2026-09-26）：侧车不可用时**不回退关键词规则、不放行**，
+// 而是按 fail-closed 返回命中并标注类别 classifier_unavailable
+// （宁可拒绝，不可静默放行；审计按该类别记账，避免把"不可用"误记为"注入命中"），
+// 同时以 onResult("degraded", reason) 上报，reason ∈ unreachable|timeout|http_status|bad_response
+// （供指标与告警归因）。可用性由侧车健康探活 + readiness 保障（见 guardrail_probe.go），
+// 不以"回退关键词、静默降级"换取可用性。
 package model
 
 import (
@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -57,6 +58,18 @@ const GuardClassifierBackendHTTP = "http-sidecar"
 // GuardClassifierBackendKeyword 关键词规则后端标识（默认，无侧车）。
 const GuardClassifierBackendKeyword = "keyword"
 
+// GuardCategoryClassifierUnavailable fail-closed 类别：侧车不可用（**非真实命中**）。
+// 独立类别用于审计与指标区分"不可用"与"语义命中"，避免拒答原因失真。
+const GuardCategoryClassifierUnavailable = "classifier_unavailable"
+
+// 侧车不可用原因（指标/告警标签，便于归因与告警分级）。
+const (
+	GuardFailReasonUnreachable = "unreachable"  // 连接失败 / DNS 失败 / 连接拒绝
+	GuardFailReasonTimeout     = "timeout"      // 调用超时
+	GuardFailReasonHTTPStatus  = "http_status"  // 非 200 应答
+	GuardFailReasonBadResponse = "bad_response" // 响应非法（请求构造失败 / JSON 解析失败）
+)
+
 // errClassifierUnavailable 侧车不可用（内部错误，不外泄响应体）。
 var errClassifierUnavailable = errors.New("guard classifier unavailable")
 
@@ -65,15 +78,15 @@ type HTTPClassifier struct {
 	url      string
 	key      string
 	client   *http.Client
-	fallback Classifier // 不可用时回退（通常为关键词规则分类器）
-	onResult func(result string)
+	onResult func(result, reason string)
 }
 
 // NewHTTPClassifier 构造侧车分类器。
 //
 // timeout <= 0 时取 2s（分类器在请求路径上，超时必须有限且小）。
-// onResult 收到 "ok"（侧车正常应答）或 "degraded"（不可用并已回退）；可为 nil。
-func NewHTTPClassifier(url, key string, timeout time.Duration, fallback Classifier, onResult func(result string)) *HTTPClassifier {
+// onResult 收到 "ok"（侧车正常应答，reason 为空）或 "degraded"（不可用，已按 fail-closed 拒答，
+// reason 为归因）；可为 nil。
+func NewHTTPClassifier(url, key string, timeout time.Duration, onResult func(result, reason string)) *HTTPClassifier {
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
@@ -81,23 +94,21 @@ func NewHTTPClassifier(url, key string, timeout time.Duration, fallback Classifi
 		url:      url,
 		key:      key,
 		client:   &http.Client{Timeout: timeout},
-		fallback: fallback,
 		onResult: onResult,
 	}
 }
 
 // Classify 实现 Classifier：命中返回 (类别, 片段)，未命中返回空类别。
+//
+// 侧车不可用时按 fail-closed 返回 (classifier_unavailable, classifier_unavailable)——
+// 调用方据此拒答（不回退关键词重判，不静默放行）。
 func (c *HTTPClassifier) Classify(text string) (string, string) {
-	resp, err := c.ClassifyWithResources(text)
+	resp, reason, err := c.classify(text)
 	if err != nil {
-		c.report("degraded")
-		if c.fallback != nil {
-			return c.fallback.Classify(text)
-		}
-		// 无回退实现：fail-closed（不放行），并如实标注原因。
-		return "prompt_injection", "classifier_unavailable"
+		c.report("degraded", reason)
+		return GuardCategoryClassifierUnavailable, GuardCategoryClassifierUnavailable
 	}
-	c.report("ok")
+	c.report("ok", "")
 	if !resp.Blocked {
 		return "", ""
 	}
@@ -111,13 +122,19 @@ func (c *HTTPClassifier) Classify(text string) (string, string) {
 // ClassifyWithResources 调用侧车并返回原始响应（评测跑道用：需 resources 与原始错误）。
 // error 非 nil 表示侧车不可用（调用方按降级处理，不得视为"未命中"）。
 func (c *HTTPClassifier) ClassifyWithResources(text string) (ClassifyResponse, error) {
+	resp, _, err := c.classify(text)
+	return resp, err
+}
+
+// classify 调用侧车；error 非 nil 表示不可用，reason 为归因（指标/告警标签）。
+func (c *HTTPClassifier) classify(text string) (ClassifyResponse, string, error) {
 	body, err := json.Marshal(ClassifyRequest{Text: text})
 	if err != nil {
-		return ClassifyResponse{}, fmt.Errorf("%w: 请求序列化失败: %v", errClassifierUnavailable, err)
+		return ClassifyResponse{}, GuardFailReasonBadResponse, fmt.Errorf("%w: 请求序列化失败: %v", errClassifierUnavailable, err)
 	}
 	req, err := http.NewRequest(http.MethodPost, c.url, bytes.NewReader(body))
 	if err != nil {
-		return ClassifyResponse{}, fmt.Errorf("%w: 构造请求失败: %v", errClassifierUnavailable, err)
+		return ClassifyResponse{}, GuardFailReasonBadResponse, fmt.Errorf("%w: 构造请求失败: %v", errClassifierUnavailable, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.key != "" {
@@ -125,25 +142,34 @@ func (c *HTTPClassifier) ClassifyWithResources(text string) (ClassifyResponse, e
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return ClassifyResponse{}, fmt.Errorf("%w: %v", errClassifierUnavailable, err)
+		return ClassifyResponse{}, guardFailReasonOf(err), fmt.Errorf("%w: %v", errClassifierUnavailable, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return ClassifyResponse{}, fmt.Errorf("%w: HTTP %d", errClassifierUnavailable, resp.StatusCode)
+		return ClassifyResponse{}, GuardFailReasonHTTPStatus, fmt.Errorf("%w: HTTP %d", errClassifierUnavailable, resp.StatusCode)
 	}
 	var out ClassifyResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-		return ClassifyResponse{}, fmt.Errorf("%w: 响应解析失败: %v", errClassifierUnavailable, err)
+		return ClassifyResponse{}, GuardFailReasonBadResponse, fmt.Errorf("%w: 响应解析失败: %v", errClassifierUnavailable, err)
 	}
-	return out, nil
+	return out, "", nil
+}
+
+// guardFailReasonOf 传输层失败归因：超时单列，其余（连接拒绝/DNS/重置）归 unreachable。
+func guardFailReasonOf(err error) string {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return GuardFailReasonTimeout
+	}
+	return GuardFailReasonUnreachable
 }
 
 // Backend 后端标识（写入 /config 快照，避免"prompt_classifier=true"含义不明）。
 func (c *HTTPClassifier) Backend() string { return GuardClassifierBackendHTTP }
 
-func (c *HTTPClassifier) report(result string) {
+func (c *HTTPClassifier) report(result, reason string) {
 	if c.onResult != nil {
-		c.onResult(result)
+		c.onResult(result, reason)
 	}
 }

@@ -147,6 +147,9 @@ type teeServer struct {
 	shadowReports   *shadowReportState
 	audit           *auditChain     // 审计哈希链
 	guard           *guardrail      // 内容安全检测（M9-4）
+	// 输入侧语义分类器侧车探活（2026-09-26；nil = 未配置侧车，此时用进程内关键词分类器，
+	// 不存在"不可用"问题）；不健康 → readiness 503。
+	guardProbe *guardClassifierProbe
 	// GA-输出侧内容审查（OG-3）：off|shadow（enforcing 属 M4，配置即拒绝启动；§2.3 I1–I7）。
 	outputGuardMode string
 	// OG-8：运行时 mode 覆盖（高敏变更复核通过后写入；空 = 沿用 outputGuardMode 启动参数）。
@@ -164,7 +167,8 @@ type teeServer struct {
 	// /config/policy/reload 将返回 400）。
 	outputGuardPolicyDir string
 	// GA-输出侧内容审查（M2 OG-12）：L2 语义分类器（nil = 未启用，纯 L1 = 当前行为）。
-	// 启用后 shadow 下 L1 未命中再走 L2；L2 不可用自动 fallback L1 + degraded 指标。
+	// 启用后 shadow 下 L1 未命中再走 L2；L2 不可用该句按 P-DEGRADE fail-closed（不回退 L1 关键词重判）；
+	// readiness 不联动 L2 状态（输出侧仍有 L1 规则层可服务，属既有设计）。
 	outputGuardL2 OutputClassifier
 	// GA-输出侧内容审查（OG-9）：策略/词库注册表（nil = 未配置，此时 L1 走既有 guardrail
 	// 包装器，行为与现网一致）。热加载经原子指针无锁换版（请求路径零阻塞）。
@@ -1653,6 +1657,8 @@ func (s *teeServer) denyAndAudit(tenant, requestID, reason, payloadSHA string) {
 
 // handleHealthz 健康探针。
 // readiness 语义：requireAttest 模式下，无有效证明会话 → 503（证明失效即不可服务）；
+// 输入侧语义分类器已接线时，侧车不健康 → 503（不可用即 fail-closed 拒答，
+// 故实例必须摘流，可用性由"摘流 + 容量保障"解决，而非回退关键词放行）；
 // liveness 语义：进程存活即 200（path=/healthz/live）。
 func (s *teeServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	// liveness：进程存活
@@ -1665,6 +1671,12 @@ func (s *teeServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if s.requireAttest && !s.hasValidSession() {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("attestation required: no valid session"))
+		return
+	}
+	// readiness：输入侧语义分类器侧车健康联动
+	if s.guardProbe != nil && !s.guardProbe.Healthy() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("guard classifier sidecar unhealthy: fail-closed, draining"))
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -2995,15 +3007,15 @@ func main() {
 	systemPrompt := flag.String("system-prompt", "", "提示词装饰：非空时在 text 载荷 messages 头部插入 system 消息（P2a，记录于审计 transformed_hash）")
 	protoVersion := flag.String("protocol-version", protocol.Version, "南向协议版本声明（C-4 版本一致性；默认 protocol.Version）")
 	guardrailCfg := flag.String("guardrail-config", "", "Guardrail 运行时配置持久化文件（M3-B：高敏复核写入的 pii_mode）；为空 = 仅进程内生效，重启回退 -pii-mode")
-	guardClassURL := flag.String("guard-classifier-url", "", "GF.4.3 语义分类器侧车地址（如 http://127.0.0.1:19091/classify）；为空 = 使用关键词规则分类器（默认，行为不变）")
+	guardClassURL := flag.String("guard-classifier-url", "", "GF.4.3 语义分类器侧车地址（如 http://127.0.0.1:19091/classify）；为空 = 使用进程内关键词规则分类器（默认，行为不变）；配置后侧车不可用即 fail-closed 拒答，并按同目录 /healthz 探活结果摘流（readiness 503）")
 	guardClassKey := flag.String("guard-classifier-key", "", "语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
-	guardClassTimeout := flag.Duration("guard-classifier-timeout", 2*time.Second, "语义分类器侧车调用超时（分类器在请求路径上，须有限且小）")
+	guardClassTimeout := flag.Duration("guard-classifier-timeout", 2*time.Second, "语义分类器侧车调用超时（分类器在请求路径上，须有限且小；超时按不可用处理 → fail-closed 拒答）")
 	outputGuardMode := flag.String("output-guard", "off", "GA-输出侧内容审查模式：off（缺省，行为与现网逐字节一致）| shadow（跑判定只记不拦）| enforcing（M4：缓冲模式 A 拦截，content_filter 终止；仅启动参数可开，运行时热切换仍限 off|shadow）")
 	outputGuardCfg := flag.String("output-guard-config", "", "GA-输出侧内容审查运行时配置持久化文件（OG-8：高敏复核写入的 mode）；为空 = 仅进程内生效，重启回退 -output-guard")
 	outputGuardPolicyDir := flag.String("output-guard-policy-dir", "", "GA-输出侧内容审查策略/词库目录（OG-9）：含 manifest.json 的 policy 根目录；为空 = 沿用既有 guardrail 规则（行为与现网一致）；加载失败/哈希不匹配即拒绝启动（fail-closed）")
 	outputGuardL2URL := flag.String("output-guard-l2-url", "", "GA-输出侧内容审查 L2 语义分类器侧车地址（M2 OG-12）：HTTP POST JSON，返回 blocked/category/confidence/match；为空 = 不启用 L2，纯 L1 规则（默认，行为零变化）")
 	outputGuardL2Key := flag.String("output-guard-l2-key", "", "输出侧 L2 语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
-	outputGuardL2Timeout := flag.Duration("output-guard-l2-timeout", 2*time.Second, "输出侧 L2 语义分类器侧车调用超时（在请求路径上，须有限且小；不可用自动 fallback L1 + degraded 指标）")
+	outputGuardL2Timeout := flag.Duration("output-guard-l2-timeout", 2*time.Second, "输出侧 L2 语义分类器侧车调用超时（在请求路径上，须有限且小；不可用时该句按 P-DEGRADE fail-closed，不回退 L1）")
 	outputGuardL2AllowedCIDRs := flag.String("output-guard-l2-allowed-cidrs", "", "P-BACKEND-TARGET 可信域 CIDR 白名单（逗号分隔；默认空＝仅 localhost）：L2 侧车地址须落在回环或白名单内，否则拒绝启动（2026-09-18 裁定 A2，防被审明文外发）")
 	outputGuardMaskEnable := flag.Bool("output-guard-mask-enable", false, "OG-18：PII mask 改写开关（默认 false = block-only 深度，A4-06 降为 flag；true = 实打马赛克后下发）；需 -output-guard=shadow/enforcing 时生效")
 	// GA-输出侧内容审查（OG-13）：级联参数（跨 §5.3–5.5 多组）。P-TIMEOUT 复用上面的 -output-guard-l2-timeout（单一事实源）。
@@ -3316,18 +3328,29 @@ func main() {
 		srv.currentContentLabelConfig().Enabled, srv.currentContentLabelConfig().Text,
 		srv.currentContentLabelConfig().Repeat, srv.currentContentLabelConfig().Std, srv.contentLabelSource())
 	// GF.4.3：语义分类器接线（默认关闭——未配置 URL 即保持关键词规则分类器，行为不变）。
-	// 侧车不可用时回退关键词规则并上报降级指标：可用性不中断，但语义检出能力回落到规则水位，
-	// 该水位由基准集量化（见 docs/GA-Guardrail分类器选型.md），必须可观测。
+	// 侧车不可用**不回退关键词规则、不回退 L1**，按 fail-closed 拒答（2026-09-26 收口）
+	// （类别 classifier_unavailable + guard_failclosed_total{backend,reason} + 告警）；
+	// 可用性由侧车健康探活 + readiness 摘流保障，不以静默降级换取可用性。
 	if *guardClassURL != "" {
 		srv.guard.useClassifier(
-			model.NewHTTPClassifier(*guardClassURL, *guardClassKey, *guardClassTimeout, srv.guard.classifier,
-				func(result string) {
+			model.NewHTTPClassifier(*guardClassURL, *guardClassKey, *guardClassTimeout,
+				func(result, reason string) {
 					srv.metrics.incGuardClassifier(model.GuardClassifierBackendHTTP, result)
+					if result == "degraded" {
+						srv.metrics.incGuardFailClosed(model.GuardClassifierBackendHTTP, reason)
+						log.Printf("[guardrail] 语义分类器侧车不可用（%s）：按 fail-closed 拒答该请求（不回退关键词规则）", reason)
+					}
 				}),
 			model.GuardClassifierBackendHTTP,
 		)
-		log.Printf("[guardrail] 语义分类器接线：backend=%s url=%s timeout=%s（不可用时回退关键词规则）",
-			model.GuardClassifierBackendHTTP, *guardClassURL, guardClassTimeout.String())
+		probe, probeErr := newGuardClassifierProbe(*guardClassURL, srv.metrics.setGuardSidecarHealthy)
+		if probeErr != nil {
+			log.Fatalf("[guardrail] 语义分类器健康端点派生失败（url=%s）：%v", *guardClassURL, probeErr)
+		}
+		srv.guardProbe = probe
+		go probe.run()
+		log.Printf("[guardrail] 语义分类器接线：backend=%s url=%s timeout=%s health=%s（不可用时 fail-closed 拒答 + readiness 摘流）",
+			model.GuardClassifierBackendHTTP, *guardClassURL, guardClassTimeout.String(), probe.healthURL)
 	}
 	// M2 OG-12：输出侧内容审查 L2 语义分类器接线（默认关闭——未配置 URL 即纯 L1，行为零变化）。
 	// 侧车不可用时该句按 P-DEGRADE fail-closed 处置（enforcing 丢该句、不整流终止）+ 记 degraded_total{backend=l2, reason=...}；
