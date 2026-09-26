@@ -168,6 +168,10 @@ type teeServer struct {
 	// GA-输出侧内容审查（OG-9）：策略目录（-output-guard-policy-dir；空 = 未配置，
 	// /config/policy/reload 将返回 400）。
 	outputGuardPolicyDir string
+	// S1-4（G21）：策略/词库**版本库**的显式引用运行态（*policyRefState，整体原子替换）。
+	// 空值 ＝ 未引用（沿用 policy 根目录 manifest，行为不变）。
+	// 版本库为**只读输入**（readOnlyRootFilesystem），发布/快照写入属离线步骤（scripts/policy-publish.ps1）。
+	outputGuardPolicyRef atomic.Value
 	// GA-输出侧内容审查（M2 OG-12）：L2 语义分类器（nil = 未启用，纯 L1 = 当前行为）。
 	// 启用后 shadow 下 L1 未命中再走 L2；L2 不可用该句按 P-DEGRADE fail-closed（不回退 L1 关键词重判）；
 	// readiness 不联动 L2 状态（输出侧仍有 L1 规则层可服务，属既有设计）。
@@ -1795,6 +1799,10 @@ type outputGuardSnapshot struct {
 	L1Rules int `json:"l1_rules_total"`
 	// MaskEnabled：PII mask 改写开关（OG-18；默认 false = block-only 深度，mask 类目降 flag）
 	MaskEnabled bool `json:"mask_enabled"`
+	// S1-4（G21）：策略版本库只读视图（无 versions/index.json 时 VersionsEnabled=false，行为不变）
+	VersionsEnabled   bool     `json:"policy_versions_enabled"`
+	ReferencedVersion string   `json:"policy_referenced_version,omitempty"` // 显式引用版本（空=根目录 manifest）
+	VersionsAvailable []string `json:"policy_versions_available,omitempty"` // 索引内已登记版本号
 }
 
 // outputGuardParamsSnapshot 缓冲参数只读快照（D 组参数，§5.4）。
@@ -1905,6 +1913,14 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		view.OutputGuard.L1Categories = reg.CategoryCount()
 		view.OutputGuard.L1Rules = reg.RuleCount()
 	}
+	// S1-4（G21）：策略版本库只读视图（未启用时不报错，enabled=false）。
+	if vv := s.buildPolicyVersionsView(); vv.Enabled {
+		view.OutputGuard.VersionsEnabled = true
+		view.OutputGuard.ReferencedVersion = vv.ReferencedVersion
+		if idx, err := loadPolicyVersionIndex(s.outputGuardPolicyDir); err == nil {
+			view.OutputGuard.VersionsAvailable = idx.policyVersionNames()
+		}
+	}
 	// B1：强标标识只读快照（enabled/source/text/repeat/std 与生效配置同源）。
 	clc := s.currentContentLabelConfig()
 	view.ContentLabel = contentLabelSnapshot{
@@ -1962,7 +1978,7 @@ func (s *teeServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reg, err := loadPolicyDir(s.outputGuardPolicyDir)
+	reg, err := s.loadCurrentPolicySource()
 	if err != nil {
 		// 回退：旧注册表保持不变（currentPolicy 不动）。
 		kind := PolicyLoadErrorKind(err)
@@ -2180,16 +2196,11 @@ func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Reque
 	reqID := r.Header.Get("X-Request-ID")
 
 	// 持久化（可选）：未配置路径则仅进程内生效。
+	// S1-4（G21）：改用**读改写合并**——同一文件还承载策略版本引用，整体覆盖会抹掉后者。
 	if s.outputGuardCfgPath != "" {
-		rec := outputGuardConfigRecord{
-			Mode: req.Mode, Actor: actor, RequestID: reqID, UpdatedAt: time.Now().UnixNano(),
-		}
-		raw, err := json.Marshal(rec)
-		if err != nil {
-			http.Error(w, "配置序列化失败", http.StatusInternalServerError)
-			return
-		}
-		if err := os.WriteFile(s.outputGuardCfgPath, append(raw, '\n'), 0o600); err != nil {
+		if err := writeOutputGuardConfigRecord(s.outputGuardCfgPath, outputGuardConfigRecord{
+			Mode: req.Mode, Actor: actor, RequestID: reqID,
+		}, false); err != nil {
 			http.Error(w, "配置持久化失败", http.StatusInternalServerError)
 			return
 		}
@@ -2239,6 +2250,18 @@ func (s *teeServer) loadOutputGuardOverride() {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &rec); err != nil {
 		log.Printf("[output-guard] 运行时配置解析失败（沿用启动参数）：%v", err)
 		return
+	}
+	// S1-4（G21）：先恢复策略版本引用运行态——它与 mode 校验互不影响，且必须在启动加载策略之前就位
+	//（启动参数 -output-guard-policy-version 为空时以后者为准）。
+	if rec.PolicyVersion != "" || rec.PreviousVersion != "" || rec.PreviousIsRoot {
+		s.setPolicyRef(policyRefState{
+			Version:  rec.PolicyVersion,
+			Prev:     rec.PreviousVersion,
+			PrevRoot: rec.PreviousIsRoot,
+			HasPrev:  rec.PreviousVersion != "" || rec.PreviousIsRoot,
+		})
+		log.Printf("[output-guard] 策略版本引用已恢复：version=%q previous=%q previous_is_root=%v",
+			rec.PolicyVersion, rec.PreviousVersion, rec.PreviousIsRoot)
 	}
 	// 持久化恢复：非法模式值直接忽略（fail-safe）；
 	// enforcing 也忽略——enforcing 只能由启动参数开启，运行时通道（含跨重启恢复）不开放（D4'）。
@@ -3029,6 +3052,9 @@ func main() {
 	outputGuardMode := flag.String("output-guard", "off", "GA-输出侧内容审查模式：off（缺省，行为与现网逐字节一致）| shadow（跑判定只记不拦）| enforcing（M4：缓冲模式 A 拦截，content_filter 终止；仅启动参数可开，运行时热切换仍限 off|shadow）")
 	outputGuardCfg := flag.String("output-guard-config", "", "GA-输出侧内容审查运行时配置持久化文件（OG-8：高敏复核写入的 mode）；为空 = 仅进程内生效，重启回退 -output-guard")
 	outputGuardPolicyDir := flag.String("output-guard-policy-dir", "", "GA-输出侧内容审查策略/词库目录（OG-9）：含 manifest.json 的 policy 根目录；为空 = 沿用既有 guardrail 规则（行为与现网一致）；加载失败/哈希不匹配即拒绝启动（fail-closed）")
+	// S1-4（G21）：策略版本库显式引用。为空 = 沿用 policy 根目录 manifest（行为不变）；
+	// 非空则须在 policy/versions/ 版本库内存在且状态 published、且通过 bench 硬门禁，否则拒绝启动。
+	outputGuardPolicyVersion := flag.String("output-guard-policy-version", "", "S1-4/G21 策略版本库显式引用版本（-output-guard-policy-dir 下 versions/index.json 登记的 policy_version）；为空 = 沿用 policy 根目录 manifest（行为不变）；指定的版本不存在/为草稿/未过 bench 硬门禁即拒绝启动（fail-closed）")
 	outputGuardL2URL := flag.String("output-guard-l2-url", "", "GA-输出侧内容审查 L2 语义分类器侧车地址（M2 OG-12）：HTTP POST JSON，返回 blocked/category/confidence/match；为空 = 不启用 L2，纯 L1 规则（默认，行为零变化）")
 	outputGuardL2Key := flag.String("output-guard-l2-key", "", "输出侧 L2 语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
 	outputGuardL2Timeout := flag.Duration("output-guard-l2-timeout", 2*time.Second, "输出侧 L2 语义分类器侧车调用超时（在请求路径上，须有限且小；不可用时该句按 P-DEGRADE fail-closed，不回退 L1）")
@@ -3286,9 +3312,35 @@ func main() {
 	srv.loadOutputGuardOverride()
 	// OG-9：策略/词库加载。配置了目录即强校验（schema/哈希/类目/命名），任何失败＝拒绝启动——
 	// 不静默降级为"无词库"（否则会以"以为在审、其实没审"的方式悄悄失效）。
+	// S1-4（G21）：若显式引用版本（启动参数优先，其次持久化恢复），则加载该版本快照，
+	// 且必须通过 bench 硬门禁；版本库不可用/版本非法/未过门禁一律拒绝启动（显式引用不得静默降级）。
 	srv.outputGuardPolicyDir = *outputGuardPolicyDir
 	if *outputGuardPolicyDir != "" {
-		reg, err := loadPolicyDir(*outputGuardPolicyDir)
+		loadDir := *outputGuardPolicyDir
+		refVersion := *outputGuardPolicyVersion
+		if refVersion == "" {
+			refVersion = srv.referencedPolicyVersion()
+		}
+		if refVersion != "" {
+			idx, err := loadPolicyVersionIndex(*outputGuardPolicyDir)
+			if err != nil {
+				log.Fatalf("[output-guard] 显式引用版本 %s 但版本库不可用（fail-closed，拒绝启动）: reason=%s",
+					refVersion, PolicyLoadErrorKind(err))
+			}
+			dir, err := srv.policySnapshotDir(refVersion)
+			if err != nil {
+				log.Fatalf("[output-guard] 显式引用版本 %s 非法（fail-closed，拒绝启动）: reason=%s",
+					refVersion, PolicyLoadErrorKind(err))
+			}
+			if err := checkPolicyBenchGate(idx, dir, refVersion); err != nil {
+				log.Fatalf("[output-guard] 显式引用版本 %s 未过 bench 硬门禁（fail-closed，拒绝启动）: reason=%s",
+					refVersion, PolicyLoadErrorKind(err))
+			}
+			loadDir = dir
+			srv.outputGuardPolicyRef.Store(refVersion)
+			log.Printf("[output-guard] 策略版本库：已显式引用 %s（bench 硬门禁通过）", refVersion)
+		}
+		reg, err := loadPolicyDir(loadDir)
 		if err != nil {
 			// 只打原因枚举，不打错误全文（§4.11：json 解析片段可能含词库内容）。
 			log.Fatalf("[output-guard] 策略/词库加载失败（fail-closed，拒绝启动）: reason=%s", PolicyLoadErrorKind(err))
@@ -3428,6 +3480,10 @@ func main() {
 	mux.HandleFunc("/config/output-guard", srv.handleOutputGuardConfig) // OG-8 输出侧审查 mode 运行时切换
 	mux.HandleFunc("/config/content-label", srv.handleContentLabelConfig) // B1 强标标识运行时热切换（on/off 双向）
 	mux.HandleFunc("/config/policy/reload", srv.handlePolicyReload)  // OG-9 策略/词库热加载（applied/rolled_back）
+	// S1-4（G21）策略版本库：只读发现 / 显式引用 / 回滚（版本库为只读输入，发布属离线步骤）
+	mux.HandleFunc("/config/policy/versions", srv.handlePolicyVersions) // GET 版本列表（含 bench 结果）
+	mux.HandleFunc("/config/policy/activate", srv.handlePolicyActivate) // POST 显式引用版本（bench 硬门禁）
+	mux.HandleFunc("/config/policy/rollback", srv.handlePolicyRollback) // POST 回滚（缺省=上一 active，可指定历史版本）
 	mux.HandleFunc("/reconcile", srv.handleReconcile)              // S5 判据 6：对账快照（只读）
 	mux.HandleFunc("/reconcile/run", srv.handleReconcileRun)       // S5 判据 6：即时对账（管理令牌）
 	mux.HandleFunc("/healthz", srv.handleHealthz)                  // 探针与证明状态联动

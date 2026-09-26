@@ -13,9 +13,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"regexp"
 	"runtime"
 	"strings"
@@ -230,11 +232,59 @@ type outputGuardConfigRequest struct {
 
 // outputGuardConfigRecord 持久化记录（JSON 单行，写 0600；与 guardrailConfigRecord 同构）。
 // 启动时读取恢复运行时覆盖（文件缺失/解析失败/取值非法 → 沿用启动参数，不阻断启动）。
+//
+// S1-4（G21）扩展：新增策略版本库字段（显式引用 + 上一 active）。
+// **向后兼容**：旧文件缺这两字段即空串（＝未显式引用，沿用 policy 根目录 manifest，行为不变）。
 type outputGuardConfigRecord struct {
 	Mode      string `json:"mode"`
 	Actor     string `json:"actor"`
 	RequestID string `json:"request_id"`
 	UpdatedAt int64  `json:"updated_at"` // UTC 纳秒
+	// S1-4（G21）：策略/词库版本库的显式引用与"上一 active"（供 rollback 缺省目标）。
+	PolicyVersion   string `json:"policy_version,omitempty"`
+	PreviousVersion string `json:"previous_version,omitempty"`
+	// PreviousIsRoot：上一 active 为"未引用态"（policy 根目录）——回滚目标 = 回到根目录。
+	PreviousIsRoot bool `json:"previous_is_root,omitempty"`
+}
+
+// writeOutputGuardConfigRecord **读改写合并**写入持久化记录。
+//
+// 为什么必须合并而不是整体覆盖：本文件同时承载「输出侧 mode 覆盖」与「策略版本引用」
+// 两组互不相干的运行时状态，各自端点独立写入；整体覆盖会让后写者抹掉先写者的字段
+// （例如换 mode 丢失版本引用 → 重启后回退到根目录 manifest，属静默失效）。
+//
+// ownsPolicyRef 声明本次写入是否**接管**版本引用三字段（PolicyVersion/PreviousVersion/PreviousIsRoot）：
+//   - false（如"仅改 mode"）→ 引用三字段保持原值；
+//   - true（activate/rollback/回到根目录）→ 三字段**整体**按 patch 写入（含显式置空）。
+//
+// 三元组必须整体写入而非按字段合并：它们是"当前引用 + 上一状态"的一体状态，
+// 按字段合并会把新值与陈旧值拼成矛盾组合（实测：previous_version 等于当前版本且 previous_is_root=true）。
+func writeOutputGuardConfigRecord(path string, patch outputGuardConfigRecord, ownsPolicyRef bool) error {
+	rec := outputGuardConfigRecord{}
+	if raw, err := os.ReadFile(path); err == nil {
+		// 解析失败按空记录处理（沿用"持久化文件损坏不阻断"的既有纪律）。
+		_ = json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &rec)
+	}
+	if patch.Mode != "" {
+		rec.Mode = patch.Mode
+	}
+	if ownsPolicyRef {
+		rec.PolicyVersion = patch.PolicyVersion
+		rec.PreviousVersion = patch.PreviousVersion
+		rec.PreviousIsRoot = patch.PreviousIsRoot
+	}
+	if patch.Actor != "" {
+		rec.Actor = patch.Actor
+	}
+	if patch.RequestID != "" {
+		rec.RequestID = patch.RequestID
+	}
+	rec.UpdatedAt = time.Now().UnixNano()
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(raw, '\n'), 0o600)
 }
 
 // ---- B 组「后端接线」参数：P-BACKEND-TARGET 可信域白名单（§5.3；2026-09-18 裁定 A2）----

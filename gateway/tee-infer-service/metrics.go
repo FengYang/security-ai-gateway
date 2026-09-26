@@ -71,6 +71,8 @@ type otpmaskMetrics struct {
 	ogBlocked         map[string]int64 // category|mode（命中且动作=block，enforcing）
 	ogMasked          map[string]int64 // category（命中且动作=mask/rewrite）
 	ogPolicyRollback  map[string]int64 // reason（策略热加载回退事件）
+	// S1-4（G21）：策略版本库显式引用/回滚事件（action|result|reason）。
+	ogPolicyActivate  map[string]int64
 	ogDegraded        map[string]int64 // backend|reason（后端降级事件，M2）
 	ogInflightBytes   int64            // gauge：在飞缓冲字节数（M1）
 	ogLatencyMs       *histogram       // 单请求审查总延迟（手写桶，M1）
@@ -120,6 +122,7 @@ func newMetrics() *otpmaskMetrics {
 		ogBlocked:         make(map[string]int64),
 		ogMasked:          make(map[string]int64),
 		ogPolicyRollback:  make(map[string]int64),
+		ogPolicyActivate:  make(map[string]int64),
 		ogDegraded:        make(map[string]int64),
 		ogLatencyMs:       newHistogram(latencyMsBuckets),
 		ogFirstFrameDelay: newHistogram(firstFrameDelayBuckets),
@@ -386,6 +389,8 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	writeCounter(w, "otpmask_output_guard_unmapped_total", "后端返回类目未映射到内部31类的次数（按后端与原生类目）", m.ogUnmapped, []string{"backend", "category_raw"})
 	writeCounter(w, "otpmask_output_guard_degraded_total", "后端降级事件次数（按后端与原因）", m.ogDegraded, []string{"backend", "reason"})
 	writeCounter(w, "otpmask_output_guard_policy_rollback_total", "策略热加载回退事件次数（按原因）", m.ogPolicyRollback, []string{"reason"})
+	// S1-4（G21）：版本库显式引用/回滚结果（reason="-" 表示成功）
+	writeCounter(w, "otpmask_output_guard_policy_activate_total", "策略版本库显式引用/回滚事件次数（action=activate|rollback；result=applied|rejected；reason 为拒绝原因枚举）", m.ogPolicyActivate, []string{"action", "result", "reason"})
 	// ---- L2 级联相关（M3 骨架；零样本时不输出，属正常）----
 	writeCounter(w, "otpmask_output_guard_l2_call_total", "L2 语义层调用次数（按类目与结果：hit/miss/timeout/error）", m.ogL2Call, []string{"category", "result"})
 	writeCounter(w, "otpmask_output_guard_l2_only_hit_total", "L1未命中且L2命中的次数（L2专属贡献，按类目）", m.ogL2OnlyHit, []string{"category"})
@@ -568,6 +573,17 @@ func (m *otpmaskMetrics) incOGMasked(category string) {
 func (m *otpmaskMetrics) incOGPolicyRollback(reason string) {
 	m.mu.Lock()
 	m.ogPolicyRollback[reason]++
+	m.mu.Unlock()
+}
+
+// incOGPolicyActivate 记录一次策略版本库显式引用/回滚事件（S1-4 / G21）。
+// 键＝action|result|reason（reason 为空表示成功，序列化时归为 "-"）。
+func (m *otpmaskMetrics) incOGPolicyActivate(action, result, reason string) {
+	if reason == "" {
+		reason = "-"
+	}
+	m.mu.Lock()
+	m.ogPolicyActivate[action+"|"+result+"|"+reason]++
 	m.mu.Unlock()
 }
 

@@ -64,6 +64,8 @@ tee otpmask_output_guard_blocked_total conditional
 tee otpmask_output_guard_masked_total conditional
 tee otpmask_output_guard_forced_split_total conditional
 tee otpmask_output_guard_policy_rollback_total conditional
+# S1-4（G21）策略版本库显式引用/回滚（action|result|reason；仅在使用版本库端点后出现样本）
+tee otpmask_output_guard_policy_activate_total conditional
 tee otpmask_output_guard_inflight_bytes conditional
 tee otpmask_output_guard_latency_ms_bucket conditional
 # M2 (buffer + PII)
