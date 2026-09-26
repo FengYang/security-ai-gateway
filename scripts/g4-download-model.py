@@ -57,6 +57,9 @@ def main():
 
     # 下载 GGUF 模型
     print("=== 下载 Qwen3Guard-Gen-0.6B Q8_0 GGUF ===")
+    # 供应链完整性：权重文件摘要固化（S0-⑧ / 缺口 D2 已闭合，2026-09-26 本机实测）
+    GGUF_PATH = "/opt/og16-g4/gguf/Qwen3Guard-Gen-0.6B.Q8_0.gguf"
+    GGUF_SHA256 = "127e8833aa16c6839613cd08df5409440302e8c61e90617914b3100f2141411a"
     rc, out, _ = run(c, "ls -lh /opt/og16-g4/gguf/*.gguf 2>/dev/null")
     if rc != 0 or "Q8_0" not in out:
         # 用 hf-mirror 加速
@@ -65,6 +68,15 @@ def main():
         run(c, "ls -lh /opt/og16-g4/gguf/")
     else:
         print("  已存在，跳过")
+
+    # 摘要校验（新增/已存在两路都校验）：不符即中止，避免供应链漂移被静默接受
+    rc, out, _ = run(c, f"sha256sum {GGUF_PATH}")
+    got = out.strip().split()[0] if out.strip() else ""
+    if got != GGUF_SHA256:
+        print(f"  ❌ sha256 不匹配：期望 {GGUF_SHA256}，实际 {got or '(空)'}")
+        print("     供应链校验失败——请核对权重来源/替换审批，勿继续部署。")
+        raise SystemExit(1)
+    print(f"  ✅ sha256 校验通过：{got}")
 
     c.close()
 
