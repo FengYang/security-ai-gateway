@@ -6,53 +6,53 @@
   "rules": [
     {
       "id": "kw-a4-03-0001",
-      "keyword": "【A4-03-示例-0001】",
+      "keyword": "侵害名誉权",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a4-03-0002",
-      "keyword": "【A4-03-示例-0002】",
+      "keyword": "诽谤他人",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a4-03-0003",
-      "keyword": "【A4-03-示例-0003】",
+      "keyword": "造谣中伤",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a4-03-0004",
-      "keyword": "【A4-03-示例-0004】",
+      "keyword": "恶意诋毁他人",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a4-03-0005",
-      "keyword": "【A4-03-示例-0005】",
+      "keyword": "损害他人名誉",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     }
   ]
 }

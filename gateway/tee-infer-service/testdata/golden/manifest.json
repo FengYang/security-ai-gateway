@@ -5,7 +5,7 @@
       "path": "positive.json",
       "kind": "positive",
       "cases": 500,
-      "sha256": "1d5012e4cac341b93bc0da1b1ff53a89dd5c15fcaecf222c641e565276e3f643"
+      "sha256": "20ba311693e621fa871c2b84793f8b0583cbeecce3b85667c042fba7949253cb"
     },
     {
       "path": "negative.json",
@@ -17,8 +17,8 @@
       "path": "refusal.json",
       "kind": "refusal",
       "cases": 500,
-      "sha256": "a114720c33000eb0024a9c31e348dc66d28e24806355926f10dab830168d5908"
+      "sha256": "252a396295e194cb7fbdadc3138a63df90e0b110eb8be990b48d5b7836bec5d6"
     }
   ],
-  "sha256": "732e1502d1e4b4a6ea49124412d4161f475b07ed2b31e4146e33dff1ba548414"
+  "sha256": "c5dbf5d84849c6953b392a1d348ebae88bb2f2e9ccac5a2669d7e33eb5990eeb"
 }

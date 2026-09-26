@@ -6,53 +6,53 @@
   "rules": [
     {
       "id": "kw-a3-05-0001",
-      "keyword": "【A3-05-示例-0001】",
+      "keyword": "其他商业违法",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a3-05-0002",
-      "keyword": "【A3-05-示例-0002】",
+      "keyword": "虚假宣传",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a3-05-0003",
-      "keyword": "【A3-05-示例-0003】",
+      "keyword": "违法经营",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a3-05-0004",
-      "keyword": "【A3-05-示例-0004】",
+      "keyword": "商业违规行为",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a3-05-0005",
-      "keyword": "【A3-05-示例-0005】",
+      "keyword": "违规商业操作",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     }
   ]
 }

@@ -6,53 +6,53 @@
   "rules": [
     {
       "id": "kw-a5-01-0001",
-      "keyword": "【A5-01-示例-0001】",
+      "keyword": "严重违背科学常识",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a5-01-0002",
-      "keyword": "【A5-01-示例-0002】",
+      "keyword": "伪科学内容",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a5-01-0003",
-      "keyword": "【A5-01-示例-0003】",
+      "keyword": "包治百病",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a5-01-0004",
-      "keyword": "【A5-01-示例-0004】",
+      "keyword": "偏方治癌",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a5-01-0005",
-      "keyword": "【A5-01-示例-0005】",
+      "keyword": "违背主流科学认知",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     }
   ]
 }

@@ -1,0 +1,47 @@
+输出形态良性对照集（outform contrast，**仅对照/回归，不得用于备案抽检**）
+================================================================
+
+用途
+----
+输出侧审查（流式/整包）在**输出形态**上的**误杀对照集**：Markdown、代码块、长编号、
+emoji、中英混排、跨 delta 半句等——这些正是 S0-⑨「输出侧误杀基线取数」要求复跑的形态
+（原句："用既有 6 条 known_fp ＋ 40 条 benign 在输出形态复跑"）。
+
+本集全部为 **benign（expect=allow）**，用于回答一个问题：**审查能力提升时会不会把正常内容拦掉**。
+
+⚠️ 禁用范围（硬约束）
+--------------------
+1. **不得**作为备案抽检集（应拒答/非拒答题库）使用；
+2. **不得**写入对外材料或备案材料；
+3. **不得**替代 OG-25 真实黄金集（后者由客户/运营交付，见 D-LLM-4 已决口径）；
+4. 其任何统计结论**仅作工程对照**，不构成达标声明（D-LLM-10：不承诺 ≥95%）。
+
+与既有语料的区别
+----------------
+  testdata/guardrail-bench/corpus.jsonl  门禁①②基准集（含 rule/semantic/benign/known_fp 四 scope），
+                                         由 scripts/build-guardrail-bench.ps1 生成，部分来自公开数据集
+  testdata/golden/                       OG-25 占位黄金集（positive/negative/refusal），交付物形态
+  testdata/outform-contrast/（本目录）    **本集**：纯合成、纯 benign、只针对"输出形态误杀对照"
+
+来源与合规
+----------
+  - 全部样本为**手工合成**（`source: synthetic`），不含第三方数据集内容；
+  - 形如长编号/卡号/证件号/邮箱/电话的样例均为**明显占位写法**（如全 0、示例域 `example.invalid`），
+    **不含任何真实个人信息**；相关条目 note 中已标注"占位，非真实"。
+
+单行格式（JSONL，一行一案）
+--------------------------
+  {"id","source","scope","expect","variant","text","note"}
+  source : synthetic（固定）
+  scope  : benign_outform（固定）
+  expect : allow（固定；本集不含应拦样本）
+  variant: 用例族（md-table / long-num / sql / code / crit / mixed / emoji / halfsent / md / json /
+           log / url / pii-like / math / cn-en / list / quote）
+  note   : 该案对应的已知风险或边界说明（含"需产品确认口径"的 borderline 项）
+
+维护
+----
+  1. 新增/调整样本后，保持 `source/scope/expect` 三字段不变（校验由
+     `outputguard_outform_contrast_test.go` 强制，含"禁令锁"：本集不得被当作交付/备案集）；
+  2. 复跑取数：`go test -mod=mod ./gateway/tee-infer-service/ -run TestOutformContrast -v`
+     （当前仅做**数据校验＋计数报告**，不设误杀阈值——阈值由 S0-⑨／D-LLM-8 的产品定线决定）。

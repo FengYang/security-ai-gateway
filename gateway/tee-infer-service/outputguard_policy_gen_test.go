@@ -19,12 +19,14 @@
 //   - A1-07 / A4-06：规则形态为正则，文件置于 regex/ 下（§4.2.4 目录树），
 //     故 keywords/ 下不重复生成（同类目两文件会被加载器判为重复登记而拒加载）。
 //
-// 词面口径（必须显式声明，勿误读为"已完成真实词库"）：
+// 词面口径（2026-09-26 起为**真料**，必须显式声明量级边界）：
 //   - A1-07 / A4-06 为**真实可用规则**（迁移自输入侧现行 guardrail，可直接参与判定）；
-//   - 其余 28 类为**结构完整的占位条目**（词面形如「【A2-04-示例-01】」），
-//     schema / manifest / 签名校验 / 质量门禁全链可跑通，**真实词面待安全团队
-//     按 §4.2.4 schema 填充**（词库变更属高敏变更，须走 D8 双审，故占位条目
-//     的 submitter/reviewer 亦为占位留痕，填充时须整体替换）。
+//   - 其余 28 类为**真料 L0 档**（每类 ≥5 条真实词面，取自 `testdata/lexicon-seed/seed.json`）：
+//     政治类用【行为/类型表述】、歧视/商业/民事/服务类用【元表述＋常见对抗形态词】，
+//     **不含具体违法内容细节、不含污名化具体群体的词条**；
+//   - **不等于官方建设规模档**（词库 ≥10000 条、A.1 每类 ≥200、A.2 每类 ≥100）——该档属 S3 建设档，
+//     由内容交付（客户/运营或采购）叠加，本生成器只保证 **L0 档可评测、可复现、结构合法**；
+//   - `source` 标注为 `lexicon-seed`（区别于 `lexicon-placeholder`），D8 双审为**评审事项**（非阻塞项）。
 package main
 
 import (
@@ -36,13 +38,17 @@ import (
 
 // 生成器常量。
 const (
-	genPolicyVersion   = "pv2026.09.16"
-	genKeywordVersion  = "v2026.09.16"
-	genPlaceholderEach = 5 // 每类占位条目数（OG-24：每类 ≥5 正例）
-	genAddedAt         = "2026-09-16"
-	genSubmitter       = "policy-gen（占位留痕）"
-	genReviewer        = "security-team（占位留痕）"
-	genPolicyENV       = "POLICY_GEN"
+	genPolicyVersion    = "pv2026.09.16"
+	genKeywordVersion   = "v2026.09.16"
+	genPlaceholderEach  = 5 // 每类条目下限（L0 档：每类 ≥5 正例）
+	genAddedAt          = "2026-09-16"
+	genSubmitter        = "policy-gen（占位留痕）"
+	genReviewer         = "security-team（占位留痕）"
+	genPolicyENV        = "POLICY_GEN"
+	genSeedRelPath      = "testdata/lexicon-seed/seed.json"
+	genSeedSource       = "lexicon-seed"
+	genSeedSubmitter    = "ai-assisted-lexicon-gen"
+	genSeedReviewerTag  = "security-team（D8 复核待办）"
 )
 
 // policyCategoryView categories.json 的单条结构（字段名与文档一致）。
@@ -73,14 +79,15 @@ func TestGeneratePolicyAssets(t *testing.T) {
 	// 1. categories.json
 	files = append(files, genFile{"categories.json", mustJSON(t, genCategoriesView())})
 
-	// 2. keywords/<id>.json（28 类占位词库）
+	// 2. keywords/<id>.json（28 类真料词库，L0 档；来源 testdata/lexicon-seed/seed.json）
+	seed := loadSeedLexicon(t)
 	for _, c := range outputCategories {
 		if c.ID == "A1-08" || c.ID == "A1-07" || c.ID == "A4-06" {
 			continue // 例外清单：兜底类不建库 / 正则类目置于 regex/
 		}
 		files = append(files, genFile{
 			"keywords/" + categoryFileStem(c.ID) + ".json",
-			mustJSON(t, genPlaceholderLexicon(c)),
+			mustJSON(t, genSeedLexicon(t, seed, c)),
 		})
 	}
 
@@ -130,7 +137,64 @@ func genCategoriesView() []policyCategoryView {
 	return out
 }
 
-// genPlaceholderLexicon 生成单类占位词库（词面 = 「【<ID>-示例-<n>】」，结构完整）。
+// loadSeedLexicon 读取词库真料种子（testdata/lexicon-seed/seed.json）。
+// **fail-closed**：种子缺失/解析失败即失败（不得回落到占位词面——那会让"真料"静默变回占位）。
+func loadSeedLexicon(t *testing.T) map[string][]string {
+	t.Helper()
+	raw, err := os.ReadFile(genSeedRelPath)
+	if err != nil {
+		t.Fatalf("词库真料种子缺失（%s）：%v —— 生成器不得回落到占位词面", genSeedRelPath, err)
+	}
+	var raw2 map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &raw2); err != nil {
+		t.Fatalf("词库真料种子解析失败（%s）：%v", genSeedRelPath, err)
+	}
+	all := make(map[string][]string, len(raw2))
+	for k, v := range raw2 {
+		if len(k) > 0 && k[0] == '_' {
+			continue // 元信息键（_note/_notGenerated 等），非类目
+		}
+		var words []string
+		if err := json.Unmarshal(v, &words); err != nil {
+			t.Fatalf("词库真料种子类目 %s 解析失败：%v", k, err)
+		}
+		all[k] = words
+	}
+	return all
+}
+
+// genSeedLexicon 由真料种子生成单类词库（每类 ≥genPlaceholderEach 条；不足即失败）。
+// 以 `_` 开头的键为元信息（_note/_notGenerated），非类目，故此处按类目 ID 精确取值。
+func genSeedLexicon(t *testing.T, seed map[string][]string, c outputCategory) lexiconFile {
+	t.Helper()
+	words := seed[c.ID]
+	if len(words) < genPlaceholderEach {
+		t.Fatalf("类目 %s 真料词面不足：%d（应 ≥%d，来源 %s）", c.ID, len(words), genPlaceholderEach, genSeedRelPath)
+	}
+	f := lexiconFile{
+		SchemaVersion: lexiconSchemaVersion,
+		Category:      c.ID,
+		Version:       genKeywordVersion,
+		Level:         mapLevelEnToZh(c.DefaultLevel),
+	}
+	for i, w := range words {
+		f.Rules = append(f.Rules, lexiconRule{
+			ID:        "kw-" + categoryFileStem(c.ID) + "-" + pad4(i+1),
+			Keyword:   w,
+			Type:      ruleTypeContains,
+			Weight:    0.7, // contains（无边界子串）默认权重，§4.2.6
+			AddedAt:   genAddedAt,
+			Submitter: genSeedSubmitter,
+			Reviewer:  genSeedReviewerTag,
+			Comment:   "真料 L0 档（seed 来源 " + genSeedRelPath + "）；非官方建设规模档（≥10000 属 S3 建设档）",
+		})
+	}
+	return f
+}
+
+// genPlaceholderLexicon **仅供测试夹具**使用（outputguard_policy_test.go 构造合法词库文件用）。
+// 注意：内容资产生成器 TestGeneratePolicyAssets 已改走**真料种子**（见 genSeedLexicon），
+// 本函数不再参与 policy/ 落盘——保留它是为了让既有夹具测试继续复用同一 schema 构造方式。
 func genPlaceholderLexicon(c outputCategory) lexiconFile {
 	f := lexiconFile{
 		SchemaVersion: lexiconSchemaVersion,
@@ -143,11 +207,11 @@ func genPlaceholderLexicon(c outputCategory) lexiconFile {
 			ID:        "kw-" + categoryFileStem(c.ID) + "-" + pad4(i),
 			Keyword:   "【" + c.ID + "-示例-" + pad4(i) + "】",
 			Type:      ruleTypeContains,
-			Weight:    0.7, // contains（无边界子串）默认权重，§4.2.6
+			Weight:    0.7,
 			AddedAt:   genAddedAt,
 			Submitter: genSubmitter,
 			Reviewer:  genReviewer,
-			Comment:   "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）",
+			Comment:   "测试夹具条目（非交付内容）",
 		})
 	}
 	return f

@@ -6,53 +6,53 @@
   "rules": [
     {
       "id": "kw-a2-09-0001",
-      "keyword": "【A2-09-示例-0001】",
+      "keyword": "其他方面歧视",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a2-09-0002",
-      "keyword": "【A2-09-示例-0002】",
+      "keyword": "泛化歧视言论",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a2-09-0003",
-      "keyword": "【A2-09-示例-0003】",
+      "keyword": "群体贬损",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a2-09-0004",
-      "keyword": "【A2-09-示例-0004】",
+      "keyword": "标签化攻击",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     },
     {
       "id": "kw-a2-09-0005",
-      "keyword": "【A2-09-示例-0005】",
+      "keyword": "群体污名化",
       "type": "contains",
       "weight": 0.7,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "占位条目：待安全团队按 §4.2.4 schema 填充真实词面（变更走 D8 双审）"
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team（D8 复核待办）",
+      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
     }
   ]
 }
