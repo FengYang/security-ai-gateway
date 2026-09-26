@@ -170,6 +170,31 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 3. 轮换：重建 `otpmask-keys` Secret → `kubectl rollout restart`（主密钥 TTL 5min 自动轮换，K_sig 重启生效）；
 4. 复盘并更新威胁模型（`otp-mask-threat-model/` 变更记录）。
 
+### 5.4 策略/词库版本发布与回滚（S1-4 / G21）
+
+**版本库位置**：`<policy-dir>/versions/`（与 policy 根目录同处**一个只读分发单元**）。容器为
+`readOnlyRootFilesystem`，故**发布是离线步骤，运行时不写盘**；tee-infer 只做只读发现 / 显式引用 / 回滚。
+
+| 步骤 | 命令 / 端点 | 说明 |
+| --- | --- | --- |
+| 发布（离线） | `./scripts/policy-publish.ps1 -Version pv… -FromDir <草稿目录> -BenchJson <评测记录.json>` | 复算 manifest 逐个 sha256（不符即中止）；**无评测记录只能归档为 `draft`**（不可被引用）；首次发布加 `-InitBaseline` 自举门禁基线 |
+| 发布物校验 | `go test -mod=mod ./gateway/tee-infer-service/ -run TestPolicyVersionArtifactsVerify -v` | 逐版本复算哈希 ＋ bench 硬门禁（脚本与 CI 共用） |
+| 发现 | `GET /config/policy/versions` | 列可用版本、状态、bench 摘要与当前引用（管理令牌） |
+| 显式引用 | `POST /config/policy/activate {"version":"pv…"}` | 须过 bench 硬门禁；失败 **409** 且**保留旧版继续服务**（不回内部错误全文，只回原因枚举） |
+| 回滚 | `POST /config/policy/rollback`（缺省＝上一 active；`{"version":"pv…"}`＝回任意历史版本） | 上一 active 可能是"**未引用态（根目录）**"，此时回滚 = 回到镜像默认策略 |
+| 启动即引用 | `-output-guard-policy-version pv…` | 启动时解析；版本库不可用 / 版本非法 / 未过门禁 → **拒绝启动**（fail-closed） |
+| 持久化 | `-output-guard-config <file>` | 引用状态跨重启保持（与 mode 覆盖**同文件、读改写合并**，互不覆盖）；未配置则仅进程内生效 |
+
+**bench 硬门禁口径**：`rule_detect`／`semantic_detect` **不低于**已登记基线、`fp` **不高于**基线，且语料指纹须与基线一致
+（语料不同即不可比 → 拒绝）。基线由首次发布自举，**不预置**（未登记基线时任何发布都会被拒绝，属预期）。
+
+**指标**：`otpmask_output_guard_policy_version{version}`（当前生效版本）、
+`otpmask_output_guard_policy_activate_total{action,result,reason}`（引用/回滚结果）、
+`otpmask_output_guard_policy_rollback_total{reason}`（未生效即保留旧版的回退计数）。
+
+**应急**：任一回滚失败都不会改变当前生效版本；彻底回到镜像默认策略 = `POST /config/policy/rollback`（缺省）。
+**未配置版本库**（无 `versions/index.json`）时上述能力全部不启用，行为与改造前**逐字节一致**。
+
 ## 6. 已知限制（MVP → 生产迁移清单）
 
 | 项 | 现状 | 生产要求 |
@@ -181,7 +206,8 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 | Guardrail | 确定性规则 | 语义分类器（S3 时 TEE 内轻量模型；S2 时可部署于客户可信域同域） |
 | 输出侧 L2 与明文侧审核服务**实例分离** | 未强制 | **两实例必须不同主机 / 不同 Service**；`-output-guard-l2-url` **不得**等于明文侧审核服务地址（地址白名单只能校验"落在可信域"，校验不了"是否同一实例"，须部署层兜住）；部署清单逐项打勾 |
 | **副本下限（接入审核侧车时）** | 现清单 `replicas: 1`、HPA `minReplicas: 1`（单节点现场形态，见清单注释） | 接入审核侧车后建议 `spec.replicas` 与 HPA `minReplicas` **≥2** 并叠加滚动冗余：**单副本场景下侧车不可用即该实例不可服务** |
-| **输入侧审核侧车接线** | 清单**尚未声明** `-guard-classifier-url`，亦无侧车容器/资源声明 | 侧车落地时须一并：显式 `-guard-classifier-timeout`（**CPU 形态 ≥30–60s**，勿沿用 2s 默认）、侧车 `GET /healthz`（免鉴权且覆盖"后端就绪"）、requests/limits、以 `startupProbe`/`initContainer` 保证"侧车先行"，并显式声明 `maxSurge`/`maxUnavailable`/`progressDeadlineSeconds` |
+| **输入侧审核侧车接线** | 清单**尚未声明** `-guard-classifier-url`，亦无侧车容器/资源声明 | 侧车落地时须一并：显式 `-guard-classifier-timeout`（**CPU 形态 ≥30–60s**，勿沿用 2s 默认）、侧车 `GET /healthz`（免鉴权且覆盖"后端就绪"）、requests/limits（**以 spike 实测为准**，勿沿用 tee-infer 现有规格）、以 **`startupProbe` ＋侧车 `readinessProbe`** 保证"侧车先行"（**不得**把常驻侧车放入 `initContainer`——`initContainer` 须运行至完成，仅可作"就绪门"或采用 K8s 原生 sidecar），并显式声明 `maxSurge`/`maxUnavailable`/`progressDeadlineSeconds` |
+| **审核后端形态（D-LLM-7 已裁定，2026-09-26）** | 现清单未接线；形态**技术侧已签** ＝ **同机密 VM 内独立进程侧车**（K8s 形态＝**同 Pod 多容器**）；Q2／Q3／Q4／Q11 待安全/证明补签 | 接线须覆盖**全部 6 处发布产物**（`deploy/k8s`／`deploy/helm`／`deploy/tee`（base＋`overlays/nvidia-cc`、`gn8v-tee`）／`deploy/k8s/canary`／`scripts/deploy-tee-infer-linux.sh`（systemd 单机）／`higress-standalone` 接入层），其中 **canary 须与稳定版同构**（现 canary 无 `-output-guard*` 且探针指 `/attest`）；**每 Pod 独立侧车**（**禁止**为侧车建独立 Deployment/Service/Endpoints，反面范式见 `deploy/tee/base/vllm-adapter.yaml`）；补**侧车 egress 约束**（A2 只管 tee-infer→侧车方向）；镜像 `tag@sha256`；**同 Pod 第二容器指标采集路径**（现单 `prometheus.io/port` 注解采不到）。**依据**：本体 §17 与《[D-LLM-7 决策材料](GA-大模型内容合规规划-D-LLM-7决策材料-审核后端形态与飞地边界.md)》 |
 | **侧车摘流耗时与容量** | 未实测 | 以 K3S `sidecar kill` 实测"侧车故障→实例摘流"耗时并回填本节；按 N−1 规则（`(N−1)×C ≥ λ_peak`）给出副本下限与容量预算 |
 | 监控存储 | PVC（Prometheus 10Gi + Grafana 5Gi，kind 需 local-path provisioner） | 按留存周期扩容 + 归档 |
 
