@@ -219,6 +219,48 @@ type outputGuardConfig struct {
 	MaskRegexps   []*regexp.Regexp          // OG-18：PII 正则切片（与 pii_patterns.json 顺序一致；为空则不改写）
 }
 
+// ---- S1-6（G18）：输出处理深度档位（透传／仅拦截／拦截+改写）----
+//
+// 设计口径（本体 §6.7「配置档位」）：档位是 **Mode（P-MODE）＋ MaskEnabled（P-PII-ACTION 实际开关）
+// 的派生视图**，**不新增第四份运行状态**——避免双份状态不一致（例如 mode 与 depth 各自记录而互相矛盾）。
+//
+// 为什么档位参数不"隐式开拦截/改写"：D-LLM-9 已决——"仅拦截"→登记、"拦截＋改写"→**须属地书面确认**，
+// 且 enforcing 仅启动参数可开（D4'）。故 `-output-guard-depth` 只做**声明＋一致性校验**：
+// 显式声明值必须等于由 mode/mask 派生的实际值，否则启动失败（fail-closed，同既有参数校验纪律）。
+const (
+	outputDepthPassthrough  = "passthrough"   // 透传（不检测不处理）⟺ mode=off
+	outputDepthBlockOnly    = "block-only"    // 仅安全拦截（不改写）⟺ mode∈{shadow,enforcing} 且 mask=false
+	outputDepthBlockRewrite = "block+rewrite" // 拦截＋改写（PII mask 实打）⟺ mode=enforcing 且 mask=true
+)
+
+// deriveOutputDepth 由生效配置派生当前档位（唯一事实源＝mode＋maskEnabled）。
+func deriveOutputDepth(mode string, maskEnabled bool) string {
+	if mode == outputGuardOff {
+		return outputDepthPassthrough
+	}
+	if mode == outputGuardEnforcing && maskEnabled {
+		return outputDepthBlockRewrite
+	}
+	return outputDepthBlockOnly
+}
+
+// validateOutputDepth 校验显式声明的档位：""（未配置）＝不做声明、按派生值；非法取值或与派生值不一致 → 报错。
+func validateOutputDepth(requested, actual string) error {
+	switch requested {
+	case "":
+		return nil
+	case outputDepthPassthrough, outputDepthBlockOnly, outputDepthBlockRewrite:
+	default:
+		return fmt.Errorf("output-guard-depth=%q 非法（取值：passthrough|block-only|block+rewrite；缺省＝按 mode/mask 派生）", requested)
+	}
+	if requested != actual {
+		return fmt.Errorf("output-guard-depth=%q 与生效配置的派生档位 %q 不一致："+
+			"档位参数不隐式开启拦截/改写（enforcing 仅启动参数可开，改写须属地书面确认），"+
+			"请显式设置 -output-guard 与 -output-guard-mask-enable 使其一致", requested, actual)
+	}
+	return nil
+}
+
 // ---- OG-8：运行时配置请求 / 持久化记录（与 guardrailConfigRequest 同构）----
 
 // outputGuardConfigRequest POST /config/output-guard 请求体（OG-8 运行时覆盖）。

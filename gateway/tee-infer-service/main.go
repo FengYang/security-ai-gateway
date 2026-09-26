@@ -1799,6 +1799,8 @@ type outputGuardSnapshot struct {
 	L1Rules int `json:"l1_rules_total"`
 	// MaskEnabled：PII mask 改写开关（OG-18；默认 false = block-only 深度，mask 类目降 flag）
 	MaskEnabled bool `json:"mask_enabled"`
+	// OutputDepth：输出处理深度档位（S1-6/G18；**派生视图**＝由 mode＋mask 计算，非独立运行状态）
+	OutputDepth string `json:"output_depth"`
 	// S1-4（G21）：策略版本库只读视图（无 versions/index.json 时 VersionsEnabled=false，行为不变）
 	VersionsEnabled   bool     `json:"policy_versions_enabled"`
 	ReferencedVersion string   `json:"policy_referenced_version,omitempty"` // 显式引用版本（空=根目录 manifest）
@@ -1890,6 +1892,7 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		ModeSource:    s.outputGuardModeSource(),
 		PolicyVersion: s.policyVersion(),
 		MaskEnabled:   s.outputGuardMaskEnabled,
+		OutputDepth:   deriveOutputDepth(ogMode, s.outputGuardMaskEnabled),
 		Params: outputGuardParamsSnapshot{
 			Unit:              s.outputGuardParams.Unit,
 			MaxUnitRunes:      s.outputGuardParams.MaxUnitRunes,
@@ -2218,11 +2221,12 @@ func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Reque
 			Action:    "output_guard_mode_change",
 			Result:    "applied",
 			OGMode:    req.Mode,
-			// 证据锚定：mode 变更摘要（omitempty 字段不进 hash，不影响链完整性）
-			TransformedHash: "output_guard_mode=" + req.Mode,
+			// 证据锚定：mode 变更摘要＋**派生的处理深度档位**（omitempty 字段不进 hash，不影响链完整性）。
+			// 档位入证据使"变更单记录对客户备案路径影响判定"可核验（D-LLM-9；本体 §6.7 配置档位）。
+			TransformedHash: "output_guard_mode=" + req.Mode + " depth=" + deriveOutputDepth(req.Mode, s.outputGuardMaskEnabled),
 		})
 	}
-	log.Printf("[output-guard] 运行时模式变更: %s → %s (source=runtime)", oldMode, req.Mode)
+	log.Printf("[output-guard] 运行时模式变更: %s → %s (source=runtime, depth=%s)", oldMode, req.Mode, deriveOutputDepth(req.Mode, s.outputGuardMaskEnabled))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"mode":   req.Mode,
@@ -3060,6 +3064,7 @@ func main() {
 	outputGuardL2Timeout := flag.Duration("output-guard-l2-timeout", 2*time.Second, "输出侧 L2 语义分类器侧车调用超时（在请求路径上，须有限且小；不可用时该句按 P-DEGRADE fail-closed，不回退 L1）")
 	outputGuardL2AllowedCIDRs := flag.String("output-guard-l2-allowed-cidrs", "", "P-BACKEND-TARGET 可信域 CIDR 白名单（逗号分隔；默认空＝仅 localhost）：L2 侧车地址须落在回环或白名单内，否则拒绝启动（2026-09-18 裁定 A2，防被审明文外发）")
 	outputGuardMaskEnable := flag.Bool("output-guard-mask-enable", false, "OG-18：PII mask 改写开关（默认 false = block-only 深度，A4-06 降为 flag；true = 实打马赛克后下发）；需 -output-guard=shadow/enforcing 时生效")
+	outputGuardDepth := flag.String("output-guard-depth", "", "S1-6（G18）：输出处理深度档位 passthrough（透传）| block-only（仅拦截，缺省档）| block+rewrite（拦截＋改写）；缺省＝按 mode/mask 派生。**只做声明＋一致性校验**，不隐式开启拦截/改写（enforcing 仅启动参数可开；改写须属地书面确认 D-LLM-9）")
 	// GA-输出侧内容审查（OG-13）：级联参数（跨 §5.3–5.5 多组）。P-TIMEOUT 复用上面的 -output-guard-l2-timeout（单一事实源）。
 	outputGuardConcurrency := flag.Int("output-guard-concurrency", 0, "P-CONCURRENCY：单请求在飞 L2 句数上限（OG-13 级联）；0＝未配置，按 CPU 核数派生；超限不排队，直接按 P-DEGRADE")
 	outputGuardMaxSlots := flag.Int("output-guard-max-slots", 0, "P-MAX-SLOTS：单请求判定句槽位上限（OG-13 级联，防长输出撑爆内存）；0＝未配置，按 P-MAX-BUFFER-BYTES/平均句长派生")
@@ -3306,6 +3311,11 @@ func main() {
 	}
 	srv.outputGuardMode = *outputGuardMode
 	srv.outputGuardMaskEnabled = *outputGuardMaskEnable
+	// S1-6（G18）：输出处理深度档位（透传／仅拦截／拦截+改写）——档位是 mode＋mask 的**派生视图**，
+	// 显式声明值必须与生效配置一致（不得由档位参数隐式开启拦截/改写；D-LLM-9：改写须属地书面确认）。
+	if err := validateOutputDepth(*outputGuardDepth, deriveOutputDepth(srv.outputGuardMode, srv.outputGuardMaskEnabled)); err != nil {
+		log.Fatalf("[output-guard] %v", err)
+	}
 	srv.outputGuardCfgPath = *outputGuardCfg
 	// OG-8：恢复运行时 mode 覆盖（高敏变更复核写入的 mode，跨重启保持）。
 	// 注意：放在模式校验之后——恢复的 mode 会另行独立校验，非法则沿用启动参数（不阻断启动）。
