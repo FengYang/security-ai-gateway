@@ -177,7 +177,7 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 | TEE 形态 | 模拟飞地（进程隔离） | **按场景**：S1 明文路径无 TEE 需求；S2 对接第三方密态模型时 TEE 在厂商侧、我方无须 TEE（tee-infer 落客户可信域）；S3 自建密态推理需 TDX/SGX + 节点亲和 |
 | 认证 | `X-Tenant-ID` 客户端自声明 | 网关鉴权签发（JWT） |
 | 密钥 | Secret 演示值 | Vault/KMS + TEE 签名注入 |
-| 审计存储 | 内存哈希链 / WORM 文件（`-audit-file` + `-audit-anchor`，JSON Lines 只追加 + 链尾锚定，篡改检测 fail-closed） | 对象存储/WORM 归档 + 定期锚定公证 |
+| 审计存储 | 内存哈希链 / WORM 文件（`-audit-file` + `-audit-anchor`，JSON Lines 只追加 + 链尾锚定，篡改检测 fail-closed） | 对象存储/WORM 归档 + 定期锚定公证；**留存期以 `-audit-retention-days` 声明**（缺省 **365** 天、法定硬底 **180** 天、`0`=不声明；非法值拒绝启动），声明值见启动日志 / `GET /config` 的 `audit_retention_days` / 指标 `otpmask_audit_retention_days`——**删除由存储层生命周期策略按声明值执行**（服务不删除审计数据，以保哈希链可从创世复算） |
 | Guardrail | 确定性规则 | 语义分类器（S3 时 TEE 内轻量模型；S2 时可部署于客户可信域同域） |
 | 输出侧 L2 与明文侧审核服务**实例分离** | 未强制 | **两实例必须不同主机 / 不同 Service**；`-output-guard-l2-url` **不得**等于明文侧审核服务地址（地址白名单只能校验"落在可信域"，校验不了"是否同一实例"，须部署层兜住）；部署清单逐项打勾 |
 | **副本下限（接入审核侧车时）** | 现清单 `replicas: 1`、HPA `minReplicas: 1`（单节点现场形态，见清单注释） | 接入审核侧车后建议 `spec.replicas` 与 HPA `minReplicas` **≥2** 并叠加滚动冗余：**单副本场景下侧车不可用即该实例不可服务** |
