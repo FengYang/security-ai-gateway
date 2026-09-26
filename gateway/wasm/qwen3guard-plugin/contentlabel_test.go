@@ -7,6 +7,7 @@ package main
 //   - parseConfig 文案校验 fail-closed（仅 enabled 时校验；snake/camel 双键）。
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -135,5 +136,70 @@ func TestParseConfigContentLabel(t *testing.T) {
 	c = pluginConfig{}
 	if err := parseConfig(gjson.Parse(base+`,"content_label_text":"任意文案"}`), &c, nil); err != nil {
 		t.Fatalf("off 态文案不应校验：%v", err)
+	}
+}
+
+// TestLabelJSONTextAtPath 非流式整包标识注入（S4-1 补口）：head＋tail 双锚点改写、幂等、
+// 路径缺失/空文本/空标签一律原样返回（调用方不得替换响应体）。
+func TestLabelJSONTextAtPath(t *testing.T) {
+	const path = "choices.0.message.content"
+	label := defaultContentLabelText
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"正文内容"}}]}`)
+
+	out, ok := labelJSONTextAtPath(body, path, label)
+	if !ok {
+		t.Fatalf("应发生改写")
+	}
+	want := label + "\n" + "正文内容" + "\n" + label
+	if got := gjson.GetBytes(out, path).String(); got != want {
+		t.Fatalf("双锚点改写不符：want %q got %q", want, got)
+	}
+	if role := gjson.GetBytes(out, "choices.0.message.role").String(); role != "assistant" {
+		t.Fatalf("相邻字段被污染：role=%q", role)
+	}
+
+	// 幂等：已注入的 body 再注入 → 不改写、原样返回
+	again, ok2 := labelJSONTextAtPath(out, path, label)
+	if ok2 || string(again) != string(out) {
+		t.Fatalf("应幂等（不重复注入）")
+	}
+
+	// 非改写场景 → 原样返回 false
+	for _, tc := range []struct {
+		name string
+		b    []byte
+		p    string
+		l    string
+	}{
+		{"路径不存在", body, "choices.0.message.missing", label},
+		{"空文本", []byte(`{"choices":[{"message":{"content":""}}]}`), path, label},
+		{"空标签", body, path, ""},
+	} {
+		o, okk := labelJSONTextAtPath(tc.b, tc.p, tc.l)
+		if okk || string(o) != string(tc.b) {
+			t.Fatalf("%s：应原样返回且 ok=false", tc.name)
+		}
+	}
+}
+
+// TestSourceInvariant_NonStreamLabelInject S4-1 源码不变量锁：非流式放行路径必须同时存在
+// "按路径注入"与"替换响应体"，且不得新增 ResumeHttpResponse 调用点
+// （既有 failclosed 测试已锁 `ResumeHttpResponse()` 出现 2 次；注入复用原调用点）。
+func TestSourceInvariant_NonStreamLabelInject(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("读取 main.go 失败：%v", err)
+	}
+	s := string(src)
+	for _, want := range []string{
+		"labelJSONTextAtPath(body, c.responseContentJSONPath, c.contentLabelText)",
+		"proxywasm.ReplaceHttpResponseBody(labelled)",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("main.go 缺少非流式标识注入关键行：%s", want)
+		}
+	}
+	if n := strings.Count(s, "ResumeHttpResponse()"); n != 2 {
+		t.Fatalf("ResumeHttpResponse() 调用点应为 2（不得新增），实际 %d", n)
 	}
 }

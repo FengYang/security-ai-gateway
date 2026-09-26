@@ -197,13 +197,27 @@ func onHttpResponseBody(ctx wrapper.HttpContext, c pluginConfig, body []byte, lo
 				return
 			}
 			if shouldBlockRisk(result.Safety, c.riskLevelBar) {
+				denyMessage := c.denyMessage
+				if c.contentLabelOnDeny {
+					// 与流式拒答首帧同口径：on_deny 开启时拒答正文带标识（默认关 → 零行为变化）。
+					denyMessage = c.contentLabelText + "\n" + denyMessage
+					metricContentLabelInjected.incr()
+				}
 				proxywasm.SendHttpResponse(
 					uint32(c.denyCode),
 					[][2]string{{"content-type", "application/json"}},
-					buildChatDenyBody(c.denyMessage),
+					buildChatDenyBody(denyMessage),
 					-1,
 				)
 				return
+			}
+			// S4-1 补口：非流式整包放行路径的标识注入（head＋tail 双锚点）。
+			// 仅当 content_label_enabled 且能定位正文时改写；否则原样放行（行为不变）。
+			if c.contentLabelEnabled {
+				if labelled, ok := labelJSONTextAtPath(body, c.responseContentJSONPath, c.contentLabelText); ok {
+					proxywasm.ReplaceHttpResponseBody(labelled)
+					metricContentLabelInjected.incr()
+				}
 			}
 			proxywasm.ResumeHttpResponse()
 		}, c.timeoutMS); err != nil {

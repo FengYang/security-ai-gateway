@@ -49,8 +49,14 @@ const (
 type contentLabelConfig struct {
 	Enabled bool   // 开关（off 时其余字段不参与发射，但仍参与 repeat 范围校验）
 	Text    string // 标识文案（启用时必须同时含"人工智能"与"生成"）
-	Repeat  int    // 每 N 个内容帧插一次 repeat 标识（0=仅首尾）
-	Std     string // 标准号（默认 GB45438-2025；chunkLabelMeta.Std 与审计同源）
+	// Repeat 每 N 个内容帧插一次 repeat 标识（0=仅首尾）。
+	//
+	// ⚠️ 单位＝内容帧，非字符数（S4-3 核对结论，2026-09-26）：帧长可变（长 delta 一帧可达数百字符），
+	// 故**帧间隔不能等价保证"按字符分页/卡片的每页均含标识"**；当前按 head＋tail 双锚点作**风险缓释**表述
+	// （与法务口径一致："不丢失"未见标准原文）。若客户给出**最小分页字符数**，须据此换算 Repeat
+	// （或改字符级间隔）后再作更强表述。
+	Repeat int
+	Std    string // 标准号（默认 GB45438-2025；chunkLabelMeta.Std 与审计同源）
 	// 标识溯源要素：生成合成服务提供者要素（客户主体编码/名称；空 = 不输出该字段）。
 	// **硬约束**：该字段属"溯源要素"，不得据此宣称"已满足 GB 45438-2025 6.1 文件元数据隐式标识"。
 	Producer string
