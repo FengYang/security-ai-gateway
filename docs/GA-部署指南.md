@@ -30,14 +30,14 @@
 | --- | --- |
 | 南向载荷 | text（明文 messages 经 K_enc 信封），不再走 embedding-service 向量化 |
 | tee-infer 引擎 | `-engine-url http://vllm:8000`（vLLM OpenAI 兼容流式）；`-cmaas-url http://127.0.0.1:8080`（C-MaaS openai-proxy，`-cmaas-api-key`/`-cmaas-model` 可选） |
-| tee-infer 治理（P1/P2a） | `-token-quota <n>`（每租户 token 配额，0=不限）；`-pii-mode mask`（PII 脱敏替换，默认 block 拦截）；`-system-prompt <text>`（提示词装饰）；配额经 `POST /usage/quota` 动态调整 |
-| 网关底座（P0a，dev/回退形态） | Envoy 原生：CORS + IP 白名单（RBAC，默认 `0.0.0.0/0` 放行，生产收紧）+ QPS 限流（local_ratelimit，零外部依赖） |
-| 网关底座（P0b，生产形态，D-0 修正为 B） | Higress 控制面：`deploy/higress/` 清单（otpmask WasmPlugin + key-auth/IP Restriction/Rate Limit/CORS，**failStrategy 一律 FAIL_CLOSED** + Ingress 路由），插件链序：认证/安全 → otpmask 段① 加密 → 路由；迁移见 `deploy/higress/README.md` |
+| tee-infer 治理 | `-token-quota <n>`（每租户 token 配额，0=不限）；`-pii-mode mask`（PII 脱敏替换，默认 block 拦截）；`-system-prompt <text>`（提示词装饰）；配额经 `POST /usage/quota` 动态调整 |
+| 网关底座（开发 / 回退形态） | Envoy 原生：CORS + IP 白名单（RBAC，默认 `0.0.0.0/0` 放行，生产收紧）+ QPS 限流（local_ratelimit，零外部依赖） |
+| 网关底座（生产形态） | Higress 控制面：`deploy/higress/` 清单（otpmask WasmPlugin + key-auth/IP Restriction/Rate Limit/CORS，**failStrategy 一律 FAIL_CLOSED** + Ingress 路由），插件链序：认证/安全 → otpmask 段① 加密 → 路由；迁移见 `deploy/higress/README.md` |
 | 证明验证 | `gateway/attest-verify` sidecar（localhost `/verify`，度量基线 allowlist）；真机 TDX 时插件经 localhost 调用 |
 | 客户端请求 | `{"text":"...","engine_type":"tee_gpu|cmaas","stream":true}`；text 载荷仅限 quote 会话（token 模式拒绝） |
 | 路由 | `deploy/` 内 `route-config.json` 声明模型→引擎映射（cmaas-* 仅 cmaas） |
 
-> 路线 2（vectors 载荷）代码全保留（`masked_vector`），部署方式见 `docs/路线2研究跟踪.md`。
+> 路线 2（vectors 载荷）代码全保留（`masked_vector`），部署方式见 §1 路线说明。
 
 ## 1.1 Linux 生产环境说明
 
@@ -102,7 +102,7 @@ kubectl get hpa,pdb -n otpmask
 | `security-ai-gateway/gateway-admin-service:latest` | `docker build -f gateway/gateway-admin-service/Dockerfile .` | 管理门户业务服务 + 内部凭据 broker（含 ca-certificates；`USER 65532` 与清单 `runAsNonRoot` 对齐） |
 | `security-ai-gateway/gateway-core:latest` | `docker build -f gateway/gateway-core/Dockerfile .` | 控制面（处方/路由表/限流预算表签发 + 策略变更审计）；需 `otpmask-keys` 的 `core-sig-key`/`core-auth-token`，且 `core-sig-key` 必须与插件 `route_verify_key` 一致 |
 
-> P0b-1 本地轻集群实测补齐：`gateway-admin-service` 此前**无 Dockerfile**（清单已引用该镜像但无法构建）；
+> 本地轻集群实测补齐：`gateway-admin-service` 此前**无 Dockerfile**（清单已引用该镜像但无法构建）；
 > 同时 tee-infer / embedding 基础镜像补 `USER 65532`（清单置 `runAsNonRoot`，镜像默认 root 会被 kubelet 拒绝）。
 
 > wasm 插件 7.1MB 超 ConfigMap 1MiB 限制，必须随镜像分发（`Dockerfile.k8s` 已内置）。
@@ -147,6 +147,8 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 | `GET /metrics` | embedding 探针 + Prometheus 抓取 |
 | `GET /audit/verify` | 审计链完整性（建议定时巡检，告警阈值：ok=false） |
 | `GET /usage` | 租户用量（对接计费） |
+| `GET /healthz`（**readiness**） | 证明状态 ＋ **输入侧审核侧车健康**：侧车不健康 → **503 摘流**；状态由 `otpmask_guard_sidecar_healthy`（0/1）暴露 |
+| `GET /healthz/live`（**liveness**） | **仅进程存活**，刻意**不联动**审核侧车；**清单 livenessProbe 必须指向此路径**（指 `/healthz` 会因侧车故障重启容器 → 重启风暴 + `-seal-file` 为空时证明会话失效） |
 
 ### 5.2 故障排查
 
@@ -159,6 +161,7 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 | guardrail 403 | 内容安全拦截，`/audit` 中 `result=guardrail_<category>` 可查原因 |
 | HPA 不扩缩 | 检查 metrics-server、Deployment 是否设置 resources.requests.cpu |
 | 审计链断裂 | `verify` 返回 false → 事件被篡改或持久化损坏，进入事件响应流程 |
+| **输入侧审核侧车不可用**（403 增多、body 含 `classifier_unavailable`） | runbook：① 看 `otpmask_guard_sidecar_healthy` 是否 0；② 按归因定位 `increase(otpmask_guard_failclosed_total{backend="http-sidecar"}[5m]) by (reason)`（`unreachable`／`timeout`／`http_status`／`bad_response`）；③ 日志 `[guardrail] 侧车健康探活失败／恢复`；④ **先恢复侧车**（探活恢复后自动回挂、无需人工），再抽样核验 `/healthz` 与一次请求 200。⚠️ 摘流生效前的窗口内，请求返回 **403**（非 503），排查时需结合 body 类目与上述指标区分 |
 
 ### 5.3 安全事件响应（摘要）
 
@@ -171,12 +174,15 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 
 | 项 | 现状 | 生产要求 |
 | --- | --- | --- |
-| TEE 形态 | 模拟飞地（进程隔离） | **按场景**：S1 明文路径无 TEE 需求；S2 对接第三方密态模型时 TEE 在厂商侧、我方无须 TEE（tee-infer 落客户可信域）；S3 自建密态推理需 TDX/SGX + 节点亲和。详见《GA-产品场景与可信区域矩阵.md》 |
+| TEE 形态 | 模拟飞地（进程隔离） | **按场景**：S1 明文路径无 TEE 需求；S2 对接第三方密态模型时 TEE 在厂商侧、我方无须 TEE（tee-infer 落客户可信域）；S3 自建密态推理需 TDX/SGX + 节点亲和 |
 | 认证 | `X-Tenant-ID` 客户端自声明 | 网关鉴权签发（JWT） |
 | 密钥 | Secret 演示值 | Vault/KMS + TEE 签名注入 |
 | 审计存储 | 内存哈希链 / WORM 文件（`-audit-file` + `-audit-anchor`，JSON Lines 只追加 + 链尾锚定，篡改检测 fail-closed） | 对象存储/WORM 归档 + 定期锚定公证 |
 | Guardrail | 确定性规则 | 语义分类器（S3 时 TEE 内轻量模型；S2 时可部署于客户可信域同域） |
-| 输出侧 L2 与明文侧审核服务**实例分离** | 未强制 | **两实例必须不同主机 / 不同 Service**；`-output-guard-l2-url` **不得**等于明文侧审核服务地址（A2 白名单校验不了"同实例"，须部署层兜住）；部署清单逐项打勾。详见《GA-输出侧内容审查-技术实现方案.md》§3.5.5 |
-| 监控存储 | PVC（C-9：Prometheus 10Gi + Grafana 5Gi，kind 需 local-path provisioner） | 按留存周期扩容 + 归档 |
+| 输出侧 L2 与明文侧审核服务**实例分离** | 未强制 | **两实例必须不同主机 / 不同 Service**；`-output-guard-l2-url` **不得**等于明文侧审核服务地址（地址白名单只能校验"落在可信域"，校验不了"是否同一实例"，须部署层兜住）；部署清单逐项打勾 |
+| **副本下限（接入审核侧车时）** | 现清单 `replicas: 1`、HPA `minReplicas: 1`（单节点现场形态，见清单注释） | 接入审核侧车后建议 `spec.replicas` 与 HPA `minReplicas` **≥2** 并叠加滚动冗余：**单副本场景下侧车不可用即该实例不可服务** |
+| **输入侧审核侧车接线** | 清单**尚未声明** `-guard-classifier-url`，亦无侧车容器/资源声明 | 侧车落地时须一并：显式 `-guard-classifier-timeout`（**CPU 形态 ≥30–60s**，勿沿用 2s 默认）、侧车 `GET /healthz`（免鉴权且覆盖"后端就绪"）、requests/limits、以 `startupProbe`/`initContainer` 保证"侧车先行"，并显式声明 `maxSurge`/`maxUnavailable`/`progressDeadlineSeconds` |
+| **侧车摘流耗时与容量** | 未实测 | 以 K3S `sidecar kill` 实测"侧车故障→实例摘流"耗时并回填本节；按 N−1 规则（`(N−1)×C ≥ λ_peak`）给出副本下限与容量预算 |
+| 监控存储 | PVC（Prometheus 10Gi + Grafana 5Gi，kind 需 local-path provisioner） | 按留存周期扩容 + 归档 |
 
-> **场景与 TEE 需求（2026-09-18 补）**：本表的生产要求列按**具体场景**裁剪，不存在「所有场景都要 TEE」的统一要求。场景 × 可信区域 × TEE 需求的唯一事实源见《GA-产品场景与可信区域矩阵.md》。
+> **场景与 TEE 需求（2026-09-18 补）**：本表的生产要求列按**具体场景**裁剪，不存在「所有场景都要 TEE」的统一要求。
