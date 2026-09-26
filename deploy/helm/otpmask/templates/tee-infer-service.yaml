@@ -64,9 +64,11 @@ spec:
             port: http
           initialDelaySeconds: 3
           periodSeconds: 5
+        # liveness 刻意不联动审核侧车：侧车故障应由 readiness 摘流，
+        # 而非重启本容器——重启不修复侧车，且 -seal-file 为空时会使证明会话失效（放大为重启风暴）。
         livenessProbe:
           httpGet:
-            path: /healthz
+            path: /healthz/live
             port: http
           initialDelaySeconds: 5
           periodSeconds: 10
