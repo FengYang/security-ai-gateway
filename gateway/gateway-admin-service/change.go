@@ -11,12 +11,16 @@
 //     执行 = tee-infer POST /config/output-guard（OG-8 D8 扩列）；
 //   - output_guard_policy_reload：输出侧策略/词库热加载（重读策略目录，失败由 tee 侧保留旧版），
 //     执行 = tee-infer POST /config/policy/reload（OG-8/OG-9 D8 扩列）；
+//   - output_guard_policy_activate：**词库/策略版本发布**（显式引用某一已发布版本；tee 侧须过
+//     bench 硬门禁，不通过即执行失败），执行 = tee-infer POST /config/policy/activate（S3-2 D8 扩列）；
 //   - credential_rotate：厂商换 Key（**两阶段**：提交时新 Key 落 0600 暂存文件，
 //     复核通过才提升为正式凭据；暂存内容绝不入变更单/日志/审计链，变更单只记指纹）；
 //   - credential_delete：删除厂商凭据。
 //
-// 清单内其余项（TEE sig/token 轮换、otpmask 密态配置）本期登记为边界外（无对应执行端点），
-// 提交时拒绝并明示，避免"建了单却执行不了"的假闭环。
+// 清单内其余项（TEE sig/token 轮换、otpmask 密态配置、**策略 A/B/C 切换、类目启停**）本期登记为
+// 边界外（**无对应执行端点**），提交时拒绝并明示，避免"建了单却执行不了"的假闭环。
+// S3-2 边界（如实）：词库/策略**版本发布**已接入（activate）；**策略 A/B/C 切换**与**类目启停**
+// 仍缺 tee 侧运行时端点 ⇒ 属 S3-2 的**剩余工程缺口**（登记，不伪造端点）。
 //
 // 安全约束：
 //   - **submitter ≠ reviewer 强制**（服务端校验，前端置灰仅为体验层）。Go 侧不掌握账号表
@@ -50,8 +54,10 @@ const (
 	changeActionGuardrailPIIMode  = "guardrail_pii_mode"
 	changeActionOutputGuardMode   = "output_guard_mode"
 	changeActionOutputGuardReload = "output_guard_policy_reload"
-	changeActionCredentialRotate  = "credential_rotate"
-	changeActionCredentialDelete  = "credential_delete"
+	// S3-2：词库/策略**版本发布**（显式引用某一已发布版本；tee 侧 /config/policy/activate 须过 bench 硬门禁）。
+	changeActionOutputGuardPolicyActivate = "output_guard_policy_activate"
+	changeActionCredentialRotate          = "credential_rotate"
+	changeActionCredentialDelete          = "credential_delete"
 )
 
 // 变更单状态。
@@ -179,6 +185,7 @@ func validChangeAction(a string) bool {
 	case changeActionGuardrailPIIMode,
 		changeActionOutputGuardMode,
 		changeActionOutputGuardReload,
+		changeActionOutputGuardPolicyActivate,
 		changeActionCredentialRotate,
 		changeActionCredentialDelete:
 		return true
@@ -231,7 +238,7 @@ func (s *changeStore) submit(w http.ResponseWriter, r *http.Request) {
 	}
 	if !validChangeAction(req.Action) {
 		writeError(w, http.StatusBadRequest,
-			"不支持的高敏动作（本期可执行：guardrail_pii_mode / output_guard_mode / output_guard_policy_reload / credential_rotate / credential_delete）")
+			"不支持的高敏动作（本期可执行：guardrail_pii_mode / output_guard_mode / output_guard_policy_reload / output_guard_policy_activate / credential_rotate / credential_delete）")
 		return
 	}
 	sub := operationSub(r)
@@ -266,6 +273,22 @@ func (s *changeStore) submit(w http.ResponseWriter, r *http.Request) {
 		c.Target = "output-guard"
 	case changeActionOutputGuardReload:
 		// 无请求参数：执行 = tee 重读策略目录；失败（409）由 tee 侧保留上一有效版本。
+		c.Target = "output-guard-policy"
+	case changeActionOutputGuardPolicyActivate:
+		// S3-2：词库/策略版本发布 = **显式引用**某一已发布版本（tee 侧须过 bench 硬门禁）。
+		// 提交期只校验形态（非空、无空白/路径分隔符），版本是否存在与是否允许引用由 tee 侧裁决。
+		if c.Payload == nil {
+			c.Payload = map[string]string{}
+		}
+		version := c.Payload["version"]
+		if version == "" {
+			writeError(w, http.StatusBadRequest, "output_guard_policy_activate 须提供 payload.version")
+			return
+		}
+		if strings.ContainsAny(version, " \t\r\n/\\") {
+			writeError(w, http.StatusBadRequest, "version 不得含空白或路径分隔符（防目录穿越）")
+			return
+		}
 		c.Target = "output-guard-policy"
 	case changeActionCredentialRotate:
 		if req.Target == "" || req.Secret == "" {
@@ -493,6 +516,8 @@ func (s *changeStore) execute(c *changeRequest) error {
 		return s.execOutputGuardMode(c)
 	case changeActionOutputGuardReload:
 		return s.execOutputGuardPolicyReload(c)
+	case changeActionOutputGuardPolicyActivate:
+		return s.execOutputGuardPolicyActivate(c)
 	case changeActionCredentialRotate:
 		return s.execCredentialRotate(c)
 	case changeActionCredentialDelete:
@@ -539,6 +564,12 @@ func (s *changeStore) execOutputGuardMode(c *changeRequest) error {
 // tee 侧加载失败回 409 并保留上一有效版本，此处按执行失败回写变更单）。
 func (s *changeStore) execOutputGuardPolicyReload(c *changeRequest) error {
 	return s.postTeeConfig(c, "/config/policy/reload", nil)
+}
+
+// execOutputGuardPolicyActivate 调 tee-infer 显式引用指定词库/策略版本（S3-2 D8 扩列）。
+// tee 侧须过 **bench 硬门禁**（不低于已登记基线且不可回退）；不通过即非 2xx → 本变更单记执行失败。
+func (s *changeStore) execOutputGuardPolicyActivate(c *changeRequest) error {
+	return s.postTeeConfig(c, "/config/policy/activate", map[string]string{"version": c.Payload["version"]})
 }
 
 // postTeeConfig 以复核人身份调 tee-infer 配置端点（输出侧动作共用）：
