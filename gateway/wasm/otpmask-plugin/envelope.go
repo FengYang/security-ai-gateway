@@ -60,6 +60,11 @@ type chunkGuard struct {
 type chunkLabel struct {
 	Std      string `json:"std"`      // 标准号（默认 GB45438-2025）
 	Position string `json:"position"` // head | repeat | tail
+	// 上游 tee-infer 随标识帧携带的**溯源要素**，本插件**透传**至客户端（标准客户端忽略未知键）。
+	// 不得据此宣称"已满足 GB 45438-2025 6.1"。字段语义对应标准附录 E。
+	Synthetic bool   `json:"synthetic,omitempty"`  // 生成合成标签要素
+	Producer  string `json:"producer,omitempty"`   // 生成合成服务提供者要素
+	ContentID string `json:"content_id,omitempty"` // 内容制作编号要素
 }
 
 // sseDelta OpenAI 流式 delta 载荷（choices[].delta）。

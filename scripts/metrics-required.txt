@@ -27,6 +27,8 @@ tee otpmask_guard_classifier_total conditional
 tee otpmask_guard_failclosed_total conditional
 # input-side classifier sidecar health gauge (emitted only when sidecar configured)
 tee otpmask_guard_sidecar_healthy conditional
+# audit/log retention declaration in days (0 = not declared); declarative only, deletion is executed by storage lifecycle
+tee otpmask_audit_retention_days required
 tee otpmask_reconcile_mismatch_total conditional
 tee otpmask_shadow_would_reject_total conditional
 tee otpmask_reconcile_diff_tokens conditional

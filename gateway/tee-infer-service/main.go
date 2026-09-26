@@ -125,6 +125,8 @@ type teeServer struct {
 	model         model.Engine       // 明文域推理引擎
 	cmaasEngine   *model.CmaasEngine // 百炼 C-MaaS 引擎（P5；nil = 未配置，请求 fail-closed）
 	protoVersion  string             // 南向协议版本声明（C-4：默认 protocol.Version，部署/测试可覆盖）
+	// 审计/日志留存期声明（天；0=未声明）。声明式，服务不删除审计数据。
+	auditRetentionDays int
 	// P2a：PII 处理模式（block = 拦截（默认，fail-closed）/ mask = 脱敏替换后放行）；
 	// SQL 注入/提示注入在任何模式下均拦截。
 	piiMode string
@@ -1155,6 +1157,13 @@ type textStreamChunk struct {
 type chunkLabelMeta struct {
 	Std      string `json:"std"`      // 标准号（默认 GB45438-2025）
 	Position string `json:"position"` // head | repeat | tail（终止帧固定 tail）
+	// 标识**溯源要素**——定位为"溯源要素载体 ＋ 为下游落盘写入文件元数据提供数据"，
+	// **非**"文件元数据隐式标识"本身。
+	// 硬约束：不得据此宣称"已满足 GB 45438-2025 第 6.1 条"（强标以"文件"为要件，本形态无文件）。
+	// 字段语义对应 GB 45438-2025 附录 E：
+	Synthetic bool   `json:"synthetic,omitempty"`  // 生成合成标签要素（标识生效时恒 true）
+	Producer  string `json:"producer,omitempty"`   // 生成合成服务提供者要素（由客户配置的主体编码）
+	ContentID string `json:"content_id,omitempty"` // 内容制作编号要素（本请求 request_id）
 }
 
 // chunkGuardMeta 输出侧内容审查 chunk-meta（§4.6.1，M1 冻结项）。
@@ -1505,6 +1514,8 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	// B1：解析当前生效配置（off → nil labeler，全路径零行为变化）。
 	lbl := newContentLabeler(s.currentContentLabelConfigPtr(), emitLabel)
 	if lbl != nil {
+		// 内容制作编号要素＝本请求 request_id（服务端唯一、可追溯）。
+		lbl.contentID = requestID
 		// 流首标识：先于引擎任何输出（首帧 seq=1）；
 		// replayEngine 缓存路径走同一 streamTextInfer，注入点放发射层自动覆盖。
 		if err := lbl.emitHead(); err != nil {
@@ -1759,6 +1770,8 @@ type secConfigView struct {
 	PIIModeSource    string            `json:"pii_mode_source"` // startup | runtime
 	SystemPromptSet  bool              `json:"system_prompt_set"`
 	AuditEnabled     bool              `json:"audit_enabled"`
+	// 审计/日志留存期声明（天；0=未声明）。声明式，删除由存储层生命周期策略执行。
+	AuditRetentionDays int               `json:"audit_retention_days"`
 	Guardrail        guardrailSnapshot `json:"guardrail"`
 	// GA-输出侧内容审查（OG-3）：当前模式与策略版本（只读；运行时覆盖/持久化归 OG-8）。
 	OutputGuard outputGuardSnapshot `json:"output_guard"`
@@ -1855,6 +1868,7 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		PIIModeSource:    "startup",
 		SystemPromptSet:  s.systemPrompt != "",
 		AuditEnabled:     s.audit != nil,
+		AuditRetentionDays: s.auditRetentionDays,
 	}
 	if v, ok := s.piiModeOverride.Load().(string); ok && v != "" {
 		view.PIIModeSource = "runtime"
@@ -1894,11 +1908,12 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// B1：强标标识只读快照（enabled/source/text/repeat/std 与生效配置同源）。
 	clc := s.currentContentLabelConfig()
 	view.ContentLabel = contentLabelSnapshot{
-		Enabled: clc.Enabled,
-		Source:  s.contentLabelSource(),
-		Text:    clc.Text,
-		Repeat:  clc.Repeat,
-		Std:     clc.Std,
+		Enabled:  clc.Enabled,
+		Source:   s.contentLabelSource(),
+		Text:     clc.Text,
+		Repeat:   clc.Repeat,
+		Std:      clc.Std,
+		Producer: clc.Producer,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(view)
@@ -2997,6 +3012,7 @@ func main() {
 	cmaasModel := flag.String("cmaas-model", "", "C-MaaS 缺省模型 code（cmaas-glm-5.2 等；请求未指定模型时使用）")
 	auditFile := flag.String("audit-file", "", "审计事件 WORM 文件路径（JSON Lines 只追加；为空 = 内存模式）")
 	auditAnchor := flag.String("audit-anchor", "", "审计锚定文件路径（链尾哈希追加；仅 audit-file 开启时生效）")
+	auditRetention := flag.Int("audit-retention-days", defaultAuditRetentionDays, "审计/日志留存期声明（天；0=不声明；>0 须 ≥180 法定硬底）。仅声明：服务不删除审计数据（保 WORM 链完整），删除由存储层生命周期策略按本值执行")
 	tsaMode := flag.String("tsa", "mock", "RFC 3161 可信时间戳服务：mock（本地自签）| off（不绑定 TST，）")
 	requireAttest := flag.Bool("require-attest", false, "强制证明模式")
 	enclaveMode := flag.String("enclave", "mock", "飞地实现：mock|tdx|sgx")
@@ -3025,11 +3041,12 @@ func main() {
 	outputGuardDegrade := flag.String("output-guard-degrade", degradeFailClosed, "P-DEGRADE：fail-closed（默认，当前唯一生效值）| fallback-keyword（尚未实现，配置即拒绝启动，不静默按 fail-closed 处置）")
 	outputGuardBlockEmission := flag.Bool("output-guard-block-emission", false, "阻塞预演开关（非 §5 参数表参数，仅浸泡期用）：true＝按 enforcing 时序阻塞下发（首帧延迟增量可实测）；false＝shadow 现状（逐 delta 立即放行，业务零影响）")
 	// B1 强标标识（GB 45438-2025，2025-09-01 已实施）：默认 off，off 时与现网逐字节一致。
-	// 法务 D-LLM-6（API 文本流标识落点）未定 → 文案/落点/重复间隔全配置化留口。
+	// 标识落点（纯 API 文本流）与分片策略 → 文案/落点/重复间隔全配置化留口。
 	contentLabel := flag.String("content-label", contentLabelOff, "B1 强标标识（GB 45438-2025）开关：off（缺省，零行为变化）| on（流首+流尾双标，终止帧恒带 tail meta 兜底）；运行时热切换走 POST /config/content-label（on/off 双向可切）")
 	contentLabelText := flag.String("content-label-text", "", "B1 标识文案（缺省「内容由人工智能生成」；启用时必须同时含「人工智能」与「生成」子串，否则启动失败 fail-closed）")
 	contentLabelRepeat := flag.Int("content-label-repeat", 0, "B1 每 N 个内容帧插一次重复标识（0=仅首尾；取值 ∈[0,1000]）")
 	contentLabelStd := flag.String("content-label-std", "", "B1 标准号声明（缺省 GB45438-2025；chunkLabelMeta.Std 与 /config 快照同源）")
+	contentLabelProducer := flag.String("content-label-producer", "", "标识溯源要素：生成合成服务提供者要素（客户主体编码/名称，随标识帧 content_label.producer 下发；空=不输出）。属溯源要素，非文件元数据隐式标识，不得据此宣称已满足 GB 45438-2025 6.1")
 	contentLabelCfg := flag.String("content-label-config", "", "B1 强标标识运行时配置持久化文件（热切换写入的 enabled/text/repeat/std）；为空 = 仅进程内生效，重启回退 -content-label* 启动参数")
 	flag.Parse()
 
@@ -3218,6 +3235,23 @@ func main() {
 		guard:             newGuardrail(),
 		metrics:           newMetrics(),
 	}
+	// 审计/日志留存期**声明**（校验 fail-closed）。
+	// 声明式：仅暴露声明值（启动日志 / GET /config / otpmask_audit_retention_days）；
+	// 服务**不删除**审计数据——WORM 只追加，就地裁剪会破坏哈希链完整性（audit-verify 无法从创世重算）。
+	// 删除动作由**存储层生命周期策略**按本值执行，二者须保持一致（"声明—执行"可核验对）。
+	if err := validateAuditRetentionDays(*auditRetention); err != nil {
+		log.Fatalf("[audit-retention] %v", err)
+	}
+	srv.auditRetentionDays = *auditRetention
+	srv.metrics.setAuditRetentionDays(*auditRetention)
+	switch {
+	case *auditRetention == 0:
+		log.Printf("[audit-retention] 未声明留存期（-audit-retention-days=0）——检查/备案时须说明留存策略")
+	case *auditFile == "":
+		log.Printf("[audit-retention] 已声明留存 %d 天，但未启用 -audit-file（内存模式），声明无实际对象", *auditRetention)
+	default:
+		log.Printf("[audit-retention] 已声明留存 %d 天（服务不删数据；须由存储层生命周期策略按本值执行删除，二者一致）", *auditRetention)
+	}
 	// M3-B：恢复运行时 Guardrail 配置（高敏复核写入的 pii_mode，跨重启保持）。
 	srv.loadGuardrailOverride()
 	// GA-输出侧内容审查（OG-3）：模式校验（非法 / enforcing 未实现 → 拒绝启动，不静默降级）
@@ -3316,10 +3350,15 @@ func main() {
 	clCfg.Text = *contentLabelText
 	clCfg.Repeat = *contentLabelRepeat
 	clCfg.Std = *contentLabelStd
-	if err := validateContentLabelConfig(clCfg); err != nil {
+	clCfg.Producer = *contentLabelProducer
+	// 修正（2026-09-26）：原为 validate→resolve，导致 `-content-label on` **未显式给文案**时
+	// 因 Text=="" 被误判为"不合规"而启动失败（与 flag help／contentlabel.go 的缺省文案声明矛盾）。
+	// 现改为 resolve→validate：缺省文案属"未配置"而非"非法值"；**显式给出的不合规文案仍被拦下**
+	// （fail-closed 语义不变，仍符合"resolve 只派生 / validate 只校验"的职责分离）。
+	srv.contentLabelCfg = resolveContentLabelConfig(clCfg)
+	if err := validateContentLabelConfig(srv.contentLabelCfg); err != nil {
 		log.Fatalf("[content-label] %v", err)
 	}
-	srv.contentLabelCfg = resolveContentLabelConfig(clCfg)
 	srv.contentLabelCfgPath = *contentLabelCfg
 	// B1：恢复运行时覆盖（热切换结果跨重启保持；on/off 双向均可恢复）。
 	srv.loadContentLabelOverride()

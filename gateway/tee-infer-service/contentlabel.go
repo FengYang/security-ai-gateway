@@ -49,6 +49,9 @@ type contentLabelConfig struct {
 	Text    string // 标识文案（启用时必须同时含"人工智能"与"生成"）
 	Repeat  int    // 每 N 个内容帧插一次 repeat 标识（0=仅首尾）
 	Std     string // 标准号（默认 GB45438-2025；chunkLabelMeta.Std 与审计同源）
+	// 标识溯源要素：生成合成服务提供者要素（客户主体编码/名称；空 = 不输出该字段）。
+	// **硬约束**：该字段属"溯源要素"，不得据此宣称"已满足 GB 45438-2025 6.1 文件元数据隐式标识"。
+	Producer string
 }
 
 // defaultContentLabelConfig 返回未配置态（Enabled=false，文案/标准留空待 resolve 兜底）。
@@ -108,11 +111,12 @@ type contentLabelConfigRecord struct {
 
 // contentLabelSnapshot 强标标识只读快照（GET /config 的 ContentLabel 字段）。
 type contentLabelSnapshot struct {
-	Enabled bool   `json:"enabled"`
-	Source  string `json:"source"` // startup | runtime
-	Text    string `json:"text"`
-	Repeat  int    `json:"repeat"`
-	Std     string `json:"std"`
+	Enabled  bool   `json:"enabled"`
+	Source   string `json:"source"` // startup | runtime
+	Text     string `json:"text"`
+	Repeat   int    `json:"repeat"`
+	Std      string `json:"std"`
+	Producer string `json:"producer"` // 标识溯源要素：生成合成服务提供者要素（空 = 未配置）
 }
 
 // ---- 注入器 ----
@@ -122,7 +126,8 @@ type contentLabelSnapshot struct {
 type contentLabeler struct {
 	cfg           contentLabelConfig
 	emit          func(text string, meta *chunkLabelMeta) error
-	contentFrames int // 已下发内容帧计数（repeat 间隔基准）
+	contentFrames int    // 已下发内容帧计数（repeat 间隔基准）
+	contentID     string // 标识溯源要素：内容制作编号（本请求 request_id，由调用点注入）
 }
 
 // newContentLabeler 构造注入器；cfg 为 nil 或 Enabled=false 时返回 nil（调用方统一判空）。
@@ -133,12 +138,18 @@ func newContentLabeler(cfg *contentLabelConfig, emit func(text string, meta *chu
 	return &contentLabeler{cfg: *cfg, emit: emit}
 }
 
-// meta 构造本请求标识 meta（Std 与配置同源）。
+// meta 构造本请求标识 meta（Std 与配置同源；标识溯源要素随标识帧携带溯源要素）。
 func (l *contentLabeler) meta(position string) *chunkLabelMeta {
 	if l == nil {
 		return nil
 	}
-	return &chunkLabelMeta{Std: l.cfg.Std, Position: position}
+	return &chunkLabelMeta{
+		Std:       l.cfg.Std,
+		Position:  position,
+		Synthetic: true, // 本形态输出即 AI 生成合成内容（标识生效时恒 true）
+		Producer:  l.cfg.Producer,
+		ContentID: l.contentID,
+	}
 }
 
 // emitHead 流首标识（eng.Generate 之前调用；首帧 seq=1）。

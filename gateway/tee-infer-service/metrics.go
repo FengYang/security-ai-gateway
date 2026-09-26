@@ -48,6 +48,8 @@ type otpmaskMetrics struct {
 	// 输入侧侧车健康状态 gauge（未配置侧车时不输出该指标；2026-09-26）。
 	guardSidecarConfigured bool
 	guardSidecarHealthy    int64
+	// 审计/日志留存期声明（gauge；0=未声明）。声明式，服务不删除审计数据。
+	auditRetentionDays int
 	// S5（判据 6）对账/出账阻断可观测
 	reconcileDiff     map[string]int64 // reason（偏差 token 量级累计）
 	reconcileLastRun  int64            // gauge：上次对账时刻（UTC 秒）
@@ -340,6 +342,13 @@ func (m *otpmaskMetrics) incKeyIssue(tenant string) {
 	m.mu.Unlock()
 }
 
+// setAuditRetentionDays 落审计留存期声明（gauge；启动期一次）。
+func (m *otpmaskMetrics) setAuditRetentionDays(days int) {
+	m.mu.Lock()
+	m.auditRetentionDays = days
+	m.mu.Unlock()
+}
+
 // render 输出完整 Prometheus 文本（审计链长度由调用方经 auditEvents 注入）。
 func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	m.mu.Lock()
@@ -356,6 +365,8 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 		fmt.Fprintf(w, "# HELP otpmask_guard_sidecar_healthy 输入侧语义分类器侧车健康（1=健康；0=不健康，实例按 readiness 摘流）\n# TYPE otpmask_guard_sidecar_healthy gauge\n")
 		fmt.Fprintf(w, "otpmask_guard_sidecar_healthy %d\n", m.guardSidecarHealthy)
 	}
+	fmt.Fprintf(w, "# HELP otpmask_audit_retention_days 审计/日志留存期声明值（天；0=未声明）。声明式：服务不删除审计数据（WORM 链完整），删除由存储层生命周期策略按本值执行\n# TYPE otpmask_audit_retention_days gauge\n")
+	fmt.Fprintf(w, "otpmask_audit_retention_days %d\n", m.auditRetentionDays)
 	writeCounter(w, "otpmask_key_issue_total", "密钥签发计数（按租户）", m.keyIssues, []string{"tenant"})
 	writeCounter(w, "otpmask_reconcile_mismatch_total", "审计-计量对账不一致次数（按差异分类）", m.reconcile, []string{"reason"})
 	writeCounter(w, "otpmask_shadow_would_reject_total", "影子命中计数（只计数不拒绝；按租户与维度）", m.shadowWouldReject, []string{"tenant", "rule"})
