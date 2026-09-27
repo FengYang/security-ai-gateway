@@ -1,0 +1,1428 @@
+{
+  "schema_version": "1.0",
+  "category": "A2-06",
+  "version": "v2026.09.27.9",
+  "level": "高",
+  "rules": [
+    {
+      "id": "kw-a2-06-0001",
+      "keyword": "年龄歧视",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0002",
+      "keyword": "歧视老年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0003",
+      "keyword": "歧视年轻人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0004",
+      "keyword": "年龄偏见",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0005",
+      "keyword": "代际对立言论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0006",
+      "keyword": "年龄污名化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0007",
+      "keyword": "年龄标签化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0008",
+      "keyword": "年龄排斥",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0009",
+      "keyword": "年龄群体歧视",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0010",
+      "keyword": "年龄群体污名化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0011",
+      "keyword": "年龄群体标签化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0012",
+      "keyword": "年龄群体排斥",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0013",
+      "keyword": "老年人歧视",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0014",
+      "keyword": "老年人污名化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0015",
+      "keyword": "老年人标签化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0016",
+      "keyword": "老年人排斥",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0017",
+      "keyword": "年轻人歧视",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0018",
+      "keyword": "年轻人污名化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0019",
+      "keyword": "年轻人标签化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0020",
+      "keyword": "年轻人排斥",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0021",
+      "keyword": "中年群体歧视",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0022",
+      "keyword": "中年群体污名化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0023",
+      "keyword": "中年群体标签化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0024",
+      "keyword": "中年群体排斥",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0025",
+      "keyword": "未成年人歧视",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0026",
+      "keyword": "未成年人污名化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0027",
+      "keyword": "未成年人标签化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0028",
+      "keyword": "未成年人排斥",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0029",
+      "keyword": "年龄身份歧视",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0030",
+      "keyword": "年龄身份污名化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0031",
+      "keyword": "年龄身份标签化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0032",
+      "keyword": "年龄身份排斥",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0033",
+      "keyword": "代际群体歧视",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0034",
+      "keyword": "代际群体污名化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0035",
+      "keyword": "代际群体标签化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0036",
+      "keyword": "代际群体排斥",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0037",
+      "keyword": "年龄段歧视",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0038",
+      "keyword": "年龄段污名化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0039",
+      "keyword": "年龄段标签化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0040",
+      "keyword": "年龄段排斥",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0041",
+      "keyword": "年龄差异歧视",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0042",
+      "keyword": "年龄差异污名化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0043",
+      "keyword": "年龄差异标签化",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0044",
+      "keyword": "年龄差异排斥",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0045",
+      "keyword": "歧视年龄",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0046",
+      "keyword": "歧视年龄群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0047",
+      "keyword": "歧视中年群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0048",
+      "keyword": "歧视未成年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0049",
+      "keyword": "歧视年龄身份",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0050",
+      "keyword": "歧视代际群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0051",
+      "keyword": "歧视年龄段",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0052",
+      "keyword": "歧视年龄差异",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0053",
+      "keyword": "贬低年龄",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0054",
+      "keyword": "贬低年龄群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0055",
+      "keyword": "贬低老年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0056",
+      "keyword": "贬低年轻人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0057",
+      "keyword": "贬低中年群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0058",
+      "keyword": "贬低未成年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0059",
+      "keyword": "贬低年龄身份",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0060",
+      "keyword": "贬低代际群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0061",
+      "keyword": "贬低年龄段",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0062",
+      "keyword": "贬低年龄差异",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0063",
+      "keyword": "攻击年龄",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0064",
+      "keyword": "攻击年龄群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0065",
+      "keyword": "攻击老年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0066",
+      "keyword": "攻击年轻人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0067",
+      "keyword": "攻击中年群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0068",
+      "keyword": "攻击未成年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0069",
+      "keyword": "攻击年龄身份",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0070",
+      "keyword": "攻击代际群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0071",
+      "keyword": "攻击年龄段",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0072",
+      "keyword": "攻击年龄差异",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0073",
+      "keyword": "嘲讽年龄",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0074",
+      "keyword": "嘲讽年龄群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0075",
+      "keyword": "嘲讽老年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0076",
+      "keyword": "嘲讽年轻人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0077",
+      "keyword": "嘲讽中年群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0078",
+      "keyword": "嘲讽未成年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0079",
+      "keyword": "嘲讽年龄身份",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0080",
+      "keyword": "嘲讽代际群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0081",
+      "keyword": "嘲讽年龄段",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0082",
+      "keyword": "嘲讽年龄差异",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0083",
+      "keyword": "仇视年龄",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0084",
+      "keyword": "仇视年龄群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0085",
+      "keyword": "仇视老年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0086",
+      "keyword": "仇视年轻人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0087",
+      "keyword": "仇视中年群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0088",
+      "keyword": "仇视未成年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0089",
+      "keyword": "仇视年龄身份",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0090",
+      "keyword": "仇视代际群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0091",
+      "keyword": "仇视年龄段",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0092",
+      "keyword": "仇视年龄差异",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0093",
+      "keyword": "贬损年龄",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0094",
+      "keyword": "贬损年龄群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0095",
+      "keyword": "贬损老年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0096",
+      "keyword": "贬损年轻人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0097",
+      "keyword": "贬损中年群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0098",
+      "keyword": "贬损未成年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0099",
+      "keyword": "贬损年龄身份",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0100",
+      "keyword": "贬损代际群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0101",
+      "keyword": "贬损年龄段",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0102",
+      "keyword": "贬损年龄差异",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0103",
+      "keyword": "污蔑年龄",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0104",
+      "keyword": "污蔑年龄群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0105",
+      "keyword": "污蔑老年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0106",
+      "keyword": "污蔑年轻人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0107",
+      "keyword": "污蔑中年群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0108",
+      "keyword": "污蔑未成年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0109",
+      "keyword": "污蔑年龄身份",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0110",
+      "keyword": "污蔑代际群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0111",
+      "keyword": "污蔑年龄段",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0112",
+      "keyword": "污蔑年龄差异",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0113",
+      "keyword": "侮辱年龄",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0114",
+      "keyword": "侮辱年龄群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0115",
+      "keyword": "侮辱老年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0116",
+      "keyword": "侮辱年轻人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0117",
+      "keyword": "侮辱中年群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0118",
+      "keyword": "侮辱未成年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0119",
+      "keyword": "侮辱年龄身份",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0120",
+      "keyword": "侮辱代际群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0121",
+      "keyword": "侮辱年龄段",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0122",
+      "keyword": "侮辱年龄差异",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0123",
+      "keyword": "冒犯年龄",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0124",
+      "keyword": "冒犯年龄群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0125",
+      "keyword": "冒犯老年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0126",
+      "keyword": "冒犯年轻人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0127",
+      "keyword": "冒犯中年群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0128",
+      "keyword": "冒犯未成年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0129",
+      "keyword": "冒犯年龄身份",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0130",
+      "keyword": "冒犯代际群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0131",
+      "keyword": "冒犯年龄段",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0132",
+      "keyword": "冒犯年龄差异",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0133",
+      "keyword": "排斥年龄",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0134",
+      "keyword": "排斥年龄群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0135",
+      "keyword": "排斥老年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0136",
+      "keyword": "排斥年轻人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0137",
+      "keyword": "排斥中年群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0138",
+      "keyword": "排斥未成年人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0139",
+      "keyword": "排斥年龄身份",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0140",
+      "keyword": "排斥代际群体",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0141",
+      "keyword": "排斥年龄段",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a2-06-0142",
+      "keyword": "排斥年龄差异",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    }
+  ]
+}

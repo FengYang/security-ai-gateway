@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "category": "A3-04",
-  "version": "v2026.09.16",
+  "version": "v2026.09.27.10",
   "level": "中",
   "rules": [
     {
@@ -11,8 +11,8 @@
       "weight": 0.7,
       "added_at": "2026-09-16",
       "submitter": "ai-assisted-lexicon-gen",
-      "reviewer": "security-team（D8 复核待办）",
-      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
     },
     {
       "id": "kw-a3-04-0002",
@@ -21,8 +21,8 @@
       "weight": 0.7,
       "added_at": "2026-09-16",
       "submitter": "ai-assisted-lexicon-gen",
-      "reviewer": "security-team（D8 复核待办）",
-      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
     },
     {
       "id": "kw-a3-04-0003",
@@ -31,8 +31,8 @@
       "weight": 0.7,
       "added_at": "2026-09-16",
       "submitter": "ai-assisted-lexicon-gen",
-      "reviewer": "security-team（D8 复核待办）",
-      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
     },
     {
       "id": "kw-a3-04-0004",
@@ -41,8 +41,8 @@
       "weight": 0.7,
       "added_at": "2026-09-16",
       "submitter": "ai-assisted-lexicon-gen",
-      "reviewer": "security-team（D8 复核待办）",
-      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
     },
     {
       "id": "kw-a3-04-0005",
@@ -51,8 +51,738 @@
       "weight": 0.7,
       "added_at": "2026-09-16",
       "submitter": "ai-assisted-lexicon-gen",
-      "reviewer": "security-team（D8 复核待办）",
-      "comment": "真料 L0 档（seed 来源 testdata/lexicon-seed/seed.json）；非官方建设规模档（≥10000 属 S3 建设档）"
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0006",
+      "keyword": "滥用支配地位",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0007",
+      "keyword": "滥用行政权力排除限制竞争",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0008",
+      "keyword": "滥用市场支配地位行为",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0009",
+      "keyword": "达成垄断协议",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0010",
+      "keyword": "实施垄断协议",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0011",
+      "keyword": "组织垄断协议",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0012",
+      "keyword": "协助达成垄断协议",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0013",
+      "keyword": "横向垄断协议",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0014",
+      "keyword": "纵向垄断协议",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0015",
+      "keyword": "轴辐协议",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0016",
+      "keyword": "固定价格协议",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0017",
+      "keyword": "固定转售价格",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0018",
+      "keyword": "限定转售价格",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0019",
+      "keyword": "维持转售价格",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0020",
+      "keyword": "限定最低转售价格",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0021",
+      "keyword": "分割销售市场",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0022",
+      "keyword": "划分销售市场",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0023",
+      "keyword": "划分采购市场",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0024",
+      "keyword": "划分商品市场",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0025",
+      "keyword": "分配销售区域",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0026",
+      "keyword": "联合抵制交易",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0027",
+      "keyword": "联合抵制交易相对人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0028",
+      "keyword": "限定交易相对人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0029",
+      "keyword": "限定交易",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0030",
+      "keyword": "独家交易",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0031",
+      "keyword": "排他性交易",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0032",
+      "keyword": "差别待遇",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0033",
+      "keyword": "差别定价",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0034",
+      "keyword": "价格歧视",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0035",
+      "keyword": "歧视性定价",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0036",
+      "keyword": "掠夺性定价",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0037",
+      "keyword": "低于成本价销售",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0038",
+      "keyword": "低价倾销",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0039",
+      "keyword": "强制搭售",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0040",
+      "keyword": "捆绑销售",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0041",
+      "keyword": "附加不合理交易条件",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0042",
+      "keyword": "附加不合理条件",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0043",
+      "keyword": "搭售商品",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0044",
+      "keyword": "搭售服务",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0045",
+      "keyword": "超高定价",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0046",
+      "keyword": "不公平高价",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0047",
+      "keyword": "不公平低价",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0048",
+      "keyword": "拒绝交易",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0049",
+      "keyword": "拒绝与交易相对人交易",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0050",
+      "keyword": "独家交易协议",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0051",
+      "keyword": "最惠国待遇条款",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0052",
+      "keyword": "平台二选一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0053",
+      "keyword": "二选一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0054",
+      "keyword": "大数据杀熟",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0055",
+      "keyword": "算法歧视定价",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0056",
+      "keyword": "数据垄断",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0057",
+      "keyword": "自我优待",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0058",
+      "keyword": "流量劫持",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0059",
+      "keyword": "恶意不兼容",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0060",
+      "keyword": "屏蔽封锁",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0061",
+      "keyword": "封禁链接",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0062",
+      "keyword": "屏蔽竞争对手",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0063",
+      "keyword": "妨碍干扰其他经营者",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0064",
+      "keyword": "恶意投诉",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0065",
+      "keyword": "虚假交易刷单",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0066",
+      "keyword": "刷单炒信",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0067",
+      "keyword": "商业诋毁",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0068",
+      "keyword": "侵犯商业秘密",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0069",
+      "keyword": "商业贿赂",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0070",
+      "keyword": "不正当有奖销售",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0071",
+      "keyword": "低于成本销售",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0072",
+      "keyword": "垄断协议",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0073",
+      "keyword": "经营者集中未申报",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0074",
+      "keyword": "违法实施经营者集中",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0075",
+      "keyword": "滥用市场势力",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0076",
+      "keyword": "限定交易机会",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0077",
+      "keyword": "限定交易条件",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a3-04-0078",
+      "keyword": "限定最低价格",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
     }
   ]
 }

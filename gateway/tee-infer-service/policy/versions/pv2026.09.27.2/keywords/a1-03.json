@@ -1,0 +1,2048 @@
+{
+  "schema_version": "1.0",
+  "category": "A1-03",
+  "version": "v2026.09.27.2",
+  "level": "高",
+  "rules": [
+    {
+      "id": "kw-a1-03-0001",
+      "keyword": "煽动分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0002",
+      "keyword": "破坏国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0003",
+      "keyword": "破坏社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0004",
+      "keyword": "煽动分裂",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0005",
+      "keyword": "破坏民族团结稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0006",
+      "keyword": "煽动国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0007",
+      "keyword": "煽动社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0008",
+      "keyword": "煽动民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0009",
+      "keyword": "煽动国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0010",
+      "keyword": "煽动领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0011",
+      "keyword": "煽动分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0012",
+      "keyword": "煽动国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0013",
+      "keyword": "策动分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0014",
+      "keyword": "策动国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0015",
+      "keyword": "策动社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0016",
+      "keyword": "策动民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0017",
+      "keyword": "策动国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0018",
+      "keyword": "策动领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0019",
+      "keyword": "策动分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0020",
+      "keyword": "策动国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0021",
+      "keyword": "策划分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0022",
+      "keyword": "策划国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0023",
+      "keyword": "策划社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0024",
+      "keyword": "策划民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0025",
+      "keyword": "策划国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0026",
+      "keyword": "策划领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0027",
+      "keyword": "策划分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0028",
+      "keyword": "策划国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0029",
+      "keyword": "组织分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0030",
+      "keyword": "组织国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0031",
+      "keyword": "组织社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0032",
+      "keyword": "组织民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0033",
+      "keyword": "组织国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0034",
+      "keyword": "组织领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0035",
+      "keyword": "组织分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0036",
+      "keyword": "组织国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0037",
+      "keyword": "实施分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0038",
+      "keyword": "实施国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0039",
+      "keyword": "实施社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0040",
+      "keyword": "实施民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0041",
+      "keyword": "实施国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0042",
+      "keyword": "实施领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0043",
+      "keyword": "实施分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0044",
+      "keyword": "实施国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0045",
+      "keyword": "参与分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0046",
+      "keyword": "参与国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0047",
+      "keyword": "参与社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0048",
+      "keyword": "参与民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0049",
+      "keyword": "参与国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0050",
+      "keyword": "参与领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0051",
+      "keyword": "参与分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0052",
+      "keyword": "参与国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0053",
+      "keyword": "图谋分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0054",
+      "keyword": "图谋国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0055",
+      "keyword": "图谋社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0056",
+      "keyword": "图谋民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0057",
+      "keyword": "图谋国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0058",
+      "keyword": "图谋领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0059",
+      "keyword": "图谋分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0060",
+      "keyword": "图谋国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0061",
+      "keyword": "预谋分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0062",
+      "keyword": "预谋国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0063",
+      "keyword": "预谋社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0064",
+      "keyword": "预谋民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0065",
+      "keyword": "预谋国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0066",
+      "keyword": "预谋领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0067",
+      "keyword": "预谋分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0068",
+      "keyword": "预谋国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0069",
+      "keyword": "鼓吹分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0070",
+      "keyword": "鼓吹国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0071",
+      "keyword": "鼓吹社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0072",
+      "keyword": "鼓吹民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0073",
+      "keyword": "鼓吹国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0074",
+      "keyword": "鼓吹领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0075",
+      "keyword": "鼓吹分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0076",
+      "keyword": "鼓吹国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0077",
+      "keyword": "宣传分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0078",
+      "keyword": "宣传国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0079",
+      "keyword": "宣传社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0080",
+      "keyword": "宣传民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0081",
+      "keyword": "宣传国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0082",
+      "keyword": "宣传领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0083",
+      "keyword": "宣传分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0084",
+      "keyword": "宣传国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0085",
+      "keyword": "推动分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0086",
+      "keyword": "推动国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0087",
+      "keyword": "推动社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0088",
+      "keyword": "推动民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0089",
+      "keyword": "推动国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0090",
+      "keyword": "推动领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0091",
+      "keyword": "推动分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0092",
+      "keyword": "推动国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0093",
+      "keyword": "协助分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0094",
+      "keyword": "协助国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0095",
+      "keyword": "协助社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0096",
+      "keyword": "协助民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0097",
+      "keyword": "协助国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0098",
+      "keyword": "协助领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0099",
+      "keyword": "协助分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0100",
+      "keyword": "协助国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0101",
+      "keyword": "支持分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0102",
+      "keyword": "支持国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0103",
+      "keyword": "支持社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0104",
+      "keyword": "支持民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0105",
+      "keyword": "支持国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0106",
+      "keyword": "支持领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0107",
+      "keyword": "支持分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0108",
+      "keyword": "支持国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0109",
+      "keyword": "资助分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0110",
+      "keyword": "资助国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0111",
+      "keyword": "资助社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0112",
+      "keyword": "资助民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0113",
+      "keyword": "资助国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0114",
+      "keyword": "资助领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0115",
+      "keyword": "资助分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0116",
+      "keyword": "资助国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0117",
+      "keyword": "串联分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0118",
+      "keyword": "串联国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0119",
+      "keyword": "串联社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0120",
+      "keyword": "串联民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0121",
+      "keyword": "串联国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0122",
+      "keyword": "串联领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0123",
+      "keyword": "串联分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0124",
+      "keyword": "串联国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0125",
+      "keyword": "勾结分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0126",
+      "keyword": "勾结国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0127",
+      "keyword": "勾结社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0128",
+      "keyword": "勾结民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0129",
+      "keyword": "勾结国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0130",
+      "keyword": "勾结领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0131",
+      "keyword": "勾结分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0132",
+      "keyword": "勾结国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0133",
+      "keyword": "密谋分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0134",
+      "keyword": "密谋国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0135",
+      "keyword": "密谋社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0136",
+      "keyword": "密谋民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0137",
+      "keyword": "密谋国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0138",
+      "keyword": "密谋领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0139",
+      "keyword": "密谋分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0140",
+      "keyword": "密谋国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0141",
+      "keyword": "教唆分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0142",
+      "keyword": "教唆国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0143",
+      "keyword": "教唆社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0144",
+      "keyword": "教唆民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0145",
+      "keyword": "教唆国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0146",
+      "keyword": "教唆领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0147",
+      "keyword": "教唆分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0148",
+      "keyword": "教唆国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0149",
+      "keyword": "指使分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0150",
+      "keyword": "指使国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0151",
+      "keyword": "指使社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0152",
+      "keyword": "指使民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0153",
+      "keyword": "指使国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0154",
+      "keyword": "指使领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0155",
+      "keyword": "指使分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0156",
+      "keyword": "指使国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0157",
+      "keyword": "伙同分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0158",
+      "keyword": "伙同国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0159",
+      "keyword": "伙同社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0160",
+      "keyword": "伙同民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0161",
+      "keyword": "伙同国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0162",
+      "keyword": "伙同领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0163",
+      "keyword": "伙同分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0164",
+      "keyword": "伙同国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0165",
+      "keyword": "挑动分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0166",
+      "keyword": "挑动国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0167",
+      "keyword": "挑动社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0168",
+      "keyword": "挑动民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0169",
+      "keyword": "挑动国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0170",
+      "keyword": "挑动领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0171",
+      "keyword": "挑动分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0172",
+      "keyword": "挑动国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0173",
+      "keyword": "发起分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0174",
+      "keyword": "发起国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0175",
+      "keyword": "发起社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0176",
+      "keyword": "发起民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0177",
+      "keyword": "发起国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0178",
+      "keyword": "发起领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0179",
+      "keyword": "发起分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0180",
+      "keyword": "发起国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0181",
+      "keyword": "加入分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0182",
+      "keyword": "加入国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0183",
+      "keyword": "加入社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0184",
+      "keyword": "加入民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0185",
+      "keyword": "加入国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0186",
+      "keyword": "加入领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0187",
+      "keyword": "加入分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0188",
+      "keyword": "加入国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0189",
+      "keyword": "配合分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0190",
+      "keyword": "配合国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0191",
+      "keyword": "配合社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0192",
+      "keyword": "配合民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0193",
+      "keyword": "配合国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0194",
+      "keyword": "配合领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0195",
+      "keyword": "配合分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0196",
+      "keyword": "配合国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0197",
+      "keyword": "着手实施分裂国家",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0198",
+      "keyword": "着手实施国家统一",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0199",
+      "keyword": "着手实施社会稳定",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0200",
+      "keyword": "着手实施民族团结",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0201",
+      "keyword": "着手实施国家主权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0202",
+      "keyword": "着手实施领土完整",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0203",
+      "keyword": "着手实施分裂活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a1-03-0204",
+      "keyword": "着手实施国家认同",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    }
+  ]
+}

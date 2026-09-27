@@ -1,0 +1,2008 @@
+{
+  "schema_version": "1.0",
+  "category": "A1-04",
+  "version": "v2026.09.27.6",
+  "level": "高",
+  "rules": [
+    {
+      "id": "kw-a1-04-0001",
+      "keyword": "宣扬恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0002",
+      "keyword": "宣扬极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0003",
+      "keyword": "宣扬恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0004",
+      "keyword": "宣扬极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0005",
+      "keyword": "煽动实施恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0006",
+      "keyword": "宣扬恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0007",
+      "keyword": "宣扬极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0008",
+      "keyword": "宣扬暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0009",
+      "keyword": "宣扬恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0010",
+      "keyword": "宣扬极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0011",
+      "keyword": "宣扬恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0012",
+      "keyword": "传播恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0013",
+      "keyword": "传播极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0014",
+      "keyword": "传播恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0015",
+      "keyword": "传播极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0016",
+      "keyword": "传播恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0017",
+      "keyword": "传播极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0018",
+      "keyword": "传播暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0019",
+      "keyword": "传播恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0020",
+      "keyword": "传播极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0021",
+      "keyword": "传播恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0022",
+      "keyword": "散布恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0023",
+      "keyword": "散布极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0024",
+      "keyword": "散布恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0025",
+      "keyword": "散布极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0026",
+      "keyword": "散布恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0027",
+      "keyword": "散布极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0028",
+      "keyword": "散布暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0029",
+      "keyword": "散布恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0030",
+      "keyword": "散布极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0031",
+      "keyword": "散布恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0032",
+      "keyword": "鼓吹恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0033",
+      "keyword": "鼓吹极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0034",
+      "keyword": "鼓吹恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0035",
+      "keyword": "鼓吹极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0036",
+      "keyword": "鼓吹恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0037",
+      "keyword": "鼓吹极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0038",
+      "keyword": "鼓吹暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0039",
+      "keyword": "鼓吹恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0040",
+      "keyword": "鼓吹极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0041",
+      "keyword": "鼓吹恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0042",
+      "keyword": "煽动恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0043",
+      "keyword": "煽动极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0044",
+      "keyword": "煽动恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0045",
+      "keyword": "煽动极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0046",
+      "keyword": "煽动恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0047",
+      "keyword": "煽动极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0048",
+      "keyword": "煽动暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0049",
+      "keyword": "煽动恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0050",
+      "keyword": "煽动极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0051",
+      "keyword": "煽动恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0052",
+      "keyword": "煽动实施恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0053",
+      "keyword": "煽动实施极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0054",
+      "keyword": "煽动实施极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0055",
+      "keyword": "煽动实施恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0056",
+      "keyword": "煽动实施极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0057",
+      "keyword": "煽动实施暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0058",
+      "keyword": "煽动实施恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0059",
+      "keyword": "煽动实施极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0060",
+      "keyword": "煽动实施恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0061",
+      "keyword": "策划恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0062",
+      "keyword": "策划极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0063",
+      "keyword": "策划恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0064",
+      "keyword": "策划极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0065",
+      "keyword": "策划恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0066",
+      "keyword": "策划极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0067",
+      "keyword": "策划暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0068",
+      "keyword": "策划恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0069",
+      "keyword": "策划极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0070",
+      "keyword": "策划恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0071",
+      "keyword": "组织恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0072",
+      "keyword": "组织极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0073",
+      "keyword": "组织恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0074",
+      "keyword": "组织极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0075",
+      "keyword": "组织恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0076",
+      "keyword": "组织极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0077",
+      "keyword": "组织暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0078",
+      "keyword": "组织恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0079",
+      "keyword": "组织极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0080",
+      "keyword": "组织恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0081",
+      "keyword": "实施恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0082",
+      "keyword": "实施极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0083",
+      "keyword": "实施恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0084",
+      "keyword": "实施极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0085",
+      "keyword": "实施恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0086",
+      "keyword": "实施极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0087",
+      "keyword": "实施暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0088",
+      "keyword": "实施恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0089",
+      "keyword": "实施极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0090",
+      "keyword": "实施恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0091",
+      "keyword": "参与恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0092",
+      "keyword": "参与极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0093",
+      "keyword": "参与恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0094",
+      "keyword": "参与极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0095",
+      "keyword": "参与恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0096",
+      "keyword": "参与极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0097",
+      "keyword": "参与暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0098",
+      "keyword": "参与恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0099",
+      "keyword": "参与极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0100",
+      "keyword": "参与恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0101",
+      "keyword": "加入恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0102",
+      "keyword": "加入极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0103",
+      "keyword": "加入恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0104",
+      "keyword": "加入极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0105",
+      "keyword": "加入恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0106",
+      "keyword": "加入极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0107",
+      "keyword": "加入暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0108",
+      "keyword": "加入恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0109",
+      "keyword": "加入极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0110",
+      "keyword": "加入恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0111",
+      "keyword": "资助恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0112",
+      "keyword": "资助极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0113",
+      "keyword": "资助恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0114",
+      "keyword": "资助极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0115",
+      "keyword": "资助恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0116",
+      "keyword": "资助极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0117",
+      "keyword": "资助暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0118",
+      "keyword": "资助恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0119",
+      "keyword": "资助极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0120",
+      "keyword": "资助恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0121",
+      "keyword": "协助恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0122",
+      "keyword": "协助极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0123",
+      "keyword": "协助恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0124",
+      "keyword": "协助极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0125",
+      "keyword": "协助恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0126",
+      "keyword": "协助极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0127",
+      "keyword": "协助暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0128",
+      "keyword": "协助恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0129",
+      "keyword": "协助极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0130",
+      "keyword": "协助恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0131",
+      "keyword": "支持恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0132",
+      "keyword": "支持极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0133",
+      "keyword": "支持恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0134",
+      "keyword": "支持极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0135",
+      "keyword": "支持恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0136",
+      "keyword": "支持极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0137",
+      "keyword": "支持暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0138",
+      "keyword": "支持恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0139",
+      "keyword": "支持极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0140",
+      "keyword": "支持恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0141",
+      "keyword": "招募恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0142",
+      "keyword": "招募极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0143",
+      "keyword": "招募恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0144",
+      "keyword": "招募极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0145",
+      "keyword": "招募恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0146",
+      "keyword": "招募极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0147",
+      "keyword": "招募暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0148",
+      "keyword": "招募恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0149",
+      "keyword": "招募极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0150",
+      "keyword": "招募恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0151",
+      "keyword": "训练恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0152",
+      "keyword": "训练极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0153",
+      "keyword": "训练恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0154",
+      "keyword": "训练极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0155",
+      "keyword": "训练恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0156",
+      "keyword": "训练极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0157",
+      "keyword": "训练暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0158",
+      "keyword": "训练恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0159",
+      "keyword": "训练极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0160",
+      "keyword": "训练恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0161",
+      "keyword": "教唆恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0162",
+      "keyword": "教唆极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0163",
+      "keyword": "教唆恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0164",
+      "keyword": "教唆极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0165",
+      "keyword": "教唆恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0166",
+      "keyword": "教唆极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0167",
+      "keyword": "教唆暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0168",
+      "keyword": "教唆恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0169",
+      "keyword": "教唆极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0170",
+      "keyword": "教唆恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0171",
+      "keyword": "指使恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0172",
+      "keyword": "指使极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0173",
+      "keyword": "指使恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0174",
+      "keyword": "指使极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0175",
+      "keyword": "指使恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0176",
+      "keyword": "指使极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0177",
+      "keyword": "指使暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0178",
+      "keyword": "指使恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0179",
+      "keyword": "指使极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0180",
+      "keyword": "指使恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0181",
+      "keyword": "联络恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0182",
+      "keyword": "联络极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0183",
+      "keyword": "联络恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0184",
+      "keyword": "联络极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0185",
+      "keyword": "联络恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0186",
+      "keyword": "联络极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0187",
+      "keyword": "联络暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0188",
+      "keyword": "联络恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0189",
+      "keyword": "联络极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0190",
+      "keyword": "联络恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0191",
+      "keyword": "宣扬实施恐怖主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0192",
+      "keyword": "宣扬实施极端主义",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0193",
+      "keyword": "宣扬实施恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0194",
+      "keyword": "宣扬实施极端思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0195",
+      "keyword": "宣扬实施恐怖团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0196",
+      "keyword": "宣扬实施极端主张",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0197",
+      "keyword": "宣扬实施暴力恐怖活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0198",
+      "keyword": "宣扬实施恐怖主义思想",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0199",
+      "keyword": "宣扬实施极端主义活动",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a1-04-0200",
+      "keyword": "宣扬实施恐怖活动团伙",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    }
+  ]
+}

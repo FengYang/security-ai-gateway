@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "category": "A4-06",
-  "version": "v2026.09.16",
+  "version": "v2026.09.27.10",
   "level": "高",
   "rules": [
     {
@@ -10,9 +10,10 @@
       "type": "regex",
       "weight": 1,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "迁移自输入侧 guardrail（同实现、同口径）；命中走 maskPII 路径，非 block"
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail（同实现、同口径，normalize=compact）；命中走 maskPII 路径，非 block",
+      "normalize": "compact"
     },
     {
       "id": "kw-a4-06-0002",
@@ -20,9 +21,10 @@
       "type": "regex",
       "weight": 1,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "迁移自输入侧 guardrail（同实现、同口径）；命中走 maskPII 路径，非 block"
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail（同实现、同口径，normalize=compact）；命中走 maskPII 路径，非 block",
+      "normalize": "compact"
     },
     {
       "id": "kw-a4-06-0003",
@@ -30,9 +32,10 @@
       "type": "regex",
       "weight": 1,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "迁移自输入侧 guardrail（同实现、同口径）；命中走 maskPII 路径，非 block"
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail（同实现、同口径，normalize=compact）；命中走 maskPII 路径，非 block",
+      "normalize": "compact"
     },
     {
       "id": "kw-a4-06-0004",
@@ -40,9 +43,10 @@
       "type": "regex",
       "weight": 1,
       "added_at": "2026-09-16",
-      "submitter": "policy-gen（占位留痕）",
-      "reviewer": "security-team（占位留痕）",
-      "comment": "迁移自输入侧 guardrail（同实现、同口径）；命中走 maskPII 路径，非 block"
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail（同实现、同口径，normalize=compact）；命中走 maskPII 路径，非 block",
+      "normalize": "compact"
     }
   ]
 }

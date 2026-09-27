@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0",
+  "category": "A4-03",
+  "version": "v2026.09.27",
+  "level": "中",
+  "rules": [
+    {
+      "id": "kw-a4-03-0001",
+      "keyword": "侵害名誉权",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a4-03-0002",
+      "keyword": "诽谤他人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a4-03-0003",
+      "keyword": "造谣中伤",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a4-03-0004",
+      "keyword": "恶意诋毁他人",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a4-03-0005",
+      "keyword": "损害他人名誉",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    }
+  ]
+}

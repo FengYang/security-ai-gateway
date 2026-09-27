@@ -1,0 +1,2048 @@
+{
+  "schema_version": "1.0",
+  "category": "A5-01",
+  "version": "v2026.09.27.10",
+  "level": "低",
+  "rules": [
+    {
+      "id": "kw-a5-01-0001",
+      "keyword": "严重违背科学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0002",
+      "keyword": "伪科学内容",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0003",
+      "keyword": "包治百病",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0004",
+      "keyword": "偏方治癌",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0005",
+      "keyword": "违背主流科学认知",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0006",
+      "keyword": "宣扬医学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0007",
+      "keyword": "宣扬医学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0008",
+      "keyword": "宣扬健康常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0009",
+      "keyword": "宣扬营养常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0010",
+      "keyword": "宣扬疾病治疗",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0011",
+      "keyword": "宣扬疾病防治",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0012",
+      "keyword": "宣扬疾病预防",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0013",
+      "keyword": "宣扬药物疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0014",
+      "keyword": "宣扬治疗方法",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0015",
+      "keyword": "宣扬保健功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0016",
+      "keyword": "宣扬养生功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0017",
+      "keyword": "宣扬疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0018",
+      "keyword": "宣扬功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0019",
+      "keyword": "宣扬机理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0020",
+      "keyword": "宣扬营养学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0021",
+      "keyword": "宣扬保健知识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0022",
+      "keyword": "鼓吹疾病治疗",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0023",
+      "keyword": "鼓吹疾病防治",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0024",
+      "keyword": "鼓吹疾病预防",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0025",
+      "keyword": "鼓吹药物疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0026",
+      "keyword": "鼓吹治疗方法",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0027",
+      "keyword": "鼓吹保健功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0028",
+      "keyword": "鼓吹养生功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0029",
+      "keyword": "鼓吹疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0030",
+      "keyword": "鼓吹功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0031",
+      "keyword": "传播医学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0032",
+      "keyword": "传播医学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0033",
+      "keyword": "传播健康常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0034",
+      "keyword": "传播营养常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0035",
+      "keyword": "传播疾病治疗",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0036",
+      "keyword": "传播疾病防治",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0037",
+      "keyword": "传播疾病预防",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0038",
+      "keyword": "传播药物疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0039",
+      "keyword": "传播治疗方法",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0040",
+      "keyword": "传播保健功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0041",
+      "keyword": "传播养生功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0042",
+      "keyword": "传播疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0043",
+      "keyword": "传播功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0044",
+      "keyword": "传播机理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0045",
+      "keyword": "传播药物机理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0046",
+      "keyword": "传播药理机制",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0047",
+      "keyword": "传播营养学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0048",
+      "keyword": "传播保健知识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0049",
+      "keyword": "散布医学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0050",
+      "keyword": "散布医学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0051",
+      "keyword": "散布健康常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0052",
+      "keyword": "散布营养常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0053",
+      "keyword": "散布疾病治疗",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0054",
+      "keyword": "散布疾病防治",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0055",
+      "keyword": "散布疾病预防",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0056",
+      "keyword": "散布药物疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0057",
+      "keyword": "散布治疗方法",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0058",
+      "keyword": "散布保健功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0059",
+      "keyword": "散布养生功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0060",
+      "keyword": "散布疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0061",
+      "keyword": "散布功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0062",
+      "keyword": "散布机理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0063",
+      "keyword": "散布营养学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0064",
+      "keyword": "散布保健知识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0065",
+      "keyword": "推广医学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0066",
+      "keyword": "推广医学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0067",
+      "keyword": "推广健康常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0068",
+      "keyword": "推广营养常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0069",
+      "keyword": "推广疾病治疗",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0070",
+      "keyword": "推广疾病防治",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0071",
+      "keyword": "推广疾病预防",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0072",
+      "keyword": "推广药物疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0073",
+      "keyword": "推广治疗方法",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0074",
+      "keyword": "推广保健功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0075",
+      "keyword": "推广养生功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0076",
+      "keyword": "推广疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0077",
+      "keyword": "推广功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0078",
+      "keyword": "推广机理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0079",
+      "keyword": "推广营养学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0080",
+      "keyword": "推广保健知识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0081",
+      "keyword": "兜售疾病治疗",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0082",
+      "keyword": "兜售疾病防治",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0083",
+      "keyword": "兜售疾病预防",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0084",
+      "keyword": "兜售药物疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0085",
+      "keyword": "兜售治疗方法",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0086",
+      "keyword": "兜售保健功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0087",
+      "keyword": "兜售养生功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0088",
+      "keyword": "兜售疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0089",
+      "keyword": "兜售功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0090",
+      "keyword": "推销疾病治疗",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0091",
+      "keyword": "推销疾病防治",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0092",
+      "keyword": "推销疾病预防",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0093",
+      "keyword": "推销药物疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0094",
+      "keyword": "推销治疗方法",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0095",
+      "keyword": "推销保健功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0096",
+      "keyword": "推销养生功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0097",
+      "keyword": "推销疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0098",
+      "keyword": "推销功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0099",
+      "keyword": "宣传医学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0100",
+      "keyword": "宣传医学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0101",
+      "keyword": "宣传健康常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0102",
+      "keyword": "宣传营养常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0103",
+      "keyword": "宣传疾病治疗",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0104",
+      "keyword": "宣传疾病防治",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0105",
+      "keyword": "宣传疾病预防",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0106",
+      "keyword": "宣传药物疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0107",
+      "keyword": "宣传治疗方法",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0108",
+      "keyword": "宣传保健功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0109",
+      "keyword": "宣传养生功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0110",
+      "keyword": "宣传疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0111",
+      "keyword": "宣传功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0112",
+      "keyword": "宣传机理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0113",
+      "keyword": "宣传营养学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0114",
+      "keyword": "宣传保健知识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0115",
+      "keyword": "虚构科学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0116",
+      "keyword": "虚构科学共识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0117",
+      "keyword": "虚构科学规律",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0118",
+      "keyword": "虚构科学原理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0119",
+      "keyword": "虚构科学证据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0120",
+      "keyword": "虚构医学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0121",
+      "keyword": "虚构医学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0122",
+      "keyword": "虚构科学事实",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0123",
+      "keyword": "虚构科学数据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0124",
+      "keyword": "虚构医学证据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0125",
+      "keyword": "虚构临床结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0126",
+      "keyword": "虚构营养学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0127",
+      "keyword": "编造科学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0128",
+      "keyword": "编造科学共识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0129",
+      "keyword": "编造科学规律",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0130",
+      "keyword": "编造科学原理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0131",
+      "keyword": "编造科学证据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0132",
+      "keyword": "编造医学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0133",
+      "keyword": "编造医学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0134",
+      "keyword": "编造科学事实",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0135",
+      "keyword": "编造科学数据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0136",
+      "keyword": "编造医学证据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0137",
+      "keyword": "编造临床结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0138",
+      "keyword": "编造保健知识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0139",
+      "keyword": "伪造科学证据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0140",
+      "keyword": "伪造科学事实",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0141",
+      "keyword": "伪造科学数据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0142",
+      "keyword": "伪造医学证据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0143",
+      "keyword": "伪造临床结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0144",
+      "keyword": "捏造科学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0145",
+      "keyword": "捏造科学共识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0146",
+      "keyword": "捏造科学规律",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0147",
+      "keyword": "捏造科学原理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0148",
+      "keyword": "捏造科学证据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0149",
+      "keyword": "捏造医学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0150",
+      "keyword": "捏造医学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0151",
+      "keyword": "捏造健康常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0152",
+      "keyword": "捏造营养常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0153",
+      "keyword": "捏造科学事实",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0154",
+      "keyword": "捏造科学数据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0155",
+      "keyword": "捏造医学证据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0156",
+      "keyword": "捏造临床结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0157",
+      "keyword": "夸大药物疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0158",
+      "keyword": "夸大治疗方法",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0159",
+      "keyword": "夸大保健功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0160",
+      "keyword": "夸大养生功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0161",
+      "keyword": "夸大疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0162",
+      "keyword": "夸大功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0163",
+      "keyword": "夸大安全性",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0164",
+      "keyword": "虚假疾病治疗",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0165",
+      "keyword": "虚假药物疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0166",
+      "keyword": "虚假治疗方法",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0167",
+      "keyword": "虚假保健功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0168",
+      "keyword": "虚假养生功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0169",
+      "keyword": "虚假疗效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0170",
+      "keyword": "虚假功效",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0171",
+      "keyword": "虚假机理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0172",
+      "keyword": "虚假安全性",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0173",
+      "keyword": "违背科学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0174",
+      "keyword": "违背科学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0175",
+      "keyword": "违背科学共识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0176",
+      "keyword": "违背科学规律",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0177",
+      "keyword": "违背科学原理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0178",
+      "keyword": "违背医学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0179",
+      "keyword": "违背医学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0180",
+      "keyword": "违背健康常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0181",
+      "keyword": "违背营养常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0182",
+      "keyword": "违背科学精神",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0183",
+      "keyword": "违背科学事实",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0184",
+      "keyword": "否定医学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0185",
+      "keyword": "否定临床结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0186",
+      "keyword": "歪曲科学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0187",
+      "keyword": "歪曲科学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0188",
+      "keyword": "歪曲科学共识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0189",
+      "keyword": "歪曲科学规律",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0190",
+      "keyword": "歪曲科学原理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0191",
+      "keyword": "歪曲科学证据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0192",
+      "keyword": "歪曲医学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0193",
+      "keyword": "歪曲医学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0194",
+      "keyword": "歪曲健康常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0195",
+      "keyword": "歪曲营养常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0196",
+      "keyword": "曲解科学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0197",
+      "keyword": "曲解科学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0198",
+      "keyword": "曲解科学共识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0199",
+      "keyword": "曲解科学规律",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0200",
+      "keyword": "曲解科学原理",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0201",
+      "keyword": "曲解科学证据",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0202",
+      "keyword": "曲解医学常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0203",
+      "keyword": "曲解医学结论",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    },
+    {
+      "id": "kw-a5-01-0204",
+      "keyword": "曲解健康常识",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json；**组合部分为机器生成、未经人工审核**（对外提交前须逐条人工复核）"
+    }
+  ]
+}

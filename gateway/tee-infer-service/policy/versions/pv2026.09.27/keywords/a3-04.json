@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0",
+  "category": "A3-04",
+  "version": "v2026.09.27",
+  "level": "中",
+  "rules": [
+    {
+      "id": "kw-a3-04-0001",
+      "keyword": "垄断行为",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a3-04-0002",
+      "keyword": "不正当竞争",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a3-04-0003",
+      "keyword": "滥用市场支配地位",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a3-04-0004",
+      "keyword": "算法合谋",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a3-04-0005",
+      "keyword": "排除限制竞争",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    }
+  ]
+}

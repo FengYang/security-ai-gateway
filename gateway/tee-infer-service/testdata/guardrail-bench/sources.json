@@ -4,7 +4,7 @@
   "corpusPath": "gateway/tee-infer-service/testdata/guardrail-bench/corpus.jsonl",
   "corpusInGit": false,
   "corpusNotCommittedReason": "第三方内容（HF 数据集）+ 体积；改为入库「生成脚本 + 本清单」，可离线复跑重建",
-  "offlineReplication": "运行 scripts/build-guardrail-bench.ps1（联网取公开集；HF 不可达时公开集部分取不到，可先用合成族跑门禁）",
+  "offlineReplication": "运行 scripts/build-guardrail-bench.ps1（默认 HF 原站 rows API）；内网/镜像环境可 -PublicSource raw -HfEndpoint https://hf-mirror.com（raw 模式须 Python+pyarrow 读 deepset parquet）。HF 不可达时公开集部分取不到，合成族仍生成、门禁①②照常生效",
 
   "publicDatasets": [
     {
@@ -30,7 +30,7 @@
       "licenseSource": "https://huggingface.co/api/datasets/jackhhao/jailbreak-classification (cardData.license)",
       "config": "default",
       "split": "train",
-      "rowsTotal": 1044,
+      "rowsTotal": 1598,
       "fields": { "prompt": "prompt", "type": "type" },
       "labelMapping": {
         "jailbreak": { "category": "prompt_injection", "scope": "semantic", "expect": "block" },
@@ -73,9 +73,9 @@
   "syntheticFamilies": [
     { "name": "pii", "scope": "rule", "expect": "block", "count": 21, "coverage": "手机号/身份证/邮箱/银行卡 × 明文 + 全角/空格/连字符混淆变体" },
     { "name": "sql_injection", "scope": "rule", "expect": "block", "count": 12, "coverage": "正则规则 × 大小写/全角/注释/恒真式/多空白变体（select-from 结构子句 6 条 syn-sql-01/02/03/15/16/17 已归 semantic，规则层不再拦）" },
-    { "name": "prompt_injection", "scope": "rule", "expect": "block", "count": 22, "coverage": "19 个关键词（中 10 / 英 9）+ 全角/全角空格/大小写混合变体" },
+    { "name": "prompt_injection", "scope": "rule", "expect": "block", "count": 22, "coverage": "24 个关键词（中 15 / 英 9）+ 全角/全角空格/大小写混合变体" },
     { "name": "benign", "scope": "benign", "expect": "allow", "count": 40, "coverage": "普通对话/技术提问 + 数字边界（11 位非 1[3-9]、15/20 位、日期、版本号）" },
-    { "name": "known_fp", "scope": "benign", "expect": "allow", "count": 6, "knownFp": true, "coverage": "16-19 位数字（订单号/时间戳/字母前缀编号）、`--` 分隔符、"请忽略"过宽、SQL 语法讲解" }
+    { "name": "known_fp", "scope": "benign", "expect": "allow", "count": 6, "knownFp": true, "coverage": "16-19 位数字（订单号/时间戳/字母前缀编号）、`--` 分隔符、\"请忽略\"过宽、SQL 语法讲解" }
   ],
 
   "scopeSemantics": {
@@ -91,12 +91,12 @@
   },
 
   "baseline": {
-    "date": "2026-09-11",
+    "date": "2026-09-27",
     "corpusRows": 267,
-    "corpusSha256": "65ab3aafb3507156ecc76d5a477757ecac940d47f1519dd0ec8434f1f5446e81",
+    "corpusSha256": "0ef1becdba94c960b097e57332286b7269a9141015725489b3dc5dfb5960669b",
     "ruleDetectRate": "55/55 = 100%",
     "benignFPRate": "0/40 = 0.00%",
-    "semanticJailbreakDetectRate": "14/106 = 13.21%（关键词占位实现的真实能力基线，分类器选型依据）",
+    "semanticJailbreakDetectRate": "17/106 = 16.04%（关键词占位实现的真实能力基线，分类器选型依据）",
     "publicBenignFPRate": "0/60 = 0.00%"
   },
 

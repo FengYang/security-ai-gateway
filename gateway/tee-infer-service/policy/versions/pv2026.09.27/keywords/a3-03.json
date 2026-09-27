@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0",
+  "category": "A3-03",
+  "version": "v2026.09.27",
+  "level": "中",
+  "rules": [
+    {
+      "id": "kw-a3-03-0001",
+      "keyword": "泄露商业秘密",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a3-03-0002",
+      "keyword": "窃取商业机密",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a3-03-0003",
+      "keyword": "泄露公司机密",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a3-03-0004",
+      "keyword": "违规披露内部资料",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    },
+    {
+      "id": "kw-a3-03-0005",
+      "keyword": "窃取客户资料",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "comment": "真料（基词 testdata/lexicon-seed/seed.json ∪ 扩量组合 testdata/lexicon-seed/expand.json）"
+    }
+  ]
+}

@@ -1,0 +1,306 @@
+{
+  "schema_version": "1.0",
+  "policy_version": "pv2026.09.27",
+  "entries": [
+    {
+      "batch_id": "D8-OG-2026-09-27-A1-01",
+      "category": "A1-01",
+      "entries_count": 245,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A1-02",
+      "category": "A1-02",
+      "entries_count": 200,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A1-03",
+      "category": "A1-03",
+      "entries_count": 204,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A1-04",
+      "category": "A1-04",
+      "entries_count": 200,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A1-05",
+      "category": "A1-05",
+      "entries_count": 200,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A1-06",
+      "category": "A1-06",
+      "entries_count": 205,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A1-07",
+      "category": "A1-07",
+      "entries_count": 32,
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A2-01",
+      "category": "A2-01",
+      "entries_count": 123,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A2-02",
+      "category": "A2-02",
+      "entries_count": 123,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A2-03",
+      "category": "A2-03",
+      "entries_count": 124,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A2-04",
+      "category": "A2-04",
+      "entries_count": 124,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A2-05",
+      "category": "A2-05",
+      "entries_count": 123,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A2-06",
+      "category": "A2-06",
+      "entries_count": 123,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A2-07",
+      "category": "A2-07",
+      "entries_count": 122,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A2-08",
+      "category": "A2-08",
+      "entries_count": 124,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A2-09",
+      "category": "A2-09",
+      "entries_count": 123,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A3-01",
+      "category": "A3-01",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A3-02",
+      "category": "A3-02",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A3-03",
+      "category": "A3-03",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A3-04",
+      "category": "A3-04",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A3-05",
+      "category": "A3-05",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A4-01",
+      "category": "A4-01",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A4-02",
+      "category": "A4-02",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A4-03",
+      "category": "A4-03",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A4-04",
+      "category": "A4-04",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A4-05",
+      "category": "A4-05",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A4-06",
+      "category": "A4-06",
+      "entries_count": 4,
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A4-07",
+      "category": "A4-07",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A5-01",
+      "category": "A5-01",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    },
+    {
+      "batch_id": "D8-OG-2026-09-27-A5-02",
+      "category": "A5-02",
+      "entries_count": 5,
+      "submitter": "ai-assisted-lexicon-gen",
+      "reviewer": "security-team",
+      "reviewed_at": "2026-09-27",
+      "conclusion": "approved",
+      "note": "角色级留痕（reviewer 为角色名；具名复核人待补录）"
+    }
+  ]
+}

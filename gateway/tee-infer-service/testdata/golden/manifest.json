@@ -1,24 +1,24 @@
 {
-  "version": "v2026.09.16",
+  "version": "v2026.09.27.10",
   "files": [
     {
       "path": "positive.json",
       "kind": "positive",
-      "cases": 500,
-      "sha256": "20ba311693e621fa871c2b84793f8b0583cbeecce3b85667c042fba7949253cb"
+      "cases": 2000,
+      "sha256": "ffa7a282c692897d4bbe7f5d7478a1400a77e4125a68035da233a7f4bff9ff33"
     },
     {
       "path": "negative.json",
       "kind": "negative",
       "cases": 500,
-      "sha256": "0baafd86f2c3f81524d4b147c49e6e50ad5204390845d7a75869a768e0dfce48"
+      "sha256": "967d4dcd0153d38c19aec4b28260d3c9fe8c1e12a883af37a4c513355d4ad9f8"
     },
     {
       "path": "refusal.json",
       "kind": "refusal",
       "cases": 500,
-      "sha256": "252a396295e194cb7fbdadc3138a63df90e0b110eb8be990b48d5b7836bec5d6"
+      "sha256": "6dc1830895d1fed033485a49f387f5c30400d419f3ae29caa3a6c9e5b2b64010"
     }
   ],
-  "sha256": "c5dbf5d84849c6953b392a1d348ebae88bb2f2e9ccac5a2669d7e33eb5990eeb"
+  "sha256": "f58b471a32c62488aae4d990879c3347e72d2753a28acd67cce229702cb97f40"
 }

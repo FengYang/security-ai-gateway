@@ -64,64 +64,64 @@
     "name": "民族歧视内容",
     "family": "A2",
     "default_level": "high",
-    "default_action": "block",
-    "note": "弱检出区：指标须分类目单列"
+    "default_action": "flag",
+    "note": "弱检出区：指标须分类目单列；2026-09-27 评审后默认动作由 block 降为 flag（元表述词面高误伤，待 D-LLM-8 误杀定线达标后再评估升回）"
   },
   {
     "id": "A2-02",
     "name": "信仰歧视内容",
     "family": "A2",
     "default_level": "high",
-    "default_action": "block",
-    "note": "官方 A.2 b) 原文为\"信仰歧视内容\"（非\"种族歧视\"，OG-2② 核对纠正）；弱检出区"
+    "default_action": "flag",
+    "note": "官方 A.2 b) 原文为\"信仰歧视内容\"（非\"种族歧视\"，OG-2② 核对纠正）；弱检出区；2026-09-27 同 A2-01 降为 flag"
   },
   {
     "id": "A2-03",
     "name": "国别歧视内容",
     "family": "A2",
     "default_level": "high",
-    "default_action": "block",
-    "note": "弱检出区"
+    "default_action": "flag",
+    "note": "弱检出区；2026-09-27 同 A2-01 降为 flag"
   },
   {
     "id": "A2-04",
     "name": "地域歧视内容",
     "family": "A2",
     "default_level": "high",
-    "default_action": "block",
-    "note": "弱检出区；\"地域黑\"梗文化对抗性强"
+    "default_action": "flag",
+    "note": "弱检出区；\"地域黑\"梗文化对抗性强；2026-09-27 同 A2-01 降为 flag"
   },
   {
     "id": "A2-05",
     "name": "性别歧视内容",
     "family": "A2",
     "default_level": "high",
-    "default_action": "block",
-    "note": "弱检出区"
+    "default_action": "flag",
+    "note": "弱检出区；2026-09-27 同 A2-01 降为 flag"
   },
   {
     "id": "A2-06",
     "name": "年龄歧视内容",
     "family": "A2",
     "default_level": "high",
-    "default_action": "block",
-    "note": "弱检出区"
+    "default_action": "flag",
+    "note": "弱检出区；2026-09-27 同 A2-01 降为 flag"
   },
   {
     "id": "A2-07",
     "name": "职业歧视内容",
     "family": "A2",
     "default_level": "high",
-    "default_action": "block",
-    "note": "弱检出区"
+    "default_action": "flag",
+    "note": "弱检出区；2026-09-27 同 A2-01 降为 flag"
   },
   {
     "id": "A2-08",
     "name": "健康歧视内容",
     "family": "A2",
     "default_level": "high",
-    "default_action": "block",
-    "note": "弱检出区"
+    "default_action": "flag",
+    "note": "弱检出区；2026-09-27 同 A2-01 降为 flag"
   },
   {
     "id": "A2-09",

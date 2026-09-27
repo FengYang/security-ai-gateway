@@ -23,4 +23,4 @@ metadata:
     time: "2026-09-09T17:36:45Z"
   name: higress-console
   namespace: higress-system
-  resourceVersion: "22"
+  resourceVersion: "23"

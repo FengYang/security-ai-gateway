@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "category": "A4-06",
+  "version": "v2026.09.27.4",
+  "level": "高",
+  "rules": [
+    {
+      "id": "kw-a4-06-0001",
+      "keyword": "(^|[^0-9])(1[3-9][0-9]{9})([^0-9]|$)",
+      "type": "regex",
+      "weight": 1,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail（同实现、同口径）；命中走 maskPII 路径，非 block"
+    },
+    {
+      "id": "kw-a4-06-0002",
+      "keyword": "(^|[^0-9])([0-9]{17}[0-9Xx])([^0-9]|$)",
+      "type": "regex",
+      "weight": 1,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail（同实现、同口径）；命中走 maskPII 路径，非 block"
+    },
+    {
+      "id": "kw-a4-06-0003",
+      "keyword": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
+      "type": "regex",
+      "weight": 1,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail（同实现、同口径）；命中走 maskPII 路径，非 block"
+    },
+    {
+      "id": "kw-a4-06-0004",
+      "keyword": "(^|[^0-9])([0-9]{16,19})([^0-9]|$)",
+      "type": "regex",
+      "weight": 1,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail（同实现、同口径）；命中走 maskPII 路径，非 block"
+    }
+  ]
+}

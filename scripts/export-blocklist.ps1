@@ -63,6 +63,38 @@ $categories = Get-Content -LiteralPath $categoriesPath -Raw -Encoding UTF8 | Con
 $catById = @{}
 foreach ($c in $categories) { $catById[$c.id] = $c }
 
+# ---- 2b) 交付分层：复核状态（review-ledger.json）+ 来源分层（seed 基词 vs expand 组合）----
+# 目的（2026-09-27 多角色评审建议）：词库 = 人工基词层 + 机器组合层，两层**可解释性不同**；
+# 分层交付可避免"用条数掩盖可解释性"，使报备与人工审核各取所需。
+$ledgerByCat = @{}
+$reviewLevel = 'role'   # 缺省按**角色级**处理（保守：不视为已具名；见 policy/review-ledger.json 的 review_level）
+$ledgerPath = Join-Path $PolicyDir 'review-ledger.json'
+if (Test-Path -LiteralPath $ledgerPath) {
+    $ledger = Get-Content -LiteralPath $ledgerPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($e in $ledger.entries) { $ledgerByCat[$e.category] = $e.conclusion }
+    if ($ledger.review_level) { $reviewLevel = [string]$ledger.review_level }
+}
+else {
+    Write-Host 'WARN: review-ledger.json 缺失 -> review_status 记为 unknown（不得据此对外申报）' -ForegroundColor Yellow
+}
+$seedPath = Join-Path $repoRoot 'gateway\tee-infer-service\testdata\lexicon-seed\seed.json'
+$seedByCat = @{}
+if (Test-Path -LiteralPath $seedPath) {
+    $seedDoc = Get-Content -LiteralPath $seedPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($p in $seedDoc.PSObject.Properties) {
+        if ($p.Name -like '_*') { continue }
+        $h = @{}
+        foreach ($w in $p.Value) { $h[[string]$w] = $true }
+        $seedByCat[$p.Name] = $h
+    }
+}
+else {
+    Write-Host "WARN: 未找到基词种子 $seedPath -> source 记为 unknown" -ForegroundColor Yellow
+}
+$seedLayerTotal = 0
+$expandLayerTotal = 0
+$unknownLayerTotal = 0
+
 # ---- 3) 逐类词库（keywords/*.json）----
 $rows = New-Object System.Collections.Generic.List[object]
 $perCat = @{}
@@ -84,6 +116,17 @@ foreach ($file in $kwFiles) {
         if ($r.keyword -match '示例') { $isPlaceholder = $true }
         if ($r.comment -and $r.comment -match '占位') { $isPlaceholder = $true }
         if ($isPlaceholder) { $ph++ }
+        # 来源分层（seed 基词 / expand 组合）与复核状态（见 2b）
+        $kwText = [string]$r.keyword
+        $src = 'unknown'
+        if ($seedByCat.ContainsKey($cid)) {
+            if ($seedByCat[$cid].ContainsKey($kwText)) { $src = 'seed' } else { $src = 'expand' }
+        }
+        if ($src -eq 'seed') { $seedLayerTotal++ }
+        elseif ($src -eq 'expand') { $expandLayerTotal++ }
+        else { $unknownLayerTotal++ }
+        $rv = 'unknown'
+        if ($ledgerByCat.ContainsKey($cid)) { $rv = [string]$ledgerByCat[$cid] }
         $cat = $catById[$cid]
         $catName = ''
         $family = ''
@@ -101,6 +144,8 @@ foreach ($file in $kwFiles) {
             submitter     = $r.submitter
             reviewer      = $r.reviewer
             placeholder   = $isPlaceholder
+            source        = $src
+            review_status = $rv
         })
         $n++
     }
@@ -145,11 +190,23 @@ foreach ($fam in @('A1', 'A2', 'A3', 'A4', 'A5')) {
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $csvAll = Join-Path $OutDir 'blocklist.csv'
 $csvKeywords = Join-Path $OutDir 'blocklist-keywords-only.csv'
+$csvSeed = Join-Path $OutDir 'blocklist-seed-only.csv'
 $jsonSummary = Join-Path $OutDir 'export-summary.json'
 $mdSummary = Join-Path $OutDir 'export-summary.md'
 
 $rows | Export-Csv -LiteralPath $csvAll -NoTypeInformation -Encoding UTF8
-$rows | Select-Object category_id, category_name, keyword | Export-Csv -LiteralPath $csvKeywords -NoTypeInformation -Encoding UTF8
+# 报备形态（blocklist-keywords-only.csv）**仅在复核级别 = named（具名复核）时生成**：
+# 角色级留痕（review_level = role）下不得产出对外申报物（2026-09-27 评审裁定）。
+$filingReady = ($reviewLevel -eq 'named')
+if ($filingReady) {
+    $rows | Select-Object category_id, category_name, keyword | Export-Csv -LiteralPath $csvKeywords -NoTypeInformation -Encoding UTF8
+}
+else {
+    if (Test-Path -LiteralPath $csvKeywords) { Remove-Item -LiteralPath $csvKeywords -Force }
+    Write-Host ("WARN: review_level={0}（未具名）-> 不生成报备形态 blocklist-keywords-only.csv；" -f $reviewLevel) -ForegroundColor Yellow
+    Write-Host '      blocklist.csv（含 source/review_status 分层列）仍产出，供人工审核使用。' -ForegroundColor Yellow
+}
+$rows | Where-Object { $_.source -eq 'seed' } | Export-Csv -LiteralPath $csvSeed -NoTypeInformation -Encoding UTF8
 
 $summary = [pscustomobject]@{
     generator            = 'scripts/export-blocklist.ps1'
@@ -166,10 +223,16 @@ $summary = [pscustomobject]@{
     entries_total        = $entriesTotal
     placeholder_entries  = $placeholderTotal
     placeholder_state    = $placeholderState
+    seed_layer_entries   = $seedLayerTotal
+    expand_layer_entries = $expandLayerTotal
+    unknown_layer_entries = $unknownLayerTotal
+    review_status_counts = @($rows | Group-Object review_status | ForEach-Object { [pscustomobject]@{ status = $_.Name; count = $_.Count } })
+    review_level         = $reviewLevel
+    filing_ready         = $filingReady
     official_min_total   = $official.total_min
     below_official_total = ($entriesTotal -lt $official.total_min)
     family_stats         = $famStats
-    files                = [pscustomobject]@{ all_rows_csv = 'blocklist.csv'; keywords_only_csv = 'blocklist-keywords-only.csv' }
+    files                = [pscustomobject]@{ all_rows_csv = 'blocklist.csv'; keywords_only_csv = 'blocklist-keywords-only.csv'; seed_layer_csv = 'blocklist-seed-only.csv' }
 }
 $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonSummary -Encoding UTF8
 
@@ -210,6 +273,18 @@ $lines.Add(('- 　└ 设计内豁免（不建 keyword 词库，依据 `categori
 $lines.Add(('- 　└ 真实缺口（既无词库也非设计豁免）：{0}' -f $gapText))
 $lines.Add('- 口径区分：**类目映射覆盖**（31 类全量映射，含官方 A.1+A.2 共 17 种）与 **keyword 词库覆盖**（28/31）是两个口径；官方"至少覆盖 A.1+A.2 共 17 种"属前者，后者按类目设计差异存在豁免。')
 $lines.Add('')
+$lines.Add('## 交付分层（人工审核用）')
+$lines.Add('')
+$lines.Add(('- 基词层（`source=seed`，人工撰写、逐条可解释）：**{0}** 条 → `blocklist-seed-only.csv`' -f $seedLayerTotal))
+$lines.Add(('- 扩量层（`source=expand`，机器组合生成、**须人工审核后**方可对外）：**{0}** 条' -f $expandLayerTotal))
+$rvText = (($rows | Group-Object review_status | ForEach-Object { '{0}={1}' -f $_.Name, $_.Count }) -join '、')
+$lines.Add(('- 复核状态（`review_status`，取自 `review-ledger.json`）：{0}' -f $rvText))
+$lines.Add(('- 复核级别（`review_level`）：**{0}**；**报备形态可生成**：{1}' -f $reviewLevel, $filingReady))
+if (-not $filingReady) {
+    $lines.Add('  - ⚠️ **当前为角色级留痕（未具名）→ 未生成报备形态 `blocklist-keywords-only.csv`**；补具名复核（`review_level` 改 `named`）后方可生成对外申报物。')
+}
+$lines.Add('- 说明：`reviewer` 列若为**角色名**（如 `security-team`），属角色级留痕；对外申报前须补**具名**复核。')
+$lines.Add('')
 $lines.Add('## 占位态（重要）')
 $lines.Add('')
 if ($placeholderState) {
@@ -221,9 +296,15 @@ if ($placeholderState) {
 $lines.Add('')
 $lines.Add('## 产物')
 $lines.Add('')
-$lines.Add('- `blocklist.csv`：全字段明细（含 submitter/reviewer/added_at/placeholder）')
-$lines.Add('- `blocklist-keywords-only.csv`：报备形态（类目 + 关键词）')
-$lines.Add('- `export-summary.json`：机器可读摘要（覆盖/量级/完整性/占位态）')
+$lines.Add('- `blocklist.csv`：全字段明细（含 submitter/reviewer/added_at/placeholder/source/review_status）')
+if ($filingReady) {
+    $lines.Add('- `blocklist-keywords-only.csv`：报备形态（类目 + 关键词）')
+}
+else {
+    $lines.Add('- `blocklist-keywords-only.csv`：报备形态——**本批次未生成**（复核级别非 named）')
+}
+$lines.Add('- `blocklist-seed-only.csv`：**基词层**（人工撰写、逐条可解释）单表')
+$lines.Add('- `export-summary.json`：机器可读摘要（覆盖/量级/完整性/占位态/分层）')
 $lines.Add('- `export-summary.md`：本文件')
 $lines | Set-Content -LiteralPath $mdSummary -Encoding UTF8
 

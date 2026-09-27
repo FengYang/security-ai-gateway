@@ -1,0 +1,246 @@
+[
+  {
+    "id": "A1-01",
+    "name": "煽动颠覆国家政权、推翻社会主义制度",
+    "family": "A1",
+    "default_level": "high",
+    "default_action": "block"
+  },
+  {
+    "id": "A1-02",
+    "name": "危害国家安全和利益、损害国家形象",
+    "family": "A1",
+    "default_level": "high",
+    "default_action": "block"
+  },
+  {
+    "id": "A1-03",
+    "name": "煽动分裂国家、破坏国家统一和社会稳定",
+    "family": "A1",
+    "default_level": "high",
+    "default_action": "block"
+  },
+  {
+    "id": "A1-04",
+    "name": "宣扬恐怖主义、极端主义",
+    "family": "A1",
+    "default_level": "high",
+    "default_action": "block"
+  },
+  {
+    "id": "A1-05",
+    "name": "宣扬民族仇恨",
+    "family": "A1",
+    "default_level": "high",
+    "default_action": "block",
+    "note": "官方 A.1 e) 原文仅\"宣扬民族仇恨\"；与 A2-01\"民族歧视内容\"分列两项，命中归类以\"宣扬仇恨\"优先归 A1-05"
+  },
+  {
+    "id": "A1-06",
+    "name": "宣扬暴力、淫秽色情",
+    "family": "A1",
+    "default_level": "high",
+    "default_action": "block",
+    "note": "官方 A.1 f) 原文；L1 词库强项（显性类）"
+  },
+  {
+    "id": "A1-07",
+    "name": "传播虚假有害信息",
+    "family": "A1",
+    "default_level": "medium",
+    "default_action": "flag",
+    "note": "检出可靠性与误杀风险均高，默认只标记"
+  },
+  {
+    "id": "A1-08",
+    "name": "其他法律、行政法规禁止的内容",
+    "family": "A1",
+    "default_level": "medium",
+    "default_action": "flag",
+    "note": "官方 A.1 h) 原文；兜底类，不单独建词库，仅作映射落点"
+  },
+  {
+    "id": "A2-01",
+    "name": "民族歧视内容",
+    "family": "A2",
+    "default_level": "high",
+    "default_action": "flag",
+    "note": "弱检出区：指标须分类目单列；2026-09-27 评审后默认动作由 block 降为 flag（元表述词面高误伤，待 D-LLM-8 误杀定线达标后再评估升回）"
+  },
+  {
+    "id": "A2-02",
+    "name": "信仰歧视内容",
+    "family": "A2",
+    "default_level": "high",
+    "default_action": "flag",
+    "note": "官方 A.2 b) 原文为\"信仰歧视内容\"（非\"种族歧视\"，OG-2② 核对纠正）；弱检出区；2026-09-27 同 A2-01 降为 flag"
+  },
+  {
+    "id": "A2-03",
+    "name": "国别歧视内容",
+    "family": "A2",
+    "default_level": "high",
+    "default_action": "flag",
+    "note": "弱检出区；2026-09-27 同 A2-01 降为 flag"
+  },
+  {
+    "id": "A2-04",
+    "name": "地域歧视内容",
+    "family": "A2",
+    "default_level": "high",
+    "default_action": "flag",
+    "note": "弱检出区；\"地域黑\"梗文化对抗性强；2026-09-27 同 A2-01 降为 flag"
+  },
+  {
+    "id": "A2-05",
+    "name": "性别歧视内容",
+    "family": "A2",
+    "default_level": "high",
+    "default_action": "flag",
+    "note": "弱检出区；2026-09-27 同 A2-01 降为 flag"
+  },
+  {
+    "id": "A2-06",
+    "name": "年龄歧视内容",
+    "family": "A2",
+    "default_level": "high",
+    "default_action": "flag",
+    "note": "弱检出区；2026-09-27 同 A2-01 降为 flag"
+  },
+  {
+    "id": "A2-07",
+    "name": "职业歧视内容",
+    "family": "A2",
+    "default_level": "high",
+    "default_action": "flag",
+    "note": "弱检出区；2026-09-27 同 A2-01 降为 flag"
+  },
+  {
+    "id": "A2-08",
+    "name": "健康歧视内容",
+    "family": "A2",
+    "default_level": "high",
+    "default_action": "flag",
+    "note": "弱检出区；2026-09-27 同 A2-01 降为 flag"
+  },
+  {
+    "id": "A2-09",
+    "name": "其他方面歧视内容",
+    "family": "A2",
+    "default_level": "medium",
+    "default_action": "flag",
+    "note": "兜底类"
+  },
+  {
+    "id": "A3-01",
+    "name": "侵犯他人知识产权",
+    "family": "A3",
+    "default_level": "medium",
+    "default_action": "flag",
+    "note": "语境依赖（如正常批评/学术讨论），默认不拦"
+  },
+  {
+    "id": "A3-02",
+    "name": "违反商业道德",
+    "family": "A3",
+    "default_level": "medium",
+    "default_action": "flag",
+    "note": "边界模糊，不建议默认 block"
+  },
+  {
+    "id": "A3-03",
+    "name": "泄露他人商业秘密",
+    "family": "A3",
+    "default_level": "medium",
+    "default_action": "flag",
+    "note": "与 A4-06 邻近，命中以\"秘密\"性质归 A3-03"
+  },
+  {
+    "id": "A3-04",
+    "name": "利用算法、数据、平台等优势，实施垄断和不正当竞争行为",
+    "family": "A3",
+    "default_level": "medium",
+    "default_action": "flag",
+    "note": "语境依赖"
+  },
+  {
+    "id": "A3-05",
+    "name": "其他商业违法违规行为",
+    "family": "A3",
+    "default_level": "low",
+    "default_action": "flag",
+    "note": "兜底类"
+  },
+  {
+    "id": "A4-01",
+    "name": "危害他人身心健康",
+    "family": "A4",
+    "default_level": "medium",
+    "default_action": "flag",
+    "note": "与 A1-06 部分重叠，显性暴力/色情归 A1-06"
+  },
+  {
+    "id": "A4-02",
+    "name": "侵害他人肖像权",
+    "family": "A4",
+    "default_level": "medium",
+    "default_action": "flag",
+    "note": "民事纠纷属性，网关不宜默认拦截"
+  },
+  {
+    "id": "A4-03",
+    "name": "侵害他人名誉权",
+    "family": "A4",
+    "default_level": "medium",
+    "default_action": "flag",
+    "note": "同上"
+  },
+  {
+    "id": "A4-04",
+    "name": "侵害他人荣誉权",
+    "family": "A4",
+    "default_level": "medium",
+    "default_action": "flag",
+    "note": "同上"
+  },
+  {
+    "id": "A4-05",
+    "name": "侵害他人隐私权",
+    "family": "A4",
+    "default_level": "medium",
+    "default_action": "flag",
+    "note": "同上；涉结构化个人信息时归 A4-06"
+  },
+  {
+    "id": "A4-06",
+    "name": "侵害他人个人信息权益",
+    "family": "A4",
+    "default_level": "high",
+    "default_action": "mask",
+    "note": "走既有 maskPII 路径，非 block"
+  },
+  {
+    "id": "A4-07",
+    "name": "侵犯他人其他合法权益",
+    "family": "A4",
+    "default_level": "low",
+    "default_action": "flag",
+    "note": "兜底类"
+  },
+  {
+    "id": "A5-01",
+    "name": "内容不准确，严重不符合科学常识或主流认知",
+    "family": "A5",
+    "default_level": "low",
+    "default_action": "pass",
+    "note": "非违法内容；仅在声明为医疗/心理等高安全服务类型时启用"
+  },
+  {
+    "id": "A5-02",
+    "name": "内容不可靠，虽然不包含严重错误的内容，但无法对使用者形成帮助",
+    "family": "A5",
+    "default_level": "low",
+    "default_action": "pass",
+    "note": "误伤正常问答风险最高，严禁默认拦截"
+  }
+]

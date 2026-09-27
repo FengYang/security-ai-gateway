@@ -1,0 +1,80 @@
+{
+    "schema_version":  "1.0",
+    "baseline_note":  "rule_detect / semantic_detect / fp / corpus_sha256 为**输入侧 guardrail 口径**（评测对象是输入侧分类器，不覆盖 policy/ 词库内容）；output_detect / output_fp 为**输出侧口径**（黄金正例自归类检出率 / 黄金负例误杀率，2026-09-27 新增）——二者互补，均适用「不得回退」原则。",
+    "baseline":  {
+                     "rule_detect":  1,
+                     "semantic_detect":  0.16,
+                     "fp":  0,
+                     "corpus_sha256":  "0ef1becdba94c960b097e57332286b7269a9141015725489b3dc5dfb5960669b",
+                     "output_detect":  1,
+                     "output_fp":  0
+                 },
+    "versions":  [
+                     {
+                         "version":  "pv2026.09.16",
+                         "status":  "published",
+                         "note":  "D8 复核基线首版（review-ledger.json 留痕；语料 0ef1becd…）",
+                         "created_at":  "2026-09-27T06:17:05Z"
+                     },
+                     {
+                         "version":  "pv2026.09.27",
+                         "status":  "published",
+                         "note":  "Batch B 第1批：A.1 每类≥200、A.2 每类≥100（expand.json 组合展开）；台账同步",
+                         "created_at":  "2026-09-27T07:30:18Z"
+                     },
+                     {
+                         "version":  "pv2026.09.27.2",
+                         "status":  "published",
+                         "note":  "Batch B 第2批：扩量至 10892 条；台账同步；待人工审核",
+                         "created_at":  "2026-09-27T08:16:58Z"
+                     },
+                     {
+                         "version":  "pv2026.09.27.3",
+                         "status":  "published",
+                         "note":  "评审修复版：关键词 10476 + 正则 12（合计 10488）；修 A1-03 极性失控等 3 项阻断级 + 跨类目抢占；待人工审核",
+                         "created_at":  "2026-09-27T08:34:51Z"
+                     },
+                     {
+                         "version":  "pv2026.09.27.4",
+                         "status":  "published",
+                         "note":  "评审修复第二批：SQL 注释规则收窄(去掉 # 分支，消 neg-0040 误杀) + 措辞统一；输出侧门禁已登记(output_detect=1/output_fp=0)；待人工审核",
+                         "created_at":  "2026-09-27T09:01:40Z"
+                     },
+                     {
+                         "version":  "pv2026.09.27.5",
+                         "status":  "published",
+                         "note":  "评审修复第三批：A2-01..08 默认动作 block→flag；regex 增匹配文本档(fold/compact，修全角/空格 PII 与全角 SQL 漏检)；台账增 review_level=role(报备形态待具名复核)",
+                         "created_at":  "2026-09-27T09:16:02Z"
+                     },
+                     {
+                         "version":  "pv2026.09.27.6",
+                         "status":  "published",
+                         "note":  "六角色 agent 评审修复：A2 语序纠偏(及物动词反序，清零「民族攻击」类反向词) + 移除中性元表述(偏见/对立)；A5-01 极性错误 28 条(传播/宣传科学X)；A3-02 批量、A4-01 极限挑战 轴级剔除",
+                         "created_at":  "2026-09-27T10:15:13Z"
+                     },
+                     {
+                         "version":  "pv2026.09.27.7",
+                         "status":  "published",
+                         "note":  "责任边界落定：台账文案明确具名复核由部署单位签署（见 GA-部署指南 §7 S1）。【2026-09-27 追注】原引用的独立清单文档已并入 GA-部署指南 §7 并删除，本备注同步改指；快照内容未变。",
+                         "created_at":  "2026-09-27T10:18:15Z"
+                     },
+                     {
+                         "version":  "pv2026.09.27.8",
+                         "status":  "published",
+                         "note":  "方案(c) 重建：轴级排除+搭配白名单(right_lefts/left_objects)+法定术语(terms)+A2反序；3项口径裁决落地；10082条",
+                         "created_at":  "2026-09-27T10:47:39Z"
+                     },
+                     {
+                         "version":  "pv2026.09.27.9",
+                         "status":  "published",
+                         "note":  "方案(c) 重建 + 3项口径裁决 + 移除含『示例』客体；10068条",
+                         "created_at":  "2026-09-27T10:50:03Z"
+                     },
+                     {
+                         "version":  "pv2026.09.27.10",
+                         "status":  "published",
+                         "note":  "责任边界并入部署指南 §7（原独立清单已删）；台账引用改指 §7",
+                         "created_at":  "2026-09-27T11:12:50Z"
+                     }
+                 ]
+}

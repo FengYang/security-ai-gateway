@@ -1,0 +1,10 @@
+{
+  "version": "pv2026.09.27.6",
+  "corpus_sha256": "0ef1becdba94c960b097e57332286b7269a9141015725489b3dc5dfb5960669b",
+  "rule_detect": 1,
+  "semantic_detect": 0.16,
+  "fp": 0,
+  "passed": true,
+  "generated_at": "2026-09-27T04:38:15Z",
+  "source": "docs/benchmark/guardrail-classifier/keyword-baseline.json（输入侧 guardrail 层基线；输出侧口径见 index.baseline.output_detect/output_fp）"
+}

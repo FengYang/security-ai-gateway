@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   策略/词库版本发布（S1-4 / G21 离线侧）——生成 policy/versions/ 版本快照并维护索引。
 
@@ -9,6 +9,7 @@
 
   硬门禁：**没有评测记录（-BenchJson）的版本只能归档为 draft**（draft 不可被 activate）。
   这也意味着基线（baseline）必须由首次发布的评测记录自举——不预置、不猜测（避免伪造口径）。
+  另：来源 manifest **必须登记 review-ledger.json**（D8 复核台账，S3-2）——无留痕不得发布。
 
 .EXAMPLE
   # 1) 首次发布并自举基线（评测记录须来自评测跑道，如 docs/benchmark/guardrail-classifier/*.json 转换）
@@ -44,6 +45,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# 无 BOM 的 UTF-8：Go 侧 json.Unmarshal 拒绝 BOM，而 PS 5.1 的 `-Encoding UTF8` 会写 BOM。
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 function Fail([string]$msg) {
     Write-Host "❌ $msg" -ForegroundColor Red
@@ -60,12 +63,17 @@ if (Test-Path (Join-Path $FromDir "versions")) {
     Fail "来源目录不得包含 versions/ 子目录（版本库由本脚本维护）：$FromDir"
 }
 
-$mf = Get-Content $srcManifest -Raw | ConvertFrom-Json
+$mf = Get-Content -LiteralPath $srcManifest -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($mf.policy_version -ne $Version) {
     Fail "manifest.policy_version=$($mf.policy_version) 与 -Version=$Version 不一致（版本号须单一事实源）"
 }
 if (-not $mf.files -or $mf.files.Count -eq 0) {
     Fail "manifest.files 为空（聚合清单不得为空）"
+}
+# D8 复核留痕（S3-2）：发布版本必须携带复核台账，且须在 manifest 登记
+# （tee 侧加载期对已登记台账强校验覆盖完整性；未登记则不校验）。
+if (-not ($mf.files | Where-Object { $_.path -eq 'review-ledger.json' })) {
+    Fail "manifest.files 未登记 review-ledger.json（D8 复核台账）——发布版本必须携带复核留痕"
 }
 
 Write-Host "== 校验 $($mf.files.Count) 个登记文件的 sha256 =="
@@ -84,7 +92,7 @@ Write-Host "✅ 全部登记文件 hash 一致"
 $bench = $null
 if ($BenchJson -ne "") {
     if (-not (Test-Path $BenchJson)) { Fail "评测记录不存在：$BenchJson" }
-    $bench = Get-Content $BenchJson -Raw | ConvertFrom-Json
+    $bench = Get-Content -LiteralPath $BenchJson -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($bench.version -ne $Version) {
         Fail "评测记录的 version=$($bench.version) 与 -Version=$Version 不一致（记录与版本须一一对应）"
     }
@@ -112,7 +120,10 @@ if (Test-Path $targetDir) {
 New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
 Copy-Item -Path (Join-Path $FromDir "*") -Destination $targetDir -Recurse -Force
 if ($null -ne $bench) {
-    Copy-Item -Path $BenchJson -Destination (Join-Path $targetDir "bench.json") -Force
+    # 去 BOM 落库（2026-09-27 修复）：Go 侧 json.Unmarshal 不接受 BOM；此前用 Copy-Item 会把调用方文件的
+    # BOM 一并带入快照，导致版本校验报 `invalid character '\ufeff'`。改为重新序列化并以无 BOM UTF-8 写入。
+    $benchText = ($bench | ConvertTo-Json -Depth 4)
+    [System.IO.File]::WriteAllText((Join-Path $targetDir "bench.json"), $benchText, (New-Object System.Text.UTF8Encoding($false)))
 }
 Write-Host "✅ 快照已写入：$targetDir"
 
@@ -120,7 +131,7 @@ Write-Host "✅ 快照已写入：$targetDir"
 
 $indexPath = Join-Path $versionsDir "index.json"
 if (Test-Path $indexPath) {
-    $index = Get-Content $indexPath -Raw | ConvertFrom-Json
+    $index = Get-Content -LiteralPath $indexPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($index.schema_version -ne "1.0") {
         Fail "index.schema_version=$($index.schema_version) 不受支持（期望 1.0）"
     }
@@ -152,7 +163,7 @@ $entry = [pscustomobject]@{
 $kept = @($index.versions | Where-Object { $_.version -ne $Version })
 $index.versions = @($kept + $entry)
 
-$index | ConvertTo-Json -Depth 8 | Set-Content -Path $indexPath -Encoding UTF8
+[System.IO.File]::WriteAllText($indexPath, (($index | ConvertTo-Json -Depth 8) + "`n"), $utf8NoBom)
 Write-Host "✅ 索引已更新：$indexPath"
 
 # ---- 5. 后续校验提示 ----
@@ -160,5 +171,7 @@ Write-Host "✅ 索引已更新：$indexPath"
 Write-Host ""
 Write-Host "下一步（Go 侧发布门禁，逐版本复算哈希 + bench 门禁）："
 Write-Host "  go test -mod=mod ./gateway/tee-infer-service/ -run TestPolicyVersionArtifactsVerify -v"
+Write-Host "输出侧门禁（不可回退：黄金正例检出率 / 负例误杀率，基线见 index.baseline.output_*）："
+Write-Host "  go test -mod=mod ./gateway/tee-infer-service/ -run 'TestPolicyOutputSideGateNotRegress|TestPolicyLexiconKeywordsSelfClassify' -v"
 Write-Host "运行时引用（经管理端点，须过 bench 硬门禁）："
 Write-Host "  POST /config/policy/activate {\"version\":\"$Version\"}"

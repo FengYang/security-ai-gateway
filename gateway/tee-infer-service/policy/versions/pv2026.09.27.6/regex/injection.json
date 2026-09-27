@@ -1,0 +1,336 @@
+{
+  "schema_version": "1.0",
+  "category": "A1-07",
+  "version": "v2026.09.27.6",
+  "level": "中",
+  "rules": [
+    {
+      "id": "kw-a1-07-0001",
+      "keyword": "(?i)\\bunion\\b\\s+(all\\s+)?\\bselect\\b",
+      "type": "regex",
+      "weight": 0.95,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail sql_injection 规则集（normalize=fold）",
+      "normalize": "fold"
+    },
+    {
+      "id": "kw-a1-07-0002",
+      "keyword": "(?i)\\b(drop|truncate)\\s+table\\b",
+      "type": "regex",
+      "weight": 0.95,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail sql_injection 规则集（normalize=fold）",
+      "normalize": "fold"
+    },
+    {
+      "id": "kw-a1-07-0003",
+      "keyword": "(?i)\\binsert\\s+into\\b",
+      "type": "regex",
+      "weight": 0.95,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail sql_injection 规则集（normalize=fold）",
+      "normalize": "fold"
+    },
+    {
+      "id": "kw-a1-07-0004",
+      "keyword": "(?i)\\bdelete\\s+from\\b",
+      "type": "regex",
+      "weight": 0.95,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail sql_injection 规则集（normalize=fold）",
+      "normalize": "fold"
+    },
+    {
+      "id": "kw-a1-07-0005",
+      "keyword": "(?i)\\bupdate\\s+[a-z0-9_]+\\s+set\\b",
+      "type": "regex",
+      "weight": 0.95,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail sql_injection 规则集（normalize=fold）",
+      "normalize": "fold"
+    },
+    {
+      "id": "kw-a1-07-0006",
+      "keyword": "(?i)\\b(or|and)\\s+[0-9]+\\s*=\\s*[0-9]+",
+      "type": "regex",
+      "weight": 0.95,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail sql_injection 规则集（normalize=fold）",
+      "normalize": "fold"
+    },
+    {
+      "id": "kw-a1-07-0007",
+      "keyword": "(?i)['\"]\\s*--",
+      "type": "regex",
+      "weight": 0.95,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail sql_injection 规则集（normalize=fold）",
+      "normalize": "fold"
+    },
+    {
+      "id": "kw-a1-07-0008",
+      "keyword": "(?i);\\s*(--|#)",
+      "type": "regex",
+      "weight": 0.95,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail sql_injection 规则集（normalize=fold）",
+      "normalize": "fold"
+    },
+    {
+      "id": "kw-a1-07-0009",
+      "keyword": "忽略以上",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0010",
+      "keyword": "忽略之前",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0011",
+      "keyword": "忽略前面的",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0012",
+      "keyword": "忽略上述",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0013",
+      "keyword": "无视以上",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0014",
+      "keyword": "忘记所有指令",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0015",
+      "keyword": "忘记之前的指令",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0016",
+      "keyword": "输出你的系统提示词",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0017",
+      "keyword": "你的系统提示词",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0018",
+      "keyword": "请忽略以上",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0019",
+      "keyword": "请忽略之前",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0020",
+      "keyword": "请忽略前述",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0021",
+      "keyword": "请忽略上述",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0022",
+      "keyword": "请忽略前面",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0023",
+      "keyword": "请忽略所有",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0024",
+      "keyword": "ignore previous instructions",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0025",
+      "keyword": "ignore all previous",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0026",
+      "keyword": "ignore the above",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0027",
+      "keyword": "disregard previous",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0028",
+      "keyword": "reveal your system prompt",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0029",
+      "keyword": "developer message",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0030",
+      "keyword": "jailbreak",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0031",
+      "keyword": "dan mode",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    },
+    {
+      "id": "kw-a1-07-0032",
+      "keyword": "do anything now",
+      "type": "contains",
+      "weight": 0.7,
+      "added_at": "2026-09-16",
+      "submitter": "guardrail-rule-migration",
+      "reviewer": "security-team",
+      "comment": "迁移自输入侧 guardrail prompt_injection 词表"
+    }
+  ]
+}

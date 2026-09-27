@@ -10,19 +10,33 @@
 #   - PII 族 与「易误报负样本」族：**全部合成**（公开 PII 数据集含真实个人信息，属合规红线，不采用）
 #
 # 语义范围（scope 字段，决定是否计入门禁阈值）：
-#   rule            规则目标集（PII 4 类 / SQLi 8 规则 / 19 关键词及其变体）→ 计入检出率 ≥95%
+#   rule            规则目标集（PII 4 类 / SQLi 8 规则 / 24 关键词及其变体）→ 计入检出率 ≥95%
 #   semantic        公开集攻击样本（语义越狱，当前关键词占位实现覆盖不到）→ 只报告，不计阈值
 #   benign          合成负样本（期望放行）→ 计入误报率 ≤2%
 #   benign_public   公开集正常样本 → 只报告，不计阈值
 #   另：known_fp=true 标记「已识别的规则固有误报」（16-19 位数字 / `--` 分隔 / 关键词过宽）→ 单列统计
 #
-# 用法：powershell -ExecutionPolicy Bypass -File scripts\build-guardrail-bench.ps1
+# 用法（默认＝ HF 原站 rows API，与改造前一致）：
+#   powershell -ExecutionPolicy Bypass -File scripts\build-guardrail-bench.ps1
+# 用法（镜像 / 内网环境：datasets-server 不可达时直取仓库原始文件）：
+#   powershell -ExecutionPolicy Bypass -File scripts\build-guardrail-bench.ps1 `
+#       -PublicSource raw -HfEndpoint https://hf-mirror.com -PythonExe .tools\bench-py\Scripts\python.exe
+#   raw 模式：jackhhao 直读 CSV；deepset 仅 parquet（需 Python + pyarrow）。
+# 网络不可达时：公开集采样失败**不中断**（合成族照常生成、门禁①②照常生效）——与 README 声明一致。
 # 注：本脚本为 UTF-8 with BOM（含中文，PS 5.1 按 ANSI 解析会破坏语法）。
 
 param(
     [string]$OutDir = (Join-Path $PSScriptRoot '..\gateway\tee-infer-service\testdata\guardrail-bench'),
     [int]$AttackPerSet = 50,
-    [int]$BenignPerSet = 30
+    [int]$BenignPerSet = 30,
+    # 公开集取数方式：rows=datasets-server rows API（默认，原行为）；raw=直取仓库原始文件（镜像/内网）
+    [ValidateSet('rows', 'raw')][string]$PublicSource = 'rows',
+    # HF 端点（元数据 / 文件树 / 原始文件）；国内可切 https://hf-mirror.com
+    [string]$HfEndpoint = 'https://huggingface.co',
+    # datasets-server 端点（仅 PublicSource=rows 时使用）
+    [string]$DatasetsServer = 'https://datasets-server.huggingface.co',
+    # PublicSource=raw 时读 parquet 的 Python 解释器（须含 pyarrow）
+    [string]$PythonExe = 'python'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,12 +115,12 @@ $sql = @(
     @('syn-sql-17', 'sql-select-from', '  select  a  from  b  ', '多余空白'),
     @('syn-sql-18', 'sql-union', 'x UNION   SELECT y', 'union 多空格')
 )
-# S2-4 方案 D 2026-09-26：select-from 结构子句规则层不再拦，改由语义层承担
+# S2-4 方案 D（C→A）之 C 步 2026-09-26：select-from 结构子句规则层不再拦，改由语义层承担
 # ⇒ 下列 6 条由 scope=rule 改 semantic（expect 仍 block，仅报告、不计入门禁①）。
 $semanticSql = @('syn-sql-01', 'syn-sql-02', 'syn-sql-03', 'syn-sql-15', 'syn-sql-16', 'syn-sql-17')
 foreach ($c in $sql) {
     if ($semanticSql -contains $c[0]) {
-        Add-Case $c[0] 'synthetic' 'sql_injection' 'semantic' 'block' $c[1] $c[2] ($c[3] + '（S2-4 方案 D 2026-09-26：select-from 结构子句规则层不再拦 ⇒ scope 由 rule 改 semantic）')
+        Add-Case $c[0] 'synthetic' 'sql_injection' 'semantic' 'block' $c[1] $c[2] ($c[3] + '（S2-4 方案 D（C→A）之 C 步 2026-09-26：select-from 结构子句规则层不再拦 ⇒ scope 由 rule 改 semantic）')
     } else {
         Add-Case $c[0] 'synthetic' 'sql_injection' 'rule' 'block' $c[1] $c[2] $c[3]
     }
@@ -196,9 +210,9 @@ $knownFp = @(
 foreach ($c in $knownFp) { Add-Case $c[0] 'synthetic' 'benign' 'benign' 'allow' 'plain' $c[1] $c[2] $true }
 
 # ============ 6. 公开集采样（scope=semantic / benign_public，不计阈值）============
-$hfBase = 'https://datasets-server.huggingface.co/rows'
+$hfBase = "$DatasetsServer/rows"
 function Get-Revision([string]$DatasetId) {
-    $meta = Fetch-Json ("https://huggingface.co/api/datasets/" + $DatasetId)
+    $meta = Fetch-Json ("$HfEndpoint/api/datasets/" + $DatasetId)
     if ($meta.sha) { return $meta.sha.Substring(0, 12) }
     return 'unknown'
 }
@@ -226,19 +240,97 @@ function Sample-Rows {
     Write-Output ("  $DatasetId [$Config/$Split/$Field] taken=$taken scanned=$seen")
 }
 
-Write-Output '=== 采样公开集（HF datasets-server）==='
-Sample-Rows -DatasetId 'deepset/prompt-injections' -Config 'default' -Split 'train' -Field 'text' `
-    -Category 'prompt_injection' -Scope 'semantic' -Expect 'block' -Want $AttackPerSet `
-    -Matcher { param($row) [int]$row.label -eq 1 }
-Sample-Rows -DatasetId 'deepset/prompt-injections' -Config 'default' -Split 'train' -Field 'text' `
-    -Category 'benign' -Scope 'benign_public' -Expect 'allow' -Want $BenignPerSet `
-    -Matcher { param($row) [int]$row.label -eq 0 }
-Sample-Rows -DatasetId 'jackhhao/jailbreak-classification' -Config 'default' -Split 'train' -Field 'prompt' `
-    -Category 'prompt_injection' -Scope 'semantic' -Expect 'block' -Want $AttackPerSet `
-    -Matcher { param($row) ([string]$row.type).ToLower() -eq 'jailbreak' }
-Sample-Rows -DatasetId 'jackhhao/jailbreak-classification' -Config 'default' -Split 'train' -Field 'prompt' `
-    -Category 'benign' -Scope 'benign_public' -Expect 'allow' -Want $BenignPerSet `
-    -Matcher { param($row) ([string]$row.type).ToLower() -eq 'benign' }
+# ---- 6b. raw 模式：直取仓库原始文件（datasets-server 不可达的镜像 / 内网环境）----
+function Get-TreePath {
+    param([string]$DatasetId, [string]$Dir)
+    return Fetch-Json ("$HfEndpoint/api/datasets/" + $DatasetId + "/tree/main/" + $Dir)
+}
+function Load-RowsCsv([string]$Url) {
+    $csv = (Invoke-WebRequest -Uri $Url -TimeoutSec 120 -UseBasicParsing).Content
+    return @($csv | ConvertFrom-Csv)
+}
+function Load-RowsParquet {
+    param([string]$Url, [string]$TmpDir, [string]$Python)
+    $pq = Join-Path $TmpDir 'raw.parquet'
+    Invoke-WebRequest -Uri $Url -TimeoutSec 180 -OutFile $pq -UseBasicParsing
+    $script = Join-Path $TmpDir 'read_parquet.py'
+    [System.IO.File]::WriteAllText($script, @'
+import sys, json
+import pyarrow.parquet as pq
+t = pq.read_table(sys.argv[1])
+cols = t.column_names
+data = {c: t.column(c).to_pylist() for c in cols}
+for i in range(t.num_rows):
+    print(json.dumps({c: data[c][i] for c in cols}, ensure_ascii=False))
+'@, $utf8NoBom)
+    $out = & $Python $script $pq
+    if ($LASTEXITCODE -ne 0) { throw "parquet 解析失败（$Python $script）：$out" }
+    return @($out | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
+}
+function Sample-RowsRaw {
+    # 注：参数名勿用 $Rows —— PowerShell 大小写不敏感，会遮蔽脚本级 $rows（ArrayList）致 Add 失败。
+    param($DatasetId, $Data, $Field, $Category, $Scope, $Expect, $Want, $Matcher)
+    $rev = Get-Revision $DatasetId
+    $seen = 0
+    $taken = 0
+    foreach ($r in $Data) {
+        $seen++
+        if (& $Matcher $r) {
+            Add-Case ("pub-" + ($DatasetId -replace '[^A-Za-z0-9]', '-') + '-' + $seen) `
+                "$DatasetId@$rev" $Category $Scope $Expect 'public' ([string]$r.$Field) ("sampled #$seen")
+            $taken++
+            if ($taken -ge $Want) { break }
+        }
+    }
+    Write-Output ("  $DatasetId [raw/$Field] taken=$taken scanned=$seen")
+}
+
+# ---- 6c. 采样调度（公开集失败不中断：对齐 README「网络不可达时合成族仍生成」声明）----
+$tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("guardrail-bench-" + ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+Write-Output "=== 采样公开集（PublicSource=$PublicSource endpoint=$HfEndpoint）==="
+try {
+    if ($PublicSource -eq 'rows') {
+        Sample-Rows -DatasetId 'deepset/prompt-injections' -Config 'default' -Split 'train' -Field 'text' `
+            -Category 'prompt_injection' -Scope 'semantic' -Expect 'block' -Want $AttackPerSet `
+            -Matcher { param($row) [int]$row.label -eq 1 }
+        Sample-Rows -DatasetId 'deepset/prompt-injections' -Config 'default' -Split 'train' -Field 'text' `
+            -Category 'benign' -Scope 'benign_public' -Expect 'allow' -Want $BenignPerSet `
+            -Matcher { param($row) [int]$row.label -eq 0 }
+        Sample-Rows -DatasetId 'jackhhao/jailbreak-classification' -Config 'default' -Split 'train' -Field 'prompt' `
+            -Category 'prompt_injection' -Scope 'semantic' -Expect 'block' -Want $AttackPerSet `
+            -Matcher { param($row) ([string]$row.type).ToLower() -eq 'jailbreak' }
+        Sample-Rows -DatasetId 'jackhhao/jailbreak-classification' -Config 'default' -Split 'train' -Field 'prompt' `
+            -Category 'benign' -Scope 'benign_public' -Expect 'allow' -Want $BenignPerSet `
+            -Matcher { param($row) ([string]$row.type).ToLower() -eq 'benign' }
+    }
+    else {
+        # deepset：仓库仅提供 parquet，经 pyarrow 读为 JSONL 后复用同一采样器
+        $dsTree = Get-TreePath 'deepset/prompt-injections' 'data'
+        $dsParquet = ($dsTree | Where-Object { $_.path -like '*train*.parquet' } | Select-Object -First 1).path
+        if (-not $dsParquet) { throw '未在 deepset/prompt-injections 树中找到 train parquet' }
+        $dsRows = Load-RowsParquet "$HfEndpoint/datasets/deepset/prompt-injections/resolve/main/$dsParquet" $tmpDir $PythonExe
+        Sample-RowsRaw -DatasetId 'deepset/prompt-injections' -Data $dsRows -Field 'text' `
+            -Category 'prompt_injection' -Scope 'semantic' -Expect 'block' -Want $AttackPerSet `
+            -Matcher { param($row) [int]$row.label -eq 1 }
+        Sample-RowsRaw -DatasetId 'deepset/prompt-injections' -Data $dsRows -Field 'text' `
+            -Category 'benign' -Scope 'benign_public' -Expect 'allow' -Want $BenignPerSet `
+            -Matcher { param($row) [int]$row.label -eq 0 }
+        # jackhhao：仓库提供 CSV（config=default / split=train）
+        $jRows = Load-RowsCsv "$HfEndpoint/datasets/jackhhao/jailbreak-classification/resolve/main/default/jailbreak_dataset_train.csv"
+        Sample-RowsRaw -DatasetId 'jackhhao/jailbreak-classification' -Data $jRows -Field 'prompt' `
+            -Category 'prompt_injection' -Scope 'semantic' -Expect 'block' -Want $AttackPerSet `
+            -Matcher { param($row) ([string]$row.type).ToLower() -eq 'jailbreak' }
+        Sample-RowsRaw -DatasetId 'jackhhao/jailbreak-classification' -Data $jRows -Field 'prompt' `
+            -Category 'benign' -Scope 'benign_public' -Expect 'allow' -Want $BenignPerSet `
+            -Matcher { param($row) ([string]$row.type).ToLower() -eq 'benign' }
+    }
+}
+catch {
+    Write-Warning "公开集采样失败：$($_.Exception.Message)"
+    Write-Warning "⇒ 合成族（rule / benign / known_fp）仍会生成，门禁①②照常生效；公开集两族本次为空（仅报告项受影响）。"
+}
+Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
 
 # ============ 7. 落盘 + 校验和 ============
 $ordered = $rows | Sort-Object { $_.scope }, { $_.category }, { $_.id }

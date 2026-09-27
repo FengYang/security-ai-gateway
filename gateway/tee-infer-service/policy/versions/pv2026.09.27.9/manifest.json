@@ -1,0 +1,135 @@
+{
+  "policy_version": "pv2026.09.27.9",
+  "schema_version": "1.0",
+  "files": [
+    {
+      "path": "categories.json",
+      "sha256": "a9d42fde87392b0d2045955000c955b0d142ca567f7d4cd258e04bdfe2260246"
+    },
+    {
+      "path": "keywords/a1-01.json",
+      "sha256": "81b7dc4f6947cb7c81a5b12d6cea4a6c72299d9c2230a0f80a51a54d7d6fbcb8"
+    },
+    {
+      "path": "keywords/a1-02.json",
+      "sha256": "5626e70eedd4051f286fc5a895ffa0a6f9c0369c342d7b96b43dca4c18025527"
+    },
+    {
+      "path": "keywords/a1-03.json",
+      "sha256": "30e3ae0375d1d56bcbfe889322d3775b569410dbc1659dadd57c796eba022f5b"
+    },
+    {
+      "path": "keywords/a1-04.json",
+      "sha256": "46e1336672ce18cca9b321f0b10138ba2d5e9d2ae43209bd591f88b8a9d7eb17"
+    },
+    {
+      "path": "keywords/a1-05.json",
+      "sha256": "f4a06383a10c783f4d307fc3019cf520e4139a82bc1974e6361babcd6786a771"
+    },
+    {
+      "path": "keywords/a1-06.json",
+      "sha256": "c2bfbc2fc8f3dd96fc0bab18c75006e517e7484c979741d8939857b7eec2c1b2"
+    },
+    {
+      "path": "keywords/a2-01.json",
+      "sha256": "388512e5d0a1045df6f14ecb56e7aa75ee2357df0aba173344c5210edf1fcd0d"
+    },
+    {
+      "path": "keywords/a2-02.json",
+      "sha256": "c386be103c14b73c63a3bee7553ca139f55debe56973ef35bfecba20e8d668d0"
+    },
+    {
+      "path": "keywords/a2-03.json",
+      "sha256": "ca77ed0d24c8b25872295dd2b6bc87ebeccda7fba7033f72d3d3e8adfb325555"
+    },
+    {
+      "path": "keywords/a2-04.json",
+      "sha256": "2a8beb480ed50b63bbcafce58131d74bf8a69edc75f17476e6beb5b0902fa24d"
+    },
+    {
+      "path": "keywords/a2-05.json",
+      "sha256": "ddacc96f43f4afe34ba8f3f00d535660a9db0f1c7ce22776f74c219f020bb1e6"
+    },
+    {
+      "path": "keywords/a2-06.json",
+      "sha256": "8080e680822aff1bd1aee9e2e853994964a7d4b7a757af530b9ad3af49e2cae7"
+    },
+    {
+      "path": "keywords/a2-07.json",
+      "sha256": "0df70c4cd2300efded5d8149a6209bf918927f139dd85210267b50e439733590"
+    },
+    {
+      "path": "keywords/a2-08.json",
+      "sha256": "7d8ce64a6dea1879be18adc50de91d829135a00f1ec81873f9b8f3f0c5e4641c"
+    },
+    {
+      "path": "keywords/a2-09.json",
+      "sha256": "789eb4fae243e3452f636ddfa6734a524310435b224bb6a39e00c0b27a99bdaf"
+    },
+    {
+      "path": "keywords/a3-01.json",
+      "sha256": "8bd508038cc3da4b4fb72d9fd886b3218fb1ba66afe33a89641b9221ab60f33a"
+    },
+    {
+      "path": "keywords/a3-02.json",
+      "sha256": "82a734d1cacc25bf029ed6910055b3e9e99b05a9a6cb5e2da15c2d55ee14fc6d"
+    },
+    {
+      "path": "keywords/a3-03.json",
+      "sha256": "28e6f2623556efe69ac50987d8805b097d70ca1e2f0d52eab4afa098eaa44250"
+    },
+    {
+      "path": "keywords/a3-04.json",
+      "sha256": "3c4373afaa24c0068882df0f8b091b3cbbc7d60a572f5a3fa40a0816db9c1007"
+    },
+    {
+      "path": "keywords/a3-05.json",
+      "sha256": "ba366158713b7095dbab591336ef6993e47d83285335ac84e71f062748f9d9a4"
+    },
+    {
+      "path": "keywords/a4-01.json",
+      "sha256": "9843d2b2fe6b06bf1634a74608b447a836664b12dccfc583b70bad3ee8846cf2"
+    },
+    {
+      "path": "keywords/a4-02.json",
+      "sha256": "0e7d52d01ac2134bfed11d9a3af6e04424843c5c5fd03ee8e7dcc9f86808dfe4"
+    },
+    {
+      "path": "keywords/a4-03.json",
+      "sha256": "fb13eb653b76450e20b4e27ef1b6390de068d0e73385df82a751f229d658dd30"
+    },
+    {
+      "path": "keywords/a4-04.json",
+      "sha256": "3d475359843bf3f02d87e3a2dd4d0b435328649a2bf0e5aa9e9a5c81480010cc"
+    },
+    {
+      "path": "keywords/a4-05.json",
+      "sha256": "c23071aaf7e689acdcc23f8ed807e85d40d02051a59160d62898055e34b5b782"
+    },
+    {
+      "path": "keywords/a4-07.json",
+      "sha256": "366eea8997e1fae6c567455f85b1e70b4106f6c03565615991300f5cd6c07014"
+    },
+    {
+      "path": "keywords/a5-01.json",
+      "sha256": "6d2052b50a6f99a3fc3bd95508457df41aed204a994ec86a7b9779b24d2d05f3"
+    },
+    {
+      "path": "keywords/a5-02.json",
+      "sha256": "87538629b4f2315a19ce2ecceb5c2cda00d6d0c5eeaf9fa20ddcac5ac05f1397"
+    },
+    {
+      "path": "regex/pii_patterns.json",
+      "sha256": "9d950b77d0c8ae6301e2387e3c9a92c9a9dc2ac079b9a30c9e292de492e26f37"
+    },
+    {
+      "path": "regex/injection.json",
+      "sha256": "1d92faf276a7666e22e083a48087f4bfc78483670918c6989258bf90c6533c30"
+    },
+    {
+      "path": "review-ledger.json",
+      "sha256": "6fe0fa095b16076bd6259ed60b59db8c964b0cf397ec62b12cfb01df8561ba09"
+    }
+  ],
+  "sha256": "f07e9ddb25b0a4c5b3de6416243b344c8291018e67c17f3a7ec182d9967d49df"
+}
