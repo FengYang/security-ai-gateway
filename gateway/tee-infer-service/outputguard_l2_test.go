@@ -178,7 +178,7 @@ func TestOutputGuardL1AndL2SameCategory(t *testing.T) {
 	og, m, a := newTestOutputGuardWithL2(t, l1, l2, "acme", "req-l1l2same-1")
 
 	// 造一个会命中 sql_injection 的文本
-	collectThrough(t, og, []string{"请执行 SELECT * FROM users。"})
+	collectThrough(t, og, []string{"请执行 SELECT * FROM users UNION SELECT password FROM admin。"})
 
 	if n := a.countByAction("output_would_reject"); n != 1 {
 		t.Fatalf("同类目命中应去重，期望 1 条 would_reject，实际 %d", n)
@@ -208,7 +208,7 @@ func TestOutputGuardL1HitA_L2HitB(t *testing.T) {
 	l2 := fakeL2Classifier{cat: "A4-02", conf: 0.95}
 	og, m, a := newTestOutputGuardWithL2(t, l1, l2, "acme", "req-l1l2diff-1")
 
-	collectThrough(t, og, []string{"请执行 SELECT * FROM users。"})
+	collectThrough(t, og, []string{"请执行 SELECT * FROM users UNION SELECT password FROM admin。"})
 
 	// L1 命中 A1-07，L2 也命中 A4-02 → 2 条 would_reject
 	if n := a.countByAction("output_would_reject"); n != 2 {

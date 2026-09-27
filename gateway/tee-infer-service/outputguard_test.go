@@ -86,7 +86,7 @@ func TestOutputGuardRejectsInvalidModes(t *testing.T) {
 // 验证"末句无终止符"也不逃逸审查。
 func TestOutputGuardShadowOnlyRecordsNotBlocks(t *testing.T) {
 	og, m, a := newTestOutputGuard(t, outputGuardShadow, "acme", "req-shadow-1")
-	deltas := []string{"正常前缀 ", "--", " 后续文本"}
+	deltas := []string{"正常前缀 ", "';--", " 后续文本"}
 	got := collectThrough(t, og, deltas)
 
 	if want := strings.Join(deltas, ""); got != want {
@@ -128,9 +128,9 @@ func TestOutputGuardShadowOnlyRecordsNotBlocks(t *testing.T) {
 // 不同类目各记一次（不丢并存命中）；l1_hit 按实际命中次数计数（不去重）。
 func TestOutputGuardShadowPerCategoryDedup(t *testing.T) {
 	og, m, a := newTestOutputGuard(t, outputGuardShadow, "acme", "req-multi-1")
-	// 三个判定单元：sql_injection（"--" 注释 → A1-07）、pii（手机号 → A4-06）、sql_injection（重复 → A1-07）。
+	// 三个判定单元：sql_injection（"';--。" 引号后注释 → A1-07）、pii（手机号 → A4-06）、sql_injection（";-- 再来一次。" 堆叠注释重复 → A1-07）。
 	// 因为 sql_injection 和 prompt_injection 都映射到 A1-07，所以两个 L1 不同类目可能映射到同一内部类目。
-	collectThrough(t, og, []string{"--。", "13812345678。", "-- 再来一次。"})
+	collectThrough(t, og, []string{"';--。", "13812345678。", ";-- 再来一次。"})
 	if n := a.countByAction("output_would_reject"); n != 2 {
 		t.Fatalf("期望 2 条（A1-07 去重 1 + A4-06 1），实际 %d", n)
 	}

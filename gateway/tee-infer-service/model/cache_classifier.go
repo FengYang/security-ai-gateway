@@ -56,12 +56,33 @@ func NewKeywordClassifier(rules ...[2]string) *KeywordClassifier {
 }
 
 // Classify 按规则顺序命中首个关键词；忽略大小写；未命中返回空类别。
+//
+// 空白不敏感（2026-09-26，S2-4 方案 D 配套）：匹配前把**文本与关键词双方的空白全部去除**。
+// 原因：`guardrail.check` 的归一化只把全角空格（U+3000）转为半角空格、**不删除空白**，
+// 而注入词条经收窄后带宾语（如「请忽略以上」），若不压空白则「请忽略　以上指令」
+// （全角空格混淆，guardrail_test.go 的真阳性样本）会漏检。压空白后恢复该检出，
+// 且对「ignore　previous instructions」类空格混淆同样更稳。
 func (c *KeywordClassifier) Classify(text string) (string, string) {
-	lower := strings.ToLower(text)
+	compact := stripWhitespace(strings.ToLower(text))
 	for _, r := range c.rules {
-		if kw := strings.ToLower(r.keyword); kw != "" && strings.Contains(lower, kw) {
+		kw := stripWhitespace(strings.ToLower(r.keyword))
+		if kw != "" && strings.Contains(compact, kw) {
 			return r.category, r.keyword
 		}
 	}
 	return "", ""
+}
+
+// stripWhitespace 去除所有 Unicode 空白（含全角空格经归一化后的半角空格、制表、换行）。
+func stripWhitespace(s string) string {
+	if !strings.ContainsAny(s, " \t\r\n\u00a0\u3000") {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '\t', '\r', '\n', '\u00a0', '\u3000':
+			return -1
+		}
+		return r
+	}, s)
 }

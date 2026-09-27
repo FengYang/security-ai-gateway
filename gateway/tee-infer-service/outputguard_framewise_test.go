@@ -368,7 +368,7 @@ func TestOutputGuardFramewiseE2EShadow(t *testing.T) {
 	srv.outputGuardMode = outputGuardShadow
 	srv.outputGuardParams = defaultOutputGuardParams()
 	// 输出含 SQL 注入口径命中（输入侧同口径，故用 stub 引擎绕过输入侧 403）
-	srv.model = framewiseStubEngine{deltas: []string{"好的。", "-- 注释。", "结束。"}}
+	srv.model = framewiseStubEngine{deltas: []string{"好的。", ";-- 注释。", "结束。"}}
 
 	sessionID, ksig, kenc := setupTestSession(t, ts)
 	hr := buildTextInferRequest(t, ts.URL+"/v1/infer", sessionID, ksig, kenc, "请讲个笑话",
@@ -388,13 +388,13 @@ func TestOutputGuardFramewiseE2EShadow(t *testing.T) {
 	for _, f := range frames {
 		sb.WriteString(f.Delta)
 	}
-	const want = "好的。-- 注释。结束。"
+	const want = "好的。;-- 注释。结束。"
 	if got := sb.String(); got != want {
 		t.Fatalf("shadow 必须原样放行：got %q want %q", got, want)
 	}
 
 	// 命中片段取 L1 实际返回的 Match（不自造字符串，保证断言与检出同源）
-	hit := newGuardrail().check("-- 注释。")
+	hit := newGuardrail().check(";-- 注释。")
 	if hit == nil || hit.Category != "sql_injection" {
 		t.Fatalf("预期 sql_injection 命中，实际 %+v", hit)
 	}

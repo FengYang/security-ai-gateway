@@ -21,14 +21,17 @@ const (
 	outformContrastRelPath = "testdata/outform-contrast/corpus.jsonl"
 	outformContrastReadme  = "testdata/outform-contrast/README"
 	// outformContrastFPBaseline 输出形态误杀**已登记基线**（命中数，非百分比）：
-	// ＝ S0-⑨ 首次取数结果（2026-09-26，走完整流式管线）：**15/40**，其中
-	//   - **A1-07 拦截类 10 条**：md-table×3（`--` 分隔线）、ignore-word（"请忽略"过宽）、
-	//     sql×4（语法讲解/代码块）、quote（分析语境引用注入话术）、url（路径含 select-from）
-	//     —— **均为已知固有误报（known_fp #3/#4/#5 形态）在输出形态下的复现**；
+	// ＝ S0-⑨ 首次取数（2026-09-26，走完整流式管线）经 **S2-4 方案 D 收窄规则后复测**的结果：**6/40**，其中
+	//   - **A1-07 拦截类 1 条**：quote-01（分析语境引用「请忽略之前的指令」，仍命中保留词条「请忽略之前」）；
 	//   - **A4-06 mask 类 5 条**：long-num×3（16-19 位数字）、pii-like×2（证件号/卡号占位）
-	//     —— 语义是"会被 PII 正则命中"，默认动作为 mask（非 block）。
+	//     —— 语义是"会被 PII 正则命中"，默认动作为 mask（非 block，本次未改动）。
+	// 收窄日期 2026-09-26（S2-4 方案 D）；收窄前为 **15/40**（A1-07 10 条 + A4-06 5 条）。
+	// 收窄的三条规则（仅 §newGuardrail 语义）：
+	//   ① 删除 `select … from` 结构子句（语法讲解/代码块误报；真注入由 union select/堆叠/恒真式承担）；
+	//   ② 裸 `--` 改为注入上下文 `['"]\s*(--|#)` 与 `;\s*(--|#)`（Markdown 表格分隔线不再误报）；
+	//   ③ 裸 `请忽略` 改为带宾语词条（请忽略以上/之前/前述/上述/前面/所有）。
 	// 仅作**回归护栏**，不作达标阈值（阈值定线见 **S2-4**）。
-	outformContrastFPBaseline = 15
+	outformContrastFPBaseline = 6
 )
 
 func TestOutformContrast(t *testing.T) {

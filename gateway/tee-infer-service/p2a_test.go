@@ -101,7 +101,7 @@ func TestInjectionAlwaysBlocked(t *testing.T) {
 	srv.piiMode = "mask"
 	sessionID, ksig, kenc := setupTestSession(t, ts)
 	hr := buildTextInferRequest(t, ts.URL+"/v1/infer", sessionID, ksig, kenc,
-		"select * from users where 1=1", protocol.EngineTypeTEEGPU, true, 1)
+		"select * from users where id=1 union select password from admin", protocol.EngineTypeTEEGPU, true, 1)
 	resp, err := http.DefaultClient.Do(hr)
 	if err != nil {
 		t.Fatal(err)

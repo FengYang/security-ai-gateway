@@ -72,7 +72,7 @@
 
   "syntheticFamilies": [
     { "name": "pii", "scope": "rule", "expect": "block", "count": 21, "coverage": "手机号/身份证/邮箱/银行卡 × 明文 + 全角/空格/连字符混淆变体" },
-    { "name": "sql_injection", "scope": "rule", "expect": "block", "count": 18, "coverage": "8 条正则规则 × 大小写/全角/注释/恒真式/多空白变体" },
+    { "name": "sql_injection", "scope": "rule", "expect": "block", "count": 12, "coverage": "正则规则 × 大小写/全角/注释/恒真式/多空白变体（select-from 结构子句 6 条 syn-sql-01/02/03/15/16/17 已归 semantic，规则层不再拦）" },
     { "name": "prompt_injection", "scope": "rule", "expect": "block", "count": 22, "coverage": "19 个关键词（中 10 / 英 9）+ 全角/全角空格/大小写混合变体" },
     { "name": "benign", "scope": "benign", "expect": "allow", "count": 40, "coverage": "普通对话/技术提问 + 数字边界（11 位非 1[3-9]、15/20 位、日期、版本号）" },
     { "name": "known_fp", "scope": "benign", "expect": "allow", "count": 6, "knownFp": true, "coverage": "16-19 位数字（订单号/时间戳/字母前缀编号）、`--` 分隔符、"请忽略"过宽、SQL 语法讲解" }
@@ -94,10 +94,10 @@
     "date": "2026-09-11",
     "corpusRows": 267,
     "corpusSha256": "65ab3aafb3507156ecc76d5a477757ecac940d47f1519dd0ec8434f1f5446e81",
-    "ruleDetectRate": "61/61 = 100%",
-    "benignFPRate": "0/40 = 0%",
-    "semanticJailbreakDetectRate": "12/100 = 12%（关键词占位实现的真实能力基线，分类器选型依据）",
-    "publicBenignFPRate": "1/60 = 1.67%"
+    "ruleDetectRate": "55/55 = 100%",
+    "benignFPRate": "0/40 = 0.00%",
+    "semanticJailbreakDetectRate": "14/106 = 13.21%（关键词占位实现的真实能力基线，分类器选型依据）",
+    "publicBenignFPRate": "0/60 = 0.00%"
   },
 
   "hashNote": "corpusSha256 随上游数据集 revision 变化（每行 source 字段记录 <id>@<sha12>）。校验不一致时：以 source 记录 revision 为准，重跑生成脚本并更新本字段与 baseline。"

@@ -638,7 +638,7 @@ func TestM9GuardrailBlocked(t *testing.T) {
 	}
 	// SQL 注入
 	seed2, nonce2 := issueKey(t, ts, "tenant-a")
-	body2 := buildInfer(t, srv, seed2, nonce2, "SELECT * FROM users WHERE id=1")
+	body2 := buildInfer(t, srv, seed2, nonce2, "SELECT * FROM users WHERE id=1 UNION SELECT password FROM admin")
 	if code, msg := postInfer(t, ts, "tenant-a", body2); code != http.StatusForbidden {
 		t.Fatalf("SQL 注入应被拦截（403），got %d (%s)", code, msg)
 	}

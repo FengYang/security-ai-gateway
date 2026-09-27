@@ -540,13 +540,13 @@ func TestCascadeL1HitDoesNotBlock(t *testing.T) {
 	l2 := newStubL2()
 	gate := make(chan struct{})
 	// L1 命中 sql_injection → A1-07；L2 画像门控挂住（不得阻塞下发）
-	l2.gates["请执行 SELECT * FROM users。"] = gate
-	l2.verdicts["请执行 SELECT * FROM users。"] = stubVerdict{cat: "A1-07", conf: 0.9}
+	l2.gates["请执行 SELECT * FROM users UNION SELECT password FROM admin。"] = gate
+	l2.verdicts["请执行 SELECT * FROM users UNION SELECT password FROM admin。"] = stubVerdict{cat: "A1-07", conf: 0.9}
 
 	og, m, a := newCascadeGuard(t, cascadeParams(true), l1Classifier{g: newGuardrail()}, l2)
 	rec := &frameRecorder{}
 
-	const text = "请执行 SELECT * FROM users。"
+	const text = "请执行 SELECT * FROM users UNION SELECT password FROM admin。"
 	if err := og.Process(text, rec.emit); err != nil {
 		t.Fatalf("Process: %v", err)
 	}
@@ -972,7 +972,7 @@ func TestCascadeEarlyAfterTimeoutNoRollback(t *testing.T) {
 
 // S2-6 画像调用早出不迁移状态：L1 命中即决放行，画像 L2 的轻段/完整段只留痕。
 func TestCascadeProfilingEarlyNoStateChange(t *testing.T) {
-	text := "请执行 SELECT * FROM users。"
+	text := "请执行 SELECT * FROM users UNION SELECT password FROM admin。"
 	l2 := newStubL2()
 	l2.earlys[text] = false
 	gate := make(chan struct{})

@@ -37,7 +37,7 @@ func TestBuildGuardMetaNoHit(t *testing.T) {
 // TestBuildGuardMetaShadowHit：shadow 命中 → detected=true, filtered=false, action=flag。
 func TestBuildGuardMetaShadowHit(t *testing.T) {
 	og, _, _ := newTestOutputGuard(t, outputGuardShadow, "t", "r")
-	collectThrough(t, og, []string{"-- 注释。"}) // 命中 sql_injection → A1-07
+	collectThrough(t, og, []string{";-- 注释。"}) // 命中 sql_injection → A1-07
 
 	gm := og.BuildGuardMeta()
 	if !gm.Detected {
@@ -61,7 +61,7 @@ func TestBuildGuardMetaShadowHit(t *testing.T) {
 func TestBuildGuardMetaFirstHitWins(t *testing.T) {
 	og, _, _ := newTestOutputGuard(t, outputGuardShadow, "t", "r")
 	// A1-07 先命中，然后 A4-06
-	collectThrough(t, og, []string{"-- 注释。", "手机号13812345678。"})
+	collectThrough(t, og, []string{";-- 注释。", "手机号13812345678。"})
 
 	gm := og.BuildGuardMeta()
 	if gm.Category != "A1-07" {
@@ -111,7 +111,7 @@ func TestChunkMetaJSONOmitempty(t *testing.T) {
 // TestChunkMetaJSONShadowHit：shadow 命中时 JSON 包含 category 和 action=flag。
 func TestChunkMetaJSONShadowHit(t *testing.T) {
 	og, _, _ := newTestOutputGuard(t, outputGuardShadow, "t", "r")
-	collectThrough(t, og, []string{"-- 注释。"})
+	collectThrough(t, og, []string{";-- 注释。"})
 
 	chunk := textStreamChunk{Seq: 1, Finish: "stop", Guard: og.BuildGuardMeta()}
 	data, _ := json.Marshal(chunk)

@@ -355,7 +355,7 @@ func TestContentLabelFramewiseWithShadowOG(t *testing.T) {
 	srv.outputGuardParams = defaultOutputGuardParams()
 	srv.contentLabelCfg = contentLabelConfig{Enabled: true}
 	// 输出含 SQL 注入口径命中（shadow 只记不拦；stub 引擎绕过输入侧 403）
-	frames := runLabelInfer(t, srv, ts, []string{"好的。", "-- 注释。", "结束。"})
+	frames := runLabelInfer(t, srv, ts, []string{"好的。", ";-- 注释。", "结束。"})
 
 	if len(frames) == 0 {
 		t.Fatal("未捕获帧")
@@ -384,11 +384,11 @@ func TestContentLabelFramewiseWithShadowOG(t *testing.T) {
 			content.WriteString(f.Delta)
 		}
 	}
-	if got, want := content.String(), "好的。-- 注释。结束。"; got != want {
+	if got, want := content.String(), "好的。;-- 注释。结束。"; got != want {
 		t.Fatalf("shadow 内容应原样：got %q want %q", got, want)
 	}
 	// 逐帧断言器：shadow 命中已下发必须检出（工具非空转）；按 stop 语义零 finish 违规
-	hit := newGuardrail().check("-- 注释。")
+	hit := newGuardrail().check(";-- 注释。")
 	if hit == nil {
 		t.Fatal("预期 sql_injection 命中")
 	}

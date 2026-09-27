@@ -101,7 +101,16 @@ $sql = @(
     @('syn-sql-17', 'sql-select-from', '  select  a  from  b  ', '多余空白'),
     @('syn-sql-18', 'sql-union', 'x UNION   SELECT y', 'union 多空格')
 )
-foreach ($c in $sql) { Add-Case $c[0] 'synthetic' 'sql_injection' 'rule' 'block' $c[1] $c[2] $c[3] }
+# S2-4 方案 D 2026-09-26：select-from 结构子句规则层不再拦，改由语义层承担
+# ⇒ 下列 6 条由 scope=rule 改 semantic（expect 仍 block，仅报告、不计入门禁①）。
+$semanticSql = @('syn-sql-01', 'syn-sql-02', 'syn-sql-03', 'syn-sql-15', 'syn-sql-16', 'syn-sql-17')
+foreach ($c in $sql) {
+    if ($semanticSql -contains $c[0]) {
+        Add-Case $c[0] 'synthetic' 'sql_injection' 'semantic' 'block' $c[1] $c[2] ($c[3] + '（S2-4 方案 D 2026-09-26：select-from 结构子句规则层不再拦 ⇒ scope 由 rule 改 semantic）')
+    } else {
+        Add-Case $c[0] 'synthetic' 'sql_injection' 'rule' 'block' $c[1] $c[2] $c[3]
+    }
+}
 
 # ============ 3. 合成：提示注入（rule 族，期望 block）============
 $inj = @(

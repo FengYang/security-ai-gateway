@@ -50,14 +50,14 @@ func newGuardrail() *guardrail {
 	}
 	// SQL 注入特征
 	for _, pat := range []string{
-		`(?i)\bselect\b[^;]{0,200}\bfrom\b`,
 		`(?i)\bunion\b\s+(all\s+)?\bselect\b`,
 		`(?i)\b(drop|truncate)\s+table\b`,
 		`(?i)\binsert\s+into\b`,
 		`(?i)\bdelete\s+from\b`,
 		`(?i)\bupdate\s+[a-z0-9_]+\s+set\b`,
 		`(?i)\b(or|and)\s+[0-9]+\s*=\s*[0-9]+`,
-		`--`,
+		`(?i)['"]\s*(--|#)`,
+		`(?i);\s*(--|#)`,
 	} {
 		g.sqlPatterns = append(g.sqlPatterns, regexp.MustCompile(pat))
 	}
@@ -66,7 +66,8 @@ func newGuardrail() *guardrail {
 	// 真机到位后替换为模型分类器，check 调用点不变。
 	injTerms := []string{
 		"忽略以上", "忽略之前", "忽略前面的", "忽略上述", "无视以上", "忘记所有指令",
-		"忘记之前的指令", "请忽略", "输出你的系统提示词", "你的系统提示词",
+		"忘记之前的指令", "输出你的系统提示词", "你的系统提示词",
+		"请忽略以上", "请忽略之前", "请忽略前述", "请忽略上述", "请忽略前面", "请忽略所有",
 		"ignore previous instructions", "ignore all previous", "ignore the above",
 		"disregard previous", "reveal your system prompt", "developer message",
 		"jailbreak", "dan mode", "do anything now",
