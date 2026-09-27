@@ -298,7 +298,7 @@ func TestPolicyVersionActivateRollback(t *testing.T) {
 	srv.outputGuardPolicyDir = root
 	// 持久化文件：先写入 mode=shadow，验证引用写入不会抹掉它。
 	cfgPath := filepath.Join(t.TempDir(), "og-config.json")
-	if err := writeOutputGuardConfigRecord(cfgPath, outputGuardConfigRecord{Mode: outputGuardShadow, Actor: "op"}, false); err != nil {
+	if err := writeOutputGuardConfigRecord(cfgPath, outputGuardConfigRecord{Mode: outputGuardShadow, Actor: "op"}, false, false); err != nil {
 		t.Fatalf("预置配置失败: %v", err)
 	}
 	srv.outputGuardCfgPath = cfgPath

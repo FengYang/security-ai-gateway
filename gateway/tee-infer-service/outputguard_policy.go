@@ -12,7 +12,9 @@
 //  2. 每个登记文件的 sha256 与实际字节一致（**先校验后解析**：篡改文件不进解析器）；
 //  3. 文件路径不得为绝对路径或含 ".."（防目录穿越）；
 //  4. 每个词库文件过 §4.2.4 六条校验（由 newLexiconClassifierFromJSON 承担）；
-//  5. 同一类目不得重复登记（重复＝拒加载，防"同一类目两套规则"歧义）。
+//  5. 同一类目不得重复登记（重复＝拒加载，防"同一类目两套规则"歧义）；
+//  6. 若登记了复核台账（review-ledger.json，S3-2）则强校验其结构与其对全部类目的覆盖
+//     （见 outputguard_review_ledger.go）；未登记则不校验（发布门禁强制要求登记）。
 //
 // 未登记文件不参与加载（manifest 是**唯一出处**，避免"加了文件忘了登记"的静默生效）。
 //
@@ -63,6 +65,8 @@ const (
 	policyErrDuplicateCategory = "duplicate_category" // 同一类目重复登记
 	policyErrRegexInvalid      = "regex_invalid"      // 正则规则不可编译
 	policyErrReadError         = "read_error"         // 文件不可读
+	// policyErrReviewLedgerInvalid 复核台账不合规（S3-2：覆盖不全/结论非 approved/发起人=复核人）。
+	policyErrReviewLedgerInvalid = "review_ledger_invalid"
 )
 
 // policyLoadError 携带归类原因的加载错误（供热加载回退的指标/审计归因）。
@@ -154,6 +158,8 @@ func loadPolicyDir(dir string) (*lexiconRegistry, error) {
 		byCategory:    make(map[string]*lexiconClassifier, len(mf.Files)),
 	}
 
+	var ledgerData []byte // 复核台账原始字节（哈希已校验；待全部类目加载后校验其覆盖）
+
 	for i, f := range mf.Files {
 		if err := checkPolicyRelPath(f.Path); err != nil {
 			return nil, plErr(policyErrUnsafePath, "%s files[%d]: %v", policyManifestName, i, err)
@@ -173,6 +179,11 @@ func loadPolicyDir(dir string) (*lexiconRegistry, error) {
 		}
 		// 类目索引文档：哈希已校验（防篡改），不参与词库解析。
 		if f.Path == policyCategoriesName {
+			continue
+		}
+		// 复核台账：哈希已校验，不参与词库解析；覆盖校验需已加载类目，故延后到循环外。
+		if f.Path == policyReviewLedgerName {
+			ledgerData = data
 			continue
 		}
 		lc, err := newLexiconClassifierFromJSON(data)
@@ -196,6 +207,13 @@ func loadPolicyDir(dir string) (*lexiconRegistry, error) {
 		return reg.classifiers[i].Category() < reg.classifiers[j].Category()
 	})
 
+	// 复核台账（若已登记）：结构 + 覆盖完整性校验（fail-closed）。
+	if ledgerData != nil {
+		if err := parseAndValidateReviewLedger(ledgerData, reg); err != nil {
+			return nil, err
+		}
+	}
+
 	return reg, nil
 }
 
@@ -215,16 +233,40 @@ func checkPolicyRelPath(p string) error {
 	return nil
 }
 
-// Classify 实现 OutputClassifier：按优先级顺序取首个命中类目。
-// 归一化只在此处做一次并随级联下传（M1 性能优化 R7①：避免每类目重复 normalizeLexicon）。
+// Classify 实现 OutputClassifier：按下述优先级判定类目。
+//
+// 命中优先级（2026-09-27 修订，修"跨类目短词面抢占"）：
+//  1. **含 regex 的类目**（结构化强证据，如 PII / 注入 / SQL）保持**绝对优先**——按注册表顺序取首个命中；
+//  2. 其余（纯关键词）类目之间取**最长命中**（同长不可能：同长即同串，而词面全局唯一）。
+//
+// 为何改：原"按类目 ID 升序取首个命中"会让低 ID 类目的短词面抢走长词面的命中
+// （如 A3-01「盗用图片」抢 A4-02「盗用图片素材」），造成分类目统计与审计归因失真、
+// 甚至动作选错（A2 的 block 被 A3 的 flag 类目抢走）。改后不变式：**任一关键词的文本
+// 必归其自身类目**（见 TestPolicyLexiconKeywordsSelfClassify）。
+//
+// 归一化只在此处做一次并随级联下传（M1 性能优化 R7①：避免每类目重复归一化）；
+// regex 规则按自身 Normalize 档选用 raw/fold/compact 文本（与输入侧 guardrail 同口径）。
 func (r *lexiconRegistry) Classify(text string) (string, float64, string) {
-	norm := normalizeLexicon(text)
+	tf := newTextForms(text)
+	var (
+		bestCat   string
+		bestConf  float64
+		bestMatch string
+		bestLen   int
+	)
 	for _, lc := range r.classifiers {
-		if cat, conf, match := lc.classifyNorm(text, norm); cat != "" {
-			return cat, conf, match
+		cat, conf, match := lc.classifyNorm(tf)
+		if cat == "" {
+			continue
+		}
+		if lc.hasRegexRules() {
+			return cat, conf, match // 结构化强证据优先
+		}
+		if n := len([]rune(match)); n > bestLen {
+			bestCat, bestConf, bestMatch, bestLen = cat, conf, match, n
 		}
 	}
-	return "", 0, ""
+	return bestCat, bestConf, bestMatch
 }
 
 // PolicyVersion 返回聚合策略版本（进审计与 chunk-meta）。

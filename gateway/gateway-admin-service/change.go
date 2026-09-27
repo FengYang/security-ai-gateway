@@ -56,6 +56,10 @@ const (
 	changeActionOutputGuardReload = "output_guard_policy_reload"
 	// S3-2：词库/策略**版本发布**（显式引用某一已发布版本；tee 侧 /config/policy/activate 须过 bench 硬门禁）。
 	changeActionOutputGuardPolicyActivate = "output_guard_policy_activate"
+	// S3-2：策略档位切换（payload.strategy；A/B 双闸，C 前置未齐备不开放）。
+	changeActionOutputGuardStrategy = "output_guard_strategy"
+	// S3-2：类目启停（payload.disable/enable，逗号分隔类目；语义校验由 tee 单一事实源裁决）。
+	changeActionOutputGuardCategoryToggle = "output_guard_category_toggle"
 	changeActionCredentialRotate          = "credential_rotate"
 	changeActionCredentialDelete          = "credential_delete"
 )
@@ -186,6 +190,8 @@ func validChangeAction(a string) bool {
 		changeActionOutputGuardMode,
 		changeActionOutputGuardReload,
 		changeActionOutputGuardPolicyActivate,
+		changeActionOutputGuardStrategy,
+		changeActionOutputGuardCategoryToggle,
 		changeActionCredentialRotate,
 		changeActionCredentialDelete:
 		return true
@@ -238,7 +244,7 @@ func (s *changeStore) submit(w http.ResponseWriter, r *http.Request) {
 	}
 	if !validChangeAction(req.Action) {
 		writeError(w, http.StatusBadRequest,
-			"不支持的高敏动作（本期可执行：guardrail_pii_mode / output_guard_mode / output_guard_policy_reload / output_guard_policy_activate / credential_rotate / credential_delete）")
+			"不支持的高敏动作（本期可执行：guardrail_pii_mode / output_guard_mode / output_guard_policy_reload / output_guard_policy_activate / output_guard_strategy / output_guard_category_toggle / credential_rotate / credential_delete）")
 		return
 	}
 	sub := operationSub(r)
@@ -290,6 +296,36 @@ func (s *changeStore) submit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.Target = "output-guard-policy"
+	case changeActionOutputGuardStrategy:
+		// S3-2：策略档位双闸（同 tee 侧）；A/B 合法，C 前置未齐备在提交期即拒（避免建注定失败的单）。
+		if c.Payload == nil {
+			c.Payload = map[string]string{}
+		}
+		strategy := c.Payload["strategy"]
+		if strategy != "A" && strategy != "B" {
+			writeError(w, http.StatusBadRequest, "strategy 仅允许 A|B（C 前置未齐备：首段预审门/P-FIRST-CHUNK/法务双通过）")
+			return
+		}
+		c.Target = "output-guard"
+	case changeActionOutputGuardCategoryToggle:
+		// S3-2：类目启停。提交期只做形态校验（CSV 非空、无空白/路径符），
+		// 类目是否存在、是否触及拦截/脱敏底线由 tee 侧（31 类单一事实源）裁决——本服务不复制类目表。
+		if c.Payload == nil {
+			c.Payload = map[string]string{}
+		}
+		disable := parseCategoryCSV(c.Payload["disable"])
+		enable := parseCategoryCSV(c.Payload["enable"])
+		if len(disable) == 0 && len(enable) == 0 {
+			writeError(w, http.StatusBadRequest, "须提供 payload.disable/enable（逗号分隔内部类目 ID，如 A2-09,A3-05）")
+			return
+		}
+		for _, cat := range append(append([]string{}, disable...), enable...) {
+			if strings.ContainsAny(cat, " \t\r\n/\\") {
+				writeError(w, http.StatusBadRequest, "类目 ID 不得含空白或路径分隔符: "+cat)
+				return
+			}
+		}
+		c.Target = "output-guard"
 	case changeActionCredentialRotate:
 		if req.Target == "" || req.Secret == "" {
 			writeError(w, http.StatusBadRequest, "credential_rotate 须提供 target 与新 Key")
@@ -518,6 +554,10 @@ func (s *changeStore) execute(c *changeRequest) error {
 		return s.execOutputGuardPolicyReload(c)
 	case changeActionOutputGuardPolicyActivate:
 		return s.execOutputGuardPolicyActivate(c)
+	case changeActionOutputGuardStrategy:
+		return s.execOutputGuardStrategy(c)
+	case changeActionOutputGuardCategoryToggle:
+		return s.execOutputGuardCategoryToggle(c)
 	case changeActionCredentialRotate:
 		return s.execCredentialRotate(c)
 	case changeActionCredentialDelete:
@@ -570,6 +610,34 @@ func (s *changeStore) execOutputGuardPolicyReload(c *changeRequest) error {
 // tee 侧须过 **bench 硬门禁**（不低于已登记基线且不可回退）；不通过即非 2xx → 本变更单记执行失败。
 func (s *changeStore) execOutputGuardPolicyActivate(c *changeRequest) error {
 	return s.postTeeConfig(c, "/config/policy/activate", map[string]string{"version": c.Payload["version"]})
+}
+
+// execOutputGuardStrategy 调 tee-infer 切换策略档位（S3-2；提交期已限 A/B）。
+func (s *changeStore) execOutputGuardStrategy(c *changeRequest) error {
+	return s.postTeeConfig(c, "/config/output-guard/strategy", map[string]string{"strategy": c.Payload["strategy"]})
+}
+
+// execOutputGuardCategoryToggle 调 tee-infer 启停类目（S3-2；CSV → JSON 数组）。
+func (s *changeStore) execOutputGuardCategoryToggle(c *changeRequest) error {
+	payload := map[string][]string{}
+	if disable := parseCategoryCSV(c.Payload["disable"]); len(disable) > 0 {
+		payload["disable"] = disable
+	}
+	if enable := parseCategoryCSV(c.Payload["enable"]); len(enable) > 0 {
+		payload["enable"] = enable
+	}
+	return s.postTeeConfig(c, "/config/output-guard/categories", payload)
+}
+
+// parseCategoryCSV 解析逗号分隔的内部类目 ID（去空白与空项；map 顺序不影响：tee 侧以集合处理）。
+func parseCategoryCSV(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if cat := strings.TrimSpace(part); cat != "" {
+			out = append(out, cat)
+		}
+	}
+	return out
 }
 
 // postTeeConfig 以复核人身份调 tee-infer 配置端点（输出侧动作共用）：

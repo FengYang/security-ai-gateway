@@ -56,7 +56,9 @@ func newGuardrail() *guardrail {
 		`(?i)\bdelete\s+from\b`,
 		`(?i)\bupdate\s+[a-z0-9_]+\s+set\b`,
 		`(?i)\b(or|and)\s+[0-9]+\s*=\s*[0-9]+`,
-		`(?i)['"]\s*(--|#)`,
+		// 注释注入：引号后**仅保留 `--`**——MySQL 的 `#` 注释分支误伤 Markdown 标题
+		// （JSON 片段里的 `"###`），2026-09-27 多角色评审后收窄（输入/输出侧同源）。
+		`(?i)['"]\s*--`,
 		`(?i);\s*(--|#)`,
 	} {
 		g.sqlPatterns = append(g.sqlPatterns, regexp.MustCompile(pat))

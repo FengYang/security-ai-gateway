@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -159,6 +160,12 @@ type teeServer struct {
 	outputGuardModeOverride atomic.Value
 	// OG-8：运行时配置持久化文件（-output-guard-config；空 = 不持久化，重启回退启动参数）。
 	outputGuardCfgPath string
+	// S3-2：策略档位启动参数（P-STRATEGY：A|B|C；空 = 缺省 A）。
+	outputGuardStrategy string
+	// S3-2：策略档位运行时覆盖（D8 通过后写入；空 = 沿用启动参数/缺省 A）。
+	outputGuardStrategyOverride atomic.Value
+	// S3-2：停用类目集合运行态（map[string]bool，D8 通过后整体替换；nil = 全类目启用）。
+	outputGuardDisabled atomic.Value
 	// GA-输出侧内容审查（OG-4）：D 组缓冲参数（启动期 resolve＋validate 后只读）。
 	outputGuardParams outputGuardParams
 	// GA-输出侧内容审查（OG-13）：级联并发参数（跨 §5.3–5.5 多组；启动期 resolve＋validate 后只读）。
@@ -206,6 +213,9 @@ type usageRecord struct {
 	TokensOut int `json:"tokens_out"`
 	Requests  int `json:"requests"`
 	Denies    int `json:"denies"`
+	// X-3（G23）：预占输入的累计回冲量（输出拦截/故障退回），与 TokensIn 净额分离，
+	// 使回冲在 /usage 可追溯（否则只是 TokensIn 变小，无法区分"少用"与"被回冲"）。
+	RefundedTokensIn int `json:"refunded_tokens_in,omitempty"`
 	// GA-计费 P0-1：模型维度计量（key = "engine_type/model"，累计口径）。
 	// 配额与租户总额仍以顶层字段为准（预占发生在引擎解析前，模型维度在
 	// 请求完成时补记）；出账分价以 from/to 审计事件聚合为权威（billing.go）。
@@ -599,6 +609,7 @@ func (s *teeServer) rollbackQuota(tenant string, tokensIn int64) {
 		tokensIn = int64(rec.TokensIn)
 	}
 	rec.TokensIn -= int(tokensIn)
+	rec.RefundedTokensIn += int(tokensIn) // X-3：回冲单独入账（/usage 可追溯）
 	for _, l := range s.quotaLimitsOf(tenant) {
 		if l.Window != quotaWindowNone {
 			s.dimensionRelease(tenant, l.Window, tokensIn)
@@ -1369,7 +1380,14 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 
 	// 统一 SSE 信封流输出（seq 严格递增 + finish 分片）；stream=false 语义为单分片聚合。
 	var agg strings.Builder
-	if serr := s.streamTextInfer(w, sess, eng, genReq, &agg, tenant, req.RequestID); serr != nil {
+	var out streamOutcome
+	if serr := s.streamTextInfer(w, sess, eng, genReq, &agg, tenant, req.RequestID, &out); serr != nil {
+		// X-3：输出侧整流拦截优先于引擎 error 判定——按实际下发回冲（block+genErr 同此）。
+		if out.Blocked {
+			s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
+				s.countTokens(inputText.String()), out)
+			return
+		}
 		log.Printf("[tee] infer(text) 引擎失败 request=%s engine=%s err=%v", req.RequestID, engType, serr)
 		// GA-计费 P0-3/P1-3 失败路径计费口径：
 		// - 已有部分输出（客户端已收到）→ 按实收计费：输入计量保留，输出按 agg
@@ -1394,6 +1412,12 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 			s.denyAndAudit(tenant, req.RequestID, "engine_error", payloadSHA)
 		}
 		s.metrics.incDeny(tenant, "engine_error")
+		return
+	}
+	// X-3：正常收尾（genErr=nil）但输出侧在 Process/Finish 整流拦截 → 按实际下发回冲。
+	if out.Blocked {
+		s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
+			s.countTokens(inputText.String()), out)
 		return
 	}
 	// 未命中回填缓存（命中路径不重复回填）。
@@ -1441,6 +1465,13 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	}
 }
 
+// streamOutcome 一次文本流的交付结果（X-3：供调用方按"实际下发"回冲计费）。
+type streamOutcome struct {
+	Blocked       bool   // 输出侧是否整流拦截（enforcing content_filter）
+	Category      string // 拦截类目（blockCat；空 = 降级终止，无类目）
+	EmittedTokens int    // 实际下发（客户端实付）token；不含被拦内容与标识帧
+}
+
 // streamTextInfer 流式生成并逐块写出加密 SSE（seq 严格递增；finish 分片终止）。
 // 返回非 nil = 流式失败（调用方审计；error 分片已尽力写出）。
 //
@@ -1448,7 +1479,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 // mode=off 时 og=nil，走原路径，行为与现网逐字节一致。
 func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	eng model.Engine, genReq model.GenerateRequest, agg *strings.Builder,
-	tenant, requestID string) error {
+	tenant, requestID string, out *streamOutcome) error {
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1478,14 +1509,21 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	if reg, ok := s.l1Classifier().(*lexiconRegistry); ok {
 		maskRes = reg.CategoryRegexps("A4-06")
 	}
+	// S3-2：按当前策略派生判定单元（请求级构造，切换对新请求真实生效），
+	// 以启动缓冲参数为基底仅覆盖 Unit（P-UNIT 随 P-STRATEGY 联动）。
+	strategy := s.currentOutputGuardStrategy()
+	disabled := s.currentDisabledCategories()
+	reqParams := s.outputGuardParams
+	reqParams.Unit = unitForStrategy(strategy)
 	og, ogErr := newOutputGuard(outputGuardConfig{
 		Mode:          s.currentOutputGuardMode(),
 		PolicyVersion: s.policyVersion(),
-		Params:        s.outputGuardParams,
+		Params:        reqParams,
 		Cascade:       s.outputGuardCascade, // OG-13：级联参数（槽位/并发阀/超时/预演开关）
 		MaskEnabled:   s.outputGuardMaskEnabled,
 		MaskRegexps:   maskRes,
-	}, s.l1Classifier(), s.outputGuardL2, s.metrics, s.audit, tenant, requestID)
+	}, withCategoryGate(s.l1Classifier(), disabled), withCategoryGate(s.outputGuardL2, disabled),
+		s.metrics, s.audit, tenant, requestID)
 	if ogErr != nil {
 		return ogErr // fail-closed：模式非法不得静默放行（启动期已校验，此处兜底）
 	}
@@ -1559,6 +1597,9 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 				guard = og.BuildGuardMeta()
 			}
 		}
+		if out != nil {
+			out.Blocked, out.Category, out.EmittedTokens = blocked, blockCat, s.countTokens(emittedBuilder.String())
+		}
 		_ = writeChunk("", finishReason, guard, nil) // B1：error 分支不注入 tail（明文不出，标识无意义）
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		// OG-19：block 命中 → 在上层发射 output_blocked 审计（携带 filtered_tokens）。
@@ -1604,6 +1645,9 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 			finishReason = "content_filter"
 		}
 		guardMeta = og.BuildGuardMeta()
+	}
+	if out != nil {
+		out.Blocked, out.Category, out.EmittedTokens = blocked, blockCat, s.countTokens(emittedBuilder.String())
 	}
 	stopChunk := textStreamChunk{Seq: seq + 1, Finish: finishReason, Guard: guardMeta, Label: lbl.tailMeta()}
 	stopJSON, err := json.Marshal(stopChunk)
@@ -1658,6 +1702,38 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		}
 	}
 	return nil
+}
+
+// applyOutputBlockBilling X-3（G23）：输出侧整流拦截后的配额回冲与计费。
+// 口径①（与 GA-计费 P0-3 故障口径对齐）：
+//   - 全拦（零下发）：全额回冲输入预占、计 deny、不出 infer 账（被拦内容零计费、
+//     配额即释放）；审计 output_blocked 已由 streamTextInfer 落链（含 filtered_tokens）。
+//   - 部分截断（有下发）：输入保留（已发送并消耗），输出仅按实际下发计费；
+//     infer 审计 result=content_filter（供 from/to 出账聚合）。
+func (s *teeServer) applyOutputBlockBilling(tenant, requestID, payloadSHA, transformedHash,
+	engType, modelName string, tokensIn int, out streamOutcome) {
+	delivered := out.EmittedTokens
+	if delivered <= 0 {
+		s.rollbackQuota(tenant, int64(tokensIn))
+		s.recordUsage(tenant, 0, 0, true)
+		s.metrics.incDeny(tenant, "content_filter")
+		log.Printf("[tee] X-3 全拦回冲 tenant=%s req=%s cat=%s 回冲输入=%d（被拦零计费、配额释放）",
+			tenant, requestID, out.Category, tokensIn)
+		return
+	}
+	s.recordUsage(tenant, 0, delivered, false)
+	s.recordModelUsage(tenant, engType, modelName, tokensIn, delivered)
+	ev := s.audit.append(AuditEvent{
+		TenantID: tenant, RequestID: requestID, Action: "infer",
+		TokensIn: tokensIn, TokensOut: delivered, Result: "content_filter",
+		PayloadSHA: payloadSHA, TransformedHash: transformedHash,
+		EngineType: engType, Model: modelName,
+		MeteringMode: s.meteringMode(),
+	})
+	go s.billing.notify(ev)
+	s.metrics.incRequest(tenant, "content_filter")
+	log.Printf("[tee] X-3 部分截断计费 tenant=%s req=%s cat=%s 输入保留=%d 输出按下发=%d",
+		tenant, requestID, out.Category, tokensIn, delivered)
 }
 
 // denyAndAudit 拒绝路径：用量 deny 计数 + 审计事件（result=拒绝原因）+ 指标。
@@ -1738,6 +1814,39 @@ func (s *teeServer) outputGuardModeSource() string {
 	return "startup"
 }
 
+// currentOutputGuardStrategy 当前生效策略档位：运行时覆盖优先，否则启动参数，缺省 A（S3-2）。
+func (s *teeServer) currentOutputGuardStrategy() string {
+	if v, ok := s.outputGuardStrategyOverride.Load().(string); ok && v != "" {
+		return v
+	}
+	if s.outputGuardStrategy != "" {
+		return s.outputGuardStrategy
+	}
+	return defaultOutputStrategy
+}
+
+// currentDisabledCategories 当前停用类目集合；未设置返回空 map（S3-2）。
+// 返回值为只读快照，调用方不得修改。
+func (s *teeServer) currentDisabledCategories() map[string]bool {
+	if v, ok := s.outputGuardDisabled.Load().(map[string]bool); ok {
+		return v
+	}
+	return map[string]bool{}
+}
+
+// disabledCategoryList 返回停用类目的有序列表（消除 map 不确定性，供快照/响应/审计复用）。
+func disabledCategoryList(disabled map[string]bool) []string {
+	if len(disabled) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(disabled))
+	for cat := range disabled {
+		out = append(out, cat)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ---- B1 强标标识（GB 45438-2025）配置访问 ----
 
 // currentContentLabelConfig 当前生效的标识配置：运行时覆盖优先，否则启动参数（均 resolve 兜底）。
@@ -1801,6 +1910,10 @@ type outputGuardSnapshot struct {
 	MaskEnabled bool `json:"mask_enabled"`
 	// OutputDepth：输出处理深度档位（S1-6/G18；**派生视图**＝由 mode＋mask 计算，非独立运行状态）
 	OutputDepth string `json:"output_depth"`
+	// Strategy：策略档位（S3-2 P-STRATEGY：A|B|C；缺省 A）。
+	Strategy string `json:"strategy"`
+	// DisabledCategories：停用类目集合（S3-2；空 = 全类目启用）。
+	DisabledCategories []string `json:"disabled_categories,omitempty"`
 	// S1-4（G21）：策略版本库只读视图（无 versions/index.json 时 VersionsEnabled=false，行为不变）
 	VersionsEnabled   bool     `json:"policy_versions_enabled"`
 	ReferencedVersion string   `json:"policy_referenced_version,omitempty"` // 显式引用版本（空=根目录 manifest）
@@ -1893,6 +2006,8 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		PolicyVersion: s.policyVersion(),
 		MaskEnabled:   s.outputGuardMaskEnabled,
 		OutputDepth:   deriveOutputDepth(ogMode, s.outputGuardMaskEnabled),
+		Strategy:      s.currentOutputGuardStrategy(),
+		DisabledCategories: disabledCategoryList(s.currentDisabledCategories()),
 		Params: outputGuardParamsSnapshot{
 			Unit:              s.outputGuardParams.Unit,
 			MaxUnitRunes:      s.outputGuardParams.MaxUnitRunes,
@@ -2203,7 +2318,7 @@ func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Reque
 	if s.outputGuardCfgPath != "" {
 		if err := writeOutputGuardConfigRecord(s.outputGuardCfgPath, outputGuardConfigRecord{
 			Mode: req.Mode, Actor: actor, RequestID: reqID,
-		}, false); err != nil {
+		}, false, false); err != nil {
 			http.Error(w, "配置持久化失败", http.StatusInternalServerError)
 			return
 		}
@@ -2232,6 +2347,152 @@ func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Reque
 		"mode":   req.Mode,
 		"status": "applied",
 		"old_mode": oldMode,
+	})
+}
+
+// outputGuardStrategyRequest POST /config/output-guard/strategy 请求体（S3-2）。
+type outputGuardStrategyRequest struct {
+	Strategy string `json:"strategy"`
+}
+
+// handleOutputGuardStrategy 策略档位运行时切换（S3-2 P-STRATEGY，D8 高敏变更）：
+//
+//	POST /config/output-guard/strategy（管理令牌）：{"strategy":"A|B|C"}。
+//
+// 语义与边界（与 handleOutputGuardConfig 对称）：
+//   - 合法取值 A/B/C；切换在请求级管线构造时生效（P-UNIT 由策略派生），不重启、对新请求真实生效；
+//   - 诚实门控：策略 C 的启用前置（缓冲层首段预审门已实现 ＋ P-FIRST-CHUNK 已配置 ＋ 法务双通过）
+//     未齐备即 400 拒绝（reason=strategy_c_unavailable），**不静默回落、不假装支持**（2026-09-27 用户裁决②）；
+//   - 持久化读改写合并（不抹 mode/版本引用）；审计 output_guard_strategy_change（证据走 TransformedHash）。
+func (s *teeServer) handleOutputGuardStrategy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAdmin(r) {
+		http.Error(w, "管理认证失败", http.StatusUnauthorized)
+		return
+	}
+	var req outputGuardStrategyRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "请求体须为 JSON", http.StatusBadRequest)
+		return
+	}
+	if err := validateOutputStrategy(req.Strategy); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	oldStrategy := s.currentOutputGuardStrategy()
+	if !strategyRunnable(req.Strategy) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "rejected", "reason": "strategy_c_unavailable", "old_strategy": oldStrategy,
+		})
+		return
+	}
+	actor := r.Header.Get("X-Admin-Actor")
+	reqID := r.Header.Get("X-Request-ID")
+	if s.outputGuardCfgPath != "" {
+		if err := writeOutputGuardConfigRecord(s.outputGuardCfgPath, outputGuardConfigRecord{
+			Strategy: req.Strategy, Actor: actor, RequestID: reqID,
+		}, false, false); err != nil {
+			http.Error(w, "配置持久化失败", http.StatusInternalServerError)
+			return
+		}
+	}
+	s.outputGuardStrategyOverride.Store(req.Strategy)
+	if s.audit != nil {
+		s.audit.append(AuditEvent{
+			TenantID: "-", UserID: actor, RequestID: reqID,
+			Action: "output_guard_strategy_change", Result: "applied",
+			TransformedHash: "output_guard_strategy=" + req.Strategy + " unit=" + unitForStrategy(req.Strategy),
+		})
+	}
+	log.Printf("[output-guard] 运行时策略变更: %s → %s（unit=%s）", oldStrategy, req.Strategy, unitForStrategy(req.Strategy))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"strategy": req.Strategy, "old_strategy": oldStrategy,
+		"unit": unitForStrategy(req.Strategy), "status": "applied",
+	})
+}
+
+// outputGuardCategoriesRequest POST /config/output-guard/categories 请求体（S3-2 类目启停）。
+type outputGuardCategoriesRequest struct {
+	Disable []string `json:"disable,omitempty"`
+	Enable  []string `json:"enable,omitempty"`
+}
+
+// handleOutputGuardCategories 类目启停运行时切换（S3-2，D8 高敏变更）：
+//
+//	POST /config/output-guard/categories（管理令牌）：{"disable":["A2-09"],"enable":["A5-01"]}。
+//
+// 语义与边界：
+//   - 两列表均可选；以当前停用集合为基底：先移除 enable、再加入 disable（同批 enable+disable 以 disable 终态）；
+//   - 校验 fail-closed：类目须在 31 类清单内；默认动作 block/mask 的拦截/脱敏底线类目（A1-01..06、A4-06）
+//     不允许停用（最高安全边界不放开关）；
+//   - 停用集合在请求级经 categoryGate 包装 l1/l2 生效（分类抑制即 block/flag/mask 抑制）；
+//   - 持久化整体接管停用集合（含清空为全启用）；审计 output_guard_category_toggle。
+func (s *teeServer) handleOutputGuardCategories(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAdmin(r) {
+		http.Error(w, "管理认证失败", http.StatusUnauthorized)
+		return
+	}
+	var req outputGuardCategoriesRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req); err != nil {
+		http.Error(w, "请求体须为 JSON", http.StatusBadRequest)
+		return
+	}
+	current := s.currentDisabledCategories()
+	next := make(map[string]bool, len(current)+len(req.Disable))
+	for cat := range current {
+		next[cat] = true
+	}
+	for _, cat := range req.Enable {
+		if !isValidCategory(cat) {
+			http.Error(w, fmt.Sprintf("enable 类目 %q 不存在（须为 31 类内部 ID）", cat), http.StatusBadRequest)
+			return
+		}
+		delete(next, cat)
+	}
+	for _, cat := range req.Disable {
+		if !isValidCategory(cat) {
+			http.Error(w, fmt.Sprintf("disable 类目 %q 不存在（须为 31 类内部 ID）", cat), http.StatusBadRequest)
+			return
+		}
+		if !categoryDisableAllowed(cat) {
+			http.Error(w, fmt.Sprintf("类目 %s 不允许停用（拦截/脱敏安全底线，最高边界不放开关）", cat), http.StatusBadRequest)
+			return
+		}
+		next[cat] = true
+	}
+	list := disabledCategoryList(next)
+	actor := r.Header.Get("X-Admin-Actor")
+	reqID := r.Header.Get("X-Request-ID")
+	if s.outputGuardCfgPath != "" {
+		if err := writeOutputGuardConfigRecord(s.outputGuardCfgPath, outputGuardConfigRecord{
+			DisabledCategories: list, Actor: actor, RequestID: reqID,
+		}, false, true); err != nil {
+			http.Error(w, "配置持久化失败", http.StatusInternalServerError)
+			return
+		}
+	}
+	s.outputGuardDisabled.Store(next)
+	if s.audit != nil {
+		s.audit.append(AuditEvent{
+			TenantID: "-", UserID: actor, RequestID: reqID,
+			Action: "output_guard_category_toggle", Result: "applied",
+			TransformedHash: "disabled_categories=" + strings.Join(list, ","),
+		})
+	}
+	log.Printf("[output-guard] 类目启停生效：当前停用 %d 类（%s）", len(list), strings.Join(list, ","))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"disabled_categories": list, "status": "applied",
 	})
 }
 
@@ -2267,14 +2528,44 @@ func (s *teeServer) loadOutputGuardOverride() {
 		log.Printf("[output-guard] 策略版本引用已恢复：version=%q previous=%q previous_is_root=%v",
 			rec.PolicyVersion, rec.PreviousVersion, rec.PreviousIsRoot)
 	}
-	// 持久化恢复：非法模式值直接忽略（fail-safe）；
-	// enforcing 也忽略——enforcing 只能由启动参数开启，运行时通道（含跨重启恢复）不开放（D4'）。
-	if rec.Mode != outputGuardOff && rec.Mode != outputGuardShadow {
+	// 持久化恢复：
+	//   - mode 为空（仅策略/类目写入的记录）＝未设置，不覆盖 mode 运行态；
+	//   - enforcing 忽略——enforcing 只能由启动参数开启，运行时通道（含跨重启恢复）不开放（D4'）；
+	//   - 仅 off/shadow 合法，其余值记非法（fail-safe）。
+	switch rec.Mode {
+	case "":
+		// 不覆盖
+	case outputGuardOff, outputGuardShadow:
+		s.outputGuardModeOverride.Store(rec.Mode)
+		log.Printf("[output-guard] 运行时配置已恢复：mode=%s actor=%s", rec.Mode, rec.Actor)
+	default:
 		log.Printf("[output-guard] 运行时配置 mode=%q 非法（沿用启动参数）", rec.Mode)
-		return
 	}
-	s.outputGuardModeOverride.Store(rec.Mode)
-	log.Printf("[output-guard] 运行时配置已恢复：mode=%s actor=%s", rec.Mode, rec.Actor)
+	// S3-2：恢复策略档位；非法值或策略 C 前置未齐备 ⇒ 忽略（fail-safe，沿用启动参数/缺省 A）。
+	if rec.Strategy != "" {
+		if err := validateOutputStrategy(rec.Strategy); err != nil {
+			log.Printf("[output-guard] 运行时策略 %q 非法（沿用缺省）", rec.Strategy)
+		} else if strategyRunnable(rec.Strategy) {
+			s.outputGuardStrategyOverride.Store(rec.Strategy)
+			log.Printf("[output-guard] 运行时策略已恢复：strategy=%s actor=%s", rec.Strategy, rec.Actor)
+		} else {
+			log.Printf("[output-guard] 运行时策略 %s 前置未齐备（不恢复，沿用缺省）", rec.Strategy)
+		}
+	}
+	// S3-2：恢复停用集合；逐条过滤——不存在或已不允许停用的类目剔除
+	//（防类目模型演进后旧持久化文件带入非法停用）。
+	if len(rec.DisabledCategories) > 0 {
+		next := make(map[string]bool, len(rec.DisabledCategories))
+		for _, cat := range rec.DisabledCategories {
+			if isValidCategory(cat) && categoryDisableAllowed(cat) {
+				next[cat] = true
+			} else {
+				log.Printf("[output-guard] 停用类目 %s 不存在或不允许停用（恢复时剔除）", cat)
+			}
+		}
+		s.outputGuardDisabled.Store(next)
+		log.Printf("[output-guard] 停用类目集合已恢复：%d 类", len(next))
+	}
 }
 
 // handleContentLabelConfig 强标标识运行时切换：POST /config/content-label（B1，管理令牌）。
@@ -3054,6 +3345,7 @@ func main() {
 	guardClassKey := flag.String("guard-classifier-key", "", "语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
 	guardClassTimeout := flag.Duration("guard-classifier-timeout", 2*time.Second, "语义分类器侧车调用超时（分类器在请求路径上，须有限且小；超时按不可用处理 → fail-closed 拒答）")
 	outputGuardMode := flag.String("output-guard", "off", "GA-输出侧内容审查模式：off（缺省，行为与现网逐字节一致）| shadow（跑判定只记不拦）| enforcing（M4：缓冲模式 A 拦截，content_filter 终止；仅启动参数可开，运行时热切换仍限 off|shadow）")
+	outputGuardStrategyFlag := flag.String("output-guard-strategy", "", "S3-2 策略档位（P-STRATEGY）：A（缺省，按句缓冲，命中零下发）| B（固定滑窗截断，窗前内容可能已发出，须法务书面确认）| C（首段预审+流式复审，前置未齐备，配置即拒绝启动）；运行时切换走 POST /config/output-guard/strategy")
 	outputGuardCfg := flag.String("output-guard-config", "", "GA-输出侧内容审查运行时配置持久化文件（OG-8：高敏复核写入的 mode）；为空 = 仅进程内生效，重启回退 -output-guard")
 	outputGuardPolicyDir := flag.String("output-guard-policy-dir", "", "GA-输出侧内容审查策略/词库目录（OG-9）：含 manifest.json 的 policy 根目录；为空 = 沿用既有 guardrail 规则（行为与现网一致）；加载失败/哈希不匹配即拒绝启动（fail-closed）")
 	// S1-4（G21）：策略版本库显式引用。为空 = 沿用 policy 根目录 manifest（行为不变）；
@@ -3310,6 +3602,17 @@ func main() {
 		log.Fatalf("[output-guard] %v", err)
 	}
 	srv.outputGuardMode = *outputGuardMode
+	// S3-2：策略档位启动参数——校验合法值；空 = 缺省 A（不在此赋值，访问器兜底）。
+	// 策略 C 前置（首段预审门/P-FIRST-CHUNK/法务双通过）未齐备 ⇒ 拒绝启动（fail-closed，不静默按 A）。
+	if *outputGuardStrategyFlag != "" {
+		if err := validateOutputStrategy(*outputGuardStrategyFlag); err != nil {
+			log.Fatalf("[output-guard] %v", err)
+		}
+		if !strategyRunnable(*outputGuardStrategyFlag) {
+			log.Fatalf("[output-guard] -output-guard-strategy=%s 前置未齐备（首段预审门/P-FIRST-CHUNK/法务双通过）：拒绝启动，不静默回落", *outputGuardStrategyFlag)
+		}
+		srv.outputGuardStrategy = *outputGuardStrategyFlag
+	}
 	srv.outputGuardMaskEnabled = *outputGuardMaskEnable
 	// S1-6（G18）：输出处理深度档位（透传／仅拦截／拦截+改写）——档位是 mode＋mask 的**派生视图**，
 	// 显式声明值必须与生效配置一致（不得由档位参数隐式开启拦截/改写；D-LLM-9：改写须属地书面确认）。
@@ -3488,6 +3791,8 @@ func main() {
 	mux.HandleFunc("/config", srv.handleConfig)                    // M3-B 安全中心：配置只读快照
 	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig)    // M3-B 高敏复核：Guardrail 降级生效点
 	mux.HandleFunc("/config/output-guard", srv.handleOutputGuardConfig) // OG-8 输出侧审查 mode 运行时切换
+	mux.HandleFunc("/config/output-guard/strategy", srv.handleOutputGuardStrategy)   // S3-2 策略 A/B/C 切换（C 诚实门控）
+	mux.HandleFunc("/config/output-guard/categories", srv.handleOutputGuardCategories) // S3-2 类目启停（拦截/脱敏底线不可停）
 	mux.HandleFunc("/config/content-label", srv.handleContentLabelConfig) // B1 强标标识运行时热切换（on/off 双向）
 	mux.HandleFunc("/config/policy/reload", srv.handlePolicyReload)  // OG-9 策略/词库热加载（applied/rolled_back）
 	// S1-4（G21）策略版本库：只读发现 / 显式引用 / 回滚（版本库为只读输入，发布属离线步骤）

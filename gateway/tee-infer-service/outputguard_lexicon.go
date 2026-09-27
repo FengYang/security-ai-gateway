@@ -39,6 +39,19 @@ const (
 	ruleTypeRegex    = "regex"    // 正则匹配
 )
 
+// regex 规则的**匹配文本档**（lexiconRule.Normalize；仅 type=regex 生效）：
+//   - 缺省 ""     → 原文（保持改造前行为）
+//   - "fold"      → 半角化且**保留空白**（SQL 规则依赖 `\s+`，不可去空白）
+//   - "compact"   → 半角化且去空白与连字符（PII 数字串混淆防御，与输入侧 compactText 同义）
+//
+// 为何需要：改造前 regex 一律按**原文**匹配，而输入侧 guardrail 先做半角化（PII 再叠去空白/连字符），
+// 导致输出侧对"全角/带空格 PII、全角 SQL"漏检（2026-09-27 多角色评审发现）。
+const (
+	regexNormRaw     = ""
+	regexNormFold    = "fold"
+	regexNormCompact = "compact"
+)
+
 // lexiconRule 单条词库规则（与 JSON schema 对齐）。
 type lexiconRule struct {
 	ID        string  `json:"id"`
@@ -49,6 +62,9 @@ type lexiconRule struct {
 	Submitter string  `json:"submitter"`
 	Reviewer  string  `json:"reviewer"`
 	Comment   string  `json:"comment,omitempty"`
+	// Normalize regex 规则的匹配文本档（可选；仅 type=regex 生效）：
+	// 空 = 原文 | "fold" = 半角化保留空白 | "compact" = 半角化去空白与连字符。
+	Normalize string `json:"normalize,omitempty"`
 }
 
 // lexiconFile 词库文件顶层结构（JSON schema）。
@@ -81,6 +97,7 @@ type lexiconClassifier struct {
 type compiledRegexRule struct {
 	rule lexiconRule
 	re   *regexp.Regexp
+	norm string // 匹配文本档（见 lexiconRule.Normalize）
 }
 
 // newLexiconClassifierFromJSON 从 JSON 字节加载单类目词库并构建匹配引擎。
@@ -166,11 +183,15 @@ func newLexiconClassifierFromJSON(data []byte) (*lexiconClassifier, error) {
 			acPatterns = append(acPatterns, acPattern{text: pat, rule: r})
 
 		case ruleTypeRegex:
+			if r.Normalize != regexNormRaw && r.Normalize != regexNormFold && r.Normalize != regexNormCompact {
+				return nil, fmt.Errorf("rules[%d] (%s): normalize=%q 非法（取值：fold | compact，或留空表示原文）",
+					i, r.ID, r.Normalize)
+			}
 			re, err := regexp.Compile(r.Keyword)
 			if err != nil {
 				return nil, fmt.Errorf("rules[%d] (%s): regex 编译失败: %v", i, r.ID, err)
 			}
-			lc.regexList = append(lc.regexList, compiledRegexRule{rule: r, re: re})
+			lc.regexList = append(lc.regexList, compiledRegexRule{rule: r, re: re, norm: r.Normalize})
 
 		default:
 			return nil, fmt.Errorf("rules[%d] (%s): type=%q 非法（取值：exact|contains|variant|regex）",
@@ -186,33 +207,53 @@ func newLexiconClassifierFromJSON(data []byte) (*lexiconClassifier, error) {
 	return lc, nil
 }
 
+// textForms 一次算好的四种匹配文本（避免每个类目重复归一化，M1 性能优化 R7①）。
+type textForms struct {
+	raw     string // 原文（regex 的缺省档）
+	norm    string // 去空白（exact / contains / variant）
+	fold    string // 半角化且保留空白（regex 的 "fold" 档）
+	compact string // 半角化且去空白与连字符（regex 的 "compact" 档）
+}
+
+// newTextForms 由原文一次性派生全部匹配文本。
+func newTextForms(text string) textForms {
+	fold := foldLexicon(text)
+	return textForms{raw: text, norm: stripSpace(fold), fold: fold, compact: compactFolded(fold)}
+}
+
 // Classify 实现 OutputClassifier 接口。
 // 命中返回（内部类目ID, 置信度=最高权重, 命中片段）；未命中返回 ("", 0, "")。
 // 匹配优先级：exact > contains/variant > regex（一旦命中即返回最高优先级结果；
 // 同层多个命中取权重最高的）。
 func (lc *lexiconClassifier) Classify(text string) (string, float64, string) {
-	return lc.classifyNorm(text, normalizeLexicon(text))
+	return lc.classifyNorm(newTextForms(text))
 }
 
-// classifyNorm 接收原文与其归一化结果：归一化由 lexiconRegistry 在级联入口
-// 统一做一次后下传，避免同一文本被 30 个类目重复 normalizeLexicon（M1 性能优化 R7①）。
-// raw 供 regex 层使用（正则按原文匹配，不经归一化）。
-func (lc *lexiconClassifier) classifyNorm(raw, norm string) (string, float64, string) {
+// classifyNorm 接收原文与派生文本（由 lexiconRegistry 在级联入口统一算一次后下传）。
+// regex 层按条目 Normalize 档选择匹配文本（raw / fold / compact），以与输入侧 guardrail 同口径。
+func (lc *lexiconClassifier) classifyNorm(tf textForms) (string, float64, string) {
 	// 1. exact 匹配（O(1)）
-	if r, ok := lc.exactMap[norm]; ok {
+	if r, ok := lc.exactMap[tf.norm]; ok {
 		return lc.category, r.Weight, r.Keyword
 	}
 
 	// 2. contains/variant（AC 自动机）
 	if lc.ac != nil {
-		if hit := lc.ac.matchFirst(norm); hit != nil {
+		if hit := lc.ac.matchFirst(tf.norm); hit != nil {
 			return lc.category, hit.rule.Weight, hit.rule.Keyword
 		}
 	}
 
-	// 3. regex（逐条匹配，按原文）
+	// 3. regex（逐条匹配，按条目声明的文本档）
 	for _, cr := range lc.regexList {
-		if cr.re.MatchString(raw) {
+		hay := tf.raw
+		switch cr.norm {
+		case regexNormFold:
+			hay = tf.fold
+		case regexNormCompact:
+			hay = tf.compact
+		}
+		if cr.re.MatchString(hay) {
 			return lc.category, cr.rule.Weight, cr.rule.Keyword
 		}
 	}
@@ -264,13 +305,9 @@ func lexiconSHA256(data []byte) string {
 
 // ---- 归一化（与 guardrail.go normalize 对齐，此处独立实现避免循环引用）----
 
-// normalizeLexicon 词库归一化：全角转半角、**去除零宽字符**、折叠大小写、去空白。
-// 与 guardrail.go 的 normalize 语义保持一致（M1 骨架期两份代码并存；
-// OG-9 完成后可考虑抽取公用函数）。
-//
-// 零宽字符属 §4.2.3 规定的混淆防御项（U+200B/200C/200D/FEFF/2060）：字符间插零宽
-// 是常见绕过手法，归一化后必须仍能命中（§6.1.4「零宽字符插入 100% 命中」）。
-func normalizeLexicon(s string) string {
+// foldLexicon 折叠混淆但**保留空白**：去零宽字符、全角 ASCII → 半角、全角空格 → 半角空格、折叠大小写。
+// 用途：regex 的 "fold" 档（SQL 规则依赖 `\s+`，不能被去空白破坏）。
+func foldLexicon(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
@@ -285,15 +322,37 @@ func normalizeLexicon(s string) string {
 		if r == 0x3000 {
 			r = ' '
 		}
-		// 折叠大小写
-		r = unicode.ToLower(r)
-		// 去空白（exact/contains 匹配都不考虑空白差异）
-		if unicode.IsSpace(r) {
-			continue
-		}
-		b.WriteRune(r)
+		b.WriteRune(unicode.ToLower(r))
 	}
 	return b.String()
+}
+
+// stripSpace 去除全部空白（含折叠后的半角空格）。
+func stripSpace(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// compactFolded 在已折叠文本上去除空白与连字符（PII 数字串混淆防御；与输入侧 compactText 同义）。
+func compactFolded(folded string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || r == '-' {
+			return -1
+		}
+		return r
+	}, folded)
+}
+
+// normalizeLexicon 词库归一化：折叠混淆 + **去空白**（exact / contains / variant 匹配不考虑空白差异）。
+//
+// 零宽字符属 §4.2.3 规定的混淆防御项（U+200B/200C/200D/FEFF/2060）：字符间插零宽
+// 是常见绕过手法，归一化后必须仍能命中（§6.1.4「零宽字符插入 100% 命中」）。
+func normalizeLexicon(s string) string {
+	return stripSpace(foldLexicon(s))
 }
 
 // isZeroWidthRune 零宽/不可见格式字符（§4.2.3 清单）。

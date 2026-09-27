@@ -438,7 +438,7 @@ func TestGuardrailEvalContractWithStub(t *testing.T) {
 	if _, err := os.Stat(out); err != nil {
 		t.Fatalf("报告应落盘：%v", err)
 	}
-	// 语料族规模（2026-09-26，S2-4 方案 D）：`select…from` 结构子句**规则层不再拦**，
+	// 语料族规模（2026-09-26，S2-4 方案 D（C→A）之 C 步）：`select…from` 结构子句**规则层不再拦**，
 	// 6 条 syn-sql-01/02/03/15/16/17 由 scope=rule 改 scope=semantic ⇒ rule 61→55、semantic 100→106。
 	if rep.DetectRule.Total != 55 || rep.DetectSem.Total != 106 {
 		t.Errorf("语料族规模应与基准集一致（rule 55 / semantic 106），实际 rule=%d semantic=%d",

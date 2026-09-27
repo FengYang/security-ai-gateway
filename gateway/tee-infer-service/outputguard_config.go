@@ -261,6 +261,66 @@ func validateOutputDepth(requested, actual string) error {
 	return nil
 }
 
+// ---- S3-2：P-STRATEGY 策略档位（A 缓冲 / B 滑窗截断 / C 首段预审+流式复审）----
+//
+// 口径（技术方案 §5.2 P-STRATEGY、§5.4 P-FIRST-CHUNK）：策略是与 mode 并列的运行态，
+// 决定判定单元切分（P-UNIT）与下发时序；缺省 A（合规优先）。
+//   - A：按句缓冲，命中不进入已下发字节（最强）；
+//   - B：固定滑窗，命中前窗内容可能已发出（须法务书面确认＋客户端披露）；
+//   - C：首段预审＋流式复审，首段延迟换取后续流式。
+//
+// C 的启用前置：① 缓冲层首段预审门已实现；② P-FIRST-CHUNK 已配置；③ 法务双通过。
+// 当前三项均不满足（既有 EarlyOutputClassifier 是 L2 传输层两段式，非缓冲首段门），
+// 故 strategyCPrereqsMet=false——端点对 C 诚实拒绝（不静默回落、不假装支持，2026-09-27 用户裁决）。
+const (
+	outputStrategyA       = "A"
+	outputStrategyB       = "B"
+	outputStrategyC       = "C"
+	defaultOutputStrategy = outputStrategyA
+)
+
+// validateOutputStrategy 校验策略取值（空串＝缺省）。
+func validateOutputStrategy(strategy string) error {
+	switch strategy {
+	case "", outputStrategyA, outputStrategyB, outputStrategyC:
+		return nil
+	default:
+		return fmt.Errorf("strategy=%q 非法（取值：A|B|C）", strategy)
+	}
+}
+
+// strategyCPrereqsMet 策略 C 启用前置（见上；2026-09-27 恒 false）。
+// 将来首段门落地并配置 P-FIRST-CHUNK、且法务签署后改此谓词并回填本体。
+func strategyCPrereqsMet() bool { return false }
+
+// strategyRunnable 判定策略当前是否可运行：A/B 恒可；C 须前置齐备（否则端点拒绝）。
+func strategyRunnable(strategy string) bool {
+	if strategy == outputStrategyC {
+		return strategyCPrereqsMet()
+	}
+	return true
+}
+
+// unitForStrategy 由策略派生判定单元（P-UNIT）：A→sentence；B/C→fixed-window。
+// C 的首段预审为独立缓冲门（未实现），其流式复审段按固定滑窗。
+func unitForStrategy(strategy string) string {
+	if strategy == outputStrategyB || strategy == outputStrategyC {
+		return unitFixedWindow
+	}
+	return unitSentence
+}
+
+// categoryDisableAllowed 类目停用安全硬底：默认动作为 block/mask 的类目
+// （A1-01..06 拦截底线、A4-06 PII 脱敏底线）不允许停用——最高安全边界不放开关
+//（同 guardrail 无关闭开关先例）；flag/pass 类目可停用（弱类目运营决策，经 D8）。
+func categoryDisableAllowed(cat string) bool {
+	c, ok := getCategory(cat)
+	if !ok {
+		return false
+	}
+	return c.DefaultAction != catActionBlock && c.DefaultAction != catActionMask
+}
+
 // ---- OG-8：运行时配置请求 / 持久化记录（与 guardrailConfigRequest 同构）----
 
 // outputGuardConfigRequest POST /config/output-guard 请求体（OG-8 运行时覆盖）。
@@ -287,6 +347,10 @@ type outputGuardConfigRecord struct {
 	PreviousVersion string `json:"previous_version,omitempty"`
 	// PreviousIsRoot：上一 active 为"未引用态"（policy 根目录）——回滚目标 = 回到根目录。
 	PreviousIsRoot bool `json:"previous_is_root,omitempty"`
+	// S3-2：策略档位运行时覆盖（P-STRATEGY；空 = 缺省 A）。
+	Strategy string `json:"strategy,omitempty"`
+	// S3-2：停用类目集合（空 = 全类目启用）。
+	DisabledCategories []string `json:"disabled_categories,omitempty"`
 }
 
 // writeOutputGuardConfigRecord **读改写合并**写入持久化记录。
@@ -301,7 +365,10 @@ type outputGuardConfigRecord struct {
 //
 // 三元组必须整体写入而非按字段合并：它们是"当前引用 + 上一状态"的一体状态，
 // 按字段合并会把新值与陈旧值拼成矛盾组合（实测：previous_version 等于当前版本且 previous_is_root=true）。
-func writeOutputGuardConfigRecord(path string, patch outputGuardConfigRecord, ownsPolicyRef bool) error {
+//
+// S3-2：策略字段非空即合并（恒为具体 A/B/C）；ownsCategories=true 时整体接管停用集合
+//（含清空为"全启用"——按字段非空合并无法表达清空）。
+func writeOutputGuardConfigRecord(path string, patch outputGuardConfigRecord, ownsPolicyRef, ownsCategories bool) error {
 	rec := outputGuardConfigRecord{}
 	if raw, err := os.ReadFile(path); err == nil {
 		// 解析失败按空记录处理（沿用"持久化文件损坏不阻断"的既有纪律）。
@@ -314,6 +381,12 @@ func writeOutputGuardConfigRecord(path string, patch outputGuardConfigRecord, ow
 		rec.PolicyVersion = patch.PolicyVersion
 		rec.PreviousVersion = patch.PreviousVersion
 		rec.PreviousIsRoot = patch.PreviousIsRoot
+	}
+	if patch.Strategy != "" {
+		rec.Strategy = patch.Strategy
+	}
+	if ownsCategories {
+		rec.DisabledCategories = patch.DisabledCategories
 	}
 	if patch.Actor != "" {
 		rec.Actor = patch.Actor

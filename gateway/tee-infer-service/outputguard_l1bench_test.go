@@ -100,9 +100,9 @@ var (
 	}()
 	// 身份证形态：regex 类（pii）优先级最高，命中即早停。
 	benchPIIHit = "经办人证件号 110105198003157892 请核对。"
-	// 关键词命中：须先跑完 pii/injection 两个 regex 类与排在 A1-06 前的词库类，
-	// 是关键词路径的真实位置（词面取自当前占位词库，仅用于压 AC 路径）。
-	benchKeywordHit = "处理结果：【A1-06-示例-0001】请知悉。"
+	// 关键词命中：须先跑完 pii/injection 两个 regex 类与全部关键词类目（最坏路径：
+	// 2026-09-27 起关键词类目间取"最长命中"，故不再早停），词面取自 A1-06 真实词条。
+	benchKeywordHit = "处理结果：传播淫秽色情内容，请知悉。"
 )
 
 // BenchmarkL1Classify 分量①：生产入口 lexiconRegistry.Classify（含每类归一化）。

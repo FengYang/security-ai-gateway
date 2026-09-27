@@ -90,6 +90,11 @@ type policyBenchBaseline struct {
 	SemanticDetect float64 `json:"semantic_detect"` // 语义族检出率（不得下降）
 	FP             float64 `json:"fp"`              // 误报率（不得上升）
 	CorpusSHA256   string  `json:"corpus_sha256"`   // 基线语料指纹（不一致即不可比）
+	// 输出侧维度（2026-09-27 新增，可选）：取自**输出侧词库 + 题库**自身，与上面三维
+	// （输入侧 guardrail 口径）互补——上面三维度量的是输入侧分类器，不覆盖 policy/ 词库内容。
+	// 缺省（null）= 未登记，此时由 TestPolicyOutputSideGateNotRegress 以"不劣于登记值"口径约束。
+	OutputDetect *float64 `json:"output_detect,omitempty"` // 黄金正例归入自身类目的比例（不得下降）
+	OutputFP     *float64 `json:"output_fp,omitempty"`     // 黄金负例被任一类目命中的比例（不得上升）
 }
 
 // policyBenchRecord 版本快照内的评测记录（versions/<v>/bench.json，由评测跑道产出）。
@@ -489,7 +494,7 @@ func (s *teeServer) saveOutputGuardRefRecord(st policyRefState, actor, reqID str
 		PreviousIsRoot:  st.PrevRoot,
 		Actor:           actor,
 		RequestID:       reqID,
-	}, true)
+	}, true, false)
 }
 
 // ---- 版本列表视图（/config/policy/versions 与 /config 快照共用）----

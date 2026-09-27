@@ -55,14 +55,14 @@ var outputCategories = []outputCategory{
 	{ID: "A1-08", Name: "其他法律、行政法规禁止的内容", Family: "A1", DefaultLevel: catLevelMedium, DefaultAction: catActionFlag, Note: "官方 A.1 h) 原文；兜底类，不单独建词库，仅作映射落点"},
 
 	// A.2 违法不良信息（歧视类，9 项）
-	{ID: "A2-01", Name: "民族歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "弱检出区：指标须分类目单列"},
-	{ID: "A2-02", Name: "信仰歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "官方 A.2 b) 原文为\"信仰歧视内容\"（非\"种族歧视\"，OG-2② 核对纠正）；弱检出区"},
-	{ID: "A2-03", Name: "国别歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "弱检出区"},
-	{ID: "A2-04", Name: "地域歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "弱检出区；\"地域黑\"梗文化对抗性强"},
-	{ID: "A2-05", Name: "性别歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "弱检出区"},
-	{ID: "A2-06", Name: "年龄歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "弱检出区"},
-	{ID: "A2-07", Name: "职业歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "弱检出区"},
-	{ID: "A2-08", Name: "健康歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionBlock, Note: "弱检出区"},
+	{ID: "A2-01", Name: "民族歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionFlag, Note: "弱检出区：指标须分类目单列；2026-09-27 评审后默认动作由 block 降为 flag（元表述词面高误伤，待 D-LLM-8 误杀定线达标后再评估升回）"},
+	{ID: "A2-02", Name: "信仰歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionFlag, Note: "官方 A.2 b) 原文为\"信仰歧视内容\"（非\"种族歧视\"，OG-2② 核对纠正）；弱检出区；2026-09-27 同 A2-01 降为 flag"},
+	{ID: "A2-03", Name: "国别歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionFlag, Note: "弱检出区；2026-09-27 同 A2-01 降为 flag"},
+	{ID: "A2-04", Name: "地域歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionFlag, Note: "弱检出区；\"地域黑\"梗文化对抗性强；2026-09-27 同 A2-01 降为 flag"},
+	{ID: "A2-05", Name: "性别歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionFlag, Note: "弱检出区；2026-09-27 同 A2-01 降为 flag"},
+	{ID: "A2-06", Name: "年龄歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionFlag, Note: "弱检出区；2026-09-27 同 A2-01 降为 flag"},
+	{ID: "A2-07", Name: "职业歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionFlag, Note: "弱检出区；2026-09-27 同 A2-01 降为 flag"},
+	{ID: "A2-08", Name: "健康歧视内容", Family: "A2", DefaultLevel: catLevelHigh, DefaultAction: catActionFlag, Note: "弱检出区；2026-09-27 同 A2-01 降为 flag"},
 	{ID: "A2-09", Name: "其他方面歧视内容", Family: "A2", DefaultLevel: catLevelMedium, DefaultAction: catActionFlag, Note: "兜底类"},
 
 	// A.3 商业/权益类（5 项）
