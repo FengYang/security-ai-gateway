@@ -61,8 +61,8 @@ func TestS32StrategyRunnable(t *testing.T) {
 	if !strategyRunnable(outputStrategyA) || !strategyRunnable(outputStrategyB) {
 		t.Error("策略 A/B 应可运行")
 	}
-	if strategyRunnable(outputStrategyC) {
-		t.Error("策略 C 前置未齐备，应不可运行（诚实门控）")
+	if !strategyRunnable(outputStrategyC) {
+		t.Error("策略 C 首段门已落地，应可运行")
 	}
 }
 
@@ -180,13 +180,16 @@ func TestS32StrategyEndpoint(t *testing.T) {
 	if resp["strategy"] != "B" || resp["unit"] != unitFixedWindow || resp["status"] != "applied" {
 		t.Fatalf("切 B 响应不符：%+v", resp)
 	}
-	// 切 C：诚实拒绝，状态保持 B。
+	// 切 C：首段门已落地，生效，派生 fixed-window。
 	rec = s32Post(mux, "/config/output-guard/strategy", `{"strategy":"C"}`, "tok")
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("切 C 应 400，实际 %d：%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("切 C 应 200，实际 %d：%s", rec.Code, rec.Body.String())
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp["reason"] != "strategy_c_unavailable" {
-		t.Fatalf("C 拒绝原因应为 strategy_c_unavailable：%+v", resp)
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应非 JSON：%v", err)
+	}
+	if resp["strategy"] != "C" || resp["unit"] != unitFixedWindow || resp["status"] != "applied" {
+		t.Fatalf("切 C 响应不符：%+v", resp)
 	}
 	if cur := newS32Server("", "").currentOutputGuardStrategy(); cur != defaultOutputStrategy {
 		t.Fatalf("新服务缺省应为 A，实际 %s", cur)

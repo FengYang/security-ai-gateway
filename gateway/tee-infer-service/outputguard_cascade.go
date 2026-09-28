@@ -106,6 +106,15 @@ type cascade struct {
 	policyVersion string
 	field         string // X-2：审查内容来源字段（text / tool_input）
 
+	// P-FIRST-CHUNK 首段预审门（S3-2 策略 C）：
+	//   第一个判定单元走完整级联（L1+L2）；
+	//   首段未命中 block → 后续单元跳过 L2（只跑 L1，大幅降延迟）；
+	//   首段命中 block → 后续单元保持完整级联（与策略 B 一致）。
+	// firstChunkSkipL2Enabled 为 false（策略 A/B）时，首段门完全不生效。
+	firstChunkSkipL2Enabled bool
+	firstChunkDone          bool
+	firstChunkSkipL2        bool
+
 	slots    []*cascadeSlot
 	inFlight int // 在飞 L2 句数（＝ buffer_queue_depth gauge 口径；含画像调用）
 
@@ -139,21 +148,22 @@ type cascade struct {
 
 // newCascade 构造请求级级联控制器。params 须为 resolve 后的取值。
 func newCascade(params outputGuardCascadeParams, mode string, maskEnabled bool, maskRes []*regexp.Regexp, l1, l2 OutputClassifier, m *otpmaskMetrics,
-	a *auditChain, tenant, requestID, policyVersion, field string) *cascade {
+	a *auditChain, tenant, requestID, policyVersion, field string, firstChunkSkipL2Enabled bool) *cascade {
 	c := &cascade{
-		params:        params,
-		mode:          mode,
-		maskEnabled:   maskEnabled,
-		maskRes:       maskRes,
-		l1:            l1,
-		l2:            l2,
-		m:             m,
-		a:             a,
-		tenant:        tenant,
-		requestID:     requestID,
-		policyVersion: policyVersion,
-		field:         field,
-		seenCategory:  make(map[string]bool, 4),
+		params:                  params,
+		mode:                    mode,
+		maskEnabled:             maskEnabled,
+		maskRes:                 maskRes,
+		l1:                      l1,
+		l2:                      l2,
+		m:                       m,
+		a:                       a,
+		tenant:                  tenant,
+		requestID:               requestID,
+		policyVersion:           policyVersion,
+		field:                   field,
+		firstChunkSkipL2Enabled: firstChunkSkipL2Enabled,
+		seenCategory:            make(map[string]bool, 4),
 	}
 	c.cond = sync.NewCond(&c.mu)
 	return c
@@ -352,6 +362,12 @@ func (c *cascade) submitUnitLocked(unit string) {
 	}
 	if c.l2 == nil {
 		c.finishLocked(s, slotDone) // 纯 L1 形态：无级联，直接终态
+		return
+	}
+	// P-FIRST-CHUNK 首段门：首段安全后后续单元跳过 L2（只跑 L1）。
+	// 首段（seq=0）不受此影响，始终走完整级联。
+	if c.firstChunkSkipL2Enabled && c.firstChunkDone && c.firstChunkSkipL2 {
+		c.finishLocked(s, slotDone)
 		return
 	}
 	// ---- 级联：提交前检查并发（容量阀，不排队）----
@@ -578,6 +594,16 @@ func (c *cascade) finishLocked(s *cascadeSlot, state int) {
 	s.state = state
 	if s.timer != nil {
 		s.timer.Stop()
+	}
+	// P-FIRST-CHUNK：首段（seq=0）终态后决定后续是否跳过 L2。
+	// 首段 L1 未命中（内容大概率安全）→ 后续跳 L2 降延迟；
+	// 首段 L1 命中（有风险）→ 后续保持完整级联（与策略 B 一致）。
+	if c.firstChunkSkipL2Enabled && s.seq == 0 {
+		c.firstChunkDone = true
+		c.firstChunkSkipL2 = (len(s.l1Cats) == 0)
+		if c.firstChunkSkipL2 && c.m != nil {
+			c.m.incOGFirstChunkSkipL2()
+		}
 	}
 	c.cond.Broadcast()
 }

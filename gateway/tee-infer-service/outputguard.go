@@ -97,6 +97,7 @@ type outputEmitFunc func(delta, finish string) error
 type outputGuard struct {
 	mode          string
 	policyVersion string
+	strategy      string // S3-2 P-STRATEGY：A/B/C
 	field         string // X-2：审查内容来源字段（text / tool_input；用于指标归因，低基数）
 	l1            OutputClassifier
 	l2            OutputClassifier // nil = 未启用 L2（纯 L1 = 当前行为）
@@ -139,9 +140,14 @@ func newOutputGuard(cfg outputGuardConfig, l1 OutputClassifier, l2 OutputClassif
 	if pv == "" {
 		pv = defaultPolicyVersion
 	}
+	strat := cfg.Strategy
+	if strat == "" {
+		strat = outputStrategyA
+	}
 	og := &outputGuard{
 		mode:          cfg.Mode,
 		policyVersion: pv,
+		strategy:      strat,
 		field:         "text", // X-2：默认审查 text 字段；可通过 withField 切换为 tool_input 等
 		l1:            l1,
 		l2:            l2,
@@ -158,7 +164,8 @@ func newOutputGuard(cfg outputGuardConfig, l1 OutputClassifier, l2 OutputClassif
 		}
 	})
 	// 级联参数：P-MAX-SLOTS 派生依赖已 resolve 的 P-MAX-BUFFER-BYTES，故传入 params。
-	og.casc = newCascade(resolveOutputGuardCascadeParams(cfg.Cascade, params), cfg.Mode, cfg.MaskEnabled, cfg.MaskRegexps, l1, l2, m, a, tenant, requestID, pv, og.field)
+	firstChunkSkipL2Enabled := (strat == outputStrategyC)
+	og.casc = newCascade(resolveOutputGuardCascadeParams(cfg.Cascade, params), cfg.Mode, cfg.MaskEnabled, cfg.MaskRegexps, l1, l2, m, a, tenant, requestID, pv, og.field, firstChunkSkipL2Enabled)
 	if og.metrics != nil {
 		og.metrics.incOGRequest(cfg.Mode, og.field) // X-2：审查过的请求数（按模式 + field）
 	}

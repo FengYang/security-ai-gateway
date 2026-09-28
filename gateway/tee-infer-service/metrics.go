@@ -72,6 +72,7 @@ type otpmaskMetrics struct {
 	ogUnmapped        map[string]int64 // backend|category_raw（后端类目未映射，M2）
 	ogBlocked         map[string]int64 // category|mode|field（命中且动作=block，enforcing）
 	ogMasked          map[string]int64 // category|field（命中且动作=mask/rewrite）
+	ogFirstChunkSkipL2 int64           // S3-2 策略 C：首段安全后跳过 L2 的请求数（gauge）
 	ogPolicyRollback  map[string]int64 // reason（策略热加载回退事件）
 	// S1-4（G21）：策略版本库显式引用/回滚事件（action|result|reason）。
 	ogPolicyActivate  map[string]int64
@@ -442,6 +443,11 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	// S2-6：重启检测 gauge（对账器检测到审计链早于启动时刻事件后置 1；进程重启天然归零）
 	fmt.Fprintf(w, "# HELP otpmask_output_guard_restart_detected 输出侧审查进程是否检测到重启（审计链含启动前事件，1=是）\n# TYPE otpmask_output_guard_restart_detected gauge\n")
 	fmt.Fprintf(w, "otpmask_output_guard_restart_detected %d\n", m.ogRestartDetected)
+	// S3-2 策略 C：首段安全后跳过 L2 的请求数（首段门触发次数，单调递增）
+	if m.ogFirstChunkSkipL2 > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_output_guard_c_first_chunk_skip_l2_total 策略C首段预审门触发次数（首段安全后跳过L2的请求数）\n# TYPE otpmask_output_guard_c_first_chunk_skip_l2_total counter\n")
+		fmt.Fprintf(w, "otpmask_output_guard_c_first_chunk_skip_l2_total %d\n", m.ogFirstChunkSkipL2)
+	}
 	// ---- B1 强标标识（GB 45438-2025）----
 	// enabled gauge 常驻（required，门禁 #9）；请求/标识帧计数 conditional（零样本不输出属正常）。
 	fmt.Fprintf(w, "# HELP otpmask_content_label_enabled 强标标识（GB 45438-2025）是否启用\n# TYPE otpmask_content_label_enabled gauge\n")
@@ -583,6 +589,13 @@ func (m *otpmaskMetrics) incOGBlocked(category, mode, field string) {
 func (m *otpmaskMetrics) incOGMasked(category, field string) {
 	m.mu.Lock()
 	m.ogMasked[category+"|"+field]++
+	m.mu.Unlock()
+}
+
+// incOGFirstChunkSkipL2 记录一次策略 C 首段安全跳过 L2 的请求。
+func (m *otpmaskMetrics) incOGFirstChunkSkipL2() {
+	m.mu.Lock()
+	m.ogFirstChunkSkipL2++
 	m.mu.Unlock()
 }
 

@@ -213,6 +213,7 @@ func validateOutputGuardCascadeParams(c outputGuardCascadeParams) error {
 type outputGuardConfig struct {
 	Mode          string                    // P-MODE：off｜shadow｜enforcing（M4 拦截仅启动参数可开；运行时/持久化通道限 off｜shadow）
 	PolicyVersion string                    // 策略版本（manifest.policy_version；M1 未接词库，用 defaultPolicyVersion）
+	Strategy      string                    // P-STRATEGY：A｜B｜C（S3-2；缺省 A；C=首段预审门 + 滑窗）
 	Params        outputGuardParams         // D 组缓冲参数（允许传未 resolve 值，构造时会 resolve）
 	Cascade       outputGuardCascadeParams  // 级联并发参数（允许传未 resolve 值，构造时会 resolve）
 	MaskEnabled   bool                      // OG-18：PII mask 改写开关（默认 false = block-only 深度，mask 降为 flag；true = 启用实打马赛克）
@@ -289,9 +290,9 @@ func validateOutputStrategy(strategy string) error {
 	}
 }
 
-// strategyCPrereqsMet 策略 C 启用前置（见上；2026-09-27 恒 false）。
-// 将来首段门落地并配置 P-FIRST-CHUNK、且法务签署后改此谓词并回填本体。
-func strategyCPrereqsMet() bool { return false }
+// strategyCPrereqsMet 策略 C 启用前置：P-FIRST-CHUNK 首段预审门已落地（S3-2，2026-09-28）。
+// 法务签署仍为外部阻塞项（不阻开发核销），工程侧首段门机制已可用。
+func strategyCPrereqsMet() bool { return true }
 
 // strategyRunnable 判定策略当前是否可运行：A/B 恒可；C 须前置齐备（否则端点拒绝）。
 func strategyRunnable(strategy string) bool {

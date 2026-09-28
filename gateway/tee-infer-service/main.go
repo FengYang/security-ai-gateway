@@ -1533,6 +1533,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	og, ogErr := newOutputGuard(outputGuardConfig{
 		Mode:          s.currentOutputGuardMode(),
 		PolicyVersion: s.policyVersion(),
+		Strategy:      strategy,
 		Params:        reqParams,
 		Cascade:       s.outputGuardCascade, // OG-13：级联参数（槽位/并发阀/超时/预演开关）
 		MaskEnabled:   s.outputGuardMaskEnabled,
