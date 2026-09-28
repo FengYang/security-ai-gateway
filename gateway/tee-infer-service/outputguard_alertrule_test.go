@@ -155,14 +155,16 @@ func TestPrometheusRuleOldDefectsGone(t *testing.T) {
 	}
 }
 
-// TestPrometheusRuleAlertsComplete 三条告警线齐备且有对应 runbook 标注。
+// TestPrometheusRuleAlertsComplete 告警线齐备（含后备规则与低流量绝对计数兜底）且有对应 runbook 标注。
 func TestPrometheusRuleAlertsComplete(t *testing.T) {
 	raw := string(readPrometheusRule(t))
 	for _, alert := range []string{
 		"OutputGuardBlockRateHigh",
 		"OutputGuardBlockRateCritical",
+		"OutputGuardBlockBurstLowTraffic", // P1-3：低流量绝对计数兜底（比率告警流量门盲区）
 		"OutputGuardPodRestarting",
 		"OutputGuardPodCrashLoop",
+		"OutputGuardPodRestartingFallback", // 无 kube-state-metrics 环境后备
 		"OutputGuardSentenceDegradationHigh",
 		"OutputGuardSlotsFullTerminating",
 	} {
