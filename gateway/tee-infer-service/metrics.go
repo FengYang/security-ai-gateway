@@ -418,6 +418,11 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	// counter：队列溢出/超并发容量阀触发次数
 	fmt.Fprintf(w, "# HELP otpmask_output_guard_buffer_full_total 缓冲队列溢出或超并发容量阀触发次数\n# TYPE otpmask_output_guard_buffer_full_total counter\n")
 	fmt.Fprintf(w, "otpmask_output_guard_buffer_full_total %d\n", m.ogBufferFull)
+	// counter：判定单元总数（句级降级率告警的分母；P0-1 修复新增）
+	if m.ogSentences > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_output_guard_sentences_total 判定单元（句/窗）总数\n# TYPE otpmask_output_guard_sentences_total counter\n")
+		fmt.Fprintf(w, "otpmask_output_guard_sentences_total %d\n", m.ogSentences)
+	}
 	// histogram：L2 单句调用延迟（M3 启用后才有样本）
 	writeHistogram(w, "otpmask_output_guard_l2_duration_seconds", "L2语义层单句调用延迟（秒）", m.ogL2DurationSec, "")
 	// 派生 gauge（M3 OG-13）：分子/分母为进程级累计（§4.10 诊断指标，不设阈值闸门）。
