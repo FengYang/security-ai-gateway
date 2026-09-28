@@ -155,6 +155,10 @@ type teeServer struct {
 	guardProbe *guardClassifierProbe
 	// GA-输出侧内容审查（OG-3）：off|shadow（enforcing 属 M4，配置即拒绝启动；§2.3 I1–I7）。
 	outputGuardMode string
+	// S1-5：公众形态锁定——true 时审核总开关不可关闭（mode 不得为 off），
+	// 关闭请求返回 400 + 审计；false 时与现网一致（off/shadow/enforcing 均可）。
+	// 私有化形态默认 false；SaaS/公众形态须显式置 true。
+	publicFacing bool
 	// OG-8：运行时 mode 覆盖（高敏变更复核通过后写入；空 = 沿用 outputGuardMode 启动参数）。
 	// 只允许在 off/shadow 之间切换，enforcing 在 M4 前不开放（安全边界）。
 	outputGuardModeOverride atomic.Value
@@ -1918,6 +1922,8 @@ type outputGuardSnapshot struct {
 	VersionsEnabled   bool     `json:"policy_versions_enabled"`
 	ReferencedVersion string   `json:"policy_referenced_version,omitempty"` // 显式引用版本（空=根目录 manifest）
 	VersionsAvailable []string `json:"policy_versions_available,omitempty"` // 索引内已登记版本号
+	// S1-5：公众形态锁定（true 时审核总开关不可关闭）
+	PublicFacing bool `json:"public_facing"`
 }
 
 // outputGuardParamsSnapshot 缓冲参数只读快照（D 组参数，§5.4）。
@@ -2007,6 +2013,7 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		MaskEnabled:   s.outputGuardMaskEnabled,
 		OutputDepth:   deriveOutputDepth(ogMode, s.outputGuardMaskEnabled),
 		Strategy:      s.currentOutputGuardStrategy(),
+		PublicFacing:  s.publicFacing,
 		DisabledCategories: disabledCategoryList(s.currentDisabledCategories()),
 		Params: outputGuardParamsSnapshot{
 			Unit:              s.outputGuardParams.Unit,
@@ -2308,6 +2315,21 @@ func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Reque
 	oldMode := s.currentOutputGuardMode()
 	if req.Mode == outputGuardEnforcing && oldMode != outputGuardEnforcing {
 		http.Error(w, "mode 不允许运行时升为 enforcing（拦截仅能经启动参数开启；运行时可从 enforcing 降级到 shadow/off）", http.StatusBadRequest)
+		return
+	}
+	// S1-5：公众形态下审核总开关不可关闭（不得切到 off）。
+	if s.publicFacing && req.Mode == outputGuardOff {
+		if s.audit != nil {
+			s.audit.append(AuditEvent{
+				TenantID:  "-",
+				UserID:    r.Header.Get("X-Admin-Actor"),
+				RequestID: r.Header.Get("X-Request-ID"),
+				Action:    "output_guard_mode_change",
+				Result:    "rejected_public_facing_lock",
+				OGMode:    req.Mode,
+			})
+		}
+		http.Error(w, "公众形态下审核总开关不可关闭（public_facing=true，禁止 mode=off）", http.StatusBadRequest)
 		return
 	}
 	actor := r.Header.Get("X-Admin-Actor")
@@ -3345,6 +3367,7 @@ func main() {
 	guardClassKey := flag.String("guard-classifier-key", "", "语义分类器侧车 Bearer 令牌（可选；经环境变量注入，勿写入镜像）")
 	guardClassTimeout := flag.Duration("guard-classifier-timeout", 2*time.Second, "语义分类器侧车调用超时（分类器在请求路径上，须有限且小；超时按不可用处理 → fail-closed 拒答）")
 	outputGuardMode := flag.String("output-guard", "off", "GA-输出侧内容审查模式：off（缺省，行为与现网逐字节一致）| shadow（跑判定只记不拦）| enforcing（M4：缓冲模式 A 拦截，content_filter 终止；仅启动参数可开，运行时热切换仍限 off|shadow）")
+	publicFacing := flag.Bool("public-facing", false, "S1-5 公众形态锁定：true 时审核总开关不可关闭（mode 不得为 off），关闭请求返回 400+审计；私有化形态默认 false")
 	outputGuardStrategyFlag := flag.String("output-guard-strategy", "", "S3-2 策略档位（P-STRATEGY）：A（缺省，按句缓冲，命中零下发）| B（固定滑窗截断，窗前内容可能已发出，须法务书面确认）| C（首段预审+流式复审，前置未齐备，配置即拒绝启动）；运行时切换走 POST /config/output-guard/strategy")
 	outputGuardCfg := flag.String("output-guard-config", "", "GA-输出侧内容审查运行时配置持久化文件（OG-8：高敏复核写入的 mode）；为空 = 仅进程内生效，重启回退 -output-guard")
 	outputGuardPolicyDir := flag.String("output-guard-policy-dir", "", "GA-输出侧内容审查策略/词库目录（OG-9）：含 manifest.json 的 policy 根目录；为空 = 沿用既有 guardrail 规则（行为与现网一致）；加载失败/哈希不匹配即拒绝启动（fail-closed）")
@@ -3602,6 +3625,11 @@ func main() {
 		log.Fatalf("[output-guard] %v", err)
 	}
 	srv.outputGuardMode = *outputGuardMode
+	srv.publicFacing = *publicFacing
+	// S1-5：公众形态下 mode 不得为 off（审核总开关不可关闭）。
+	if srv.publicFacing && srv.outputGuardMode == outputGuardOff {
+		log.Fatalf("[output-guard] 公众形态（-public-facing=true）下审核总开关不可关闭；须设置 -output-guard=shadow 或 enforcing")
+	}
 	// S3-2：策略档位启动参数——校验合法值；空 = 缺省 A（不在此赋值，访问器兜底）。
 	// 策略 C 前置（首段预审门/P-FIRST-CHUNK/法务双通过）未齐备 ⇒ 拒绝启动（fail-closed，不静默按 A）。
 	if *outputGuardStrategyFlag != "" {
