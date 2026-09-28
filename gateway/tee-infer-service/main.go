@@ -159,6 +159,8 @@ type teeServer struct {
 	// 关闭请求返回 400 + 审计；false 时与现网一致（off/shadow/enforcing 均可）。
 	// 私有化形态默认 false；SaaS/公众形态须显式置 true。
 	publicFacing bool
+	// S4-4：租户处置状态检查器（SaaS 模式下由 tenantDispositionStore 实现，OSS 下永远放行）。
+	disposition dispositionChecker
 	// OG-8：运行时 mode 覆盖（高敏变更复核通过后写入；空 = 沿用 outputGuardMode 启动参数）。
 	// 只允许在 off/shadow 之间切换，enforcing 在 M4 前不开放（安全边界）。
 	outputGuardModeOverride atomic.Value
@@ -1007,6 +1009,15 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		s.denyAndAudit(tenant, req.RequestID, "replay", payloadSHA)
 		http.Error(w, replayErr.Error(), http.StatusBadRequest)
 		return
+	}
+
+	// S4-4：租户处置状态检查（SaaS 模式；OSS 下永远放行）。
+	if s.disposition != nil {
+		if allowed, reason := s.disposition.Check(tenant); !allowed {
+			s.denyAndAudit(tenant, req.RequestID, "tenant_disposition", payloadSHA)
+			http.Error(w, reason, http.StatusForbidden)
+			return
+		}
 	}
 
 	// 双路线路由校验
@@ -3580,6 +3591,7 @@ func main() {
 		audit:             audit,
 		guard:             newGuardrail(),
 		metrics:           newMetrics(),
+		disposition:       nilDisposition{}, // S4-4：默认永远放行；SaaS 构建由 initTenantDisposition 替换
 	}
 	// 审计/日志留存期**声明**（校验 fail-closed）。
 	// 声明式：仅暴露声明值（启动日志 / GET /config / otpmask_audit_retention_days）；
@@ -3829,6 +3841,8 @@ func main() {
 	mux.HandleFunc("/config/policy/rollback", srv.handlePolicyRollback) // POST 回滚（缺省=上一 active，可指定历史版本）
 	mux.HandleFunc("/reconcile", srv.handleReconcile)              // S5 判据 6：对账快照（只读）
 	mux.HandleFunc("/reconcile/run", srv.handleReconcileRun)       // S5 判据 6：即时对账（管理令牌）
+	// S4-4：租户处置状态机（SaaS 构建下注册 /config/tenant-disposition 端点；OSS 构建空操作）
+	initTenantDisposition(srv, mux)
 	mux.HandleFunc("/healthz", srv.handleHealthz)                  // 探针与证明状态联动
 	mux.HandleFunc("/healthz/live", srv.handleHealthz)             // liveness
 
