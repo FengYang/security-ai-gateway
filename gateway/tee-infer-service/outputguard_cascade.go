@@ -69,6 +69,33 @@ const (
 	degradeReasonBadConf   = "l2_bad_conf"    // 命中但置信度缺失（P-CONF-BAND：格式错误＝P-DEGRADE）
 )
 
+// firstChunkCanaryInterval canary 探测节奏（P0-3）：首段安全后每 5 句 1 句强制走完整 L2。
+const firstChunkCanaryInterval = 5
+
+// canaryBottomCategories 触发"回挂＋块内补判"的 12 项硬底线类目（2026-09-28 用户拍板）：
+// A1-01..08（8 项政治安全/暴力淫秽/虚假信息/兜底）＋A3-03（商业秘密）
+// ＋A4-01（身心健康）＋A4-05（隐私权）＋A4-06（个人信息）。
+// A2 歧视类不纳入（2026-09-27 已裁定默认降 flag）。
+var canaryBottomCategories = map[string]bool{
+	"A1-01": true,
+	"A1-02": true,
+	"A1-03": true,
+	"A1-04": true,
+	"A1-05": true,
+	"A1-06": true,
+	"A1-07": true,
+	"A1-08": true,
+	"A3-03": true,
+	"A4-01": true,
+	"A4-05": true,
+	"A4-06": true,
+}
+
+// isCanaryBottomCategory 判定类目是否属 12 项硬底线。
+func isCanaryBottomCategory(cat string) bool {
+	return canaryBottomCategories[cat]
+}
+
 // cascadeSlot 单句槽位（创建后永不删除——下标即 seq，供 delta 归属引用）。
 type cascadeSlot struct {
 	seq                int
@@ -82,6 +109,8 @@ type cascadeSlot struct {
 	l2InFlight         bool // 该槽位有在飞 L2（含画像调用）：决定 inFlight 是否回补
 	profiling          bool // 画像调用（L1 命中后仍在飞的 L2）：结果只留痕，不迁移状态
 	earlyPass          bool // 两段式轻段已提前放行（D8 T2/S2）：完整段到达只记指标，不迁移状态、不回改已下发内容
+	canaryProbe        bool // P0-3：本槽位是 canary 探测句（走完整 L2；终态触发块处置）
+	probeDue           bool // P0-3：挂起成员中按节奏应升为下一个 canary 的槽位
 }
 
 // cascade 单请求级联控制器（`[]slot` + `sync.Cond`，§5.8 #9）。
@@ -92,7 +121,7 @@ type cascade struct {
 	params outputGuardCascadeParams
 	mode   string
 
-	maskEnabled bool          // OG-18：PII mask 改写开关
+	maskEnabled bool             // OG-18：PII mask 改写开关
 	maskRes     []*regexp.Regexp // OG-18：PII 正则切片（与 pii_patterns.json 顺序一致；为空则不改写）
 
 	l1   OutputClassifier
@@ -114,6 +143,16 @@ type cascade struct {
 	firstChunkSkipL2Enabled bool
 	firstChunkDone          bool
 	firstChunkSkipL2        bool
+
+	// P0-3 canary 块（修复"首段门只看 L1、后续 L2 检出全漏"）：
+	// canaryAttached 一旦置位（canary 命中 12 项底线或无结论 fail-closed），
+	// 本请求后续单元永久走完整 L2 级联（单向闩锁）；
+	// probeOutstanding 时，块内成员保持 pending（probeHeld），等 canary 终态；
+	// nextProbeSeq 为下一个 canary 探测句的 seq（每 firstChunkCanaryInterval 句一次）。
+	canaryAttached   bool
+	probeOutstanding bool
+	nextProbeSeq     int
+	probeHeld        []*cascadeSlot
 
 	slots    []*cascadeSlot
 	inFlight int // 在飞 L2 句数（＝ buffer_queue_depth gauge 口径；含画像调用）
@@ -208,6 +247,13 @@ func (c *cascade) finish(units []string, emit outputEmitFunc) error {
 	}
 	c.noMore = true
 	c.releaseUnclaimedLocked()
+	// P0-3：canary 门激活且无在飞探测时，挂起成员等不到探测句到来（内容已结束）——
+	// 强制首个挂起成员升级为 canary（取真实 L2 结论，优先于 fail-closed 丢句）。
+	if c.firstChunkSkipL2 && !c.canaryAttached && !c.probeOutstanding && len(c.probeHeld) > 0 {
+		first := c.probeHeld[0]
+		c.probeHeld = c.probeHeld[1:]
+		c.startHeldProbeLocked(first)
+	}
 	// 放行未认领 delta 后必须自己推进一次游标：此时可能已无在飞 L2
 	// （无人会再调 emitReadyLocked），否则游标永久卡住、Finish 永不返回。
 	if err := c.emitReadyLocked(); err != nil {
@@ -354,6 +400,12 @@ func (c *cascade) submitUnitLocked(unit string) {
 			c.m.incOGMasked(cat, c.field)
 		}
 		c.finishLocked(s, slotDone) // L1 命中即决：不阻塞下发（§3.6.3）
+		// P0-3：canary 节奏位被 L1 决定性命中（已有实证动作）即替代本次探测——
+		// 推进节奏并放行等待探测句到来的块内成员。
+		if c.firstChunkSkipL2 && !c.canaryAttached && !c.probeOutstanding && s.seq == c.nextProbeSeq {
+			c.nextProbeSeq += firstChunkCanaryInterval
+			c.flushHeldSafeLocked(c.takeHeldLocked())
+		}
 		// 方案 2 画像：L2 仍异步跑（不参与阻塞）；超并发阀时跳过（画像非安全判定）
 		if c.l2 != nil && c.inFlight < c.params.Concurrency {
 			c.startL2Locked(s, true)
@@ -364,11 +416,23 @@ func (c *cascade) submitUnitLocked(unit string) {
 		c.finishLocked(s, slotDone) // 纯 L1 形态：无级联，直接终态
 		return
 	}
-	// P-FIRST-CHUNK 首段门：首段安全后后续单元跳过 L2（只跑 L1）。
+	// P-FIRST-CHUNK 首段门（P0-3 修复）：首段安全后不再无条件跳过 L2——
+	// canary 节奏位走完整 L2 探测；块内成员保持 pending 等 canary 终态（零漏出）。
+	// canaryAttached（命中底线/无结论）后本请求恢复全级联，本门整体旁路。
 	// 首段（seq=0）不受此影响，始终走完整级联。
-	if c.firstChunkSkipL2Enabled && c.firstChunkDone && c.firstChunkSkipL2 {
-		c.finishLocked(s, slotDone)
-		return
+	if c.firstChunkSkipL2Enabled && c.firstChunkDone && c.firstChunkSkipL2 && !c.canaryAttached {
+		if !c.probeOutstanding && s.seq == c.nextProbeSeq {
+			// 本单元即 canary 探测句：落标记后走下方常规 L2 提交路径
+			c.probeOutstanding = true
+			s.canaryProbe = true
+			c.nextProbeSeq = s.seq + firstChunkCanaryInterval
+		} else {
+			// 块内成员（或探测未到时提前到达的成员）：pending 挂起；
+			// 若自身 seq 已到下一轮节奏位，标记由下次安全放行时升级为新 canary。
+			s.probeDue = (s.seq == c.nextProbeSeq)
+			c.probeHeld = append(c.probeHeld, s)
+			return
+		}
 	}
 	// ---- 级联：提交前检查并发（容量阀，不排队）----
 	if c.inFlight >= c.params.Concurrency {
@@ -421,6 +485,9 @@ func (c *cascade) startL2Locked(s *cascadeSlot, profiling bool) {
 	if c.m != nil {
 		c.m.addOGBufferQueueDepth(1) // OG-13 缺陷2：进程级聚合 +1（不再以本 cascade 本地值覆写全局）
 		c.m.incOGL2CallStarted()
+		if s.canaryProbe {
+			c.m.incOGCanaryProbe() // P0-3：canary 探测发起（仅一次）
+		}
 	}
 	if !profiling {
 		s.timer = time.AfterFunc(c.params.Timeout, func() { c.onSlotTimeout(s.seq) })
@@ -595,17 +662,114 @@ func (c *cascade) finishLocked(s *cascadeSlot, state int) {
 	if s.timer != nil {
 		s.timer.Stop()
 	}
-	// P-FIRST-CHUNK：首段（seq=0）终态后决定后续是否跳过 L2。
-	// 首段 L1 未命中（内容大概率安全）→ 后续跳 L2 降延迟；
-	// 首段 L1 命中（有风险）→ 后续保持完整级联（与策略 B 一致）。
+	// P-FIRST-CHUNK：首段（seq=0）终态后决定后续是否进入 canary 门。
+	// P0-3 修复：安全条件不再只看 L1——须 L1 未命中 且 L2 有结论（slotDone）
+	// 且 L2 未命中 12 项底线；任一不满足则后续保持完整级联（与策略 B 一致）。
 	if c.firstChunkSkipL2Enabled && s.seq == 0 {
 		c.firstChunkDone = true
-		c.firstChunkSkipL2 = (len(s.l1Cats) == 0)
-		if c.firstChunkSkipL2 && c.m != nil {
-			c.m.incOGFirstChunkSkipL2()
+		c.firstChunkSkipL2 = len(s.l1Cats) == 0 && s.state == slotDone && !isCanaryBottomCategory(s.category)
+		if c.firstChunkSkipL2 {
+			c.nextProbeSeq = firstChunkCanaryInterval // 首个 canary：seq 5
+			if c.m != nil {
+				c.m.incOGFirstChunkSkipL2()
+			}
 		}
 	}
+	// P0-3：canary 探测句终态 → 块处置（安全放行 / 底线回挂 / 无结论 fail-closed）。
+	if s.canaryProbe {
+		c.resolveProbeLocked(s)
+	}
 	c.cond.Broadcast()
+}
+
+// resolveProbeLocked canary 探测句终态后的块处置（P0-3）：
+//   - slotTimeout（超时/过载/不可用/未映射/坏置信，无结论）→ fail-closed：闩锁＋块内补 L2；
+//   - 命中 12 项底线 → 闩锁回挂＋块内补 L2（补判后按动作表处置）；
+//   - miss / 非底线命中 → 块内成员放行（probeDue 成员升级为新 canary）。
+func (c *cascade) resolveProbeLocked(probe *cascadeSlot) {
+	c.probeOutstanding = false
+	held := c.takeHeldLocked()
+
+	switch {
+	case probe.state == slotTimeout:
+		c.latchCanaryLocked()
+		c.reattachHeldLocked(held)
+	case isCanaryBottomCategory(probe.category):
+		c.latchCanaryLocked()
+		if c.m != nil {
+			c.m.incOGCanaryReattach()
+		}
+		c.reattachHeldLocked(held)
+	default:
+		c.flushHeldSafeLocked(held)
+	}
+}
+
+// takeHeldLocked 取出并清空挂起成员列表。
+func (c *cascade) takeHeldLocked() []*cascadeSlot {
+	held := c.probeHeld
+	c.probeHeld = nil
+	return held
+}
+
+// flushHeldSafeLocked canary 确认安全后放行块内挂起成员；
+// 挂起成员中 probeDue 的槽位升级为新 canary（其后续成员继续挂起，in-order 零漏出）。
+func (c *cascade) flushHeldSafeLocked(held []*cascadeSlot) {
+	for _, m := range held {
+		if m.state != slotPending {
+			continue
+		}
+		if m.probeDue && !c.probeOutstanding {
+			c.startHeldProbeLocked(m)
+			continue
+		}
+		if c.probeOutstanding {
+			c.probeHeld = append(c.probeHeld, m)
+			continue
+		}
+		c.finishLocked(m, slotDone)
+	}
+}
+
+// startHeldProbeLocked 把挂起成员升级为新 canary 探测句（走完整 L2）。
+func (c *cascade) startHeldProbeLocked(s *cascadeSlot) {
+	c.probeOutstanding = true
+	s.canaryProbe = true
+	s.probeDue = false
+	c.nextProbeSeq = s.seq + firstChunkCanaryInterval
+	// 并发容量阀（与常规提交一致；超阀＝无结论，fail-closed）
+	if c.inFlight >= c.params.Concurrency {
+		if c.m != nil {
+			c.m.incOGBufferFull()
+		}
+		c.finishLocked(s, slotTimeout)
+		c.failClosedLocked(degradeReasonOverload)
+		return
+	}
+	c.startL2Locked(s, false)
+}
+
+// reattachHeldLocked 回挂：块内挂起成员全部补走完整 L2（超并发阀按 P-DEGRADE fail-closed）。
+func (c *cascade) reattachHeldLocked(held []*cascadeSlot) {
+	for _, s := range held {
+		if s.state != slotPending {
+			continue
+		}
+		if c.inFlight >= c.params.Concurrency {
+			if c.m != nil {
+				c.m.incOGBufferFull()
+			}
+			c.finishLocked(s, slotTimeout)
+			c.failClosedLocked(degradeReasonOverload)
+			continue
+		}
+		c.startL2Locked(s, false)
+	}
+}
+
+// latchCanaryLocked canary 闩锁：本请求后续单元恢复完整 L2 级联（单向不回退）。
+func (c *cascade) latchCanaryLocked() {
+	c.canaryAttached = true
 }
 
 // settleInFlightLocked 在该槽位的 L2 调用返回时收敛在飞计数（幂等；Close 已清零则不再减）。

@@ -65,15 +65,17 @@ type otpmaskMetrics struct {
 	shadowReports map[string]int64
 	// GA-输出侧内容审查（OG-3 M1 骨架；§4.10 唯一目录）
 	// X-2：核心 counter 增加 field 标签（低基数：text / tool_input），用于 T6 三字段覆盖归因
-	ogRequests        map[string]int64 // mode|field（审查过的请求数）
-	ogL1Hit           map[string]int64 // category|field（L1 规则层命中）
-	ogWouldReject     map[string]int64 // category|field（shadow 命中=本该拦截）
-	ogForcedSplit     map[string]int64 // reason（缓冲强切：max_unit|first_unit，OG-4）
-	ogUnmapped        map[string]int64 // backend|category_raw（后端类目未映射，M2）
-	ogBlocked         map[string]int64 // category|mode|field（命中且动作=block，enforcing）
-	ogMasked          map[string]int64 // category|field（命中且动作=mask/rewrite）
-	ogFirstChunkSkipL2 int64           // S3-2 策略 C：首段安全后跳过 L2 的请求数（gauge）
-	ogPolicyRollback  map[string]int64 // reason（策略热加载回退事件）
+	ogRequests         map[string]int64 // mode|field（审查过的请求数）
+	ogL1Hit            map[string]int64 // category|field（L1 规则层命中）
+	ogWouldReject      map[string]int64 // category|field（shadow 命中=本该拦截）
+	ogForcedSplit      map[string]int64 // reason（缓冲强切：max_unit|first_unit，OG-4）
+	ogUnmapped         map[string]int64 // backend|category_raw（后端类目未映射，M2）
+	ogBlocked          map[string]int64 // category|mode|field（命中且动作=block，enforcing）
+	ogMasked           map[string]int64 // category|field（命中且动作=mask/rewrite）
+	ogFirstChunkSkipL2 int64            // S3-2 策略 C：首段安全后跳过 L2 的请求数（gauge）
+	ogCanaryProbe      int64            // P0-3 策略 C：canary 探测句走完整 L2 的次数
+	ogCanaryReattach   int64            // P0-3 策略 C：canary 命中底线触发回挂的次数
+	ogPolicyRollback   map[string]int64 // reason（策略热加载回退事件）
 	// S1-4（G21）：策略版本库显式引用/回滚事件（action|result|reason）。
 	ogPolicyActivate  map[string]int64
 	ogDegraded        map[string]int64 // backend|reason（后端降级事件，M2）
@@ -102,38 +104,38 @@ type otpmaskMetrics struct {
 
 func newMetrics() *otpmaskMetrics {
 	return &otpmaskMetrics{
-		requests:          make(map[string]int64),
-		tokensIn:          make(map[string]int64),
-		tokensOut:         make(map[string]int64),
-		denies:            make(map[string]int64),
-		keyIssues:         make(map[string]int64),
-		reconcile:         make(map[string]int64),
-		tokenTraffic:      make(map[string]int64),
-		recomputeOps:      make(map[string]int64),
-		recomputeDur:      make(map[string]int64),
-		guardClassifier:   make(map[string]int64),
-		guardFailClosed:   make(map[string]int64),
-		reconcileDiff:     make(map[string]int64),
-		billingBlockCount: make(map[string]int64),
-		billingSuppressed: make(map[string]int64),
-		shadowWouldReject: make(map[string]int64),
-		quotaDenies:       make(map[string]int64),
-		shadowReports:     make(map[string]int64),
-		ogRequests:        make(map[string]int64),
-		ogL1Hit:           make(map[string]int64),
-		ogWouldReject:     make(map[string]int64),
-		ogForcedSplit:     make(map[string]int64),
-		ogUnmapped:        make(map[string]int64),
-		ogBlocked:         make(map[string]int64),
-		ogMasked:          make(map[string]int64),
-		ogPolicyRollback:  make(map[string]int64),
-		ogPolicyActivate:  make(map[string]int64),
-		ogDegraded:        make(map[string]int64),
-		ogLatencyMs:       newHistogram(latencyMsBuckets),
-		ogFirstFrameDelay: newHistogram(firstFrameDelayBuckets),
-		ogL2Call:          make(map[string]int64),
-		ogL2OnlyHit:       make(map[string]int64),
-		ogL2DurationSec:   newHistogram(l2DurationSecBuckets),
+		requests:           make(map[string]int64),
+		tokensIn:           make(map[string]int64),
+		tokensOut:          make(map[string]int64),
+		denies:             make(map[string]int64),
+		keyIssues:          make(map[string]int64),
+		reconcile:          make(map[string]int64),
+		tokenTraffic:       make(map[string]int64),
+		recomputeOps:       make(map[string]int64),
+		recomputeDur:       make(map[string]int64),
+		guardClassifier:    make(map[string]int64),
+		guardFailClosed:    make(map[string]int64),
+		reconcileDiff:      make(map[string]int64),
+		billingBlockCount:  make(map[string]int64),
+		billingSuppressed:  make(map[string]int64),
+		shadowWouldReject:  make(map[string]int64),
+		quotaDenies:        make(map[string]int64),
+		shadowReports:      make(map[string]int64),
+		ogRequests:         make(map[string]int64),
+		ogL1Hit:            make(map[string]int64),
+		ogWouldReject:      make(map[string]int64),
+		ogForcedSplit:      make(map[string]int64),
+		ogUnmapped:         make(map[string]int64),
+		ogBlocked:          make(map[string]int64),
+		ogMasked:           make(map[string]int64),
+		ogPolicyRollback:   make(map[string]int64),
+		ogPolicyActivate:   make(map[string]int64),
+		ogDegraded:         make(map[string]int64),
+		ogLatencyMs:        newHistogram(latencyMsBuckets),
+		ogFirstFrameDelay:  newHistogram(firstFrameDelayBuckets),
+		ogL2Call:           make(map[string]int64),
+		ogL2OnlyHit:        make(map[string]int64),
+		ogL2DurationSec:    newHistogram(l2DurationSecBuckets),
 		contentLabelFrames: make(map[string]int64),
 	}
 }
@@ -452,6 +454,13 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	if m.ogFirstChunkSkipL2 > 0 {
 		fmt.Fprintf(w, "# HELP otpmask_output_guard_c_first_chunk_skip_l2_total 策略C首段预审门触发次数（首段安全后跳过L2的请求数）\n# TYPE otpmask_output_guard_c_first_chunk_skip_l2_total counter\n")
 		fmt.Fprintf(w, "otpmask_output_guard_c_first_chunk_skip_l2_total %d\n", m.ogFirstChunkSkipL2)
+		// P0-3：canary 探测数（有首段门触发才可能产生探测）
+		fmt.Fprintf(w, "# HELP otpmask_output_guard_canary_probe_total 策略C首段安全后canary探测句走完整L2的次数\n# TYPE otpmask_output_guard_canary_probe_total counter\n")
+		fmt.Fprintf(w, "otpmask_output_guard_canary_probe_total %d\n", m.ogCanaryProbe)
+		if m.ogCanaryReattach > 0 {
+			fmt.Fprintf(w, "# HELP otpmask_output_guard_canary_reattach_total 策略C canary探测命中12项底线触发回挂（块内补判+恢复全级联）的次数\n# TYPE otpmask_output_guard_canary_reattach_total counter\n")
+			fmt.Fprintf(w, "otpmask_output_guard_canary_reattach_total %d\n", m.ogCanaryReattach)
+		}
 	}
 	// ---- B1 强标标识（GB 45438-2025）----
 	// enabled gauge 常驻（required，门禁 #9）；请求/标识帧计数 conditional（零样本不输出属正常）。
@@ -601,6 +610,20 @@ func (m *otpmaskMetrics) incOGMasked(category, field string) {
 func (m *otpmaskMetrics) incOGFirstChunkSkipL2() {
 	m.mu.Lock()
 	m.ogFirstChunkSkipL2++
+	m.mu.Unlock()
+}
+
+// incOGCanaryProbe 记录一次 canary 探测句走完整 L2。
+func (m *otpmaskMetrics) incOGCanaryProbe() {
+	m.mu.Lock()
+	m.ogCanaryProbe++
+	m.mu.Unlock()
+}
+
+// incOGCanaryReattach 记录一次 canary 命中底线触发回挂。
+func (m *otpmaskMetrics) incOGCanaryReattach() {
+	m.mu.Lock()
+	m.ogCanaryReattach++
 	m.mu.Unlock()
 }
 
