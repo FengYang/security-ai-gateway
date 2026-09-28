@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -181,6 +182,12 @@ func readPrometheusRule(t *testing.T) []byte {
 	path := filepath.Join("..", "..", "docs", "output-guard", "GA-输出侧-告警规则-PrometheusRule.yaml")
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		// 该 yaml 属 .gitignore 白名单之外的本地资产（不入库）：在无此文件的环境
+		// （CI／他人 clone／部署单位）应跳过而非失败——避免把"环境缺件"误报为代码缺陷；
+		// 本地与交付环境仍执行完整强校验。
+		if errors.Is(err, os.ErrNotExist) {
+			t.Skipf("跳过：未找到本地 PrometheusRule 资产 %s（该文件不入库）", path)
+		}
 		t.Fatalf("读取 PrometheusRule 失败: %v", err)
 	}
 	return raw
