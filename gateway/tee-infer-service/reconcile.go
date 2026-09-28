@@ -173,6 +173,14 @@ func (r *reconciler) reconcileOnce(now time.Time) bool {
 		ForeignInstances:  foreign,
 		LastRunAt:         now.UnixNano(),
 	}
+	// S2-6：输出侧审查重启检测 gauge 置位（1=检测到启动前事件=发生过重启）
+	if r.metrics != nil {
+		if beforeEvents > 0 {
+			r.metrics.setOGRestartDetected(1)
+		} else {
+			r.metrics.setOGRestartDetected(0)
+		}
+	}
 	auditAhead, usageAhead := false, false
 	for _, t := range names {
 		var aIn, aOut, aReq int64

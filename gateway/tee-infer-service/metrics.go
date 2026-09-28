@@ -89,6 +89,8 @@ type otpmaskMetrics struct {
 	ogSentences      int64 // 判定句总数（l2_cascade_ratio / failclosed_sentences_ratio 分母）
 	ogFailclosedSent int64 // 按 P-DEGRADE（fail-closed）处置的句数
 	ogL2CallsStarted int64 // 已发起的 L2 调用数（含 L1 命中后的画像调用）
+	// S2-6：输出侧审查重启检测（gauge 0/1；对账器检测到审计链早于启动时刻事件时置 1）
+	ogRestartDetected int64
 	// B1 强标标识（GB 45438-2025）：enabled gauge（required 常驻）+ 请求/标识帧计数（conditional）。
 	contentLabelEnabled  int64            // gauge 0/1：当前是否启用强标标识
 	contentLabelRequests int64            // counter：启用标识的请求数（conditional）
@@ -143,6 +145,14 @@ func (m *otpmaskMetrics) setOutputGuardMode(mode, version string) {
 	if _, ok := m.ogRequests[mode]; !ok {
 		m.ogRequests[mode] = 0
 	}
+	m.mu.Unlock()
+}
+
+// setOGRestartDetected 输出侧审查重启检测 gauge 置位（S2-6）。
+// 对账器检测到审计链含早于本进程启动时刻的事件时调用，置 1；进程重启后天然归零。
+func (m *otpmaskMetrics) setOGRestartDetected(v int64) {
+	m.mu.Lock()
+	m.ogRestartDetected = v
 	m.mu.Unlock()
 }
 
@@ -422,6 +432,9 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 		fmt.Fprintf(w, "# HELP otpmask_output_guard_policy_version 当前生效的输出侧内容审查策略版本号\n# TYPE otpmask_output_guard_policy_version gauge\n")
 		fmt.Fprintf(w, "otpmask_output_guard_policy_version{version=%q} 1\n", m.ogPolicyVersion)
 	}
+	// S2-6：重启检测 gauge（对账器检测到审计链早于启动时刻事件后置 1；进程重启天然归零）
+	fmt.Fprintf(w, "# HELP otpmask_output_guard_restart_detected 输出侧审查进程是否检测到重启（审计链含启动前事件，1=是）\n# TYPE otpmask_output_guard_restart_detected gauge\n")
+	fmt.Fprintf(w, "otpmask_output_guard_restart_detected %d\n", m.ogRestartDetected)
 	// ---- B1 强标标识（GB 45438-2025）----
 	// enabled gauge 常驻（required，门禁 #9）；请求/标识帧计数 conditional（零样本不输出属正常）。
 	fmt.Fprintf(w, "# HELP otpmask_content_label_enabled 强标标识（GB 45438-2025）是否启用\n# TYPE otpmask_content_label_enabled gauge\n")
