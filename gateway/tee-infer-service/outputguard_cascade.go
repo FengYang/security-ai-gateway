@@ -104,6 +104,7 @@ type cascade struct {
 	tenant        string
 	requestID     string
 	policyVersion string
+	field         string // X-2：审查内容来源字段（text / tool_input）
 
 	slots    []*cascadeSlot
 	inFlight int // 在飞 L2 句数（＝ buffer_queue_depth gauge 口径；含画像调用）
@@ -138,7 +139,7 @@ type cascade struct {
 
 // newCascade 构造请求级级联控制器。params 须为 resolve 后的取值。
 func newCascade(params outputGuardCascadeParams, mode string, maskEnabled bool, maskRes []*regexp.Regexp, l1, l2 OutputClassifier, m *otpmaskMetrics,
-	a *auditChain, tenant, requestID, policyVersion string) *cascade {
+	a *auditChain, tenant, requestID, policyVersion, field string) *cascade {
 	c := &cascade{
 		params:        params,
 		mode:          mode,
@@ -151,6 +152,7 @@ func newCascade(params outputGuardCascadeParams, mode string, maskEnabled bool, 
 		tenant:        tenant,
 		requestID:     requestID,
 		policyVersion: policyVersion,
+		field:         field,
 		seenCategory:  make(map[string]bool, 4),
 	}
 	c.cond = sync.NewCond(&c.mu)
@@ -339,7 +341,7 @@ func (c *cascade) submitUnitLocked(unit string) {
 		s.category = cat
 		// OG-18：mask 动作命中记指标（改写在 emit 前对 delta 做，见 emitReadyLocked）。
 		if s.action == catActionMask && c.m != nil {
-			c.m.incOGMasked(cat)
+			c.m.incOGMasked(cat, c.field)
 		}
 		c.finishLocked(s, slotDone) // L1 命中即决：不阻塞下发（§3.6.3）
 		// 方案 2 画像：L2 仍异步跑（不参与阻塞）；超并发阀时跳过（画像非安全判定）
@@ -387,7 +389,7 @@ func (c *cascade) classifyL1Locked(s *cascadeSlot) string {
 	}
 	s.l1Cats = append(s.l1Cats, cat)
 	if c.m != nil {
-		c.m.incOGL1Hit(cat)
+		c.m.incOGL1Hit(cat, c.field)
 	}
 	c.recordHitLocked(cat)
 	return cat
@@ -741,7 +743,7 @@ func (c *cascade) terminateLocked(cat string, hit bool) {
 	}
 	if hit {
 		if c.m != nil {
-			c.m.incOGBlocked(cat, c.mode)
+			c.m.incOGBlocked(cat, c.mode, c.field)
 		}
 	}
 	c.cond.Broadcast() // 唤醒 finish 等待者（finish 循环条件含 !blocked）
@@ -831,7 +833,7 @@ func (c *cascade) recordHitLocked(cat string) {
 	// I3（评审缺陷修复）：would_reject 口径回归 shadow-only，enforcing 下不再重复落审计/指标。
 	if c.mode == outputGuardShadow {
 		if c.m != nil {
-			c.m.incOGWouldReject(cat)
+			c.m.incOGWouldReject(cat, c.field)
 		}
 		if c.a != nil {
 			c.a.append(AuditEvent{

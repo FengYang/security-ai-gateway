@@ -82,7 +82,7 @@ func TestOutputGuardL2Hit(t *testing.T) {
 	checks := []string{
 		`otpmask_output_guard_l2_call_total{category="A2-03",result="hit"} 1`,
 		`otpmask_output_guard_l2_only_hit_total{category="A2-03"} 1`,
-		`otpmask_output_guard_would_reject_total{category="A2-03"} 1`,
+		`otpmask_output_guard_would_reject_total{category="A2-03",field="text"} 1`,
 	}
 	for _, want := range checks {
 		if !strings.Contains(body, want) {
@@ -188,7 +188,7 @@ func TestOutputGuardL1AndL2SameCategory(t *testing.T) {
 	m.render(&buf, a.len())
 	body := buf.String()
 	// L1 命中
-	if !strings.Contains(body, `otpmask_output_guard_l1_hit_total{category="A1-07"} 1`) {
+	if !strings.Contains(body, `otpmask_output_guard_l1_hit_total{category="A1-07",field="text"} 1`) {
 		t.Fatalf("l1_hit 缺失\n---\n%s", body)
 	}
 	// L2 也被调用（方案 2：L1 命中不短路 L2，完整画像）；同类目不记 l2_only_hit
@@ -219,11 +219,11 @@ func TestOutputGuardL1HitA_L2HitB(t *testing.T) {
 	m.render(&buf, a.len())
 	body := buf.String()
 	for _, want := range []string{
-		`otpmask_output_guard_l1_hit_total{category="A1-07"} 1`,
-		`otpmask_output_guard_would_reject_total{category="A1-07"} 1`,
+		`otpmask_output_guard_l1_hit_total{category="A1-07",field="text"} 1`,
+		`otpmask_output_guard_would_reject_total{category="A1-07",field="text"} 1`,
 		`otpmask_output_guard_l2_call_total{category="A4-02",result="hit"} 1`,
 		`otpmask_output_guard_l2_only_hit_total{category="A4-02"} 1`,
-		`otpmask_output_guard_would_reject_total{category="A4-02"} 1`,
+		`otpmask_output_guard_would_reject_total{category="A4-02",field="text"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("指标缺失 %q\n---\n%s", want, body)

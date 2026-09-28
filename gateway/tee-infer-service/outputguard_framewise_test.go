@@ -461,7 +461,7 @@ func (e framewiseStubEngineThenError) Generate(_ model.GenerateRequest, onDelta 
 	if e.waitBlocked != nil {
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
-			if strings.Contains(renderMetrics(e.waitBlocked, 0), `otpmask_output_guard_blocked_total{category="A1-06",mode="enforcing"} 1`) {
+			if strings.Contains(renderMetrics(e.waitBlocked, 0), `otpmask_output_guard_blocked_total{category="A1-06",mode="enforcing",field="text"} 1`) {
 				break
 			}
 			time.Sleep(time.Millisecond)

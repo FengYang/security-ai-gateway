@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -63,13 +64,14 @@ type otpmaskMetrics struct {
 	// A 项：数据面明文影子窗口级上报计数（result=accepted|deduped|rejected）
 	shadowReports map[string]int64
 	// GA-输出侧内容审查（OG-3 M1 骨架；§4.10 唯一目录）
-	ogRequests        map[string]int64 // mode（审查过的请求数）
-	ogL1Hit           map[string]int64 // category（L1 规则层命中）
-	ogWouldReject     map[string]int64 // category（shadow 命中=本该拦截）
+	// X-2：核心 counter 增加 field 标签（低基数：text / tool_input），用于 T6 三字段覆盖归因
+	ogRequests        map[string]int64 // mode|field（审查过的请求数）
+	ogL1Hit           map[string]int64 // category|field（L1 规则层命中）
+	ogWouldReject     map[string]int64 // category|field（shadow 命中=本该拦截）
 	ogForcedSplit     map[string]int64 // reason（缓冲强切：max_unit|first_unit，OG-4）
 	ogUnmapped        map[string]int64 // backend|category_raw（后端类目未映射，M2）
-	ogBlocked         map[string]int64 // category|mode（命中且动作=block，enforcing）
-	ogMasked          map[string]int64 // category（命中且动作=mask/rewrite）
+	ogBlocked         map[string]int64 // category|mode|field（命中且动作=block，enforcing）
+	ogMasked          map[string]int64 // category|field（命中且动作=mask/rewrite）
 	ogPolicyRollback  map[string]int64 // reason（策略热加载回退事件）
 	// S1-4（G21）：策略版本库显式引用/回滚事件（action|result|reason）。
 	ogPolicyActivate  map[string]int64
@@ -142,8 +144,10 @@ func (m *otpmaskMetrics) setOutputGuardMode(mode, version string) {
 	m.mu.Lock()
 	m.ogMode = mode
 	m.ogPolicyVersion = version
-	if _, ok := m.ogRequests[mode]; !ok {
-		m.ogRequests[mode] = 0
+	// 零值预置：保证 field=text 默认组合有样本（required 指标可观测性）
+	key := mode + "|text"
+	if _, ok := m.ogRequests[key]; !ok {
+		m.ogRequests[key] = 0
 	}
 	m.mu.Unlock()
 }
@@ -156,10 +160,11 @@ func (m *otpmaskMetrics) setOGRestartDetected(v int64) {
 	m.mu.Unlock()
 }
 
-// incOGRequest 记录一次被输出侧审查的请求（按模式）。
-func (m *otpmaskMetrics) incOGRequest(mode string) {
+// incOGRequest 记录一次被输出侧审查的请求（按模式与字段）。
+// X-2：field 标签（text / tool_input）用于 T6 三字段覆盖归因。
+func (m *otpmaskMetrics) incOGRequest(mode, field string) {
 	m.mu.Lock()
-	m.ogRequests[mode]++
+	m.ogRequests[mode+"|"+field]++
 	m.mu.Unlock()
 }
 
@@ -188,17 +193,19 @@ func (m *otpmaskMetrics) incContentLabelFrame(position string) {
 	m.mu.Unlock()
 }
 
-// incOGL1Hit 记录一次 L1 规则层命中（分类目）。
-func (m *otpmaskMetrics) incOGL1Hit(category string) {
+// incOGL1Hit 记录一次 L1 规则层命中（分类目与字段）。
+// X-2：field 标签（text / tool_input）。
+func (m *otpmaskMetrics) incOGL1Hit(category, field string) {
 	m.mu.Lock()
-	m.ogL1Hit[category]++
+	m.ogL1Hit[category+"|"+field]++
 	m.mu.Unlock()
 }
 
-// incOGWouldReject 记录一次 shadow 命中（本该拦截；分类目）。
-func (m *otpmaskMetrics) incOGWouldReject(category string) {
+// incOGWouldReject 记录一次 shadow 命中（本该拦截；分类目与字段）。
+// X-2：field 标签（text / tool_input）。
+func (m *otpmaskMetrics) incOGWouldReject(category, field string) {
 	m.mu.Lock()
-	m.ogWouldReject[category]++
+	m.ogWouldReject[category+"|"+field]++
 	m.mu.Unlock()
 }
 
@@ -390,11 +397,11 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	writeCounter(w, "otpmask_recompute_ops_total", "补算调用计数（按算子）", m.recomputeOps, []string{"op"})
 	writeCounter(w, "otpmask_recompute_duration_ms_total", "补算耗时累计（按算子，毫秒）", m.recomputeDur, []string{"op"})
 	// ---- GA-输出侧内容审查（OG-3 M1 骨架；§4.10 唯一目录）----
-	writeCounter(w, "otpmask_output_guard_requests_total", "输出侧内容审查请求计数（按模式）", m.ogRequests, []string{"mode"})
-	writeCounter(w, "otpmask_output_guard_l1_hit_total", "L1 规则层命中次数（按类目）", m.ogL1Hit, []string{"category"})
-	writeCounter(w, "otpmask_output_guard_would_reject_total", "shadow 模式命中（本该拦截）计数（按类目）", m.ogWouldReject, []string{"category"})
-	writeCounter(w, "otpmask_output_guard_blocked_total", "命中且动作=block 的次数（enforcing 生效，按类目与模式）", m.ogBlocked, []string{"category", "mode"})
-	writeCounter(w, "otpmask_output_guard_masked_total", "命中且动作=mask/rewrite 的次数（按类目）", m.ogMasked, []string{"category"})
+	writeCounter(w, "otpmask_output_guard_requests_total", "输出侧内容审查请求计数（按模式与字段）", m.ogRequests, []string{"mode", "field"})
+	writeCounter(w, "otpmask_output_guard_l1_hit_total", "L1 规则层命中次数（按类目与字段）", m.ogL1Hit, []string{"category", "field"})
+	writeCounter(w, "otpmask_output_guard_would_reject_total", "shadow 模式命中（本该拦截）计数（按类目与字段）", m.ogWouldReject, []string{"category", "field"})
+	writeCounter(w, "otpmask_output_guard_blocked_total", "命中且动作=block 的次数（enforcing 生效，按类目、模式与字段）", m.ogBlocked, []string{"category", "mode", "field"})
+	writeCounter(w, "otpmask_output_guard_masked_total", "命中且动作=mask/rewrite 的次数（按类目与字段）", m.ogMasked, []string{"category", "field"})
 	writeCounter(w, "otpmask_output_guard_forced_split_total", "缓冲强制切分次数（按原因：max_unit|first_unit）", m.ogForcedSplit, []string{"reason"})
 	writeCounter(w, "otpmask_output_guard_unmapped_total", "后端返回类目未映射到内部31类的次数（按后端与原生类目）", m.ogUnmapped, []string{"backend", "category_raw"})
 	writeCounter(w, "otpmask_output_guard_degraded_total", "后端降级事件次数（按后端与原因）", m.ogDegraded, []string{"backend", "reason"})
@@ -472,14 +479,9 @@ func writeCounter(w io.Writer, name, help string, data map[string]int64, labels 
 	}
 }
 
-// splitKey "a|b" → [a b]（无分隔符 → [k]）。
+// splitKey "a|b|c" → [a b c]（按 | 分割；无分隔符 → [k]）。
 func splitKey(k string) []string {
-	for i := 0; i < len(k); i++ {
-		if k[i] == '|' {
-			return []string{k[:i], k[i+1:]}
-		}
-	}
-	return []string{k}
+	return strings.Split(k, "|")
 }
 
 // labelPairs 生成 `label1="v1",label2="v2"` 片段。
@@ -568,17 +570,19 @@ func writeHistogram(w io.Writer, name, help string, h *histogram, extraLabels st
 
 // ---- 输出侧新指标方法 ----
 
-// incOGBlocked 记录一次 block 命中（enforcing 模式；category|mode）。
-func (m *otpmaskMetrics) incOGBlocked(category, mode string) {
+// incOGBlocked 记录一次 block 命中（enforcing 模式；category|mode|field）。
+// X-2：field 标签（text / tool_input）。
+func (m *otpmaskMetrics) incOGBlocked(category, mode, field string) {
 	m.mu.Lock()
-	m.ogBlocked[category+"|"+mode]++
+	m.ogBlocked[category+"|"+mode+"|"+field]++
 	m.mu.Unlock()
 }
 
-// incOGMasked 记录一次 mask 命中（按类目）。
-func (m *otpmaskMetrics) incOGMasked(category string) {
+// incOGMasked 记录一次 mask 命中（按类目与字段）。
+// X-2：field 标签（text / tool_input）。
+func (m *otpmaskMetrics) incOGMasked(category, field string) {
 	m.mu.Lock()
-	m.ogMasked[category]++
+	m.ogMasked[category+"|"+field]++
 	m.mu.Unlock()
 }
 

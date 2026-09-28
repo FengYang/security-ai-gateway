@@ -76,18 +76,18 @@ func TestHistogramZeroSamplesNoOutput(t *testing.T) {
 // TestOGBlockedMaskedMetrics：blocked/masked 指标正确渲染（enforcing 模式会触发）。
 func TestOGBlockedMaskedMetrics(t *testing.T) {
 	m := newMetrics()
-	m.incOGBlocked("A1-06", "enforcing")
-	m.incOGBlocked("A1-07", "enforcing")
-	m.incOGMasked("A4-06")
+	m.incOGBlocked("A1-06", "enforcing", "text")
+	m.incOGBlocked("A1-07", "enforcing", "text")
+	m.incOGMasked("A4-06", "text")
 
 	var buf bytes.Buffer
 	m.render(&buf, 0)
 	body := buf.String()
 
 	for _, want := range []string{
-		`otpmask_output_guard_blocked_total{category="A1-06",mode="enforcing"} 1`,
-		`otpmask_output_guard_blocked_total{category="A1-07",mode="enforcing"} 1`,
-		`otpmask_output_guard_masked_total{category="A4-06"} 1`,
+		`otpmask_output_guard_blocked_total{category="A1-06",mode="enforcing",field="text"} 1`,
+		`otpmask_output_guard_blocked_total{category="A1-07",mode="enforcing",field="text"} 1`,
+		`otpmask_output_guard_masked_total{category="A4-06",field="text"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("缺失指标样本 %q\n---\n%s", want, body)

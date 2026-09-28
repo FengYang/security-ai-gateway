@@ -447,7 +447,7 @@ func TestOutputGuardWithLexiconRegistry(t *testing.T) {
 	var buf bytes.Buffer
 	m.render(&buf, a.len())
 	body := buf.String()
-	if !strings.Contains(body, `otpmask_output_guard_l1_hit_total{category="A4-06"} 1`) {
+	if !strings.Contains(body, `otpmask_output_guard_l1_hit_total{category="A4-06",field="text"} 1`) {
 		t.Fatalf("l1_hit 样本缺失\n---\n%s", body)
 	}
 	if strings.Contains(body, "otpmask_output_guard_unmapped_total") {

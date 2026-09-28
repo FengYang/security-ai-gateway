@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // 角色归一化：Anthropic/Gemini 角色 → OpenAI 角色。
@@ -37,6 +38,8 @@ type anthropicRequest struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"` // string 或 [{type:"text",text:"..."}]
 	} `json:"messages"`
+	// X-2 / T6：工具定义（tool spec）——输入侧 guardrail 需审查工具描述中的文本
+	Tools json.RawMessage `json:"tools,omitempty"`
 }
 
 // anthropicText 从 content（string 或 text block 数组）提取纯文本。
@@ -60,6 +63,82 @@ func anthropicText(raw json.RawMessage) (string, error) {
 		// 非文本块（image/tool_use 等）跳过；多模态由文本与工具调用另行处理
 	}
 	return out, nil
+}
+
+// AnthropicToolFields 从 Anthropic Messages 请求中提取需输入侧审查的工具相关文本字段。
+// 含 tool_spec（工具定义描述）和 tool_result（用户侧工具调用结果内容）。
+// 所有字段拼接成纯文本，供 guardrail 统一检查。
+// 返回 map[field]text：field = tool_spec | tool_result。
+func AnthropicToolFields(raw []byte) (map[string]string, error) {
+	var req anthropicRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, fmt.Errorf("protocol: Anthropic 请求解析失败: %w", err)
+	}
+	fields := make(map[string]string)
+
+	// tool_spec：从 tools 数组提取 name + description + input_schema 描述
+	if len(req.Tools) > 0 {
+		var tools []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			InputSchema struct {
+				Properties map[string]struct {
+					Description string `json:"description"`
+					Type        string `json:"type"`
+				} `json:"properties"`
+			} `json:"input_schema"`
+		}
+		if err := json.Unmarshal(req.Tools, &tools); err == nil {
+			var sb strings.Builder
+			for _, t := range tools {
+				sb.WriteString(t.Name)
+				sb.WriteString(": ")
+				sb.WriteString(t.Description)
+				sb.WriteString("\n")
+				for _, p := range t.InputSchema.Properties {
+					sb.WriteString("  - ")
+					sb.WriteString(p.Description)
+					sb.WriteString("\n")
+				}
+			}
+			fields["tool_spec"] = sb.String()
+		}
+	}
+
+	// tool_result：从 messages 的 user 消息中提取 type=tool_result 块的内容
+	for _, m := range req.Messages {
+		if m.Role != "user" {
+			continue
+		}
+		var blocks []struct {
+			Type      string          `json:"type"`
+			Content   json.RawMessage `json:"content"` // string 或 [{type:text,text:...}]
+			ToolUseID string          `json:"tool_use_id,omitempty"`
+		}
+		if err := json.Unmarshal(m.Content, &blocks); err != nil {
+			continue // 不是块数组（纯文本），跳过
+		}
+		var sb strings.Builder
+		for _, b := range blocks {
+			if b.Type != "tool_result" {
+				continue
+			}
+			// content 可能是 string 或 text block 数组
+			if s, err := anthropicText(b.Content); err == nil {
+				sb.WriteString(s)
+				sb.WriteString("\n")
+			}
+		}
+		if sb.Len() > 0 {
+			if existing, ok := fields["tool_result"]; ok {
+				fields["tool_result"] = existing + sb.String()
+			} else {
+				fields["tool_result"] = sb.String()
+			}
+		}
+	}
+
+	return fields, nil
 }
 
 // ConvertAnthropicMessages 将 Anthropic Messages API 请求体转为网关内部 text 载荷。

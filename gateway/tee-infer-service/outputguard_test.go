@@ -114,9 +114,9 @@ func TestOutputGuardShadowOnlyRecordsNotBlocks(t *testing.T) {
 	m.render(&buf, a.len())
 	body := buf.String()
 	for _, want := range []string{
-		`otpmask_output_guard_requests_total{mode="shadow"} 1`,
-		`otpmask_output_guard_l1_hit_total{category="A1-07"} 1`,
-		`otpmask_output_guard_would_reject_total{category="A1-07"} 1`,
+		`otpmask_output_guard_requests_total{mode="shadow",field="text"} 1`,
+		`otpmask_output_guard_l1_hit_total{category="A1-07",field="text"} 1`,
+		`otpmask_output_guard_would_reject_total{category="A1-07",field="text"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/metrics 缺失样本 %q\n---\n%s", want, body)
@@ -138,9 +138,9 @@ func TestOutputGuardShadowPerCategoryDedup(t *testing.T) {
 	m.render(&buf, a.len())
 	body := buf.String()
 	for _, want := range []string{
-		`otpmask_output_guard_would_reject_total{category="A1-07"} 1`,
-		`otpmask_output_guard_would_reject_total{category="A4-06"} 1`,
-		`otpmask_output_guard_l1_hit_total{category="A1-07"} 2`,
+		`otpmask_output_guard_would_reject_total{category="A1-07",field="text"} 1`,
+		`otpmask_output_guard_would_reject_total{category="A4-06",field="text"} 1`,
+		`otpmask_output_guard_l1_hit_total{category="A1-07",field="text"} 2`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/metrics 缺失样本 %q\n---\n%s", want, body)
@@ -160,7 +160,7 @@ func TestOutputGuardShadowBenignNoHit(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	m.render(&buf, a.len())
-	if !strings.Contains(buf.String(), `otpmask_output_guard_requests_total{mode="shadow"} 1`) {
+	if !strings.Contains(buf.String(), `otpmask_output_guard_requests_total{mode="shadow",field="text"} 1`) {
 		t.Fatalf("应计入审查请求数\n---\n%s", buf.String())
 	}
 	if strings.Contains(buf.String(), "otpmask_output_guard_would_reject_total") {

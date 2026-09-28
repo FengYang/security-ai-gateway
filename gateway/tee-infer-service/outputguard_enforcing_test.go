@@ -92,7 +92,7 @@ func TestEnforcingL1BlockTerminatesZeroBytes(t *testing.T) {
 	}
 	// OG-19：output_blocked 审计事件已上移到 streamTextInfer 层发射（以精确计算 filtered_tokens），
 	// cascade 层只记指标。此处用指标 + BlockInfo 验证 block 状态，审计事件在 framewise e2e 中断言。
-	if body := renderMetrics(m, 0); !strings.Contains(body, `otpmask_output_guard_blocked_total{category="A1-06",mode="enforcing"} 1`) {
+	if body := renderMetrics(m, 0); !strings.Contains(body, `otpmask_output_guard_blocked_total{category="A1-06",mode="enforcing",field="text"} 1`) {
 		t.Fatalf("blocked 指标缺失：\n%s", body)
 	}
 }
@@ -605,7 +605,7 @@ func TestEnforcingEarlyTrueHeldThenBlock(t *testing.T) {
 	if got := rec.joined(); got != "" {
 		t.Fatalf("block 首句必须零泄漏，实际 %q", got)
 	}
-	if body := renderMetrics(m, 0); !strings.Contains(body, `otpmask_output_guard_blocked_total{category="A1-06",mode="enforcing"} 1`) {
+	if body := renderMetrics(m, 0); !strings.Contains(body, `otpmask_output_guard_blocked_total{category="A1-06",mode="enforcing",field="text"} 1`) {
 		t.Fatalf("blocked 指标缺失\n---\n%s", body)
 	}
 }
