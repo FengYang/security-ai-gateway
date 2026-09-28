@@ -139,6 +139,11 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
   - 推理请求速率（按租户/结果）、Token 累计、拒绝计数（按租户/原因）、审计哈希链长度；
 - 生产补充：Alertmanager 告警（审计链断裂、denies 突增、HPA 失效、TEE 不可达）、TSDB PVC 持久化、Grafana 密码 Secret 化；
 - **截断率告警的现场接线与演练为部署单位事项（S13）**，查询/阈值/分级见《[GA-截断率监控与处置Runbook.md](output-guard/GA-截断率监控与处置Runbook.md)》。
+- **输出侧审查告警工程化（S2-6）**：
+  - 指标 `otpmask_output_guard_restart_detected`（gauge 0/1）由 tee-infer 对账器自动置位，无需额外 sidecar；
+  - 告警规则见 `docs/output-guard/GA-输出侧-告警规则-PrometheusRule.yaml`（CRD 形态），含 **7 条告警 ＋ 2 条记录规则**：截断率升高（warning ＞10%/10m、critical ＞25% 双窗口）、Pod 反复重启（kube-state-metrics 为主 ＋ `restart_detected` 后备）、句级降级率升高、槽位占满终止；**「503 激增」为已删除的幽灵规则**（过载实际表现为句级丢句＋HTTP 200，并非 503）；
+  - 演练验收单见 `docs/output-guard/GA-输出侧-告警演练验收单.md`，覆盖重启风暴与同 Pod 重启叠加两场景；
+  - **采集侧车问题**：若 Prometheus 通过 sidecar exporter 间接采集，需保证该 sidecar 与 tee-infer 共生命周期（sidecar 崩溃不影响 tee-infer 业务）；推荐直接 Pod 注解 + `/metrics` 直采，避免侧车单点失效导致告警盲区。
 
 ## 5. 运维手册
 
@@ -304,7 +309,7 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 - [ ] **S4** 日志/内容留存范围、期限、存证方式定稿
 - [ ] **S11** 审计只读账号与留存期对外承诺签署（与 S4 一致）
 - [ ] **S10** 供应链与出境登记签署、出境情形已判定
-- [ ] **评估证据**：§9.3/§9.4 在锁定版本上的合格率、拒答率等结果达标且题库口径已对齐（S3-1/S0-①）
+- [ ] **评估证据**：§9.3/§9.4 在锁定版本上的合格率、拒答率（**双口径分列**，口径B 须经 D-LLM-10 确认）等结果达标且题库口径已对齐（S3-1/S0-①）
 - [ ] **材料一致性复核**：申报材料 ↔ 系统配置 ↔ 评测结果三者一致
 
 → 由**部署单位**经属地系统提交，留存**提交回执**（S2 证据）；开发单位不代申报。
@@ -347,10 +352,11 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 - *执行人*：部署单位合规＋技术，开发单位协助。
 - *操作*：
   - 跑评估并写报告：`OG_EVAL93_WRITE=1 go test -mod=mod ./gateway/tee-infer-service/ -run TestOutputGuard93GenerationEval`；`OG_EVAL94_WRITE=1 go test -mod=mod ./gateway/tee-infer-service/ -run TestOutputGuard94CategoryReport`。
-  - 三方比对：备案/安评材料 ↔ `GET /config` 配置快照（mode、policy_version、标识、留存、类目）↔ §9.3/§9.4 报告（生成合格率 ≥90%、应拒答拒答率 ≥95% 采用口径B、非拒答误拒率 ≤5%、弱类目单列）。
+  - 三方比对：备案/安评材料 ↔ `GET /config` 配置快照（mode、policy_version、标识、留存、类目）↔ §9.3/§9.4 报告（生成合格率 ≥90%；应拒答拒答率**双口径分列**——口径A〔严格：仅 `block`〕与口径B〔已处置：含 `flag`/`mask`，**不含默认 `pass` 类目**〕，判据 ≥95% 为**目标值，当前实测未达**；非拒答误拒率 ≤5%；弱类目单列）。
   - 对账：`POST /reconcile/run`（或查 `GET /reconcile`）确认 `ok=true`、`billing_blocked=false`；版本以 `GET /config/policy/versions` 与材料一致。
 - *产出/验证*：一份"一致性核对结论"（无差异项或差异已闭环）。
 - *不通过*：指标不达标或口径不一致 → 回到第 1 步整改并复跑；弱类目须在材料中如实书面列明，不得用总均值掩盖。
+- ⚠️ *口径注*：拒答率口径A/B 属**判据口径**（GB/T 45654-2025 §9.4 未直述"标记/脱敏是否计入拒答"），口径B 为变更项，**须经法务/产品按 D-LLM-10 确认后方可对外引用**；确认前对外材料只列口径A 并如实标注未达标，**不得宣称"已达标"或"100% 拒答"**。
 
 **第 4 步｜部署单位具名批准（关键门，开发单位不签）**
 - *执行人*：部署单位有权批准人。

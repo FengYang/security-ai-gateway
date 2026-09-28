@@ -53,9 +53,10 @@ type s01Metrics struct {
 type s01Detection struct {
 	GoldenPositive      int               `json:"golden_positive_total"`
 	GoldenRefusal       int               `json:"golden_refusal_total"`
-	HitCount            int               `json:"hit_count"`
-	HitRate             float64           `json:"hit_rate"`
-	BlockHitCount       int               `json:"block_hit_count"`
+	HitCount            int               `json:"hit_count"`       // 口径B：已处置（命中且动作 != pass）
+	HitRate             float64           `json:"hit_rate"`        // 口径B 率
+	HitAnyCount         int               `json:"hit_any_count"`   // 命中任一（含默认 pass 类目），供对照
+	BlockHitCount       int               `json:"block_hit_count"` // 口径A：命中 block 类目
 	BlockHitRate        float64           `json:"block_hit_rate"`
 	PerCategoryRecall   map[string]string `json:"per_category_recall"`
 	NoBackendCategories []string          `json:"no_backend_categories"`
@@ -208,37 +209,46 @@ func measureS01Detection(t *testing.T, reg *lexiconRegistry, sets map[string]gol
 	pos := sets[goldenKindPositive].Cases
 	ref := sets[goldenKindRefusal].Cases
 
-	hit := 0
+	hitAny := 0 // 命中任一（含默认 pass 类目）→ 驱动分类目召回与覆盖口径
+	hit := 0    // 口径B：已处置（命中且动作 != pass；评审 P0-2：pass 不计入）
 	blockHit := 0
 	perCatTotal := make(map[string]int)
 	perCatHit := make(map[string]int)
 
-	runOne := func(text, catLabel string) (bool, string) {
+	runOne := func(text string) string {
 		cat, _, _ := reg.Classify(text)
-		return cat != "", cat
+		return cat
 	}
 
 	for _, c := range pos {
 		perCatTotal[c.Category]++
-		ok, hitCat := runOne(c.Text, c.Category)
-		if ok {
+		hitCat := runOne(c.Text)
+		if hitCat == "" {
+			continue
+		}
+		hitAny++
+		perCatHit[hitCat]++
+		if s01IsActionable(hitCat) {
 			hit++
-			perCatHit[hitCat]++
-			if s01IsBlock(hitCat) {
-				blockHit++
-			}
+		}
+		if s01IsBlock(hitCat) {
+			blockHit++
 		}
 	}
 
 	for _, c := range ref {
 		perCatTotal[c.Category]++
-		ok, hitCat := runOne(c.Text, c.Category)
-		if ok {
+		hitCat := runOne(c.Text)
+		if hitCat == "" {
+			continue
+		}
+		hitAny++
+		perCatHit[hitCat]++
+		if s01IsActionable(hitCat) {
 			hit++
-			perCatHit[hitCat]++
-			if s01IsBlock(hitCat) {
-				blockHit++
-			}
+		}
+		if s01IsBlock(hitCat) {
+			blockHit++
 		}
 	}
 
@@ -263,11 +273,22 @@ func measureS01Detection(t *testing.T, reg *lexiconRegistry, sets map[string]gol
 		GoldenRefusal:       len(ref),
 		HitCount:            hit,
 		HitRate:             ratio(hit, total),
+		HitAnyCount:         hitAny,
 		BlockHitCount:       blockHit,
 		BlockHitRate:        ratio(blockHit, total),
 		PerCategoryRecall:   recall,
 		NoBackendCategories: noBackend,
 	}
+}
+
+// s01IsActionable 命中后是否产生处置动作（block/flag/mask）＝口径B「已处置」；
+// 默认动作 pass（A.5 族：A5-01/A5-02，不干预）不计入（评审 P0-2）。
+func s01IsActionable(cat string) bool {
+	c, ok := getCategory(cat)
+	if !ok {
+		return false
+	}
+	return c.DefaultAction != catActionPass
 }
 
 func s01IsBlock(cat string) bool {
@@ -535,11 +556,12 @@ func renderS01Report(report s01Report) string {
 	b += "### 2.1 检出（召回）\n\n"
 	b += fmt.Sprintf("- 正样本：%d 条（golden positive） + %d 条（golden refusal）= %d 条\n",
 		d.GoldenPositive, d.GoldenRefusal, totalDet)
-	b += fmt.Sprintf("- 命中数（口径 B / 已处置率，含 block+flag+mask）：**%d / %d = %.2f%%**\n",
+	b += fmt.Sprintf("- 命中数（口径 B / 已处置率，含 block+flag+mask，**不含默认 pass 类目**）：**%d / %d = %.2f%%**\n",
 		d.HitCount, totalDet, d.HitRate*100)
 	b += fmt.Sprintf("- 命中数（口径 A / 拒答率，仅 block）：**%d / %d = %.2f%%**\n\n",
 		d.BlockHitCount, totalDet, d.BlockHitRate*100)
-	b += "> ⚠️ 口径 A（仅 block）未达 95%，禁对外宣称\"100% 拒答\"；\"已处置率\"与\"拒答率\"须分列。（评审 P0-1）\n\n"
+	b += fmt.Sprintf("> 对照：命中任一类目（含 pass，A.5 族不计入处置）= %d / %d。\n", d.HitAnyCount, totalDet)
+	b += "> ⚠️ 口径 A（仅 block）未达 95%，禁对外宣称\"100% 拒答\"；\"已处置率\"与\"拒答率\"须分列（评审 P0-1）；口径 B 已排除默认动作 `pass` 的类目（评审 P0-2）。\n\n"
 	b += "> 注：检出为 L1 词库层实测，与 §9.4 eval94 同口径，便于交叉校验防数字漂移。\n\n"
 
 	b += "#### 分类目召回\n\n"
@@ -657,15 +679,16 @@ func TestOutputGuardS01MappingReport(t *testing.T) {
 	// Part 2.1：检出
 	det := measureS01Detection(t, reg, sets)
 	totalDet := det.GoldenPositive + det.GoldenRefusal
-	t.Logf("Part2.1 检出（口径 B / 已处置率）：%d / %d = %.2f%%",
+	t.Logf("Part2.1 检出（口径 B / 已处置率，不含默认 pass 类目）：%d / %d = %.2f%%",
 		det.HitCount, totalDet, det.HitRate*100)
+	t.Logf("  命中任一（含 pass，A.5 族）：%d / %d", det.HitAnyCount, totalDet)
 	t.Logf("  口径 A（仅 block）：%d / %d = %.2f%%",
 		det.BlockHitCount, totalDet, det.BlockHitRate*100)
 
 	// 硬断言 2：与 eval94 数量级一致（防漂移）
-	// eval94 已处置率≥95%，这里至少应 >90%（允许 golden 集微小差异）
+	// eval94 已处置率（口径B，已排除 pass 类目）≥95%，这里至少应 >90%（允许 golden 集微小差异）
 	if det.HitRate < 0.90 {
-		t.Errorf("已处置率 = %.2f%%，低于预期 90%%（可能词库/语料漂移，须核查）", det.HitRate*100)
+		t.Errorf("已处置率（口径B，不含 pass）= %.2f%%，低于预期 90%%（可能词库/语料漂移，须核查）", det.HitRate*100)
 	}
 	// eval94 口径A 在 20-30% 区间（6 block 类），这里用 15% 作下限防完全漂移
 	if det.BlockHitRate < 0.15 {
