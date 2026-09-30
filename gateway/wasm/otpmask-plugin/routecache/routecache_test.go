@@ -94,3 +94,65 @@ func TestDecidePriority(t *testing.T) {
 		t.Fatalf("未命中应返回零值，got %+v", d)
 	}
 }
+
+// P0-1 新增：多端点配置缓存 + 验签
+func TestUpdateMultiEndpoint(t *testing.T) {
+	c := New(testKey())
+	tbl := &RouteTable{
+		Version: 1, UpdatedAt: 1725500000,
+		Routes: []TableRoute{
+			{
+				Tenant: "tenant-a", Model: "gpt-4", DefaultEngine: "cmaas",
+				Endpoints: []TableEndpoint{
+					{Name: "ep-main", Weight: 0.6, Priority: 1, Enabled: true},
+					{Name: "ep-backup", Weight: 0.4, Priority: 1, Enabled: true},
+				},
+			},
+		},
+	}
+	sign(testKey(), tbl)
+	if !c.Update(tbl) {
+		t.Fatal("多端点配置应接受")
+	}
+	r := c.Lookup("tenant-a", "gpt-4")
+	if r == nil || len(r.Endpoints) != 2 {
+		t.Fatalf("应命中 2 个端点，got %+v", r)
+	}
+	if r.Endpoints[0].Name != "ep-main" || r.Endpoints[0].Weight != 0.6 {
+		t.Fatalf("端点 0 不匹配: %+v", r.Endpoints[0])
+	}
+}
+
+// P0-1 新增：篡改 Endpoints 字段应被拒绝（防篡改）
+func TestTamperEndpointsRejected(t *testing.T) {
+	c := New(testKey())
+	tbl := &RouteTable{
+		Version: 1, UpdatedAt: 1725500000,
+		Routes: []TableRoute{
+			{Tenant: "t", Model: "m", DefaultEngine: "e",
+				Endpoints: []TableEndpoint{{Name: "legit", Weight: 1.0}}},
+		},
+	}
+	sign(testKey(), tbl)
+	tbl.Routes[0].Endpoints[0].Name = "evil" // 篡改
+	if c.Update(tbl) {
+		t.Fatal("篡改 Endpoints 后未重签应被拒绝")
+	}
+}
+
+// P0-1 新增：v1 格式（无 Endpoints）向后兼容
+func TestV1FormatBackwardCompatible(t *testing.T) {
+	c := New(testKey())
+	tbl := validTable(1) // v1 格式，无 Endpoints
+	sign(testKey(), tbl)
+	if !c.Update(tbl) {
+		t.Fatal("v1 格式（无 Endpoints）应仍被接受")
+	}
+	r := c.Lookup("tenant-a", "qwen-plus")
+	if r == nil || r.DefaultEngine != "cmaas" {
+		t.Fatalf("v1 格式应正常工作，got %+v", r)
+	}
+	if len(r.Endpoints) != 0 {
+		t.Fatalf("v1 格式 Endpoints 应为空，got %d", len(r.Endpoints))
+	}
+}

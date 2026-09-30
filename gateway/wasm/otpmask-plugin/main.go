@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,6 +75,10 @@ type PluginConfig struct {
 	MaxStaleSeconds int64 `json:"max_stale_seconds"`
 	// 默认路由表拉取周期（秒，设计 §3.3 poll_interval）。缺省 60；最小按 100ms tick 粒度换算。
 	PollIntervalSeconds int64 `json:"poll_interval"`
+	// P0-1 非流式重试（§6.5）：启用后已加密的南向协议请求由插件自持出站派发
+	// （DispatchHttpCall），失败时按 §6.5 换端点重发。**默认 false = 行为与接线前完全一致**
+	// （请求体仍交 Envoy 直发）。仅覆盖整包（非流式）响应，流式不重发，详见 routedispatch.go。
+	RouteDispatchEnabled bool `json:"route_dispatch_enabled"`
 	// 段① 凭据运行态拉取（Phase 1 门禁 #8 / GF.2.5）：启用后从管理面只读端点周期拉取
 	// sig_key/attest_token，CR 内不再出现真实密钥。**未启用 = 行为与接线前完全一致**。
 	CredentialEnabled         bool   `json:"credential_enabled"`
@@ -124,6 +129,7 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.RouteVerifyKeyHex = json.Get("route_verify_key").String()
 	config.MaxStaleSeconds = json.Get("max_stale_seconds").Int()
 	config.PollIntervalSeconds = json.Get("poll_interval").Int()
+	config.RouteDispatchEnabled = json.Get("route_dispatch_enabled").Bool()
 	config.CredentialEnabled = json.Get("credential_enabled").Bool()
 	config.CredentialService = json.Get("credential_service").String()
 	config.CredentialPort = json.Get("credential_port").Int()
@@ -256,6 +262,13 @@ const ctxKeyTenantID = "otpmask-tenant-id"
 // ctxKeyRespStatus 响应状态码缓存键（同因：body 阶段读不到响应伪头 :status）。
 const ctxKeyRespStatus = "otpmask-resp-status"
 
+// ctxKeyRouteEndpoint / ctxKeyRouteEntry 请求级路由决策结果（P0-1 多端点路由）。
+// 请求头阶段写入（选中的端点名 + 其所属路由条目），响应头阶段读取以回写 EWMA/熔断结果。
+const (
+	ctxKeyRouteEndpoint = "otpmask-route-endpoint"
+	ctxKeyRouteEntry    = "otpmask-route-entry"
+)
+
 // respStatusCached 取响应状态码：优先头回调缓存；缺失时回退 header 直读
 // （缓存缺失 = 非本插件上下文路径，如预判阶段）。
 func respStatusCached(ctx wrapper.HttpContext) string {
@@ -347,11 +360,16 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig, log log
 		log.Warnf("otpmask-plugin: 移除响应 content-length 失败: %v", err)
 	}
 	// body 阶段读不到响应伪头 :status → 此处缓存（SSE 增量 vs 整包路径判定依赖）。
-	ctx.SetContext(ctxKeyRespStatus, responseStatus())
+	st := responseStatus()
+	ctx.SetContext(ctxKeyRespStatus, st)
+	// P0-1 多端点路由结果回写（EWMA 失败率/熔断/动态权重）；未选择端点时为 no-op。
+	if code, err := strconv.Atoi(st); err == nil {
+		recordRouteResult(ctx, code)
+	}
 	// B1：客户端 Accept: text/event-stream 且成功响应 → text/event-stream；
 	// P1b：quote 模式成功响应总是输出 SSE 信封明文（协议路径 buildSSE）→ 一并预置。
 	// （header 阶段替换才生效，§4.3）
-	if responseStatus() == "200" && (requestWantsSSE || (config.AttestMode == "quote" && !pendingVectorsPlain)) {
+	if st == "200" && (requestWantsSSE || (config.AttestMode == "quote" && !pendingVectorsPlain)) {
 		_ = proxywasm.ReplaceHttpResponseHeader("content-type", "text/event-stream")
 	}
 	return types.HeaderContinue
@@ -627,6 +645,12 @@ func finishTextFlow(ctx wrapper.HttpContext, config PluginConfig, req *textReque
 				failClosed(log, fmt.Sprintf("编码协议请求失败: %v", err))
 				return
 			}
+			// P0-1 非流式重试（§6.5）：启用且已选出端点时改走插件自持派发（含换端点重发）；
+			// 未启用/未选端点 → 既有路径（请求体交 Envoy 直发），行为零变化。
+			if e, ep, ok := dispatchTargetOf(ctx); ok {
+				dispatchInfer(ctx, config, e, ep, encBody, log)
+				return
+			}
 			// P1b：quote 模式下南向协议请求整体入 K_enc 信封（段①，AAD 绑定 /v1/infer）
 			if config.AttestMode == "quote" {
 				sealed, err := Session.sealPayload(protocol.EndpointInfer, encBody)
@@ -704,6 +728,14 @@ func finishTextDirect(ctx wrapper.HttpContext, config PluginConfig, req *textReq
 	if err != nil {
 		failClosed(log, fmt.Sprintf("编码协议请求失败: %v", err))
 		return
+	}
+	// P0-1 非流式重试（§6.5）：仅整包响应（stream=false）走插件自持派发（可换端点重发）；
+	// 流式不做重发（SDK SendHttpResponse 无流式变体，见 routedispatch.go 文件头偏差声明）。
+	if !stream {
+		if e, ep, ok := dispatchTargetOf(ctx); ok {
+			dispatchInfer(ctx, config, e, ep, encBody, log)
+			return
+		}
 	}
 	// P1b：quote 模式下南向协议请求整体入 K_enc 信封（段①，AAD 绑定 /v1/infer）
 	sealed, err := Session.sealPayload(protocol.EndpointInfer, encBody)

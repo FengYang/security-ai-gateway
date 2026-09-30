@@ -25,11 +25,25 @@ import (
 	"time"
 )
 
+// RouteEndpoint 处方内的单个端点配置（多端点权重路由）。
+// P0-1 新增：用于描述多端点场景下的权重、优先级、超时等配置。
+// 向后兼容：老处方只有 PreferredEngine/FallbackEngine，新处方可带完整端点列表。
+type RouteEndpoint struct {
+	Name     string  `json:"name"`               // 端点名称，如 "openai-gpt4-main"
+	URL      string  `json:"url,omitempty"`      // 端点地址（可选，L1 处方可能只传名称）
+	Weight   float64 `json:"weight,omitempty"`   // 权重（0-1），仅在同优先级内有效
+	Priority int     `json:"priority,omitempty"` // 优先级（数字越小优先级越高，1=主，2=备1...）
+}
+
 // RoutePolicy 处方内的路由策略（引擎偏好 + 成本优先级）。
+// 向后兼容：v1 只有 PreferredEngine/FallbackEngine（主备二元）；
+// v2 新增 Endpoints 数组（多端点权重）。当 Endpoints 非空时，优先使用 Endpoints；
+// 否则回退到 PreferredEngine/FallbackEngine 的二元模式。
 type RoutePolicy struct {
-	PreferredEngine string `json:"preferred_engine,omitempty"` // 首选引擎，如 cmaas
-	FallbackEngine  string `json:"fallback_engine,omitempty"`  // 兜底引擎，如 vllm
+	PreferredEngine string `json:"preferred_engine,omitempty"` // 首选引擎，如 cmaas（v1 二元模式）
+	FallbackEngine  string `json:"fallback_engine,omitempty"`  // 兜底引擎，如 vllm（v1 二元模式）
 	CostPriority    string `json:"cost_priority,omitempty"`    // latency | cost | quality
+	Endpoints       []RouteEndpoint `json:"endpoints,omitempty"` // v2 多端点列表（P0-1 新增）
 }
 
 // RoutePrescription 路由处方——请求级的路由决策凭证（推路径 L1）。
