@@ -45,8 +45,12 @@ func fetchRouteTableOnce() {
 		return
 	}
 	cli := wrapper.NewClusterClient(wrapper.FQDNCluster{FQDN: service, Port: port})
+	headers := [][2]string{{"Accept", "application/json"}}
+	if routeRuntime.token != "" {
+		headers = append(headers, [2]string{"Authorization", "Bearer " + routeRuntime.token})
+	}
 	err := cli.Get("/routes",
-		[][2]string{{"Accept", "application/json"}},
+		headers,
 		func(statusCode int, _ http.Header, respBody []byte) {
 			// 诊断计数（门禁 #5）：cb 恒未注册 ⇒ 回调从未执行（异步回调被丢弃）。
 			metricRouteFetchCb.incr()

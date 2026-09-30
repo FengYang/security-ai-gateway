@@ -61,6 +61,7 @@ type routeRuntimeState struct {
 	service        string
 	port           int64
 	pollIntervalMs int64
+	token          string // gateway-core 拉取通道令牌（Authorization: Bearer；空 = 控制面未启用鉴权）
 }
 
 // routeRuntime 运行时单例（含周期拉取参数）。
@@ -98,6 +99,7 @@ func initRouteRuntime(config PluginConfig, log logs.Log) {
 	routeRuntime.service = config.GatewayCoreService
 	routeRuntime.port = config.GatewayCorePort
 	routeRuntime.pollIntervalMs = config.PollIntervalSeconds * 1000
+	routeRuntime.token = config.GatewayCoreToken
 	// 注册周期拉取（幂等）：负责冷启动与后续刷新（请求路径不再发起拉取）。
 	ensureRouteFetchLoop()
 	// 注册运行时周期任务（幂等）：三级降级重评估 + 端点快照可观测（§6.9/§10）。
@@ -147,7 +149,6 @@ func applyRouteDecision(ctx wrapper.HttpContext, config PluginConfig, log logs.L
 	}
 	tenant := tenantHeaderValue(ctx)
 	model := requestModelHeader(config)
-
 	d, rxErr, failReason := decideRoute(routeRuntime.cache, routeRuntime.key, tenant, model, reqHeader(hdrOtpRoute), time.Now())
 	if rxErr != nil {
 		log.Warnf("otpmask-plugin: 处方校验失败，降级 L2: %v", rxErr)
