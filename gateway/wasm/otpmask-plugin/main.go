@@ -262,11 +262,12 @@ const ctxKeyTenantID = "otpmask-tenant-id"
 // ctxKeyRespStatus 响应状态码缓存键（同因：body 阶段读不到响应伪头 :status）。
 const ctxKeyRespStatus = "otpmask-resp-status"
 
-// ctxKeyRouteEndpoint / ctxKeyRouteEntry 请求级路由决策结果（P0-1 多端点路由）。
-// 请求头阶段写入（选中的端点名 + 其所属路由条目），响应头阶段读取以回写 EWMA/熔断结果。
+// ctxKeyRouteEndpoint / ctxKeyRouteEntry / ctxKeyRouteStart 请求级路由上下文（P0-1 多端点路由）。
+// 请求头阶段写入，响应头阶段读取以回写 EWMA/熔断/延迟结果。
 const (
 	ctxKeyRouteEndpoint = "otpmask-route-endpoint"
 	ctxKeyRouteEntry    = "otpmask-route-entry"
+	ctxKeyRouteStart    = "otpmask-route-start-ns" // 路由决策时间戳（int64 纳秒），用于延迟观测
 )
 
 // respStatusCached 取响应状态码：优先头回调缓存；缺失时回退 header 直读

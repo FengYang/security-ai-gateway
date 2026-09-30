@@ -23,7 +23,12 @@ package main
 // pwCounter 懒初始化（Define 同名幂等，复用同一 stat），metricsHostGuard 由
 // TestMain 置位跳过——与 streamdone_test 的纯逻辑测试策略一致。
 
-import "github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
+)
 
 // metricsHostGuard 单测环境守卫：true 时 incr 为 no-op（防 hostcall panic）。
 var metricsHostGuard = false
@@ -37,6 +42,11 @@ type pwCounter struct {
 
 // incr 计数 +1；首次调用时 Define（同名指标幂等，返回同一 stat）。
 func (m *pwCounter) incr() {
+	m.add(1)
+}
+
+// add 计数 +offset；首次调用时 Define（同名指标幂等，返回同一 stat）。
+func (m *pwCounter) add(offset uint64) {
 	if metricsHostGuard {
 		return
 	}
@@ -44,7 +54,7 @@ func (m *pwCounter) incr() {
 		m.c = proxywasm.DefineCounterMetric(m.name)
 		m.defined = true
 	}
-	m.c.Increment(1)
+	m.c.Increment(offset)
 }
 
 // 插件计数器（W-1 最小集 + §6 降级/拉取可观测）。
@@ -96,6 +106,10 @@ var (
 	metricRouteCanaryWhitelist = &pwCounter{name: "otpmask_route_canary_whitelist_total"}
 	metricRouteCanaryTreatment = &pwCounter{name: "otpmask_route_canary_treatment_total"}
 	metricRouteCanaryControl   = &pwCounter{name: "otpmask_route_canary_control_total"}
+	// token 消耗统计（方案 §10 #4：route_tokens_total，direction 分为 input/output）
+	// proxy-wasm Counter 不支持自定义标签，故拆为两个独立 Counter。
+	metricRouteTokensInput  = &pwCounter{name: "otpmask_route_tokens_input_total"}
+	metricRouteTokensOutput = &pwCounter{name: "otpmask_route_tokens_output_total"}
 )
 
 // ============================================================
@@ -114,30 +128,81 @@ var (
 //   延迟：[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, +Inf]（9 桶）
 //   token：[10, 100, 500, 1000, 2000, 5000, 10000, +Inf]（8 桶）
 
-// latencyBuckets 延迟桶上界（秒）。
+// latencyBuckets 延迟桶上界（秒），与方案 §10.1.3 对齐。
 var latencyBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0}
 
 // tokenBuckets token 数桶上界。
 var tokenBuckets = []float64{10, 100, 500, 1000, 2000, 5000, 10000}
 
-// observeLatency 记录一个延迟值到所有 le >= value 的桶（Prometheus 累积直方图语义）。
-func observeLatency(valueSec float64) {
-	// +Inf 桶始终 +1（在 Prometheus 中由 _count 表示，此处省略）
-	for _, le := range latencyBuckets {
-		if valueSec <= le {
-			// 找到第一个 >= value 的桶 +1（累积直方图，所有更大的桶也应 +1）
-			// 但 proxy-wasm Counter 是逐个注册的，为避免 N 次 hostcall，
-			// 我们用简化版：只给命中的最小桶 +1
-			// 注意：这不符合 Prometheus 累积直方图语义，
-			// 但 proxy-wasm 无 Histogram 是硬限制，P0 先做单桶计数，
-			// 后续可扩展为累积式（遍历所有 >= 的桶 incr）。
-			_ = le
-			break
+// latencyBucketCounters 按延迟桶索引对应的 Counter（懒初始化）。
+// 命名格式：otpmask_route_latency_seconds_bucket{le="0.005"}
+// 由于 proxy-wasm Counter 不支持标签，用指标名编码 le 值。
+var latencyBucketCounters []*pwCounter
+
+// tokenBucketCounters 按 token 桶索引对应的 Counter（懒初始化）。
+var tokenBucketCounters []*pwCounter
+
+func init() {
+	// 预初始化 Histogram 桶 Counter（与 bucket 一一对应，按顺序）。
+	latencyBucketCounters = make([]*pwCounter, len(latencyBuckets))
+	for i, le := range latencyBuckets {
+		latencyBucketCounters[i] = &pwCounter{
+			name: "otpmask_route_latency_seconds_bucket_le_" + formatFloatForMetric(le),
 		}
 	}
-	// P0 简化：延迟统计通过 Engine Snapshot 的 EWMA 失败率间接体现，
-	// Histogram 完整实现延后到 P1（等确认是否有更好的 SDK 支持）。
-	_ = valueSec
+	tokenBucketCounters = make([]*pwCounter, len(tokenBuckets))
+	for i, le := range tokenBuckets {
+		tokenBucketCounters[i] = &pwCounter{
+			name: "otpmask_route_tokens_bucket_le_" + formatFloatForMetric(le),
+		}
+	}
+}
+
+// formatFloatForMetric 将浮点数格式化为指标名安全的字符串（去掉小数点和负号）。
+// 0.005 → "0_005"，10 → "10"
+func formatFloatForMetric(v float64) string {
+	s := fmt.Sprintf("%g", v)
+	s = strings.ReplaceAll(s, ".", "_")
+	s = strings.ReplaceAll(s, "-", "_")
+	return s
+}
+
+// observeLatency 记录一个延迟值（累积直方图语义：所有 le >= value 的桶都 +1）。
+// 符合 Prometheus histogram_quantile() 要求。
+func observeLatency(valueSec float64) {
+	for i, le := range latencyBuckets {
+		if valueSec <= le {
+			latencyBucketCounters[i].incr()
+		}
+	}
+}
+
+// observeTokens 记录一次 token 数（累积直方图语义）。
+func observeTokens(tokens int) {
+	v := float64(tokens)
+	for i, le := range tokenBuckets {
+		if v <= le {
+			tokenBucketCounters[i].incr()
+		}
+	}
+}
+
+// recordTokensInput 记录输入 token 数（Counter + Histogram 双计）。
+func recordTokensInput(tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	metricRouteTokensInput.add(uint64(tokens))
+	observeTokens(tokens)
+}
+
+// recordTokensOutput 记录输出 token 数（Counter + Histogram 双计）。
+func recordTokensOutput(tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	metricRouteTokensOutput.add(uint64(tokens))
+	observeTokens(tokens)
 }
 
 // 说明（如实）：**不暴露**"当前生效限流表版本"仪表。proxy-wasm 的 MetricGauge 在多 worker

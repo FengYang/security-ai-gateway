@@ -43,11 +43,14 @@ import (
 )
 
 const (
-	hdrOtpRoute    = "X-Otp-Route"    // 处方（推路径 L1，JWT）
-	hdrOtpEngine   = "X-Otp-Engine"   // 决策输出：目标引擎（供 Envoy 路由规则）
-	hdrOtpTarget   = "X-Otp-Target"   // 决策输出：显式目标端点
-	hdrOtpModel    = "X-Otp-Model"    // 可选输入：模型维度（请求头阶段可得）
-	hdrOtpEndpoint = "X-Otp-Endpoint" // P0-1 新增：选中的端点名称（多端点路由决策输出）
+	hdrOtpRoute     = "X-Otp-Route"     // 处方（推路径 L1，JWT）
+	hdrOtpEngine    = "X-Otp-Engine"    // 决策输出：目标引擎（供 Envoy 路由规则）
+	hdrOtpTarget    = "X-Otp-Target"    // 决策输出：显式目标端点
+	hdrOtpModel     = "X-Otp-Model"     // 可选输入：模型维度（请求头阶段可得）
+	hdrOtpEndpoint  = "X-Otp-Endpoint"  // P0-1 新增：选中的端点名称（多端点路由决策输出）
+	hdrOtpStrategy  = "X-Otp-Strategy"  // P0-1 新增：使用的路由策略（tracing 关联用）
+	hdrOtpCanary    = "X-Otp-Canary"    // P0-1 新增：灰度分组（tracing 关联用）
+	hdrRequestID    = "X-Request-Id"    // Envoy 生成的请求 ID（日志-trace 关联用）
 )
 
 // routeRuntimeState 路由运行时状态：验签密钥 + 路由表缓存 + 拉取参数（由 parseConfig 初始化）。
@@ -171,9 +174,15 @@ func applyRouteDecision(ctx wrapper.HttpContext, config PluginConfig, log logs.L
 		epd := e.engine.PickEndpointForTenant(tenant)
 		if epd.EndpointName != "" {
 			_ = proxywasm.ReplaceHttpRequestHeader(hdrOtpEndpoint, epd.EndpointName)
+			// §10.3：tracing 关联属性（写入请求头，由 Envoy tracing 采集）
+			_ = proxywasm.ReplaceHttpRequestHeader(hdrOtpStrategy, string(epd.Strategy))
+			if epd.CanaryGroup != "" {
+				_ = proxywasm.ReplaceHttpRequestHeader(hdrOtpCanary, epd.CanaryGroup)
+			}
 			// 请求级决策结果挂到上下文，供响应阶段回写 RecordResult（§6.5.8 结果判定）。
 			ctx.SetContext(ctxKeyRouteEndpoint, epd.EndpointName)
 			ctx.SetContext(ctxKeyRouteEntry, e)
+			ctx.SetContext(ctxKeyRouteStart, time.Now().UnixNano()) // §10 #2：延迟观测起点
 			log.Debugf("otpmask-plugin: 端点选择 tenant=%q model=%q endpoint=%q strategy=%s reason=%s canary=%s",
 				tenant, model, epd.EndpointName, epd.Strategy, epd.Reason, epd.CanaryGroup)
 			// §10 #11：灰度请求计数
@@ -306,6 +315,19 @@ func routeEndpointSuccess(status int) bool {
 	return status < 500 && status != 429
 }
 
+// sampleHit 基于时间戳的伪随机采样（percent 为 0-100 的整数）。
+// P0 简化实现，避免引入 math/rand 依赖和全局状态。
+// 精度：纳秒时间戳模 100，均匀分布在 0-99。
+func sampleHit(percent int, seed int64) bool {
+	if percent <= 0 {
+		return false
+	}
+	if percent >= 100 {
+		return true
+	}
+	return (seed % 100) < int64(percent)
+}
+
 // recordRouteResult 响应阶段回写端点结果（供 EWMA/熔断/动态权重消费）。
 // 未经端点选择的请求（endpoint 缺失/条目缺失）为 no-op。
 func recordRouteResult(ctx wrapper.HttpContext, status int) {
@@ -320,6 +342,18 @@ func recordRouteResult(ctx wrapper.HttpContext, status int) {
 	metricRouteRequests.incr() // §10 #1：经端点选择的路由请求计数
 	success := routeEndpointSuccess(status)
 	e.engine.RecordResult(name, success)
+
+	// 计算延迟（§10 #2 / §10.2 路由决策日志共用）
+	var latencySec float64
+	var latencyMs float64
+	startNs, hasStart := ctx.GetContext(ctxKeyRouteStart).(int64)
+	if hasStart && startNs > 0 {
+		elapsed := float64(time.Now().UnixNano() - startNs)
+		latencySec = elapsed / 1e9
+		latencyMs = elapsed / 1e6
+		observeLatency(latencySec) // §10 #2：端到端延迟 Histogram
+	}
+
 	// §6.9 降级迟滞：按优先级组累计连续成功；失败清零（恢复需连续成功达标）。
 	if prio, ok := e.engine.EndpointPriority(name); ok {
 		if success {
@@ -327,6 +361,14 @@ func recordRouteResult(ctx wrapper.HttpContext, status int) {
 		} else {
 			e.degrade.RecordFailure(prio)
 		}
+	}
+	// §10.2 路由决策日志：成功 5% 采样，失败 100%。
+	// P0 简化：用伪随机（时间戳取模）实现采样，避免引入 math/rand 依赖。
+	if !success || sampleHit(5, time.Now().UnixNano()) {
+		// §10.3：日志-trace 关联（读取 Envoy x-request-id）
+		reqID, _ := proxywasm.GetHttpRequestHeader(hdrRequestID)
+		proxywasm.LogInfof("route: request_id=%q endpoint=%q status=%d success=%v latency_ms=%.2f degrade=%s",
+			reqID, name, status, success, latencyMs, e.degrade.Level())
 	}
 }
 
