@@ -421,14 +421,13 @@ func (e *Engine) PickEndpointForTenant(tenant string) Decision {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	usable := e.filterUsable()
-	if len(usable) == 0 {
+	if len(e.state) == 0 {
 		return Decision{Reason: "no_usable_endpoints"}
 	}
 
 	// 无灰度：直接选
 	if e.canary == nil {
-		return e.pickByStrategy(usable)
+		return e.pickByStrategy()
 	}
 
 	canaryEpName := e.config.Canary.TargetEndpoint
@@ -448,7 +447,7 @@ func (e *Engine) PickEndpointForTenant(tenant string) Decision {
 	}
 
 	// 非白名单 / 灰度未启动：按权重策略选择
-	decision := e.pickByStrategy(usable)
+	decision := e.pickByStrategy()
 	if decision.EndpointName == canaryEpName && canaryIsUsable &&
 		e.canary.State().State != CanaryIdle && e.canary.State().State != CanaryRolledBack {
 		decision.CanaryGroup = "treatment"
@@ -459,18 +458,21 @@ func (e *Engine) PickEndpointForTenant(tenant string) Decision {
 }
 
 // pickByStrategy 按配置的策略选择端点（内部辅助，调用方持锁）。
-func (e *Engine) pickByStrategy(usable []*EndpointState) Decision {
+// 直接遍历 e.state，零堆分配。
+func (e *Engine) pickByStrategy() Decision {
 	switch e.config.Strategy {
 	case StrategyPriority:
-		return e.pickByPriority(usable)
+		return e.pickByPriority()
 	case StrategyWeighted, StrategyFailureAware:
-		return e.pickByWeight(usable)
+		return e.pickByWeight()
 	default:
-		return e.pickByPriority(usable)
+		return e.pickByPriority()
 	}
 }
 
-// filterUsable 过滤出可用端点（按优先级分组内的可用端点）。
+// filterUsable 过滤出可用端点（启用 + 非熔断 open + 权重 > 0）。
+// 注意：每次调用分配新 slice，仅用于对外 API（UsableEndpointNames）。
+// 请求路径的 PickEndpoint 不经过此处，以避免分配。
 func (e *Engine) filterUsable() []*EndpointState {
 	result := make([]*EndpointState, 0, len(e.state))
 	for _, ep := range e.state {
@@ -481,16 +483,20 @@ func (e *Engine) filterUsable() []*EndpointState {
 	return result
 }
 
-// pickByPriority 按优先级选择：选最高优先级组里的第一个端点。
-func (e *Engine) pickByPriority(usable []*EndpointState) Decision {
-	if len(usable) == 0 {
-		return Decision{Reason: "no_usable_endpoints"}
-	}
-	best := usable[0]
-	for _, ep := range usable[1:] {
-		if ep.Priority < best.Priority {
+// pickByPriority 按优先级选择：选最高优先级组里第一个可用端点。
+// 一次遍历搞定，零分配。
+func (e *Engine) pickByPriority() Decision {
+	var best *EndpointState
+	for _, ep := range e.state {
+		if !ep.IsUsable() {
+			continue
+		}
+		if best == nil || ep.Priority < best.Priority {
 			best = ep
 		}
+	}
+	if best == nil {
+		return Decision{Reason: "no_usable_endpoints"}
 	}
 	return Decision{
 		EndpointName: best.Name,
@@ -501,37 +507,43 @@ func (e *Engine) pickByPriority(usable []*EndpointState) Decision {
 }
 
 // pickByWeight 按权重随机选择（同优先级内按比例分配）。
-// 先选最高优先级组，再在组内按权重随机。
-func (e *Engine) pickByWeight(usable []*EndpointState) Decision {
-	if len(usable) == 0 {
-		return Decision{Reason: "no_usable_endpoints"}
-	}
-
-	// 找出最高优先级
+// 两遍遍历：第一遍找最高优先级 + 算总权重，第二遍加权随机。
+// 零堆分配。
+func (e *Engine) pickByWeight() Decision {
+	// 第一遍：找最高优先级 + 算该组总权重
 	minPrio := math.MaxInt
-	for _, ep := range usable {
+	var totalWeight float64
+	hasUsable := false
+	for _, ep := range e.state {
+		if !ep.IsUsable() {
+			continue
+		}
+		hasUsable = true
 		if ep.Priority < minPrio {
 			minPrio = ep.Priority
-		}
-	}
-
-	// 收集最高优先级组的端点
-	var group []*EndpointState
-	var totalWeight float64
-	for _, ep := range usable {
-		if ep.Priority == minPrio {
-			group = append(group, ep)
+			totalWeight = ep.Weight
+		} else if ep.Priority == minPrio {
 			totalWeight += ep.Weight
 		}
 	}
-	if len(group) == 0 || totalWeight <= 0 {
+	if !hasUsable {
+		return Decision{Reason: "no_usable_endpoints"}
+	}
+	if totalWeight <= 0 {
 		return Decision{Reason: "no_available_in_priority_group"}
 	}
 
-	// 加权随机
+	// 第二遍：加权随机选择
 	r := randomFloat64() * totalWeight
 	var cum float64
-	for _, ep := range group {
+	var first *EndpointState
+	for _, ep := range e.state {
+		if !ep.IsUsable() || ep.Priority != minPrio {
+			continue
+		}
+		if first == nil {
+			first = ep
+		}
 		cum += ep.Weight
 		if r < cum {
 			return Decision{
@@ -543,9 +555,12 @@ func (e *Engine) pickByWeight(usable []*EndpointState) Decision {
 		}
 	}
 	// 兜底：返回组内第一个（浮点误差防护）
+	if first == nil {
+		return Decision{Reason: "no_available_in_priority_group"}
+	}
 	return Decision{
-		EndpointName: group[0].Name,
-		EndpointURL:  group[0].URL,
+		EndpointName: first.Name,
+		EndpointURL:  first.URL,
 		Strategy:     StrategyWeighted,
 		Reason:       "weighted_fallback",
 	}

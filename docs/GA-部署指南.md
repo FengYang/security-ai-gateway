@@ -309,7 +309,7 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 - [ ] **S4** 日志/内容留存范围、期限、存证方式定稿
 - [ ] **S11** 审计只读账号与留存期对外承诺签署（与 S4 一致）
 - [ ] **S10** 供应链与出境登记签署、出境情形已判定
-- [ ] **评估证据**：§9.3/§9.4 在锁定版本上的合格率、拒答率（**双口径分列**）等结果达标且题库口径已对齐（S3-1/S0-①）
+- [ ] **评估证据**：§9.3/§9.4 在锁定版本上的合格率、拒答率（**双口径分列**，口径B**剔除默认 `pass` 类目且剔除 A5 族**，A5 单列为"事实性问题"独立指标）等结果达标且题库口径已对齐（S3-1/S0-①）
 - [ ] **S14** §9.4 拒答率**判据口径确认**（[D-LLM-10 §10.1／§10.2](GA-大模型内容合规规划-D-LLM-10决策材料-分类体系与题库口径裁决.md) 的 Q13–Q15：口径B 定义〔仅"产生处置动作"＝排除默认 `pass` 类目〕／A5 族是否纳入「应拒答」判据／双口径均未达下的对外写法；**§10.2 已出四路评审与建议措辞，签署栏见 §10.2.7**）
 - [ ] **材料一致性复核**：申报材料 ↔ 系统配置 ↔ 评测结果三者一致
 
@@ -353,11 +353,11 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 - *执行人*：部署单位合规＋技术，开发单位协助。
 - *操作*：
   - 跑评估并写报告：`OG_EVAL93_WRITE=1 go test -mod=mod ./gateway/tee-infer-service/ -run TestOutputGuard93GenerationEval`；`OG_EVAL94_WRITE=1 go test -mod=mod ./gateway/tee-infer-service/ -run TestOutputGuard94CategoryReport`。
-  - 三方比对：备案/安评材料 ↔ `GET /config` 配置快照（mode、policy_version、标识、留存、类目）↔ §9.3/§9.4 报告（生成合格率 ≥90%；应拒答拒答率**双口径分列**——口径A〔严格：仅 `block`〕与口径B〔已处置：含 `flag`/`mask`，**不含默认 `pass` 类目**〕，判据 ≥95% 为**目标值，当前实测未达**；非拒答误拒率 ≤5%；弱类目单列）。
+  - 三方比对：备案/安评材料 ↔ `GET /config` 配置快照（mode、policy_version、标识、留存、类目）↔ §9.3/§9.4 报告（生成合格率 ≥90%；应拒答拒答率**双口径分列**——口径A〔严格：仅 `block`〕与口径B〔已处置：含 `flag`/`mask`，**不含默认 `pass` 类目且剔除 A5 族**；**Q14 已由产品 2026-09-29 签批**，剔除后口径B ≈ 100%，**但不得宣称达标**，仅分类目披露；A5 单列为"事实性问题"独立指标〕，判据 ≥95% 为**目标值，当前口径A 未达**；非拒答误拒率 ≤5%；弱类目单列）。
   - 对账：`POST /reconcile/run`（或查 `GET /reconcile`）确认 `ok=true`、`billing_blocked=false`；版本以 `GET /config/policy/versions` 与材料一致。
 - *产出/验证*：一份"一致性核对结论"（无差异项或差异已闭环）。
 - *不通过*：指标不达标或口径不一致 → 回到第 1 步整改并复跑；弱类目须在材料中如实书面列明，不得用总均值掩盖。
-- ⚠️ *口径注*：拒答率口径A/B 属**判据口径**（GB/T 45654-2025 §9.4 未直述"标记/脱敏是否计入拒答"），口径B 为变更项，**须经法务/产品按 D-LLM-10 确认后方可对外引用**；确认前对外材料只列口径A 并如实标注未达标，**不得宣称"已达标"或"100% 拒答"**。
+- ⚠️ *口径注*：拒答率口径A/B 属**判据口径**（GB/T 45654-2025 §9.4 未直述"标记/脱敏是否计入拒答"），口径B 定义与 A5 族剔除已于 **2026-09-29 由产品（张三）按 D-LLM-10 §10.2.8 签批**；法务侧 Q13/Q14 仍待具名确认。**对外统一写法**：双口径分列、口径A 如实标注未达、口径B 分类目披露且**不得宣称"已达标"或"100% 拒答"**；A5 族单列为"事实性问题"独立指标。
 
 **第 4 步｜部署单位具名批准（关键门，开发单位不签）**
 - *执行人*：部署单位有权批准人。
@@ -466,6 +466,33 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 | 监控/告警接入 | **否** | 运维就绪性，非合规签字项 |
 | 备案材料编制 | **否**（材料本身） | 编制是作业；**S2/S3/S4/S11 签的是其中对外承担责任的口径** |
 
+### 7.7.1 运营/部署单位待办清单（研发结项不阻塞项）
+
+> **2026-09-29 研发结项口径**：下表 18 项为**部署/运营单位责任**，研发侧已完成全部编码、测试、工程交付与内部评审（R 类已归零）。这些事项**转入部署/运营侧跟踪，不再作为研发结项阻塞项**。研发按 §7.6 四要素提供技术协助（配置快照、日志、口径说明、评测脚本）。
+
+| 编号 | 事项 | 性质 | 责任方 | 研发已提供 | 备注 |
+|---|---|---|---|---|---|
+| S0-⑤ | spike 四象限＋GPU 现实性 | 自加 | 部署单位（提供 T4/TDX 环境） | 测脚本与取数方法 | 需真机环境 |
+| S0-⑥ | 二维主体判定表 D-LLM-1 | 法定 | 产品＋法务 | 判定表骨架与字段 | 主体定性 |
+| S0-⑦ | provider 出境＋境内核查 | 法定 | 法务＋商务 | 数据流图与 18 家登记清单 | 含 Phala 主体核实 |
+| S0-⑧ | 模型许可与可复现登记（D1 回填） | 混合 | 部署单位（提供 HF 可达环境） | `g4-download-model.py` 脚本与回填位 | 取 commit SHA |
+| S1-5 | 配置刚性分级（形态判定） | 法定 | 产品（公众/内部形态） | 刚性开关与审计链 | `-public-facing` 已实现 |
+| S2-1 | 浸泡达标 | 标准·备案 | 运营（真实流量窗口） | 指标与浸泡观察手册 | 真实流量才能取数 |
+| S2-2 | 四闸门授权与切 enforcing | 标准·备案 | 四道闸门（SRE/安全/产品/法务） | 切换能力与回滚方案 | 升级禁、降级允 |
+| S2-4 | 误杀线定线（D-LLM-8） | 混合 | 产品＋SRE | 实测数据（6/40＝15%，拦截类 1/40）与推荐值 | 产品已签推荐，待法务/安全 |
+| S2-5 | 误杀基线达标验收 | 标准·备案 | 产品＋SRE | 基线数据与复跑脚本 | 待 S2-4 定线后验收 |
+| S2-6 | 告警接线与演练 | 自加 | SRE（Alertmanager 路由＋值班） | 告警规则（7＋2 记录＋低流量兜底）与 Runbook | 工程化已完成 |
+| S3-1 | 类目动作表与分类体系对应 | 标准·备案 | 法务＋产品 | 31 类动作对照表 | 口径一致性 |
+| S3-2 | 策略切换与类目启停 tee 运行时 | 混合 | 安全团队（D8 复核） | 端点与审计留痕 | C 策略三前置待解 |
+| S3-4 | 语义后端选型 PoC | 混合 | 算法＋算力预算审批 | PoC 方案与对比脚本 | 已签"延后" |
+| S3-5 | 拒答率达标对齐 | 标准·备案 | 算法＋产品 | 评测框架与基线（口径A 21.60%/口径B 剔除后≈100%） | 产品已签 Q14 |
+| S3-6 | 真实模型合格率演练 | 标准·备案 | 运营（真实模型窗口） | 评测脚本与 SLO 基线 | 需真实推理后端 |
+| S4-4 | SaaS 租户处置（客户决策） | 混合 | 产品（SaaS 决策） | 状态机与隔离机制 | 工程已完成 |
+| S5-8 | 销售话术与对外承诺定稿 | 自加 | 法务 | 事实数据与口径说明 | 不得宣称达标 |
+| X-2 | T6 跨系统联调 | 跨系统 | T6 团队 | API 与对接文档 | 工程侧已就绪 |
+
+> **交付边界**：研发侧交付物＝代码仓库＋本部署指南＋备案材料骨架＋同源证据链＋评测与告警脚本。运营/部署单位交付物＝具名签署＋现场操作记录＋外部资质回执。双方按 §7.6 四要素留痕归档。
+
 ### 7.8 残余风险登记与本章修订记录
 
 #### 7.8.1 词库残余项登记（S12 的决策对象）
@@ -480,6 +507,7 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 
 | 日期 | 内容 |
 |---|---|
+| 2026-09-29 | **新增 §7.7.1 运营/部署单位待办清单（研发结项口径）**：把遗留清单 18 项未闭项按"R/O 责任主体"分类，**确认 18 项全部为 O 类（部署/运营单位责任）**，R 类（研发责任）已全部归零；18 项转入本节跟踪，**不再作为研发结项阻塞项**。研发侧已完成举证：代码入仓、OSS 与 `-tags saas` 全量测试绿、3 个 P0 缺陷全闭、告警与可观测性就绪、备案材料骨架与同源证据链齐。研发按 §7.6 四要素继续提供技术协助，不承担阻塞责任。同步在《[遗留工作清单](GA-大模型内容合规规划-遗留工作清单.md)》§1.1.1 加责任主体映射表、§1.1 总览加注研发结项口径。 |
 | 2026-09-28 | **新增 S14（乙类）：§9.4 拒答率判据口径确认**——口径B 定义（仅"产生处置动作"＝**排除默认 `pass` 类目**）、A5 族是否纳入「应拒答」判据、口径A/B 双口径均未达 95% 下的对外写法；载体＝[D-LLM-10 §10.1](GA-大模型内容合规规划-D-LLM-10决策材料-分类体系与题库口径裁决.md) 的 **Q13–Q15 批注/签署页**（法务＋产品具名）。同步更新 §7.0 三类性质（乙类）、§7.1 待部署单位完成项（→**S1–S14**）、§7.1.3 门 A 清单、§7.2 明细表＋标题、§7.3 时间线（T-30）、§7.4 勾选；《[GA-报备与上线放行单模板](GA-报备与上线放行单模板.md)》门 A 同步加 S14。**背景**：第二轮评审 P0-2 订正口径B（原 100.00%→**93.20%**，弱类目由「无」变为 **A5-01/A5-02**），"采用口径B 即达标"前提不再成立并新生三问，须外部具名确认后备案材料"效果结论"栏方可定稿。开发单位只备料与如实登记，不代签。 |
 | 2026-09-28 | **新增《[GA-报备与上线放行单模板](GA-报备与上线放行单模板.md)》并在 §7.1.3 加指针**：两门勾选（门 A 报备 8 项／门 B 上线 10 项）＋证据载体＋具名签署＋备案回执＋上线执行观察记录，每租户一份；模板已加入 `.gitignore` 白名单随仓库交付。模板条件与 §7.1.3/§7.2 一致，未新增机制。 |
 | 2026-09-27 | **§7.1.3 扩写"六步放行操作细则"**：六步逐一补 执行人/具体操作（真实命令与 HTTP 端点）/产出验证/不通过处置——S1 具名五步命令、audit-verify 独立复算、§9.3/§9.4 评估写盘与三方一致性比对、具名批准门、属地报备取回执、以启动参数 `-output-guard enforcing` 滚动重启上线观察及回滚；注明鉴权头（X-Admin-Token/Actor/Request-ID）与持久化覆盖注意事项。均引用仓库内既有脚本/端点/测试，未新增机制。 |
@@ -487,3 +515,291 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 | 2026-09-27 | **新增 S13（丙类）：监控告警现场接线与合规演练**——截断率告警接线、enforcing/回滚演练、TEE 会话重启风暴与同 Pod 重启叠加两场景演练，载体为监控配置＋演练记录；同步更新 §4.4 指针、§7.0.2 丙类、§7.0.3、§7.2（含 S1 交叉引用乙类 S5-5 内容部分）、§7.3、§7.4。**背景**：乙类草稿外部依赖收口——具名复核与现场接线演练按既有责任划分归部署单位并集中登记于本章，开发单位不代签、不代演练；这些外部/现场事项**不阻断开发进度完成**（未完成只影响"合法对外"放行，见 §7 判定）。 |
 | 2026-09-27 | **并入原独立文档《GA-部署单位具名与签署事项清单》**（该文件已删除，不再作为独立文件维护）：本章现为本主题的**唯一事实源**。新增 §7.0（责任边界／三类性质／分工现状）、§7.2（S1–S12 明细）、§7.8（残余风险登记与修订记录）；原 §7.0–§7.5 顺延为 §7.1、§7.3–§7.7。**动机**：本指南在白名单内随仓库交付，独立清单属 `.gitignore` 本地资产——合并后单一出处且能随代码交付到部署单位。 |
 | 2026-09-27 | 建档：新增本章「上线前的法定与合规必办步骤（环境搭建之外）」，并在 §1 部署路径总览顶部加放行指针。 |
+
+## 8. 生产部署分步操作指南（技术 · Kubernetes）
+
+> 本章为**技术部署**的 step-by-step 操作清单，解决「系统能跑起来、链路能跑通」的问题。
+> 合规与放行流程见 §7；本章是 §7 的**技术前置条件**。
+>
+> 适用场景：路径 C（Kubernetes 生产）。kind / Docker Compose 见 §2/§3。
+
+### 8.0 前置检查
+
+| # | 项 | 命令 / 验证方式 | 预期 |
+|---|---|---|---|
+| 1 | K8s 集群可达 | `kubectl cluster-info` | 返回集群地址 + CoreDNS running |
+| 2 | metrics-server 可用 | `kubectl top nodes` | 返回节点 CPU/内存 |
+| 3 | 命名空间存在 | `kubectl get ns otpmask` | 存在；不存在则执行 §8.1.1 |
+| 4 | 镜像仓库可达 | 手动 `docker pull <镜像>` | 能拉取 |
+| 5 | 默认 StorageClass | `kubectl get sc` | 至少 1 个 default SC（监控 PVC 用） |
+
+### 8.1 第一步：基础资源（Namespace + Secret）
+
+#### 8.1.1 创建命名空间
+
+```bash
+kubectl apply -f deploy/k8s/namespace.yaml
+# 确认
+kubectl get ns otpmask
+```
+
+#### 8.1.2 创建密钥（生产必读）
+
+`deploy/k8s/secret.yaml` 中的密钥为**演示值**，生产必须替换：
+
+```bash
+# 生成随机签名密钥（32 字节 hex）
+SIG_KEY=$(openssl rand -hex 32)
+
+# 创建 Secret（覆盖演示值）
+kubectl create secret generic otpmask-keys -n otpmask \
+  --from-literal=sig-key=$SIG_KEY \
+  --from-literal=core-sig-key=$SIG_KEY \
+  --from-literal=core-auth-token=$(openssl rand -hex 16) \
+  --from-literal=attest-token=$(openssl rand -hex 32) \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# 验证
+kubectl get secret otpmask-keys -n otpmask
+kubectl describe secret otpmask-keys -n otpmask | grep "sig-key\|core-sig-key"
+```
+
+> **重要**：`core-sig-key` 必须与插件侧 `route_verify_key` 完全一致，否则路由表验签失败 → 插件降级。
+>
+> 密钥管理建议：Vault / KMS envelope 加密，不要明文提交到 Git。
+
+### 8.2 第二步：部署核心服务
+
+按依赖顺序部署：Redis → 控制面 → 推理服务 → 网关插件。
+
+#### 8.2.1 Redis（限流 + 速率限制缓存）
+
+```bash
+kubectl apply -k deploy/k8s
+# 仅部署 Redis（如果用 kustomize 是一次性全量，可用 label 过滤）
+kubectl get pods -n otpmask -l app=redis -w
+# 等 STATUS 变 Running
+```
+
+#### 8.2.2 控制面（gateway-core + gateway-admin-service）
+
+```bash
+# 确认镜像已推送
+# 部署
+kubectl apply -f deploy/k8s/gateway-core.yaml
+kubectl apply -f deploy/k8s/gateway-admin-service.yaml
+
+# 验证 Pod
+kubectl get pods -n otpmask -l app=gateway-core -w
+kubectl get pods -n otpmask -l app=gateway-admin-service -w
+
+# 验证控制面 API
+kubectl port-forward svc/gateway-core -n otpmask 8085:8085 &
+curl -s http://localhost:8085/healthz
+# 预期：返回 ok
+```
+
+> 如果 Pod 状态是 `CreateContainerConfigError`，检查 Secret 是否存在（`kubectl describe pod <pod> -n otpmask | tail -20`）。
+
+#### 8.2.3 推理服务（tee-infer-service）
+
+```bash
+kubectl apply -f deploy/k8s/tee-infer-service.yaml
+kubectl get pods -n otpmask -l app=tee-infer-service -w
+
+# 健康检查
+kubectl port-forward svc/tee-infer-service -n otpmask 19090:19090 &
+curl -s http://localhost:19090/attest
+# 预期：返回 quote 或 mock 证明
+```
+
+### 8.3 第三步：部署 Higress 网关 + Wasm 插件
+
+#### 8.3.1 安装 Higress（如果尚未安装）
+
+```bash
+# 使用 Helm 安装（首次）
+helm repo add higress.io https://higress.io/helm-charts
+helm repo update
+helm install higress higress.io/higress -n higress-system --create-namespace \
+  --set global.enableStatus=false
+```
+
+#### 8.3.2 部署 otpmask Wasm 插件
+
+```bash
+# 部署插件配置
+kubectl apply -f deploy/higress/otpmask-plugin.yaml
+
+# 部署路由（infer ingress）
+kubectl apply -f deploy/higress/ingress-infer.yaml
+
+# 验证插件加载
+kubectl get wasmplugin otpmask -n higress-system
+# 查看 Higress 网关日志确认插件加载成功
+kubectl logs -n higress-system deploy/higress-gateway | grep -i "otpmask\|wasm" | tail -20
+```
+
+#### 8.3.3 部署其他安全插件（可选）
+
+```bash
+# Key Auth / IP Restriction / Rate Limit / CORS
+kubectl apply -f deploy/higress/security-plugins.yaml
+# 扩展插件
+kubectl apply -f deploy/higress/security-plugins-extended.yaml
+```
+
+### 8.4 第四步：监控部署
+
+```bash
+# Prometheus + Grafana
+kubectl apply -k deploy/monitoring
+
+# 验证
+kubectl get pods -n monitoring -w
+kubectl get svc -n monitoring
+
+# 访问 Grafana（默认 admin/admin）
+# NodePort: 30001
+```
+
+### 8.5 第五步：冒烟测试
+
+```bash
+# 获取网关地址（NodePort 方式）
+NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}')
+HTTP_PORT=$(kubectl get svc higress-gateway -n higress-system -o jsonpath='{.spec.ports[0].nodePort}')
+
+# 冒烟请求（text 推理）
+curl -s -X POST "http://$NODE_IP:$HTTP_PORT/v1/infer" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-ID: test-tenant" \
+  -d '{"text":"hello","engine_type":"tee_gpu","stream":false}' | head -c 500
+
+# 预期：返回 200 + 推理结果（或证明相关错误，但不是 503/连接错误）
+```
+
+### 8.6 第六步：功能验证 Checklist
+
+逐项验证核心功能：
+
+| # | 功能 | 验证方法 | 通过标准 |
+|---|---|---|---|
+| 1 | 正常请求 | 发一次推理请求 | 200 OK + 返回结果 |
+| 2 | 路由表热更新 | 控制面更新路由 → 插件生效 | 请求路由到新端点 |
+| 3 | 签名验签 | 篡改签名 → 被拒绝 | 返回降级/错误，不生效 |
+| 4 | 版本回退防护 | 推送低版本配置 → 被忽略 | 高版本配置仍生效 |
+| 5 | 熔断 | 某端点 50% 失败 → 熔断 | 流量切走，失败端点无流量 |
+| 6 | 重试 | 临时故障 → 自动重试成功 | 业务无感，请求成功 |
+| 7 | 降级 | 全部端点故障 → L2/L3 降级 | 返回降级响应，不崩溃 |
+| 8 | 灰度切流 | 开启灰度 → 白名单走灰度 | 白名单租户命中灰度端点 |
+| 9 | 灰度回滚 | 灰度失败率超阈值 → 自动回滚 | 流量回到稳定版 |
+| 10 | 限流 | 超过 QPS 限制 → 被限流 | 返回 429 |
+
+### 8.7 回滚操作
+
+```bash
+# 插件版本回滚
+# 修改 WasmPlugin 的 url 指向上一版本，重新 apply
+kubectl apply -f deploy/higress/otpmask-plugin.yaml
+
+# 服务回滚
+kubectl rollout undo deployment/tee-infer-service -n otpmask
+kubectl rollout undo deployment/gateway-core -n otpmask
+
+# 查看回滚历史
+kubectl rollout history deployment/tee-infer-service -n otpmask
+```
+
+## 9. 上线技术验收 Checklist
+
+> **本章定位**：纯技术验收清单，用于确认「系统达到可上线的技术状态」。
+> 合规与放行见 §7；本章是 §7 门 B 的**技术前置条件**。
+>
+> 验收通过 = 所有 P0 项 ✅；P1 项允许上线后补齐，但须有明确计划。
+
+### 9.1 功能验收（P0）
+
+| 优先级 | # | 项 | 验证方法 | 结果 |
+|---|---|---|---|---|
+| P0 | F-01 | 正常推理请求 200 | curl 发送 text 请求 | ☐ |
+| P0 | F-02 | 流式推理正常 | curl -N 验证 SSE 格式 | ☐ |
+| P0 | F-03 | 多端点路由生效 | 配置多端点，验证流量分配 | ☐ |
+| P0 | F-04 | 失败率感知路由 | 注入失败，验证流量倾斜 | ☐ |
+| P0 | F-05 | 熔断机制 | 连续失败 → 熔断 → 流量切走 | ☐ |
+| P0 | F-06 | 熔断恢复 | 冷却期后 → 半开探测 → 恢复 | ☐ |
+| P0 | F-07 | 自动重试 | 临时故障 → 重试成功 | ☐ |
+| P0 | F-08 | 重试预算 | 高失败率下重试不放大 | ☐ |
+| P0 | F-09 | L2/L3 降级 | 全部端点故障 → 兜底不崩溃 | ☐ |
+| P0 | F-10 | 灰度切流 | 白名单 → treatment/control 分组 | ☐ |
+| P0 | F-11 | 灰度自动回滚 | 灰度失败率超阈值 → 自动回滚 | ☐ |
+| P1 | F-12 | 配置热更新（零停机） | 更新路由表，请求不中断 | ☐ |
+| P1 | F-13 | 限流生效 | 超 QPS 返回 429 | ☐ |
+
+### 9.2 性能验收（P0）
+
+| 优先级 | # | 项 | 目标值 | 验证方法 | 结果 |
+|---|---|---|---|---|---|
+| P0 | P-01 | 路由层延迟 p95 | < 5ms | 压测工具（wrk/hey） | ☐ |
+| P0 | P-02 | 单节点 QPS | > 5,000 | 稳态压测 5min | ☐ |
+| P0 | P-03 | 熔断判断耗时 | < 1ms | benchmark + 真实流量 | ☐ |
+| P0 | P-04 | 高并发稳定性 | 内存增长 < 10MB / 小时 | 满负载 1h | ☐ |
+| P0 | P-05 | 大流不雪崩 | 10x 流量自动降级不崩溃 | 突发压测 | ☐ |
+| P1 | P-06 | 配置更新延迟 | < 10ms / 次 | 高频更新测试 | ☐ |
+| P1 | P-07 | Wasm 内存占用 | < 50MB | runtime 观测 | ☐ |
+| P1 | P-08 | onTick 性能 | < 1ms（10 端点） | 日志埋点 | ☐ |
+
+### 9.3 安全验收（P0）
+
+| 优先级 | # | 项 | 验证方法 | 结果 |
+|---|---|---|---|---|
+| P0 | S-01 | HMAC 签名验证有效 | 正确签名接受 / 错误签名拒绝 | ☐ |
+| P0 | S-02 | 配置篡改防护 | 修改内容不重签 → 被拒绝 | ☐ |
+| P0 | S-03 | 版本回退防护 | 低版本配置被忽略 | ☐ |
+| P0 | S-04 | 密钥不在日志中出现 | grep 日志确认 | ☐ |
+| P0 | S-05 | API Key 脱敏 | 错误信息中不暴露完整 key | ☐ |
+| P0 | S-06 | Wasm 沙箱隔离 | 插件无法访问宿主文件系统 | 架构评审 + 验证 | ☐ |
+| P1 | S-07 | 请求体大小限制 | 超大请求返回 413 | ☐ |
+| P1 | S-08 | 审计日志完整 | 操作可追溯，哈希链连续 | audit-verify 工具 | ☐ |
+| P1 | S-09 | TLS 配置 | 入口启用 TLS，弱密码套件禁用 | SSL Labs / openssl s_client | ☐ |
+| P1 | S-10 | RBAC 有效 | 管理接口需鉴权，越权被拒 | 渗透测试 | ☐ |
+
+### 9.4 可观测性验收（P0）
+
+| 优先级 | # | 项 | 验证方法 | 结果 |
+|---|---|---|---|---|
+| P0 | O-01 | 核心指标上报 | Prometheus 能查到 otpmask_* 指标 | ☐ |
+| P0 | O-02 | 路由请求量 | `rate(otpmask_route_requests_total[5m])` 有数据 | ☐ |
+| P0 | O-03 | 延迟分位数 | histogram_quantile 能算 p95 | ☐ |
+| P0 | O-04 | 端点健康状态 | 每个端点 health_status gauge 有值 | ☐ |
+| P0 | O-05 | 熔断状态 | circuit_breaker_state gauge 正确 | ☐ |
+| P0 | O-06 | 降级级别 | degrade_level gauge 正确反映状态 | ☐ |
+| P0 | O-07 | 日志格式规范 | JSON 结构化，含 request_id | ☐ |
+| P0 | O-08 | 关键告警配置 | 熔断 / 高失败率 / 错误率告警 | ☐ |
+| P1 | O-09 | Grafana 仪表盘 | 总览面板数据完整 | ☐ |
+| P1 | O-10 | 日志检索 | Loki / ELK 能按 request_id 查链路 | ☐ |
+
+### 9.5 运维验收（P1）
+
+| 优先级 | # | 项 | 验证方法 | 结果 |
+|---|---|---|---|---|
+| P1 | OPS-01 | HPA 自动扩缩 | 加压后副本数增加 | ☐ |
+| P1 | OPS-02 | PDB 生效 | 节点维护时不中断服务 | ☐ |
+| P1 | OPS-03 | 滚动升级零停机 | rollout restart 不丢请求 | ☐ |
+| P1 | OPS-04 | 回滚能力 | rollout undo 可回到上一版本 | ☐ |
+| P1 | OPS-05 | 故障演练 | 单 Pod 崩溃 → 自动恢复 | ☐ |
+| P1 | OPS-06 | 备份与恢复 | 配置 / 密钥备份 + 恢复演练 | ☐ |
+| P1 | OPS-07 | 运行手册 | 常见故障有排查步骤 | 对照 §5.2 |
+
+### 9.6 验收签字
+
+| 角色 | 姓名 | 日期 | 签字 |
+|---|---|---|---|
+| 开发负责人 | | | |
+| 测试负责人 | | | |
+| 运维负责人 | | | |
+| 安全负责人 | | | |
+
+> **验收通过标准**：所有 P0 项 ✅，P1 项有明确的补齐计划和责任人。
+>
+> 验收通过后，方可进入 §7 的合规放行流程（门 A → 门 B → 具名放行）。
