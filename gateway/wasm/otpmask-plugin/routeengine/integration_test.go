@@ -298,3 +298,184 @@ func TestE2E_RetryBudgetExhausted(t *testing.T) {
 		t.Fatalf("reason 应为 retry_budget_exhausted，got %s", d.Reason)
 	}
 }
+
+// 场景8：端点熔断 → 重试切到备用端点 → 最终成功（INT-05）
+// 验证：熔断-重试耦合决策 + 端点切换 + 结果回写
+func TestE2E_RetrySuccessOnAlternateEndpoint(t *testing.T) {
+	e := NewEngine(Config{
+		Strategy: StrategyFailureAware,
+		Endpoints: []EndpointConfig{
+			{Name: "ep-main", Weight: 0.8, Priority: 1, Enabled: true},
+			{Name: "ep-backup", Weight: 0.2, Priority: 1, Enabled: true},
+		},
+		EWMAMinSamples:       5,
+		EWMAAlpha:            0.5,
+		CircuitFailureThresh: 0.5,
+		CircuitMinSamples:    5,
+		CircuitCooldownMs:    30000,
+	})
+
+	// 预热：两端点各 10 次成功
+	for i := 0; i < 10; i++ {
+		e.RecordResult("ep-main", true)
+		e.RecordResult("ep-backup", true)
+	}
+
+	// ep-main 连续失败 → 触发熔断
+	cbTripped := false
+	for i := 0; i < 20; i++ {
+		e.RecordResult("ep-main", false)
+		cs, _ := e.GetEndpointCircuitState("ep-main")
+		if cs == CircuitOpen {
+			cbTripped = true
+			break
+		}
+	}
+	if !cbTripped {
+		t.Fatal("ep-main 应已熔断")
+	}
+
+	// 用 CoupledDecider 做重试决策
+	budgets := NewBudgetManager(RetryBudgetConfig{
+		MaxTokens:        10,
+		RefillIntervalMs: 60000,
+	})
+	retry := NewRetryPolicy(RetryConfig{MaxRetries: 2}, budgets)
+	cbMap := make(map[string]*CircuitBreaker)
+	for _, name := range []string{"ep-main", "ep-backup"} {
+		cs, _ := e.GetEndpointCircuitState(name)
+		cbMap[name] = &CircuitBreaker{
+			State:             cs,
+			CooldownMs:        30000,
+			FailureThreshold:  0.5,
+			MinSamples:        5,
+			LastStateChangeMs: 500, // 刚变状态，远未到冷却期
+		}
+	}
+	decider := NewCoupledDecider(retry, budgets, cbMap)
+	state := NewRetryState()
+	now := int64(1000)
+
+	// 当前端点（ep-main）已熔断 → 重试应切到备用端点
+	allEps := []string{"ep-main", "ep-backup"}
+	dec := decider.ShouldRetry(state, "ep-main", allEps, now, true, false)
+	if !dec.ShouldRetry {
+		t.Fatalf("熔断后应允许切换端点重试，reason=%s", dec.Reason)
+	}
+	if dec.RetryEndpoint == "ep-main" {
+		t.Fatal("熔断后重试不应切回失败端点")
+	}
+	if dec.RetryEndpoint != "ep-backup" {
+		t.Fatalf("重试应切到 ep-backup，got %s", dec.RetryEndpoint)
+	}
+	if dec.Reason != "failover_circuit_open" {
+		t.Fatalf("reason 应为 failover_circuit_open，got %s", dec.Reason)
+	}
+	if state.Attempt != 2 {
+		t.Fatalf("attempt 应为 2（初始1 + 1次重试），got %d", state.Attempt)
+	}
+
+	// 备用端点成功 → 最终成功
+	e.RecordResult(dec.RetryEndpoint, true)
+
+	// 验证：备用端点仍 Closed、失败率低
+	backupCs, _ := e.GetEndpointCircuitState("ep-backup")
+	if backupCs != CircuitClosed {
+		t.Fatalf("备用端点应处于 Closed，got %v", backupCs)
+	}
+	backupRate, _ := e.GetEndpointFailureRate("ep-backup")
+	if backupRate > 0.1 {
+		t.Fatalf("备用端点失败率应低，got %.4f", backupRate)
+	}
+}
+
+// 场景9：全链路复杂场景（INT-15）
+// 正常 → 一端点失败率升高 → 权重下降 → 流量倾斜 → 恢复 → 权重回归
+// 验证：完整生命周期下 EWMA + 动态权重 + 熔断 协同正确
+func TestE2E_FullLifecycle(t *testing.T) {
+	e := NewEngine(Config{
+		Strategy: StrategyFailureAware,
+		Endpoints: []EndpointConfig{
+			{Name: "ep-1", Weight: 0.6, Priority: 1, Enabled: true},
+			{Name: "ep-2", Weight: 0.4, Priority: 1, Enabled: true},
+		},
+		EWMAMinSamples:       10,
+		EWMAAlpha:            0.3,
+		CircuitFailureThresh: 0.7, // 设高一点，验证权重调整而非直接熔断
+		CircuitMinSamples:    10,
+		CircuitCooldownMs:    5000,
+		WeightMin:            0.05,
+		WeightAdjustStep:     0.1,
+		WeightFailureThresh:  0.3,
+		WeightRecoveryRatio:  0.5,
+	})
+
+	// 阶段1：预热 — 两端点各 20 次成功，建立基线
+	for i := 0; i < 20; i++ {
+		e.RecordResult("ep-1", true)
+		e.RecordResult("ep-2", true)
+	}
+	// 验证：两端点都健康、失败率接近 0、都在 Closed
+	for _, name := range []string{"ep-1", "ep-2"} {
+		rate, valid := e.GetEndpointFailureRate(name)
+		if !valid {
+			t.Fatalf("%s 统计应有效", name)
+		}
+		if rate > 0.05 {
+			t.Fatalf("%s 预热期失败率应接近 0，got %.4f", name, rate)
+		}
+		cs, _ := e.GetEndpointCircuitState(name)
+		if cs != CircuitClosed {
+			t.Fatalf("%s 应处于 Closed，got %v", name, cs)
+		}
+	}
+	w1Before, _ := e.GetEndpointWeight("ep-1")
+	w2Before, _ := e.GetEndpointWeight("ep-2")
+	if !floatEqual(w1Before+w2Before, 1.0) {
+		t.Fatalf("预热后权重和应为 1.0")
+	}
+
+	// 阶段2：ep-1 部分失败（30% 失败率） → 权重逐步下降
+	for i := 0; i < 30; i++ {
+		if i%3 == 0 {
+			e.RecordResult("ep-1", false)
+		} else {
+			e.RecordResult("ep-1", true)
+		}
+	}
+	rate1, valid1 := e.GetEndpointFailureRate("ep-1")
+	if !valid1 {
+		t.Fatal("ep-1 统计应有效")
+	}
+	if rate1 < 0.15 {
+		t.Fatalf("ep-1 失败率应显著升高（>0.15），got %.4f", rate1)
+	}
+	// ep-1 权重应下降（低于初始 0.6）
+	w1AfterFail, _ := e.GetEndpointWeight("ep-1")
+	if w1AfterFail >= w1Before {
+		t.Fatalf("失败后 ep-1 权重应下降，之前=%.3f 之后=%.3f", w1Before, w1AfterFail)
+	}
+
+	// 阶段3：ep-1 恢复（全成功） → 权重逐步回升
+	for i := 0; i < 100; i++ {
+		d := e.PickEndpoint()
+		e.RecordResult(d.EndpointName, true)
+	}
+	w1Recovered, _ := e.GetEndpointWeight("ep-1")
+	if w1Recovered <= w1AfterFail {
+		t.Fatalf("恢复后 ep-1 权重应回升，失败后=%.3f 恢复后=%.3f", w1AfterFail, w1Recovered)
+	}
+	// 权重和始终为 1
+	w2Recovered, _ := e.GetEndpointWeight("ep-2")
+	if !floatEqual(w1Recovered+w2Recovered, 1.0) {
+		t.Fatalf("恢复后权重和应为 1.0，got %.3f + %.3f = %.3f",
+			w1Recovered, w2Recovered, w1Recovered+w2Recovered)
+	}
+	// 两端点始终未熔断（因为失败率 < 0.7 阈值）
+	for _, name := range []string{"ep-1", "ep-2"} {
+		cs, _ := e.GetEndpointCircuitState(name)
+		if cs != CircuitClosed {
+			t.Fatalf("%s 应处于 Closed，got %v", name, cs)
+		}
+	}
+}
