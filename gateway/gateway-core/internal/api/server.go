@@ -131,6 +131,16 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /prescriptions/{id}", s.withAuth(s.handleDelete))
 	s.mux.HandleFunc("GET /prescriptions", s.withAuth(s.handleListByTenant))
 	s.mux.HandleFunc("GET /routes", s.withAuth(s.handleGetRoutes))
+	// 路由配置管理（方案 §4.1，P0-1 W4-2）
+	s.mux.HandleFunc("GET /routes/{tenant}/{model}", s.withAuth(s.handleGetRoute))
+	s.mux.HandleFunc("PUT /routes/{tenant}/{model}", s.withAuth(s.handleUpsertRoute))
+	s.mux.HandleFunc("DELETE /routes/{tenant}/{model}", s.withAuth(s.handleDeleteRoute))
+	s.mux.HandleFunc("POST /routes/dry-run", s.withAuth(s.handleDryRun))
+	s.mux.HandleFunc("GET /routes/endpoints/status", s.withAuth(s.handleEndpointStatus))
+	s.mux.HandleFunc("POST /routes/rollback", s.withAuth(s.handleRouteRollback))
+	s.mux.HandleFunc("GET /routes/history", s.withAuth(s.handleRouteHistory))
+	s.mux.HandleFunc("POST /routes/push", s.withAuth(s.handleRoutePush))
+	s.mux.HandleFunc("GET /routes/audit", s.withAuth(s.handleRouteAudit))
 	// 限流/预算表（Phase 1 门禁 #7）：GET 下发（拉路径）、PUT 策略源（校验+防回滚+签名）、
 	// history 变更审计查询、rollback 按版本回滚（判据 7）。
 	s.mux.HandleFunc("GET /ratelimits", s.withAuth(s.handleGetRateLimits))

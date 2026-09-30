@@ -238,7 +238,6 @@ func entryFor(cache *routecache.Cache, tenant, model string) *routingEntry {
 }
 
 // buildEngineConfig 由路由表条目构造引擎配置。
-// 可调参数（EWMA/熔断/重试/降级/灰度）暂用引擎内置默认值，待 §4.1 配置面落地后补齐。
 func buildEngineConfig(tr *routecache.TableRoute) routeengine.Config {
 	eps := make([]routeengine.EndpointConfig, 0, len(tr.Endpoints))
 	for _, ep := range tr.Endpoints {
@@ -258,6 +257,16 @@ func buildEngineConfig(tr *routecache.TableRoute) routeengine.Config {
 	return routeengine.Config{
 		Strategy:  routeStrategy(tr.Strategy),
 		Endpoints: eps,
+		Canary: routeengine.CanaryConfig{
+			Enabled:            tr.Canary.Enabled,
+			TargetEndpoint:     tr.Canary.TargetEndpoint,
+			TargetWeight:       tr.Canary.TargetWeight,
+			RampStep:           tr.Canary.RampStep,
+			RampIntervalMs:     tr.Canary.RampIntervalMs,
+			RollbackThreshold:  tr.Canary.RollbackThreshold,
+			RollbackMinSamples: tr.Canary.RollbackMinSamples,
+			AllowedTenants:     tr.Canary.AllowedTenants,
+		},
 	}
 }
 

@@ -60,9 +60,30 @@ func TestCrossModuleSignVerify(t *testing.T) {
 func toPluginRoutes(rs []route.TableRoute) []routecache.TableRoute {
 	out := make([]routecache.TableRoute, len(rs))
 	for i, r := range rs {
+		eps := make([]routecache.TableEndpoint, len(r.Endpoints))
+		for j, ep := range r.Endpoints {
+			eps[j] = routecache.TableEndpoint{
+				Name: ep.Name, URL: ep.URL, Weight: ep.Weight,
+				Priority: ep.Priority, Enabled: ep.Enabled,
+				Auth: routecache.EndpointAuth{
+					Type: ep.Auth.Type, SecretRef: ep.Auth.SecretRef,
+				},
+			}
+		}
+		tenants := make([]string, len(r.Canary.AllowedTenants))
+		copy(tenants, r.Canary.AllowedTenants)
 		out[i] = routecache.TableRoute{
 			Tenant: r.Tenant, Model: r.Model, DefaultEngine: r.DefaultEngine,
 			FallbackEngine: r.FallbackEngine, Target: r.Target,
+			Endpoints: eps, Strategy: r.Strategy,
+			Canary: routecache.RouteCanary{
+				Enabled: r.Canary.Enabled, TargetEndpoint: r.Canary.TargetEndpoint,
+				TargetWeight: r.Canary.TargetWeight, RampStep: r.Canary.RampStep,
+				RampIntervalMs: r.Canary.RampIntervalMs,
+				RollbackThreshold: r.Canary.RollbackThreshold,
+				RollbackMinSamples: r.Canary.RollbackMinSamples,
+				AllowedTenants: tenants,
+			},
 		}
 	}
 	return out

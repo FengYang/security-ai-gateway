@@ -17,13 +17,47 @@ import (
 	"time"
 )
 
+// EndpointAuth 端点凭证配置（与 gateway-core internal/route 对齐）。
+type EndpointAuth struct {
+	Type      string `json:"type,omitempty"`       // 认证类型：bearer / apikey / none
+	SecretRef string `json:"secret_ref,omitempty"` // 密钥引用：km://<path> / file://<path> / env://<name>
+}
+
+// TableEndpoint 路由表中的端点配置（P0-1 多端点权重路由）。
+// 与 gateway-core internal/route 的 JSON 对齐（签名一致性依赖）。
+type TableEndpoint struct {
+	Name     string       `json:"name"`
+	URL      string       `json:"url,omitempty"`
+	Weight   float64      `json:"weight,omitempty"`
+	Priority int          `json:"priority,omitempty"`
+	Enabled  bool         `json:"enabled,omitempty"`
+	Auth     EndpointAuth `json:"auth,omitempty"` // P0 端点凭证配置（§9.2）
+}
+
+// RouteCanary 灰度切流配置（与 gateway-core internal/route 对齐）。
+type RouteCanary struct {
+	Enabled            bool     `json:"enabled,omitempty"`
+	TargetEndpoint     string   `json:"target_endpoint,omitempty"`
+	TargetWeight       float64  `json:"target_weight,omitempty"`
+	RampStep           float64  `json:"ramp_step,omitempty"`
+	RampIntervalMs     int64    `json:"ramp_interval_ms,omitempty"`
+	RollbackThreshold  float64  `json:"rollback_threshold,omitempty"`
+	RollbackMinSamples int64    `json:"rollback_min_samples,omitempty"`
+	AllowedTenants     []string `json:"allowed_tenants,omitempty"`
+}
+
 // TableRoute 路由表条目（与 gateway-core internal/route 的 JSON 对齐）。
 type TableRoute struct {
-	Tenant         string `json:"tenant"`
-	Model          string `json:"model"`
-	DefaultEngine  string `json:"default_engine"`
-	FallbackEngine string `json:"fallback_engine,omitempty"`
-	Target         string `json:"target,omitempty"`
+	Tenant         string          `json:"tenant"`
+	Model          string          `json:"model"`
+	DefaultEngine  string          `json:"default_engine"`
+	FallbackEngine string          `json:"fallback_engine,omitempty"`
+	Target         string          `json:"target,omitempty"`
+	Endpoints      []TableEndpoint `json:"endpoints,omitempty"` // P0-1 新增：多端点权重配置
+	// P0-1 新增：多端点路由策略（priority/weighted/failure-aware）。空 = priority。
+	// 与 gateway-core internal/route.TableRoute 的 JSON 严格对齐（签名一致性）。
+	Strategy string      `json:"strategy,omitempty"`
+	Canary   RouteCanary `json:"canary,omitempty"` // P0-1 新增：灰度切流配置（§7.5）
 }
 
 // RouteTable 签名路由表（JSON 与网关侧对齐）。
