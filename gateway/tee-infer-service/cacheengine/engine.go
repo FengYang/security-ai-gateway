@@ -59,6 +59,11 @@ func WithFastScanner(s FastScanner) EngineOption {
 	return func(e *engine) { e.scanner = s }
 }
 
+// WithSemanticStore 注入语义缓存存储。
+func WithSemanticStore(s SemanticStore) EngineOption {
+	return func(e *engine) { e.sem = s }
+}
+
 // NewCacheEngine 构造缓存引擎。
 // mode=off 时引擎返回 NullCacheEngine 行为（永不命中），保证向后兼容。
 func NewCacheEngine(cfg CacheConfig, opts ...EngineOption) CacheEngine {
@@ -103,6 +108,12 @@ func NewCacheEngine(cfg CacheConfig, opts ...EngineOption) CacheEngine {
 	}
 	if e.scanner == nil {
 		e.scanner = &stubScanner{} // 默认识别为不可用，读时快审 fail-closed
+	}
+
+	// 初始化语义缓存（二期）
+	if e.sem == nil && e.cfg.Mode == ModeSemantic {
+		// 默认 stub：embedder 不可用，语义层自动降级
+		// 生产环境通过 WithSemanticStore 注入真正实现
 	}
 
 	return e
@@ -204,16 +215,35 @@ func (e *engine) doLookup(ctx LookupContext) LookupResult {
 
 	// 5. L2 语义（二期）
 	if e.sem != nil && e.sem.Enabled(ctx.TenantID) {
-		if r := e.semanticLookup(ctx); r.Hit {
-			return r
-		} else {
-			return LookupResult{
-				Hit:          false,
-				Kind:         "miss",
-				RejectReason: r.RejectReason,
-				TopCandidate: r.TopCandidate,
-				Jitter:       e.jitter.Sample(ctx),
+		hit, entryID, sim, _, _, reason := e.sem.Lookup(ctx)
+		if hit && e.exact != nil {
+			// 从 ExactStore 取正文
+			entry, ok := e.exact.Get(entryID)
+			if ok && EntryUsable(entry, ctx.GuardVer, ctx.PolicyVer, e.nowFn()) {
+				e.stats.observeLookup("semantic", "hit")
+				return e.finishHit(ctx, entry, KindSemantic, sim, sim)
 			}
+			// 正文已失效 → 清理向量索引
+			if ok {
+				e.exact.Delete(entryID)
+			}
+			_ = e.sem.Delete(entryID)
+			e.stats.observeLookup("semantic", "entry_evicted")
+		} else if hit {
+			e.stats.observeLookup("semantic", "no_exact_store")
+		} else {
+			e.stats.observeLookup("semantic", "miss")
+			_ = reason // 区分 miss 原因（below_threshold / no_candidates / embed_error）
+		}
+
+		// 语义未命中，返回 miss（带上 top 候选信息用于观察）
+		return LookupResult{
+			Hit:          false,
+			Kind:         "miss",
+			RejectReason: "semantic_miss:" + reason,
+			Similarity:   sim,
+			TopCandidate: sim,
+			Jitter:       e.jitter.Sample(ctx),
 		}
 	}
 
@@ -377,8 +407,22 @@ func (e *engine) Store(ctx StoreContext, res InferResult) StoreOutcome {
 	}
 
 	// 写语义层（二期）
-	if e.sem != nil && e.sem.Enabled(ctx.TenantID) && e.sem.CanStore(&ctx) {
-		_ = e.sem.Store(ctx, entry) // fail-open：写失败不影响主流程
+	if e.sem != nil && e.sem.Enabled(ctx.TenantID) {
+		meta := VectorMeta{
+			EntryID:    key, // 用 exact key 作为向量索引 ID，便于回查正文
+			TenantID:   ctx.TenantID,
+			EngineType: ctx.EngineType,
+			Model:      ctx.Model,
+			PolicyVer:  ctx.PolicyVer,
+			GuardVer:   ctx.GuardVer,
+			Scene:      SceneClass(ctx.Scene),
+			ExpireAt:   entry.ExpireAt,
+		}
+		if err := e.sem.Store(key, res.Text, meta); err != nil {
+			// fail-open：向量写入失败不影响精确层命中
+			return StoreOutcome{Stored: true, Layer: "exact"}
+		}
+		e.stats.observeStore("semantic")
 		return StoreOutcome{Stored: true, Layer: "both"}
 	}
 
@@ -470,6 +514,9 @@ func (e *engine) Stats() StatsSnapshot {
 	}
 	if e.neg != nil {
 		snap.NegativeEntries = e.neg.Len()
+	}
+	if e.sem != nil {
+		snap.VectorEntries = e.sem.Size()
 	}
 	if e.stats != nil {
 		e.stats.fillSnapshot(&snap)
@@ -563,18 +610,4 @@ func (e *engine) isCanaryAllowed(ctx LookupContext) bool {
 	}
 
 	return false
-}
-
-// ===== 语义层占位（二期实现） =====
-
-// semanticLookup 语义查询占位（二期实现）。
-func (e *engine) semanticLookup(ctx LookupContext) LookupResult {
-	return LookupResult{Hit: false, Kind: "miss", RejectReason: "not_found"}
-}
-
-// SemanticStore 语义存储接口（二期）。
-type SemanticStore interface {
-	Enabled(tenantID string) bool
-	CanStore(ctx *StoreContext) bool
-	Store(ctx StoreContext, entry *Entry) error
 }

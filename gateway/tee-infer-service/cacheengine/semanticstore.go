@@ -1,0 +1,200 @@
+package cacheengine
+
+import (
+	"context"
+	"fmt"
+)
+
+// SemanticStore 语义缓存存储层（§4.1.3 / §5.3）。
+// 职责：
+//   - 编排 Embedder + VectorIndex（向量索引只存元数据，正文在 ExactStore）
+//   - 语义查询：embed → topK 候选 → 阈值过滤 → 返回最佳 entry_id
+//   - 写入：embed response → upsert 向量索引（通过 entry_id 关联 ExactStore 正文）
+//   - 版本校验、租户隔离、TTL 过期过滤
+//
+// 注意：SemanticStore 不持有 ExactStore（正文存取由 engine 编排），
+// 两者通过 entry_id 关联（VectorMeta.EntryID == ExactStore key 或独立 entry_id）。
+type SemanticStore interface {
+	// Lookup 语义查询。返回命中的 entry_id 和相似度；未命中返回 reason。
+	Lookup(ctx LookupContext) (hit bool, entryID string, sim float64, scene string, threshold float64, reason string)
+
+	// Store 写入向量索引。内部计算 response embedding。
+	Store(entryID string, text string, meta VectorMeta) error
+
+	// Delete 删除指定 entry 的向量索引。
+	Delete(entryID string) error
+
+	// Invalidate 按选择器失效（返回删除的向量条目数）。
+	Invalidate(sel InvalidateSelector) int
+
+	// Size 当前向量条目数。
+	Size() int
+
+	// Close 关闭。
+	Close() error
+
+	// Enabled 语义缓存是否启用（mode + 租户策略）。
+	Enabled(tenantID string) bool
+}
+
+// semanticStore 语义缓存实现。
+type semanticStore struct {
+	cfg      *CacheConfig
+	embedder Embedder
+	index    VectorIndex
+	nowFn    nowFunc
+}
+
+// NewSemanticStore 构造语义缓存存储。
+// embedder 不可为 nil（即使是 stub，也由调用方决定）。
+// index 不可为 nil。
+func NewSemanticStore(cfg *CacheConfig, embedder Embedder, index VectorIndex) (SemanticStore, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("semantic store: cfg is nil")
+	}
+	if embedder == nil {
+		return nil, fmt.Errorf("semantic store: embedder is nil")
+	}
+	if index == nil {
+		return nil, fmt.Errorf("semantic store: index is nil")
+	}
+	return &semanticStore{
+		cfg:      cfg,
+		embedder: embedder,
+		index:    index,
+		nowFn:    defaultNow,
+	}, nil
+}
+
+// Enabled 语义缓存是否启用。
+func (s *semanticStore) Enabled(tenantID string) bool {
+	if s.cfg.Mode != ModeSemantic && s.cfg.Mode != ModeFull {
+		return false
+	}
+	if !s.cfg.Semantic.Enabled {
+		return false
+	}
+	if !s.embedder.Available() {
+		return false
+	}
+	// 租户策略
+	return tenantPolicy(s.cfg, tenantID) != PolicyOff
+}
+
+// Lookup 语义查询（§6.5）。
+// 流程：取场景化阈值 → embed query → 向量检索 → 阈值过滤 → 返回最佳 entry_id
+func (s *semanticStore) Lookup(ctx LookupContext) (bool, string, float64, string, float64, string) {
+	scene := string(ctx.Scene)
+	if scene == "" {
+		scene = "general"
+	}
+
+	// 获取场景化阈值
+	th := s.sceneThreshold(scene)
+
+	// 计算 query 向量
+	ctx2, cancel := context.WithTimeout(context.Background(), s.cfg.Semantic.Embedder.Timeout)
+	defer cancel()
+
+	vec, err := s.embedder.Embed(ctx2, ctx.PromptText)
+	if err != nil {
+		return false, "", 0, scene, th, "embed_error"
+	}
+
+	// 向量检索（topK + 硬过滤）
+	filter := VectorFilter{
+		TenantID:   ctx.TenantID,
+		EngineType: ctx.EngineType,
+		Model:      ctx.Model,
+		PolicyVer:  ctx.PolicyVer,
+		GuardVer:   ctx.GuardVer,
+	}
+
+	hits, err := s.index.Search(vec, s.cfg.Semantic.Vector.TopK, filter)
+	if err != nil || len(hits) == 0 {
+		return false, "", 0, scene, th, "no_candidates"
+	}
+
+	// 取第一个超过阈值的候选（已按相似度降序）
+	best := hits[0]
+	if best.Similarity < th {
+		return false, best.EntryID, best.Similarity, scene, th, "below_threshold"
+	}
+
+	return true, best.EntryID, best.Similarity, scene, th, ""
+}
+
+// Store 写入向量索引。
+// 计算 response embedding → upsert 向量索引。
+// 如果 embed 失败，返回错误（由 engine 决定是否回滚 ExactStore）。
+func (s *semanticStore) Store(entryID string, text string, meta VectorMeta) error {
+	if !s.embedder.Available() {
+		return fmt.Errorf("embedder unavailable")
+	}
+	if text == "" {
+		return fmt.Errorf("empty text")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Semantic.Embedder.Timeout)
+	defer cancel()
+
+	vec, err := s.embedder.Embed(ctx, text)
+	if err != nil {
+		return fmt.Errorf("embed response: %w", err)
+	}
+
+	return s.index.Upsert(entryID, vec, meta)
+}
+
+// Delete 删除指定 entry 的向量索引。
+func (s *semanticStore) Delete(entryID string) error {
+	return s.index.Delete(entryID)
+}
+
+// Invalidate 失效语义缓存。
+// FLAT 索引不支持按标签批量删除，仅支持 key 精确删除和全量失效。
+// 生产环境 Redis VSS 才支持高效标签删除。
+func (s *semanticStore) Invalidate(sel InvalidateSelector) int {
+	// 注：FLAT 索引的批量删除代价为 O(N)，在条目多时不适合同步调用。
+	// 一期先返回 0，后续接入 Redis VSS 后再实现。
+	return 0
+}
+
+// Size 当前向量索引条目数。
+func (s *semanticStore) Size() int {
+	return s.index.Size()
+}
+
+// Close 关闭。
+func (s *semanticStore) Close() error {
+	return nil
+}
+
+// sceneThreshold 获取场景化阈值。
+// 场景名与 ThresholdConfig 字段映射：factual → Factual, general → General, code → Code, math → Math。
+func (s *semanticStore) sceneThreshold(scene string) float64 {
+	tc := s.cfg.Semantic.Threshold
+	switch scene {
+	case "factual":
+		if tc.Factual > 0 {
+			return tc.Factual
+		}
+	case "general":
+		if tc.General > 0 {
+			return tc.General
+		}
+	case "code":
+		if tc.Code > 0 {
+			return tc.Code
+		}
+	case "math":
+		if tc.Math > 0 {
+			return tc.Math
+		}
+	}
+	// 默认为 general 阈值（如果有），否则 0.85 兜底
+	if tc.General > 0 {
+		return tc.General
+	}
+	return 0.85
+}
