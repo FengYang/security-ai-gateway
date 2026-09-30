@@ -277,10 +277,9 @@ func buildEngineConfig(tr *routecache.TableRoute) routeengine.Config {
 			Enabled:  true,
 		})
 	}
-	return routeengine.Config{
-		Strategy:  routeStrategy(tr.Strategy),
-		Endpoints: eps,
-		Canary: routeengine.CanaryConfig{
+	var canaryCfg routeengine.CanaryConfig
+	if tr.Canary != nil {
+		canaryCfg = routeengine.CanaryConfig{
 			Enabled:            tr.Canary.Enabled,
 			TargetEndpoint:     tr.Canary.TargetEndpoint,
 			TargetWeight:       tr.Canary.TargetWeight,
@@ -289,7 +288,12 @@ func buildEngineConfig(tr *routecache.TableRoute) routeengine.Config {
 			RollbackThreshold:  tr.Canary.RollbackThreshold,
 			RollbackMinSamples: tr.Canary.RollbackMinSamples,
 			AllowedTenants:     tr.Canary.AllowedTenants,
-		},
+		}
+	}
+	return routeengine.Config{
+		Strategy:  routeStrategy(tr.Strategy),
+		Endpoints: eps,
+		Canary:    canaryCfg,
 	}
 }
 

@@ -70,20 +70,22 @@ func toPluginRoutes(rs []route.TableRoute) []routecache.TableRoute {
 				},
 			}
 		}
-		tenants := make([]string, len(r.Canary.AllowedTenants))
-		copy(tenants, r.Canary.AllowedTenants)
 		out[i] = routecache.TableRoute{
 			Tenant: r.Tenant, Model: r.Model, DefaultEngine: r.DefaultEngine,
 			FallbackEngine: r.FallbackEngine, Target: r.Target,
 			Endpoints: eps, Strategy: r.Strategy,
-			Canary: routecache.RouteCanary{
+		}
+		if r.Canary != nil {
+			tenants := make([]string, len(r.Canary.AllowedTenants))
+			copy(tenants, r.Canary.AllowedTenants)
+			out[i].Canary = &routecache.RouteCanary{
 				Enabled: r.Canary.Enabled, TargetEndpoint: r.Canary.TargetEndpoint,
 				TargetWeight: r.Canary.TargetWeight, RampStep: r.Canary.RampStep,
 				RampIntervalMs: r.Canary.RampIntervalMs,
 				RollbackThreshold: r.Canary.RollbackThreshold,
 				RollbackMinSamples: r.Canary.RollbackMinSamples,
-				AllowedTenants: tenants,
-			},
+				AllowedTenants:     tenants,
+			}
 		}
 	}
 	return out

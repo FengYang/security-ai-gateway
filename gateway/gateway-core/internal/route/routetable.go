@@ -52,7 +52,7 @@ type TableRoute struct {
 	// P0-1 新增：多端点路由策略（priority 主备 / weighted 权重 / failure-aware 失败率感知）。
 	// 空 = priority（缺省，与既有行为一致）。仅在 Endpoints 非空时生效。
 	Strategy string `json:"strategy,omitempty"`
-	Canary   RouteCanary `json:"canary,omitempty"` // P0-1 新增：灰度切流配置（§7.5）
+	Canary   *RouteCanary `json:"canary,omitempty"` // P0-1 新增：灰度切流配置（§7.5）
 }
 
 // RouteTable 默认路由表（gateway-core 为事实源，签名后经 GET /routes 下发）。
@@ -178,7 +178,7 @@ func (r *TableRoute) Validate() error {
 			return fmt.Errorf("strategy 不合法: %q（支持 priority/weighted/failure-rate-aware）", r.Strategy)
 		}
 		// 灰度配置校验（启用才校验）
-		if r.Canary.Enabled {
+		if r.Canary != nil && r.Canary.Enabled {
 			if err := r.Canary.validate(r.Endpoints); err != nil {
 				return fmt.Errorf("canary 配置无效: %w", err)
 			}
@@ -258,11 +258,15 @@ func (t *RouteTable) Clone() *RouteTable {
 	for i, r := range t.Routes {
 		eps := make([]TableEndpoint, len(r.Endpoints))
 		copy(eps, r.Endpoints)
-		tenants := make([]string, len(r.Canary.AllowedTenants))
-		copy(tenants, r.Canary.AllowedTenants)
 		routes[i] = r
 		routes[i].Endpoints = eps
-		routes[i].Canary.AllowedTenants = tenants
+		if r.Canary != nil {
+			canary := *r.Canary
+			tenants := make([]string, len(r.Canary.AllowedTenants))
+			copy(tenants, r.Canary.AllowedTenants)
+			canary.AllowedTenants = tenants
+			routes[i].Canary = &canary
+		}
 	}
 	sig := make([]byte, len(t.Signature))
 	copy(sig, t.Signature)
@@ -362,12 +366,14 @@ func diffRouteFields(a, b *TableRoute) []RouteChange {
 		})
 	}
 	// 灰度配置：启用状态变化即记一条
-	if a.Canary.Enabled != b.Canary.Enabled {
+	aCanaryEnabled := a.Canary != nil && a.Canary.Enabled
+	bCanaryEnabled := b.Canary != nil && b.Canary.Enabled
+	if aCanaryEnabled != bCanaryEnabled {
 		changes = append(changes, RouteChange{
 			Tenant: a.Tenant, Model: a.Model, Change: "modify",
 			Field: "canary.enabled",
-			Old:   fmt.Sprintf("%v", a.Canary.Enabled),
-			New:   fmt.Sprintf("%v", b.Canary.Enabled),
+			Old:   fmt.Sprintf("%v", aCanaryEnabled),
+			New:   fmt.Sprintf("%v", bCanaryEnabled),
 		})
 	}
 	return changes

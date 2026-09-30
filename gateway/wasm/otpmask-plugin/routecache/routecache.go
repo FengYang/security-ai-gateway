@@ -57,7 +57,7 @@ type TableRoute struct {
 	// P0-1 新增：多端点路由策略（priority/weighted/failure-aware）。空 = priority。
 	// 与 gateway-core internal/route.TableRoute 的 JSON 严格对齐（签名一致性）。
 	Strategy string      `json:"strategy,omitempty"`
-	Canary   RouteCanary `json:"canary,omitempty"` // P0-1 新增：灰度切流配置（§7.5）
+	Canary   *RouteCanary `json:"canary,omitempty"` // P0-1 新增：灰度切流配置（§7.5）
 }
 
 // RouteTable 签名路由表（JSON 与网关侧对齐）。
