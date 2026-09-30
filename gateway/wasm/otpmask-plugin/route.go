@@ -168,14 +168,23 @@ func applyRouteDecision(ctx wrapper.HttpContext, config PluginConfig, log logs.L
 	// 引擎按 tenant|model 隔离，维护 EWMA 失败率/熔断/动态权重状态；路由表版本变化时
 	// 平滑迁移（保留统计）。Endpoints 为空 → entryFor 返回 nil → 行为与接线前完全一致。
 	if e := entryFor(routeRuntime.cache, tenant, model); e != nil {
-		epd := e.engine.PickEndpoint()
+		epd := e.engine.PickEndpointForTenant(tenant)
 		if epd.EndpointName != "" {
 			_ = proxywasm.ReplaceHttpRequestHeader(hdrOtpEndpoint, epd.EndpointName)
 			// 请求级决策结果挂到上下文，供响应阶段回写 RecordResult（§6.5.8 结果判定）。
 			ctx.SetContext(ctxKeyRouteEndpoint, epd.EndpointName)
 			ctx.SetContext(ctxKeyRouteEntry, e)
-			log.Debugf("otpmask-plugin: 端点选择 tenant=%q model=%q endpoint=%q strategy=%s reason=%s",
-				tenant, model, epd.EndpointName, epd.Strategy, epd.Reason)
+			log.Debugf("otpmask-plugin: 端点选择 tenant=%q model=%q endpoint=%q strategy=%s reason=%s canary=%s",
+				tenant, model, epd.EndpointName, epd.Strategy, epd.Reason, epd.CanaryGroup)
+			// §10 #11：灰度请求计数
+			switch epd.CanaryGroup {
+			case "whitelist":
+				metricRouteCanaryWhitelist.incr()
+			case "treatment":
+				metricRouteCanaryTreatment.incr()
+			case "control":
+				metricRouteCanaryControl.incr()
+			}
 		}
 	}
 
