@@ -29,6 +29,7 @@ package main
 import (
 	"encoding/hex"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
@@ -38,16 +39,19 @@ import (
 
 	"security-ai-gateway/gateway/rxroute"
 	"security-ai-gateway/gateway/wasm/otpmask-plugin/routecache"
+	"security-ai-gateway/gateway/wasm/otpmask-plugin/routeengine"
 )
 
 const (
-	hdrOtpRoute  = "X-Otp-Route"  // 处方（推路径 L1，JWT）
-	hdrOtpEngine = "X-Otp-Engine" // 决策输出：目标引擎（供 Envoy 路由规则）
-	hdrOtpTarget = "X-Otp-Target" // 决策输出：显式目标端点
-	hdrOtpModel  = "X-Otp-Model"  // 可选输入：模型维度（请求头阶段可得）
+	hdrOtpRoute    = "X-Otp-Route"    // 处方（推路径 L1，JWT）
+	hdrOtpEngine   = "X-Otp-Engine"   // 决策输出：目标引擎（供 Envoy 路由规则）
+	hdrOtpTarget   = "X-Otp-Target"   // 决策输出：显式目标端点
+	hdrOtpModel    = "X-Otp-Model"    // 可选输入：模型维度（请求头阶段可得）
+	hdrOtpEndpoint = "X-Otp-Endpoint" // P0-1 新增：选中的端点名称（多端点路由决策输出）
 )
 
 // routeRuntimeState 路由运行时状态：验签密钥 + 路由表缓存 + 拉取参数（由 parseConfig 初始化）。
+// 多端点路由引擎按 tenant|model 隔离，见下方 routingRegistry（不在本结构内，避免跨租户共享状态）。
 type routeRuntimeState struct {
 	key            []byte
 	cache          *routecache.Cache
@@ -74,6 +78,8 @@ func initRouteRuntime(config PluginConfig, log logs.Log) {
 	routeRuntime.service = ""
 	routeRuntime.port = 0
 	routeRuntime.pollIntervalMs = 0
+	// 派发开关每次重解析都复位：未启用路由时不可能有端点决策，故必为 false（零行为变化）。
+	routeDispatchEnabled = false
 	if !config.GatewayCoreEnabled || config.RouteVerifyKeyHex == "" {
 		return
 	}
@@ -91,8 +97,13 @@ func initRouteRuntime(config PluginConfig, log logs.Log) {
 	routeRuntime.pollIntervalMs = config.PollIntervalSeconds * 1000
 	// 注册周期拉取（幂等）：负责冷启动与后续刷新（请求路径不再发起拉取）。
 	ensureRouteFetchLoop()
-	log.Infof("otpmask-plugin: 路由决策已启用 gateway-core=%s:%d max_stale=%ds poll=%ds",
-		config.GatewayCoreService, config.GatewayCorePort, config.MaxStaleSeconds, config.PollIntervalSeconds)
+	// 注册运行时周期任务（幂等）：三级降级重评估 + 端点快照可观测（§6.9/§10）。
+	ensureRouteRuntimeLoop()
+	// 非流式重试（§6.5）仅在路由决策可用时才有意义（需端点决策结果）。
+	routeDispatchEnabled = config.RouteDispatchEnabled
+	log.Infof("otpmask-plugin: 路由决策已启用 gateway-core=%s:%d max_stale=%ds poll=%ds dispatch=%v",
+		config.GatewayCoreService, config.GatewayCorePort, config.MaxStaleSeconds,
+		config.PollIntervalSeconds, routeDispatchEnabled)
 }
 
 // routeEnabled 路由决策是否已启用。
@@ -125,6 +136,8 @@ func decideRoute(cache *routecache.Cache, key []byte, tenant, model, rxToken str
 }
 
 // applyRouteDecision 读请求维度 → 决策 → 写路由头或 fail-closed（只读缓存，不发起拉取）。
+// P0-1 新增：如果路由表配置了多端点（Endpoints 非空），则在决策引擎之后再做一次端点选择，
+// 结果写入 X-Otp-Endpoint 头。未配置 Endpoints = 行为与接线前完全一致（向后兼容）。
 func applyRouteDecision(ctx wrapper.HttpContext, config PluginConfig, log logs.Log) types.Action {
 	if !routeEnabled() {
 		return types.HeaderContinue // 未启用路由：与接线前行为一致
@@ -150,7 +163,203 @@ func applyRouteDecision(ctx wrapper.HttpContext, config PluginConfig, log logs.L
 	if d.Target != "" {
 		_ = proxywasm.ReplaceHttpRequestHeader(hdrOtpTarget, d.Target)
 	}
+
+	// === P0-1 多端点路由：Endpoints 非空时由有状态引擎选择端点 ===
+	// 引擎按 tenant|model 隔离，维护 EWMA 失败率/熔断/动态权重状态；路由表版本变化时
+	// 平滑迁移（保留统计）。Endpoints 为空 → entryFor 返回 nil → 行为与接线前完全一致。
+	if e := entryFor(routeRuntime.cache, tenant, model); e != nil {
+		epd := e.engine.PickEndpoint()
+		if epd.EndpointName != "" {
+			_ = proxywasm.ReplaceHttpRequestHeader(hdrOtpEndpoint, epd.EndpointName)
+			// 请求级决策结果挂到上下文，供响应阶段回写 RecordResult（§6.5.8 结果判定）。
+			ctx.SetContext(ctxKeyRouteEndpoint, epd.EndpointName)
+			ctx.SetContext(ctxKeyRouteEntry, e)
+			log.Debugf("otpmask-plugin: 端点选择 tenant=%q model=%q endpoint=%q strategy=%s reason=%s",
+				tenant, model, epd.EndpointName, epd.Strategy, epd.Reason)
+		}
+	}
+
 	return types.HeaderContinue
+}
+
+// ============================================================
+// 多端点路由引擎注册表（P0-1 W3 接线）
+// ============================================================
+
+// routingEntry 单个 tenant+model 的有状态路由引擎及其来源路由表版本。
+type routingEntry struct {
+	engine  *routeengine.Engine
+	degrade *routeengine.DegradationManager // 三级降级级别（§6.9，周期 tick 重评估）
+	version int
+}
+
+// routingRegistry 多端点路由引擎注册表（按 tenant|model 隔离）。
+// wasm 单线程执行，仍以互斥锁保护，避免配置热更新与请求路径交叠。
+// 条目只增不删（随 tenant×model 规模有界），保证热更新时统计状态不丢失。
+type routingRegistry struct {
+	mu      sync.Mutex
+	entries map[string]*routingEntry
+}
+
+var routingEngines = routingRegistry{entries: make(map[string]*routingEntry)}
+
+// entryFor 取（或建）指定 tenant+model 的有状态路由条目。
+// 未命中路由表或该条目未配置端点 → 返回 nil（调用方保持既有行为，向后兼容）。
+// 路由表版本变化时用 UpdateConfigSmooth 平滑迁移（保留 EWMA/熔断状态）。
+func entryFor(cache *routecache.Cache, tenant, model string) *routingEntry {
+	if cache == nil {
+		return nil
+	}
+	tr := cache.Lookup(tenant, model)
+	if tr == nil || len(tr.Endpoints) == 0 {
+		return nil
+	}
+	ver := cache.Version()
+	key := tenant + "\x00" + model
+
+	routingEngines.mu.Lock()
+	defer routingEngines.mu.Unlock()
+	e := routingEngines.entries[key]
+	if e == nil {
+		e = &routingEntry{
+			engine:  routeengine.NewEngine(buildEngineConfig(tr)),
+			degrade: routeengine.NewDegradationManager(routeengine.DegradationConfig{}),
+			version: ver,
+		}
+		routingEngines.entries[key] = e
+		return e
+	}
+	if e.version != ver {
+		e.engine.UpdateConfigSmooth(buildEngineConfig(tr))
+		e.version = ver
+		metricRouteConfigReload.incr() // §10 #12：配置平滑热更新计数
+	}
+	return e
+}
+
+// buildEngineConfig 由路由表条目构造引擎配置。
+// 可调参数（EWMA/熔断/重试/降级/灰度）暂用引擎内置默认值，待 §4.1 配置面落地后补齐。
+func buildEngineConfig(tr *routecache.TableRoute) routeengine.Config {
+	eps := make([]routeengine.EndpointConfig, 0, len(tr.Endpoints))
+	for _, ep := range tr.Endpoints {
+		if ep.Name == "" {
+			continue // 无名端点不参与选择（与既有接线一致）
+		}
+		// W3 阶段：Name 非空即视为启用（与既有接线一致）；显式禁用由控制面下发时
+		// 从 Endpoints 列表中剔除该条目承担。
+		eps = append(eps, routeengine.EndpointConfig{
+			Name:     ep.Name,
+			URL:      ep.URL,
+			Weight:   ep.Weight,
+			Priority: ep.Priority,
+			Enabled:  true,
+		})
+	}
+	return routeengine.Config{
+		Strategy:  routeStrategy(tr.Strategy),
+		Endpoints: eps,
+	}
+}
+
+// routeStrategy 解析路由策略字符串（大小写与连接符不敏感）。
+// 兼容方案 §4.1.3 枚举（priority/weighted/failure-rate-aware）与引擎内部取值；
+// 未知/空值回落 priority（主备，最保守）。
+func routeStrategy(s string) routeengine.Strategy {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "weighted", "weight":
+		return routeengine.StrategyWeighted
+	case "failure-rate-aware", "failure_rate_aware", "failure-rate", "failureaware":
+		return routeengine.StrategyFailureAware
+	case "primary-backup", "priority", "primary_backup":
+		return routeengine.StrategyPriority
+	default:
+		return routeengine.StrategyPriority
+	}
+}
+
+// routeEndpointSuccess 判定一次端点响应是否算成功（§6.5.8 错误分类与处理矩阵）：
+// 5xx 与 429 计入失败率/熔断；其余（含 4xx 中的 400/401/403）不计入失败。
+func routeEndpointSuccess(status int) bool {
+	return status < 500 && status != 429
+}
+
+// recordRouteResult 响应阶段回写端点结果（供 EWMA/熔断/动态权重消费）。
+// 未经端点选择的请求（endpoint 缺失/条目缺失）为 no-op。
+func recordRouteResult(ctx wrapper.HttpContext, status int) {
+	name, ok := ctx.GetContext(ctxKeyRouteEndpoint).(string)
+	if !ok || name == "" {
+		return
+	}
+	e, ok := ctx.GetContext(ctxKeyRouteEntry).(*routingEntry)
+	if !ok || e == nil {
+		return
+	}
+	metricRouteRequests.incr() // §10 #1：经端点选择的路由请求计数
+	success := routeEndpointSuccess(status)
+	e.engine.RecordResult(name, success)
+	// §6.9 降级迟滞：按优先级组累计连续成功；失败清零（恢复需连续成功达标）。
+	if prio, ok := e.engine.EndpointPriority(name); ok {
+		if success {
+			e.degrade.RecordSuccess(prio)
+		} else {
+			e.degrade.RecordFailure(prio)
+		}
+	}
+}
+
+// ============================================================
+// 路由运行时周期任务（§6.9 降级重评估 + §10 快照可观测）
+// ============================================================
+
+// routeRuntimeLoopOnce 保证运行时 tick 仅注册一次（parseConfig 可能被热更新重复调用）。
+var routeRuntimeLoopOnce sync.Once
+
+// routeRuntimeTickIntervalMs 降级/快照评估周期（毫秒）。
+// 取 10s：远小于 §6 故障检测目标（<10s 由被动 EWMA + 主动探测承担），
+// 且作为纯本地计算开销可忽略。
+const routeRuntimeTickIntervalMs = 10000
+
+// ensureRouteRuntimeLoop 注册路由运行时周期任务（幂等）。
+func ensureRouteRuntimeLoop() {
+	routeRuntimeLoopOnce.Do(func() {
+		wrapper.RegisterTickFunc(routeRuntimeTickIntervalMs, routeRuntimeTick)
+		proxywasm.LogInfof("otpmask-plugin: 路由运行时周期任务已注册 period_ms=%d", routeRuntimeTickIntervalMs)
+	})
+}
+
+// routeRuntimeTick 周期任务：对每个已建引擎重评估三级降级级别并输出运行时快照。
+// 纯本地计算（无出站 hostcall），不影响请求路径。
+func routeRuntimeTick() {
+	nowMs := time.Now().UnixMilli()
+
+	routingEngines.mu.Lock()
+	entries := make([]*routingEntry, 0, len(routingEngines.entries))
+	for _, e := range routingEngines.entries {
+		entries = append(entries, e)
+	}
+	routingEngines.mu.Unlock()
+
+	for _, e := range entries {
+		states := e.engine.EndpointStates()
+		if e.degrade.Evaluate(states, nowMs) {
+			metricRouteDegradeEvents.incr() // §10 P1-7：降级事件计数
+			proxywasm.LogWarnf("otpmask-plugin: 路由降级级别变更 level=%s endpoints=%d",
+				e.degrade.Level(), len(states))
+		}
+		// §7.5：灰度放量推进 + 自动回滚检测
+		if changed := e.engine.Tick(nowMs); changed {
+			if cs, ok := e.engine.CanarySnapshot(); ok {
+				proxywasm.LogInfof("otpmask-plugin: 灰度状态变更 state=%s weight=%.4f progress=%.3f reason=%q",
+					cs.State.String(), cs.CurrentWeight, cs.CurrentProgress, cs.Reason)
+			}
+		}
+		snap := e.engine.Snapshot()
+		for _, es := range snap.Endpoints {
+			proxywasm.LogDebugf("otpmask-plugin: 端点快照 name=%q usable=%v weight=%.3f failure=%.4f valid=%v circuit=%d level=%s",
+				es.Name, es.Enabled && es.CircuitState != routeengine.CircuitOpen, es.CurrentWeight,
+				es.FailureRate, es.FailureValid, es.CircuitState, e.degrade.Level())
+		}
+	}
 }
 
 // requestModelHeader 取模型维度：优先 X-Otp-Model，缺省 config.Model（见文件头"已知约束"）。
