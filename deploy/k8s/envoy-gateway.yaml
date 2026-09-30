@@ -132,6 +132,18 @@ data:
       clusters:
       - name: tee-infer
         connect_timeout: 30s
+        # P2f：Envoy 承担主动健康检查（方案 §6.3.10，裁决 A：插件侧仅被动 EWMA，
+        # 主动探测由 Envoy 完成；插件 routeengine.HealthChecker 保留纯逻辑库＋单测，不接线调度）。
+        # 探测路径必须用 /healthz/live（纯进程存活，恒 200）；**切勿改为 /healthz**——它带
+        # readiness 语义，requireAttest 且无有效证明会话时返回 503，会把唯一 TEE 端点判为不健康
+        # 并在空闲期摘除，导致连建立会话的握手都打不进 → 全量 503 事故（见 tee-infer-service handleHealthz）。
+        health_checks:
+        - timeout: 3s
+          interval: 5s
+          unhealthy_threshold: 2
+          healthy_threshold: 1
+          http_health_check:
+            path: /healthz/live
         type: LOGICAL_DNS
         dns_lookup_family: V4_ONLY
         lb_policy: ROUND_ROBIN
@@ -160,6 +172,15 @@ data:
                     port_value: 18080
       - name: "outbound|19090||tee_infer_service.dns"
         connect_timeout: 5s
+        # P2f：同 tee-infer——本簇为插件自持派发（HttpCall→FQDNCluster）所用端点簇，
+        # 主动健康检查同样由 Envoy 承担，探测路径必须为 /healthz/live（原因见上）。
+        health_checks:
+        - timeout: 3s
+          interval: 5s
+          unhealthy_threshold: 2
+          healthy_threshold: 1
+          http_health_check:
+            path: /healthz/live
         type: LOGICAL_DNS
         dns_lookup_family: V4_ONLY
         lb_policy: ROUND_ROBIN

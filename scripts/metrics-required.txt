@@ -106,6 +106,12 @@ plugin otpmask_core_channel_fetch_cb_total conditional
 plugin otpmask_core_channel_fetch_ok_total conditional
 plugin otpmask_core_channel_fetch_reject_total conditional
 
+# ---- P0-1 multi-endpoint intelligent routing (§10; gauge 类按 §10.1.4 不注册 stat) ----
+plugin otpmask_route_requests_total conditional
+plugin otpmask_route_degrade_events_total conditional
+plugin otpmask_route_config_reload_total conditional
+plugin otpmask_route_retry_total conditional
+
 # ---- boundary A (gate #7): plaintext-route RPM shadow executor (rpm-shadow plugin) ----
 plugin otpmask_shadow_would_reject_total conditional
 plugin otpmask_shadow_report_dropped_total conditional
