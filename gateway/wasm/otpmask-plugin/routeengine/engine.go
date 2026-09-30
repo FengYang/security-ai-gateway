@@ -152,6 +152,32 @@ type Decision struct {
 	CanaryGroup  string // 灰度分组：whitelist / treatment / control / ""（无灰度）
 }
 
+// BillingNotifier 计费通知接口（P0-1 W4-5 接口预留，方案附录 D）。
+//
+// P0-1 侧仅定义接口 + 调用点，不做具体实现。
+// 实际计费逻辑由 P0-3 计费模块注入实现（如通过 gRPC/HTTP 上报计费服务）。
+//
+// 设计要点：
+//   - RecordUsage 在 RecordResult 之后调用（不阻塞请求路径核心逻辑）
+//   - IsRetry 标记本次请求是否为重试（重试不计费，方案 §D.2）
+//   - 接口方法应快速返回（异步上报由实现方内部处理）
+type BillingNotifier interface {
+	// RecordUsage 记录一次端点请求的用量。
+	// tenant/model/endpoint：路由维度
+	// inputTokens/outputTokens：token 用量（-1 表示未知，如非流式响应尚未统计）
+	// isRetry：是否为重试请求（重试不计费）
+	// success：请求是否成功（失败是否计费由计费侧策略决定）
+	RecordUsage(tenant, model, endpoint string, inputTokens, outputTokens int, isRetry bool, success bool)
+}
+
+// SetBillingHook 注册计费通知器（nil = 取消通知）。
+// 线程安全：由调用方保证在无请求时设置（如初始化或配置热更新时）。
+func (e *Engine) SetBillingHook(hook BillingNotifier) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.billingHook = hook
+}
+
 // Engine 路由引擎实例。
 //
 // 用法：
@@ -160,11 +186,13 @@ type Decision struct {
 //  3. RecordResult() 记录请求结果（更新 EWMA + 权重 + 熔断器）
 //  4. Tick() 周期调用（推进灰度放量 + 自动回滚检测）
 //  5. UpdateConfig() / UpdateConfigSmooth() 热更新配置
+//  6. SetBillingHook() 注册计费通知器（P0-1 W4-5 接口预留）
 type Engine struct {
-	mu     sync.RWMutex
-	config Config
-	state  map[string]*EndpointState // name -> state
-	canary *CanaryManager            // 灰度管理器（nil = 未启用灰度）
+	mu          sync.RWMutex
+	config      Config
+	state       map[string]*EndpointState // name -> state
+	canary      *CanaryManager            // 灰度管理器（nil = 未启用灰度）
+	billingHook BillingNotifier           // 计费通知器（nil = 不通知）
 }
 
 // NewEngine 创建路由引擎。
@@ -530,11 +558,12 @@ func (e *Engine) pickByWeight(usable []*EndpointState) Decision {
 //  2. 检查熔断器状态机（状态可能变更：Closed↔Open↔HalfOpen）
 //  3. 失败率感知策略下，根据新失败率调整端点权重
 //  4. 同优先级组内权重归一化
+//  5. 计费钩子通知（若注册了 BillingNotifier，方案附录 D）
 func (e *Engine) RecordResult(endpointName string, success bool) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	ep, ok := e.state[endpointName]
 	if !ok {
+		e.mu.Unlock()
 		return
 	}
 
@@ -577,6 +606,16 @@ func (e *Engine) RecordResult(endpointName string, success bool) {
 	// 5. 同优先级组内权重归一化
 	if weightChanged {
 		e.normalizeGroupByPriority(ep.Priority)
+	}
+
+	// 计费钩子（在锁外调用，避免持锁时执行可能阻塞的外部调用）
+	hook := e.billingHook
+	e.mu.Unlock()
+
+	if hook != nil {
+		// P0 预留：token 用量未知（-1），非重试（false）
+		// 实际 token 计数和重试标记由调用方通过 NotifyUsage 补充
+		hook.RecordUsage("", "", endpointName, -1, -1, false, success)
 	}
 }
 
