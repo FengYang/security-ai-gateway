@@ -238,14 +238,19 @@ func entryFor(cache *routecache.Cache, tenant, model string) *routingEntry {
 }
 
 // buildEngineConfig 由路由表条目构造引擎配置。
+// 同时注册端点凭证到全局 CredentialManager（方案 §9.2）。
 func buildEngineConfig(tr *routecache.TableRoute) routeengine.Config {
 	eps := make([]routeengine.EndpointConfig, 0, len(tr.Endpoints))
 	for _, ep := range tr.Endpoints {
 		if ep.Name == "" {
 			continue // 无名端点不参与选择（与既有接线一致）
 		}
-		// W3 阶段：Name 非空即视为启用（与既有接线一致）；显式禁用由控制面下发时
-		// 从 Endpoints 列表中剔除该条目承担。
+		// 注册端点凭证（secret_ref 非空时）
+		if ep.Auth.SecretRef != "" {
+			if err := registerEndpointCredentials(ep.Name, ep.Auth.SecretRef); err != nil {
+				proxywasm.LogWarnf("otpmask-plugin: 端点 %q 凭证注册失败: %v", ep.Name, err)
+			}
+		}
 		eps = append(eps, routeengine.EndpointConfig{
 			Name:     ep.Name,
 			URL:      ep.URL,
