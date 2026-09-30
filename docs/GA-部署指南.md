@@ -803,3 +803,257 @@ kubectl rollout history deployment/tee-infer-service -n otpmask
 > **验收通过标准**：所有 P0 项 ✅，P1 项有明确的补齐计划和责任人。
 >
 > 验收通过后，方可进入 §7 的合规放行流程（门 A → 门 B → 具名放行）。
+
+---
+
+## 10. 路由模块（多模型智能路由）运维手册
+
+> **本章定位**：路由模块（P0-1）专项运维指南，覆盖配置、操作、故障排查、观测与回滚。
+> 通用部署与运维见 §1–§6；全局上线验收见 §9；本章为路由专项补充。
+
+### 10.1 组件与部署拓扑
+
+路由模块由以下组件构成，以 Higress WasmPlugin 形态接入数据面：
+
+```
+客户端 → Higress 网关（Envoy + otpmask WasmPlugin）
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+   gateway-core     tee-infer        cmaas / vllm
+   （控制面：        （TEE 推理      （各引擎端点
+    路由表签发）      引擎端点）       由路由表配置）
+```
+
+| 组件 | 部署形态 | 关键配置 | 说明 |
+|---|---|---|---|
+| **otpmask WasmPlugin** | Higress `extensions.higress.io/WasmPlugin` CR | `url` / `matchRules[0].config` | 数据面路由决策，与 otpmask 加密插件共用同一 wasm |
+| **gateway-core** | K8s Deployment + Service + Secret | `core-sig-key` / `core-auth-token` | 控制面：路由表/限流表签发，签名使用 `core-sig-key` |
+| **otpmask-keys Secret** | K8s Secret（`otpmask` 命名空间） | `sig-key` / `attest-token` 等 | 数据面密钥，WasmPlugin 经 `secret_name` 引用 |
+| **wasm-files 服务** | K8s Deployment + Service（可选） | — | wasm 制品 HTTP 分发；wasm 超 ConfigMap 1MiB 限制时使用 |
+
+**依赖关系**：
+- 路由决策启用 = `gateway_core_enabled=true` **且** `route_verify_key` 有效（≥32 字节 hex）
+- 路由表拉取 = 需 gateway-core 可达 + `gateway_core_token`（Bearer 鉴权）
+- 验签密钥 = 插件侧 `route_verify_key` 必须与 gateway-core 的 `core-sig_key` **完全一致**
+
+### 10.2 配置参数速查表
+
+以下为路由模块相关的 WasmPlugin 配置项（`matchRules[0].config` 内）：
+
+| 参数 | JSON key | 类型 | 默认值 | 取值范围 | 风险等级 | 说明 |
+|---|---|---|---|---|---|---|
+| **路由总开关** | `gateway_core_enabled` | bool | `false` | true/false | ⚠️ 中 | 关闭 = 行为与接线前完全一致，不介入任何请求 |
+| **控制面服务名** | `gateway_core_service` | string | `""` | 服务名 / FQDN | 低 | Higress 服务发现名；推荐用 `<name>.dns` 短名（与 `outbound\|port\|\|<name>.dns` cluster 一致） |
+| **控制面端口** | `gateway_core_port` | int/string | `0` | 1–65535 | 低 | gateway-core 的 HTTP 端口 |
+| **控制面令牌** | `gateway_core_token` | string | `""` | — | 🔴 高 | Bearer 鉴权令牌；生产经 Secret 注入，勿明文落 CR |
+| **验签密钥** | `route_verify_key` | string | `""` | 64 字符 hex（32 字节） | 🔴 高 | 路由表/限流表 HMAC 验签密钥；必须与 gateway-core `core-sig-key` 一致 |
+| **缓存过期** | `max_stale_seconds` | int | `300` | -1=永不过期；0=始终过期；>0=秒 | ⚠️ 中 | 超过此时长未刷新的路由表视为 stale；stale 且无有效处方 → fail-closed |
+| **拉取周期** | `poll_interval` | int | `60` | ≥1（秒） | 低 | 路由表周期拉取间隔；最小粒度 100ms |
+| **非流式重试** | `route_dispatch_enabled` | bool | `false` | true/false | ⚠️ 中 | 启用后插件自持出站派发，失败时换端点重发；默认关闭 = Envoy 直发 |
+| **限流开关** | `ratelimit_enabled` | bool | `false` | true/false | ⚠️ 中 | 启用后周期拉取 `/ratelimits` 并本地执行限流 |
+| **凭据拉取开关** | `credential_enabled` | bool | `false` | true/false | 低 | 启用后从管理面周期拉取 sig_key/attest_token，CR 内不落明文 |
+
+> **生产关键参数**：`route_verify_key`、`gateway_core_token` 为敏感配置，必须经 Secret / Vault 注入，不得直接写入 WasmPlugin CR 并提交 Git。
+
+### 10.3 日常运维操作
+
+#### 10.3.1 路由表变更
+
+路由表由 gateway-core 管理，数据面插件被动拉取。变更流程：
+
+```bash
+# 1. 在 gateway-core 更新路由表（具体 API 见 gateway-core 文档）
+#    路由表版本号必须递增（防回滚）
+
+# 2. 验证数据面是否已拉取到新版本（按 VM 逐个验证）
+kubectl exec -n higress-system <gw-pod> -- \
+  curl -s http://127.0.0.1:15090/stats/prometheus | \
+  grep 'otpmask_route_fetch_ok_total'
+
+# 3. 发测试请求验证路由决策
+curl -H "X-Tenant-ID: <tenant>" -H "X-Otp-Model: <model>" \
+  http://<gateway>/infer
+```
+
+**生效延迟**：≈ `poll_interval` 秒（各 VM 独立拉取，存在轻微时间差）。
+如需立即生效，可触发 WasmPlugin 热更新（改 URL query 参数），代价是所有 VM 重启、缓存清空。
+
+#### 10.3.2 配置热更新（WasmPlugin）
+
+通过 ECDS 热更新 WasmPlugin 配置，**无需重启网关 Pod**：
+
+```bash
+# 示例：调整 max_stale 为 600 秒
+kubectl patch wasmplugin otpmask -n higress-system --type=merge \
+  -p '{"spec":{"matchRules":[{"config":{"max_stale_seconds":600}}]}}'
+
+# 示例：切换 wasm 版本（改 URL query 触发重新加载）
+kubectl patch wasmplugin otpmask -n higress-system --type=merge \
+  -p '{"spec":{"url":"http://wasm-files.otpmask.svc.cluster.local/otpmask-v5.wasm?v=20261001"}}'
+```
+
+> **⚠️ 已知约束**：频繁开关 `gateway_core_enabled` 可能导致部分 worker VM 的周期拉取 tick 丢失（ECDS 热更新 + sync.Once 交互问题）。
+> 若发现路由表停止刷新（`otpmask_route_fetch_ok_total` 不再增长），重启网关 Pod 即可恢复。
+
+#### 10.3.3 wasm 版本升级
+
+```bash
+# 1. 构建新版 wasm（在 Linux/Go 环境）
+GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared \
+  -o otpmask-v6.wasm ./gateway/wasm/otpmask-plugin
+
+# 2. 上传到 wasm-files 服务（或替换镜像内 wasm）
+kubectl cp otpmask-v6.wasm otpmask/<wasm-files-pod>:/usr/share/nginx/html/
+
+# 3. 滚动更新（改 URL 触发 ECDS 热加载，零停机）
+kubectl patch wasmplugin otpmask -n higress-system --type=merge \
+  -p '{"spec":{"url":"http://wasm-files.otpmask.svc.cluster.local/otpmask-v6.wasm"}}'
+
+# 4. 验证：请求正常 + 指标正常
+kubectl exec -n higress-system <gw-pod> -- \
+  curl -s -o /dev/null -w '%{http_code}' \
+  -H "X-Tenant-ID: tenant-a" -H "X-Otp-Model: qwen-plus" \
+  http://127.0.0.1:30000/infer
+```
+
+#### 10.3.4 回滚 SOP
+
+| 回滚场景 | 操作 | 预期 |
+|---|---|---|
+| **路由表回滚** | 在 gateway-core 发布更高版本号的旧内容路由表（版本号必须递增，防回滚机制禁止版本号递减） | 下一个 poll 周期生效 |
+| **配置回滚** | `kubectl patch` 恢复旧配置；或 `kubectl rollout undo`（若用 Deployment 管理） | ECDS 秒级生效 |
+| **wasm 版本回滚** | `kubectl patch wasmplugin` 改回旧版 URL | ECDS 热加载，各 VM 逐批生效；期间部分请求可能走旧 VM 部分走新 VM |
+| **紧急降级（关闭路由）** | `gateway_core_enabled: false` → 行为与接线前完全一致，不再 fail-closed | ECDS 秒级生效；注意：关闭后路由决策完全退出，请求直通后端 |
+
+> **紧急降级优先级**：关路由（直通）→ 回滚 wasm → 回滚配置 → 重启 Pod。
+> 优先关路由，最快速、影响最小。
+
+### 10.4 故障排查手册
+
+| 现象 | 可能原因 | 排查步骤 | 处置 |
+|---|---|---|---|
+| **请求全部 503 fail-closed** | 路由表为空 / 过期 / 拉取失败 | 1. 查 `otpmask_route_fetch_ok_total` 是否在增长<br>2. 查 `otpmask_fail_closed_total` 增长速度<br>3. 查 gateway-core `/routes` 是否正常返回<br>4. 查 Envoy `outbound\|8085\|\|gateway-core.dns` cluster 是否健康 | 紧急：关路由（`gateway_core_enabled=false`）<br>长期：修复拉取链路 |
+| **路由表拉取指标不增长** | tick 丢失（ECDS 热更新 + sync.Once） / gateway-core 不可达 / 鉴权失败 | 1. 看日志是否有"拉取 /routes 返回 401"等 warn<br>2. `otpmask_route_fetch_cb_total` 是否增长<br>3. 都不增长 = tick 丢失 | 重启网关 Pod（最快恢复） |
+| **部分请求 503 部分正常** | 部分 worker VM 缓存为空 / 路由表不一致 | 1. 连续发 20+ 请求看状态码分布<br>2. 若比例约 1/N（N=worker 数）= 某 VM 缓存空 | 等一个 poll 周期；或重启 Pod |
+| **路由表验签失败** | `route_verify_key` 与 gateway-core 不一致 / 路由表被篡改 | 1. 日志中找"拉取 /routes 返回 200"但无"验签通过"<br>2. 对比两端密钥 hex | 修正密钥配置；若密钥被轮换，同步更新 |
+| **路由决策不生效（请求直通）** | `gateway_core_enabled=false` 或 `route_verify_key` 无效 | 1. 确认配置为 boolean `true`（不是字符串 `"true"`）<br>2. 确认 `route_verify_key` 是 64 字符有效 hex<br>3. 查日志是否有"路由决策已启用" | 修正配置；WasmPlugin config 为 Object 类型，bool 字段须为 JSON boolean |
+| **401 Unauthorized** | `gateway_core_token` 错误 / 缺失 | 日志中有"拉取 /routes 返回 401" | 补全/修正令牌 |
+| **性能下降明显** | 路由决策开销异常 / 拉取过于频繁 / EWMA 计算量大 | 1. 对比开/关路由的 QPS 和延迟<br>2. 看 `otpmask_route_latency_seconds` histogram | 正常开销：QPS -1~3%，延迟 +0.2~0.5ms；若超阈值排查 |
+| **熔断后不恢复** | 熔断冷却期配置过长 / 半开探测全部失败 | 1. 查 `otpmask_route_circuit_breaker_state` gauge<br>2. 查后端端点是否真的恢复了 | 修复后端；或临时调整熔断参数 |
+| **灰度流量比例不对** | 哈希分布不均 / 配置未生效 | 1. 查 `otpmask_route_canary_*` 指标<br>2. 确认灰度配置已生效 | 灰度基于 tenant ID 哈希，样本量小时可能不均匀；大流量下趋近目标比例 |
+
+#### 常用排查命令
+
+```bash
+# 查路由拉取指标
+kubectl exec -n higress-system <pod> -- \
+  curl -s http://127.0.0.1:15090/stats/prometheus | grep otpmask_route
+
+# 查 gateway-core cluster 健康
+kubectl exec -n higress-system <pod> -- \
+  curl -s 'http://127.0.0.1:15000/clusters?filter=gateway-core'
+
+# 查 otpmask 插件日志（最近 5 分钟，过滤关键字）
+kubectl logs -n higress-system <pod> --since=5m | grep 'otpmask-plugin' | grep -i 'route\|拉取\|fail-closed'
+
+# 手动验证路由表 API
+kubectl exec -n higress-system <pod> -- \
+  curl -s -H "Authorization: Bearer <token>" http://gateway-core.dns:8085/routes
+```
+
+### 10.5 观测指标速查
+
+路由模块所有指标前缀为 `otpmask_route_`，按类型分类：
+
+#### Counter（计数器）
+
+| 指标 | 说明 | 告警建议 |
+|---|---|---|
+| `otpmask_route_requests_total` | 经端点选择的路由请求数 | — |
+| `otpmask_route_degraded_total` | 降级到 L2 缓存（处方缺失/失效）次数 | 突增 → 处方签发异常 |
+| `otpmask_fail_closed_total` | fail-closed 拒绝次数 | 短时间激增 → 路由表全空/过期，P1 告警 |
+| `otpmask_route_fetch_ok_total` | 路由表拉取并验签通过次数 | 持续不增长 → 拉取停滞，P2 告警 |
+| `otpmask_route_fetch_reject_total` | 路由表拉取被拒绝次数（HTTP 非 200 / 验签失败 / 版本回滚） | 持续增长 → 控制面异常或密钥错配，P1 告警 |
+| `otpmask_route_fetch_cb_total` | 拉取回调执行总次数 | 与 ok+reject 对账 |
+| `otpmask_route_config_reload_total` | 路由配置平滑热更新次数 | — |
+| `otpmask_route_degrade_events_total` | 三级降级级别变更次数 | 频繁变更 → 后端不稳定 |
+| `otpmask_route_canary_whitelist_total` | 灰度白名单命中次数 | — |
+| `otpmask_route_canary_treatment_total` | 灰度实验组请求数 | — |
+| `otpmask_route_canary_control_total` | 灰度对照组请求数 | — |
+
+#### Gauge（仪表盘）
+
+| 指标 | 说明 | 告警建议 |
+|---|---|---|
+| `otpmask_route_circuit_breaker_state{endpoint}` | 端点熔断状态（0=正常 / 1=半开 / 2=熔断） | 状态=2 且持续 >5min → 端点故障，P2 告警 |
+| `otpmask_route_degrade_level` | 当前降级级别（0=正常 / 1=L1 / 2=L2 / 3=L3） | 级别≥2 → 后端大面积故障，P1 告警 |
+
+#### Histogram（直方图）
+
+| 指标 | 说明 | 告警建议 |
+|---|---|---|
+| `otpmask_route_latency_seconds` | 端到端路由请求延迟 | p95 持续 > 预期值的 2 倍 → 性能退化，P2 告警 |
+
+### 10.6 上线前检查清单（路由模块专项）
+
+> 本清单为 §9 全局上线验收的**路由模块专项补充**。全局验收通过 §9 执行；
+> 本清单在路由模块首次上线或大版本变更时使用，作为 §9 的路由维度细化。
+
+#### 功能验收
+
+| # | 项 | 验证方法 | 结果 |
+|---|---|---|---|
+| R-F01 | 单路由命中（已知 tenant+model 返回预期引擎） | curl 指定租户和模型，验证 `X-Otp-Engine` 响应头 | ☐ |
+| R-F02 | 未知租户 fail-closed（503） | 用不存在的租户发请求，验证返回 503 | ☐ |
+| R-F03 | 处方验签生效（有效处方走 L1） | 带有效 X-Otp-Route 头，验证使用 preferred_engine | ☐ |
+| R-F04 | 伪造处方降级 L2（不 fail-closed） | 带伪造签名的 X-Otp-Route，验证请求仍被路由（降级），不 503 | ☐ |
+| R-F05 | 主备切换（主端点故障 → 切备） | 注入主端点 50% 失败，验证流量切到备端点 | ☐ |
+| R-F06 | 权重路由（按比例分配） | 配置 70/30 权重，验证大流量下比例趋近 7:3 | ☐ |
+| R-F07 | 熔断机制（连续失败 → 熔断 → 半开 → 恢复） | 连续失败注入，验证状态变化 | ☐ |
+| R-F08 | 非流式重试（临时故障自动重试成功） | 端点偶发失败，验证重试后成功 | ☐ |
+| R-F09 | 三级降级（全端点故障 → 逐级降级） | 所有端点故障，验证降级级别逐步提升 | ☐ |
+| R-F10 | 灰度切流（白名单 / treatment / control） | 配置灰度策略，验证分组正确 | ☐ |
+| R-F11 | 配置热更新（路由表变更零停机） | 更新路由表，验证流量平滑切换、无 5xx 尖峰 | ☐ |
+
+#### 性能验收
+
+| # | 项 | 目标值 | 验证方法 | 结果 |
+|---|---|---|---|---|
+| R-P01 | 路由决策 QPS 开销 | ≤ 5% | 开/关路由对比压测 | ☐ |
+| R-P02 | 路由决策延迟增量 | ≤ 1ms（p95） | 开/关路由对比延迟 | ☐ |
+| R-P03 | 长稳内存增长 | ≤ 10 MB / 小时 | 满负载 1h，观察内存 | ☐ |
+| R-P04 | 大流不雪崩 | 10x 流量下自动降级、不崩溃 | 突发压测 | ☐ |
+
+#### 安全验收
+
+| # | 项 | 验证方法 | 结果 |
+|---|---|---|---|
+| R-S01 | 路由表 HMAC 验签有效 | 正确签名接受 / 错误签名拒绝 | ☐ |
+| R-S02 | 版本回退防护 | 低版本号路由表被忽略 | ☐ |
+| R-S03 | 篡改防护 | 修改路由表内容不重签 → 被拒绝 | ☐ |
+| R-S04 | fail-closed 密态语义 | 无可用路由时拒绝（503），不静默直通 | ☐ |
+| R-S05 | 注入防护 | 特殊字符 tenant/model 不 crash、正常处理 | ☐ |
+| R-S06 | 密钥不在日志中出现 | grep 日志确认无 `route_verify_key` / `gateway_core_token` 明文 | ☐ |
+
+#### 运维验收
+
+| # | 项 | 验证方法 | 结果 |
+|---|---|---|---|
+| R-OPS01 | 路由表热更新生效 | 更新路由表，一个 poll 周期内生效 | ☐ |
+| R-OPS02 | WasmPlugin 配置热更新 | patch 配置，请求不中断 | ☐ |
+| R-OPS03 | wasm 版本升级回滚 | 升级 → 验证 → 回滚，全程零停机 | ☐ |
+| R-OPS04 | 紧急降级（关路由） | `gateway_core_enabled=false`，秒级生效，请求直通 | ☐ |
+| R-OPS05 | 监控指标完整 | Prometheus 能查到所有 `otpmask_route_*` 指标 | ☐ |
+| R-OPS06 | 关键告警配置 | fail-closed 激增 / 拉取停滞 / 熔断 三类告警可用 | ☐ |
+| R-OPS07 | 日志可追溯 | 每条路由决策有日志，含 request_id / endpoint / strategy | ☐ |
+
+#### 上线前 Go/No-Go 检查
+
+- [ ] 所有 P0 功能项 ✅
+- [ ] 性能指标在目标范围内 ✅
+- [ ] 安全验收全部通过 ✅
+- [ ] 监控告警接入完成 ✅
+- [ ] 回滚方案验证通过 ✅
+- [ ] 运维团队培训完成 ✅
+- [ ] 已知问题与规避措施文档化 ✅
