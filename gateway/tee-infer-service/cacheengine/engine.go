@@ -31,6 +31,7 @@ type engine struct {
 	sf      SingleFlight
 	scanner FastScanner
 	jitter  JitterInjector
+	canary  CanaryController
 	stats   *statsCollector
 	feedback FeedbackDetector
 	nowFn   nowFunc
@@ -68,6 +69,11 @@ func WithSemanticStore(s SemanticStore) EngineOption {
 // WithFeedbackDetector 注入误命中反馈检测器。
 func WithFeedbackDetector(f FeedbackDetector) EngineOption {
 	return func(e *engine) { e.feedback = f }
+}
+
+// WithCanaryController 注入灰度控制器。
+func WithCanaryController(c CanaryController) EngineOption {
+	return func(e *engine) { e.canary = c }
 }
 
 // NewCacheEngine 构造缓存引擎。
@@ -115,6 +121,9 @@ func NewCacheEngine(cfg CacheConfig, opts ...EngineOption) CacheEngine {
 	if e.scanner == nil {
 		e.scanner = &stubScanner{} // 默认识别为不可用，读时快审 fail-closed
 	}
+	if e.canary == nil {
+		e.canary = NewConfigCanaryController(e.cfg)
+	}
 
 	// 初始化语义缓存（二期）
 	if e.sem == nil && e.cfg.Mode == ModeSemantic {
@@ -146,7 +155,7 @@ func (e *engine) Lookup(ctx LookupContext) LookupResult {
 	}
 
 	// 灰度写只读（write_only）
-	if e.cfg.Gray.Enabled && e.cfg.Gray.WriteOnly {
+	if e.canary.Enabled() && e.canary.WriteOnly() {
 		e.stats.observeLookup("precheck", "canary_write_only")
 		return LookupResult{
 			Hit:          false,
@@ -157,7 +166,7 @@ func (e *engine) Lookup(ctx LookupContext) LookupResult {
 	}
 
 	// 灰度流量控制
-	if e.cfg.Gray.Enabled && !e.isCanaryAllowed(ctx) {
+	if e.canary.Enabled() && !e.canary.Allowed(ctx) {
 		e.stats.observeLookup("precheck", "canary_skip")
 		return LookupResult{
 			Hit:          false,
@@ -603,42 +612,6 @@ func streamFlag(stream bool) string {
 		return "s"
 	}
 	return "n"
-}
-
-// isCanaryAllowed 灰度放量判定。
-func (e *engine) isCanaryAllowed(ctx LookupContext) bool {
-	if !e.cfg.Gray.Enabled {
-		return true
-	}
-
-	// 白名单判定
-	for _, t := range e.cfg.Gray.CanaryTenants {
-		if t == ctx.TenantID {
-			return true
-		}
-	}
-	for _, s := range e.cfg.Gray.CanaryScenes {
-		if s == string(ctx.Scene) {
-			return true
-		}
-	}
-	for _, m := range e.cfg.Gray.CanaryModels {
-		if m == ctx.Model {
-			return true
-		}
-	}
-
-	// 流量比例
-	if e.cfg.Gray.TrafficPercent > 0 {
-		// 简单的 hash 取模：基于 tenant_id 的 hash
-		h := sha256.Sum256([]byte(ctx.TenantID))
-		val := int(h[0]) + int(h[1])<<8 // 16-bit value
-		if val%100 < e.cfg.Gray.TrafficPercent {
-			return true
-		}
-	}
-
-	return false
 }
 
 // ===== 实体指纹与误命中反馈 =====
