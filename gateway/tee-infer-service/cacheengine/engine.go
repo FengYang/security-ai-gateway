@@ -32,6 +32,7 @@ type engine struct {
 	scanner FastScanner
 	jitter  JitterInjector
 	stats   *statsCollector
+	feedback FeedbackDetector
 	nowFn   nowFunc
 	closed  atomic.Bool
 }
@@ -62,6 +63,11 @@ func WithFastScanner(s FastScanner) EngineOption {
 // WithSemanticStore 注入语义缓存存储。
 func WithSemanticStore(s SemanticStore) EngineOption {
 	return func(e *engine) { e.sem = s }
+}
+
+// WithFeedbackDetector 注入误命中反馈检测器。
+func WithFeedbackDetector(f FeedbackDetector) EngineOption {
+	return func(e *engine) { e.feedback = f }
 }
 
 // NewCacheEngine 构造缓存引擎。
@@ -215,12 +221,34 @@ func (e *engine) doLookup(ctx LookupContext) LookupResult {
 
 	// 5. L2 语义（二期）
 	if e.sem != nil && e.sem.Enabled(ctx.TenantID) {
-		hit, entryID, sim, _, _, reason := e.sem.Lookup(ctx)
+		hit, entryID, sim, sceneStr, th, reason := e.sem.Lookup(ctx)
 		if hit && e.exact != nil {
 			// 从 ExactStore 取正文
 			entry, ok := e.exact.Get(entryID)
 			if ok && EntryUsable(entry, ctx.GuardVer, ctx.PolicyVer, e.nowFn()) {
+				// 严格场景（code/math）做实体指纹二次校验
+				if e.needsFingerprintCheck(sceneStr) {
+					qfp := ExtractEntities(ctx.PromptText)
+					rfp := ExtractEntities(entry.Text)
+					fpTh := e.fingerprintThreshold(sceneStr)
+					if !qfp.Compatible(rfp, fpTh) {
+						// 实体不兼容 → 不命中
+						e.stats.observeLookup("semantic", "fingerprint_miss")
+						return LookupResult{
+							Hit:          false,
+							Kind:         "miss",
+							RejectReason: "fingerprint_mismatch",
+							Similarity:   sim,
+							TopCandidate: sim,
+							Jitter:       e.jitter.Sample(ctx),
+						}
+					}
+				}
 				e.stats.observeLookup("semantic", "hit")
+				// 记录反馈统计命中
+				if e.feedback != nil {
+					e.feedback.RecordHit(sceneStr)
+				}
 				return e.finishHit(ctx, entry, KindSemantic, sim, sim)
 			}
 			// 正文已失效 → 清理向量索引
@@ -233,7 +261,8 @@ func (e *engine) doLookup(ctx LookupContext) LookupResult {
 			e.stats.observeLookup("semantic", "no_exact_store")
 		} else {
 			e.stats.observeLookup("semantic", "miss")
-			_ = reason // 区分 miss 原因（below_threshold / no_candidates / embed_error）
+			_ = reason
+			_ = th
 		}
 
 		// 语义未命中，返回 miss（带上 top 候选信息用于观察）
@@ -610,4 +639,37 @@ func (e *engine) isCanaryAllowed(ctx LookupContext) bool {
 	}
 
 	return false
+}
+
+// ===== 实体指纹与误命中反馈 =====
+
+// needsFingerprintCheck 判断场景是否需要实体指纹二次校验。
+// 严格场景（code、math）需要，一般场景（factual、general）不需要。
+func (e *engine) needsFingerprintCheck(scene string) bool {
+	strict := e.cfg.Semantic.Threshold.StrictFingerprint
+	if len(strict) == 0 {
+		// 默认严格场景
+		return scene == "code" || scene == "math"
+	}
+	for _, s := range strict {
+		if s == scene {
+			return true
+		}
+	}
+	return false
+}
+
+// fingerprintThreshold 实体指纹 Jaccard 阈值（默认 0.3）。
+func (e *engine) fingerprintThreshold(scene string) float64 {
+	// 配置中暂未提供独立的指纹阈值字段，使用 0.3 保守默认
+	return 0.3
+}
+
+// ReportFalsePositive 上报一次误命中反馈（由业务层调用）。
+// 触发反馈统计和自适应阈值调整。
+func (e *engine) ReportFalsePositive(scene string) {
+	if e.feedback != nil {
+		e.feedback.Report(scene)
+	}
+	e.stats.observeFP()
 }

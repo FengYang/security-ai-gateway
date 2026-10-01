@@ -8,14 +8,15 @@ import (
 // SemanticStore 语义缓存存储层（§4.1.3 / §5.3）。
 // 职责：
 //   - 编排 Embedder + VectorIndex（向量索引只存元数据，正文在 ExactStore）
-//   - 语义查询：embed → topK 候选 → 阈值过滤 → 返回最佳 entry_id
+//   - 语义查询：embed → topK 候选 → 阈值过滤 → 实体指纹校验 → 返回最佳 entry_id
 //   - 写入：embed response → upsert 向量索引（通过 entry_id 关联 ExactStore 正文）
 //   - 版本校验、租户隔离、TTL 过期过滤
 //
 // 注意：SemanticStore 不持有 ExactStore（正文存取由 engine 编排），
-// 两者通过 entry_id 关联（VectorMeta.EntryID == ExactStore key 或独立 entry_id）。
+// 两者通过 entry_id 关联（VectorMeta.EntryID == ExactStore key）。
 type SemanticStore interface {
 	// Lookup 语义查询。返回命中的 entry_id 和相似度；未命中返回 reason。
+	// 注意：返回的 entryID 是 ExactStore 的 key，可直接用于 exactStore.Get(entryID)。
 	Lookup(ctx LookupContext) (hit bool, entryID string, sim float64, scene string, threshold float64, reason string)
 
 	// Store 写入向量索引。内部计算 response embedding。

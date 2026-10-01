@@ -79,6 +79,11 @@ func (s *statsCollector) addSavedTokens(n int64) {
 	atomic.AddInt64(&s.savedTokens, n)
 }
 
+// observeFP 记录一次误命中反馈。
+func (s *statsCollector) observeFP() {
+	atomic.AddUint64(&s.semanticFP, 1)
+}
+
 // fillSnapshot 填充统计快照。
 func (s *statsCollector) fillSnapshot(snap *StatsSnapshot) {
 	s.lookupsMu.Lock()
