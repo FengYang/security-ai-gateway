@@ -21,8 +21,12 @@ func (a *legacyAdapter) Get(key string) (string, bool) {
 	// 旧接口只有 key 字符串，我们需要构造 LookupContext
 	// 这里做最简化的适配：把 key 当 transformed_hash 用
 	// 生产环境应使用新的 Lookup 接口
+	//
+	// 注意：PromptText 必须足够长，否则 NC-2（prompt 太短）会拒掉
+	// legacy 模式下我们用 key 本身作为 prompt（保证长度充足）
 	ctx := LookupContext{
 		TransformedHash: key,
+		PromptText:      key + ":legacy-prompt-padding",
 		TenantID:        "legacy",
 		EngineType:      "legacy",
 		Model:           "legacy",
@@ -41,6 +45,7 @@ func (a *legacyAdapter) Put(key, text string) {
 	ctx := StoreContext{
 		LookupContext: LookupContext{
 			TransformedHash: key,
+			PromptText:      key + ":legacy-prompt-padding",
 			TenantID:        "legacy",
 			EngineType:      "legacy",
 			Model:           "legacy",

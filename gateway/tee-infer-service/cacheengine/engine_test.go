@@ -266,3 +266,13 @@ func TestGenParams_Canonical(t *testing.T) {
 		t.Fatal("different temp should have different canonical")
 	}
 }
+
+// testConfig 返回测试用默认配置（降低阈值，方便测试）。
+func testConfig() CacheConfig {
+	cfg := DefaultConfig()
+	cfg.Mode = ModeExact
+	cfg.Exact.MinPromptTokens = 2
+	cfg.Exact.MinTokens = 2
+	cfg.Guard.ReadFastCheck = false
+	return cfg
+}

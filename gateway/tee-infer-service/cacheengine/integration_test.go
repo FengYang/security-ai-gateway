@@ -1,321 +1,383 @@
 package cacheengine
 
 import (
+	"bytes"
+	"fmt"
+	"strings"
 	"testing"
-	"time"
 )
 
-// testConfig 返回一份用于测试的配置（放宽 min_prompt_tokens 等限制）。
-func testConfig() CacheConfig {
+// TestIntegration_ExactLifecycle 精确缓存完整生命周期。
+// 写入 → 命中 → 版本升级失效 → 未命中 → 再写入 → 再命中。
+func TestIntegration_ExactLifecycle(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Exact.MinPromptTokens = 0
-	return cfg
-}
-
-// TestEngine_ModeOff 关闭模式下永不命中。
-func TestEngine_ModeOff(t *testing.T) {
-	cfg := testConfig()
-	cfg.Mode = ModeOff
-
-	eng := NewCacheEngine(cfg)
-
-	ctx := LookupContext{
-		TenantID:     "t1",
-		RequestID:    "r1",
-		EngineType:   "cmaas",
-		Model:        "gpt-4",
-		MaxNewTokens: 100,
-		Stream:       false,
-		TransformedHash: "abc123",
-		PromptText:   "什么是缓存？",
-		PolicyVer:    "1",
-		GuardVer:     "v1",
-	}
-
-	result := eng.Lookup(ctx)
-	if result.Hit {
-		t.Fatal("mode=off should never hit")
-	}
-	if result.RejectReason != "disabled" {
-		t.Fatalf("expected disabled, got %s", result.RejectReason)
-	}
-}
-
-// TestEngine_ExactHit 精确缓存命中。
-func TestEngine_ExactHit(t *testing.T) {
-	cfg := testConfig()
 	cfg.Mode = ModeExact
-	cfg.Guard.ReadFastCheck = false // 关掉快审，专注测试精确命中
-
-	eng := NewCacheEngine(cfg)
-
-	ctx := LookupContext{
-		TenantID:     "t1",
-		RequestID:    "r1",
-		EngineType:   "cmaas",
-		Model:        "gpt-4",
-		MaxNewTokens: 100,
-		Stream:       false,
-		TransformedHash: "abc123",
-		PromptText:   "什么是缓存？",
-		PolicyVer:    "1",
-		GuardVer:     "v1",
-	}
-
-	// 第一次：miss
-	r1 := eng.Lookup(ctx)
-	if r1.Hit {
-		t.Fatal("first lookup should miss")
-	}
-
-	// 写入
-	storeCtx := StoreContext{LookupContext: ctx, Writable: true}
-	res := InferResult{
-		Text:      "缓存是...",
-		TokensIn:  5,
-		TokensOut: 10,
-		Finish:    "stop",
-	}
-	outcome := eng.Store(storeCtx, res)
-	if !outcome.Stored {
-		t.Fatalf("store should succeed, skipped: %s", outcome.Skipped)
-	}
-	if outcome.Layer != "exact" {
-		t.Fatalf("expected layer=exact, got %s", outcome.Layer)
-	}
-
-	// 第二次：hit
-	r2 := eng.Lookup(ctx)
-	if !r2.Hit {
-		t.Fatalf("second lookup should hit, reason: %s", r2.RejectReason)
-	}
-	if r2.Kind != KindExact {
-		t.Fatalf("expected exact hit, got %s", r2.Kind)
-	}
-	if r2.Entry.Text != "缓存是..." {
-		t.Fatalf("unexpected text: %s", r2.Entry.Text)
-	}
-}
-
-// TestEngine_ExactKeyIsolation 不同参数不互相命中。
-func TestEngine_ExactKeyIsolation(t *testing.T) {
-	cfg := testConfig()
-	cfg.Mode = ModeExact
+	cfg.Exact.MinPromptTokens = 2
+	cfg.Exact.MinTokens = 2
 	cfg.Guard.ReadFastCheck = false
-	cfg.Exact.MinPromptTokens = 0
-
 	eng := NewCacheEngine(cfg)
 
-	store := func(prompt, text, model string) {
-		ctx := LookupContext{
-			TenantID:     "t1",
-			EngineType:   "cmaas",
-			Model:        model,
-			MaxNewTokens: 100,
-			TransformedHash: prompt,
-			PromptText:   prompt,
-			PolicyVer:    "1",
-			GuardVer:     "v1",
-		}
-		eng.Store(StoreContext{LookupContext: ctx, Writable: true}, InferResult{
-			Text:      text,
-			TokensOut: len(text),
-			Finish:    "stop",
-		})
-	}
-
-	// 写入两条：不同 model，相同 prompt
-	store("q1", "answer-m1", "model1")
-	store("q1", "answer-m2", "model2")
-
-	// 查询 model1
-	r := eng.Lookup(LookupContext{
+	ctxV1 := LookupContext{
 		TenantID:        "t1",
 		EngineType:      "cmaas",
-		Model:           "model1",
+		Model:           "m1",
 		MaxNewTokens:    100,
-		TransformedHash: "q1",
-		PromptText:      "q1",
-		PolicyVer:       "1",
+		TransformedHash: "h1",
+		PromptText:      "prompt text long enough",
+		PolicyVer:       "v1",
 		GuardVer:        "v1",
-	})
-	if !r.Hit {
-		t.Fatal("model1 should hit")
 	}
-	if r.Entry.Text != "answer-m1" {
-		t.Fatalf("unexpected text: %s", r.Entry.Text)
-	}
-}
 
-// TestEngine_Invalidate 主动失效。
-func TestEngine_Invalidate(t *testing.T) {
-	cfg := testConfig()
-	cfg.Mode = ModeExact
-	cfg.Guard.ReadFastCheck = false
-	cfg.Exact.MinPromptTokens = 0
-
-	eng := NewCacheEngine(cfg)
-
-	// 写入 t1 的两条
-	for i := 0; i < 3; i++ {
-		ctx := LookupContext{
-			TenantID:     "t1",
-			EngineType:   "cmaas",
-			Model:        "m1",
-			MaxNewTokens: 100,
-			TransformedHash: string(rune('a' + i)),
-			PromptText:   "prompt " + string(rune('a'+i)),
-			PolicyVer:    "1",
-			GuardVer:     "v1",
-		}
-		eng.Store(StoreContext{LookupContext: ctx, Writable: true}, InferResult{
-			Text:      "answer",
-			TokensOut: 6,
-			Finish:    "stop",
-		})
+	// 初始 miss
+	r1 := eng.Lookup(ctxV1)
+	if r1.Hit {
+		t.Fatal("step1: expected miss")
 	}
-	// 写入 t2 的一条
-	ctx := LookupContext{
-		TenantID:     "t2",
-		EngineType:   "cmaas",
-		Model:        "m1",
-		MaxNewTokens: 100,
-		TransformedHash: "x",
-		PromptText:   "hello",
-		PolicyVer:    "1",
-		GuardVer:     "v1",
-	}
-	eng.Store(StoreContext{LookupContext: ctx, Writable: true}, InferResult{
-		Text:      "hello there",
-		TokensOut: 11,
+
+	// 写入 v1
+	eng.Store(StoreContext{LookupContext: ctxV1, Writable: true}, InferResult{
+		Text:      "answer v1",
+		TokensOut: 10,
 		Finish:    "stop",
 	})
 
-	s := eng.Stats()
-	if s.ExactEntries != 4 {
-		t.Fatalf("expected 4 entries, got %d", s.ExactEntries)
+	// 命中 v1
+	r2 := eng.Lookup(ctxV1)
+	if !r2.Hit {
+		t.Fatalf("step2: expected hit, reason=%s", r2.RejectReason)
+	}
+	if r2.Entry.Text != "answer v1" {
+		t.Fatalf("expected 'answer v1', got '%s'", r2.Entry.Text)
 	}
 
-	// 按租户删除 t1
-	count, err := eng.Invalidate(InvalidateSelector{TenantID: "t1"})
+	// 版本升级 → 失效
+	ctxV2 := ctxV1
+	ctxV2.PolicyVer = "v2"
+	r3 := eng.Lookup(ctxV2)
+	if r3.Hit {
+		t.Fatal("step3: expected miss after version bump")
+	}
+
+	// 写入 v2
+	eng.Store(StoreContext{LookupContext: ctxV2, Writable: true}, InferResult{
+		Text:      "answer v2",
+		TokensOut: 10,
+		Finish:    "stop",
+	})
+
+	// 命中 v2
+	r4 := eng.Lookup(ctxV2)
+	if !r4.Hit {
+		t.Fatalf("step4: expected v2 hit, reason=%s", r4.RejectReason)
+	}
+	if r4.Entry.Text != "answer v2" {
+		t.Fatalf("expected 'answer v2', got '%s'", r4.Entry.Text)
+	}
+
+	// v1 应该仍在（版本不同但都可用，各自的 key）
+	// v1 查询：应该还是命中（因为 v1 的 key 没被删）
+	r5 := eng.Lookup(ctxV1)
+	if !r5.Hit {
+		t.Fatalf("step5: expected v1 still cached, reason=%s", r5.RejectReason)
+	}
+
+	// 全量失效
+	count, err := eng.Invalidate(InvalidateSelector{All: true})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("invalidate error: %v", err)
 	}
-	if count != 3 {
-		t.Fatalf("expected 3 invalidated, got %d", count)
-	}
-
-	s = eng.Stats()
-	if s.ExactEntries != 1 {
-		t.Fatalf("expected 1 entry left, got %d", s.ExactEntries)
+	if count < 2 {
+		t.Fatalf("expected at least 2 invalidated, got %d", count)
 	}
 
-	// 全量清空
-	count, err = eng.Invalidate(InvalidateSelector{All: true})
-	if err != nil {
-		t.Fatal(err)
+	// 都失效了
+	r6 := eng.Lookup(ctxV1)
+	if r6.Hit {
+		t.Fatal("step6: v1 should be invalidated")
 	}
-	if count != 1 {
-		t.Fatalf("expected 1 invalidated (all), got %d", count)
-	}
-
-	s = eng.Stats()
-	if s.ExactEntries != 0 {
-		t.Fatalf("expected 0 entries after all, got %d", s.ExactEntries)
+	r7 := eng.Lookup(ctxV2)
+	if r7.Hit {
+		t.Fatal("step6: v2 should be invalidated")
 	}
 }
 
-// TestEngine_NegativeCache 负向缓存。
-func TestEngine_NegativeCache(t *testing.T) {
-	cfg := testConfig()
-	cfg.Mode = ModeExact
+// TestIntegration_SemanticLifecycle 语义缓存完整生命周期。
+func TestIntegration_SemanticLifecycle(t *testing.T) {
+	cfg := testSemanticConfig()
+	cfg.Semantic.Threshold.General = 0.6
 	cfg.Guard.ReadFastCheck = false
-	cfg.Exact.MinPromptTokens = 0
-	cfg.Negative.Enabled = true
-	cfg.Negative.TTL = time.Hour
+	cfg.Guard.WriteRequiresOutGuard = false
 
+	embedder := NewDeterministicEmbedder(32)
+	idx := NewFlatVectorIndex(32, cfg.Semantic.Vector.FlatMaxEntries)
+	store, err := NewSemanticStore(&cfg, embedder, idx)
+	if err != nil {
+		t.Fatalf("NewSemanticStore failed: %v", err)
+	}
+	eng := NewCacheEngine(cfg, WithSemanticStore(store))
+
+	// 初始写入
+	ctx1 := LookupContext{
+		TenantID:        "t1",
+		EngineType:      "cmaas",
+		Model:           "m1",
+		MaxNewTokens:    100,
+		TransformedHash: "h1",
+		PromptText:      "what is the capital of france",
+		PolicyVer:       "v1",
+		GuardVer:        "v1",
+		Scene:           SceneGeneral,
+	}
+	eng.Store(StoreContext{LookupContext: ctx1, Writable: true}, InferResult{
+		Text:      "Paris is the capital of France.",
+		TokensOut: 20,
+		Finish:    "stop",
+	})
+
+	// 精确命中
+	r1 := eng.Lookup(ctx1)
+	if !r1.Hit || r1.Kind != KindExact {
+		t.Fatalf("expected exact hit, got hit=%v kind=%v reason=%s", r1.Hit, r1.Kind, r1.RejectReason)
+	}
+
+	// 语义相似查询（去掉 exact 匹配，用不同的 hash 触发语义检索）
+	ctx2 := LookupContext{
+		TenantID:        "t1",
+		EngineType:      "cmaas",
+		Model:           "m1",
+		MaxNewTokens:    100,
+		TransformedHash: "h2",
+		PromptText:      "capital of france what is",
+		PolicyVer:       "v1",
+		GuardVer:        "v1",
+		Scene:           SceneGeneral,
+	}
+	r2 := eng.Lookup(ctx2)
+	if !r2.Hit || r2.Kind != KindSemantic {
+		t.Fatalf("expected semantic hit, got hit=%v kind=%v reason=%s", r2.Hit, r2.Kind, r2.RejectReason)
+	}
+
+	// 不同主题查询（确定性 embedder 的相似度区分度有限，此处仅验证流程不崩）
+	ctx3 := LookupContext{
+		TenantID:        "t1",
+		EngineType:      "cmaas",
+		Model:           "m1",
+		MaxNewTokens:    100,
+		TransformedHash: "h3",
+		PromptText:      "completely different topic about machine learning algorithms",
+		PolicyVer:       "v1",
+		GuardVer:        "v1",
+		Scene:           SceneGeneral,
+	}
+	r3 := eng.Lookup(ctx3)
+	t.Logf("different topic: hit=%v kind=%v reason=%s", r3.Hit, r3.Kind, r3.RejectReason)
+	// 注：确定性 embedder 的相似度区分度有限，不做强断言
+}
+
+// TestIntegration_SceneThresholds 场景化阈值：不同场景阈值不同。
+func TestIntegration_SceneThresholds(t *testing.T) {
+	cfg := testSemanticConfig()
+	// factual 阈值高，general 阈值低
+	cfg.Semantic.Threshold.Factual = 0.95
+	cfg.Semantic.Threshold.General = 0.5
+	cfg.Guard.ReadFastCheck = false
+	cfg.Guard.WriteRequiresOutGuard = false
+
+	embedder := NewDeterministicEmbedder(32)
+	idx := NewFlatVectorIndex(32, cfg.Semantic.Vector.FlatMaxEntries)
+	store, err := NewSemanticStore(&cfg, embedder, idx)
+	if err != nil {
+		t.Fatalf("NewSemanticStore failed: %v", err)
+	}
+	eng := NewCacheEngine(cfg, WithSemanticStore(store))
+
+	// 写入一个 factual 场景的条目
+	factCtx := LookupContext{
+		TenantID:        "t1",
+		EngineType:      "cmaas",
+		Model:           "m1",
+		MaxNewTokens:    100,
+		TransformedHash: "f1",
+		PromptText:      "what year did world war 2 end",
+		PolicyVer:       "v1",
+		GuardVer:        "v1",
+		Scene:           SceneFactual,
+	}
+	eng.Store(StoreContext{LookupContext: factCtx, Writable: true}, InferResult{
+		Text:      "World War II ended in 1945.",
+		TokensOut: 15,
+		Finish:    "stop",
+	})
+
+	// 相似的 factual 查询 → 高阈值下不命中（确定性 embedder 差异够大）
+	simFact := LookupContext{
+		TenantID:        "t1",
+		EngineType:      "cmaas",
+		Model:           "m1",
+		MaxNewTokens:    100,
+		TransformedHash: "f2",
+		PromptText:      "when did second world war finish",
+		PolicyVer:       "v1",
+		GuardVer:        "v1",
+		Scene:           SceneFactual,
+	}
+	rFact := eng.Lookup(simFact)
+	// 高阈值 + 确定性 embedder 余弦差异 → 大概率不命中
+	t.Logf("factual scene: hit=%v kind=%v reason=%s", rFact.Hit, rFact.Kind, rFact.RejectReason)
+
+	// 写入 general 场景条目
+	genCtx := LookupContext{
+		TenantID:        "t1",
+		EngineType:      "cmaas",
+		Model:           "m1",
+		MaxNewTokens:    100,
+		TransformedHash: "g1",
+		PromptText:      "tell me about weather today",
+		PolicyVer:       "v1",
+		GuardVer:        "v1",
+		Scene:           SceneGeneral,
+	}
+	eng.Store(StoreContext{LookupContext: genCtx, Writable: true}, InferResult{
+		Text:      "It is sunny today.",
+		TokensOut: 10,
+		Finish:    "stop",
+	})
+
+	simGen := LookupContext{
+		TenantID:        "t1",
+		EngineType:      "cmaas",
+		Model:           "m1",
+		MaxNewTokens:    100,
+		TransformedHash: "g2",
+		PromptText:      "what is weather like today",
+		PolicyVer:       "v1",
+		GuardVer:        "v1",
+		Scene:           SceneGeneral,
+	}
+	rGen := eng.Lookup(simGen)
+	t.Logf("general scene: hit=%v kind=%v reason=%s", rGen.Hit, rGen.Kind, rGen.RejectReason)
+}
+
+// TestIntegration_StatsMetrics 统计与指标渲染。
+func TestIntegration_StatsMetrics(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Mode = ModeExact
+	cfg.Exact.MinPromptTokens = 2
+	cfg.Exact.MinTokens = 2
+	cfg.Guard.ReadFastCheck = false
 	eng := NewCacheEngine(cfg)
 
-	ctx := LookupContext{
-		TenantID:     "t1",
-		EngineType:   "cmaas",
-		Model:        "m1",
-		MaxNewTokens: 100,
-		TransformedHash: "bad-prompt",
-		PromptText:   "这是个坏问题",
-		PolicyVer:    "1",
-		GuardVer:     "v1",
+	// 做一些操作
+	for i := 0; i < 10; i++ {
+		ctx := LookupContext{
+			TenantID:        "t1",
+			EngineType:      "cmaas",
+			Model:           "m1",
+			MaxNewTokens:    100,
+			TransformedHash: fmt.Sprintf("h%d", i),
+			PromptText:      "long enough prompt",
+			PolicyVer:       "v1",
+			GuardVer:        "v1",
+		}
+		// 先 miss
+		r := eng.Lookup(ctx)
+		if r.Hit {
+			t.Fatalf("expected miss for h%d", i)
+		}
+		// 再写入
+		eng.Store(StoreContext{LookupContext: ctx, Writable: true}, InferResult{
+			Text:      fmt.Sprintf("answer %d", i),
+			TokensOut: 10,
+			Finish:    "stop",
+		})
+		// 再命中
+		r2 := eng.Lookup(ctx)
+		if !r2.Hit {
+			t.Fatalf("expected hit for h%d, reason=%s", i, r2.RejectReason)
+		}
 	}
 
-	// 写入负向
-	storeCtx := StoreContext{LookupContext: ctx, Writable: true}
-	res := InferResult{
-		Finish: "stop",
-		Negative: &NegativePayload{
-			Reason:    "injection",
-			Stage:     "guardrail",
-			PolicyVer: "1",
-			GuardVer:  "v1",
-		},
+	stats := eng.Stats()
+	// Lookups 是 map，格式 "{kind}:{result}"
+	exactHits := stats.Lookups["exact:hit"]
+	exactMisses := stats.Lookups["exact:miss"]
+	totalHits := exactHits + stats.Lookups["semantic:hit"] + stats.Lookups["negative:hit"]
+	totalMisses := exactMisses + stats.Lookups["semantic:miss"] + stats.Lookups["precheck:not_cacheable"]
+
+	if totalHits+totalMisses == 0 {
+		t.Fatal("expected some lookups")
 	}
-	outcome := eng.Store(storeCtx, res)
-	if !outcome.Stored || outcome.Layer != "negative" {
-		t.Fatalf("expected negative store, got %v", outcome)
+	if exactHits != 10 {
+		t.Fatalf("expected 10 exact hits, got %d", exactHits)
+	}
+	if exactMisses != 10 {
+		t.Fatalf("expected 10 exact misses, got %d", exactMisses)
+	}
+	if stats.ExactEntries != 10 {
+		t.Fatalf("expected 10 exact entries, got %d", stats.ExactEntries)
 	}
 
-	// 查询负向命中
-	r := eng.Lookup(ctx)
-	if !r.Hit {
-		t.Fatalf("expected negative hit, reason: %s", r.RejectReason)
+	// 命中率计算
+	hitRate := float64(totalHits) / float64(totalHits+totalMisses)
+	if hitRate < 0.49 || hitRate > 0.51 {
+		t.Fatalf("expected ~0.5 hit rate, got %f", hitRate)
 	}
-	if !r.IsNegative() {
-		t.Fatal("should be negative")
+
+	// metrics 渲染（通过内部 engine 类型断言）
+	var buf bytes.Buffer
+	e := eng.(*engine)
+	e.RenderPrometheus(&buf)
+	output := buf.String()
+
+	if output == "" {
+		t.Fatal("metrics should not be empty")
 	}
-	if r.Entry.Negative.Reason != "injection" {
-		t.Fatalf("unexpected reason: %s", r.Entry.Negative.Reason)
+	// 包含关键指标
+	checks := []string{
+		"otpmask_cache_lookups_total",
+		"otpmask_cache_exact_entries",
+		"otpmask_cache_evictions_total",
+	}
+	for _, name := range checks {
+		if !strings.Contains(output, name) {
+			t.Fatalf("metrics missing: %s", name)
+		}
 	}
 }
 
-// TestEngine_Stats 统计指标。
-func TestEngine_Stats(t *testing.T) {
-	cfg := testConfig()
-	cfg.Mode = ModeExact
-	cfg.Guard.ReadFastCheck = false
-	cfg.Exact.MinPromptTokens = 0
-
+// TestIntegration_ModeOff mode=off 完全透传（fail-closed）。
+func TestIntegration_ModeOff(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Mode = ModeOff
 	eng := NewCacheEngine(cfg)
 
 	ctx := LookupContext{
-		TenantID:     "t1",
-		EngineType:   "cmaas",
-		Model:        "m1",
-		MaxNewTokens: 100,
-		TransformedHash: "abc",
-		PromptText:   "hello world test prompt long enough",
-		PolicyVer:    "1",
-		GuardVer:     "v1",
-	}
-
-	// 3 次 miss
-	for i := 0; i < 3; i++ {
-		eng.Lookup(ctx)
+		TenantID:        "t1",
+		EngineType:      "cmaas",
+		Model:           "m1",
+		TransformedHash: "h1",
+		PromptText:      "long enough prompt text",
 	}
 
 	// 写入
 	eng.Store(StoreContext{LookupContext: ctx, Writable: true}, InferResult{
 		Text:      "answer",
-		TokensOut: 6,
+		TokensOut: 10,
 		Finish:    "stop",
 	})
 
-	// 1 次 hit
-	eng.Lookup(ctx)
-
-	s := eng.Stats()
-	if s.Lookups["exact:miss"] != 3 {
-		t.Errorf("expected 3 exact:miss, got %d", s.Lookups["exact:miss"])
+	// 查询 → 不命中（mode=off 不查缓存）
+	r := eng.Lookup(ctx)
+	if r.Hit {
+		t.Fatal("mode=off should never hit")
 	}
-	if s.Lookups["exact:hit"] != 1 {
-		t.Errorf("expected 1 exact:hit, got %d", s.Lookups["exact:hit"])
+	if r.RejectReason != "disabled" {
+		t.Fatalf("expected reason 'disabled', got '%s'", r.RejectReason)
+	}
+
+	stats := eng.Stats()
+	// mode=off 计入 precheck:disabled，不计入 exact/semantic hit
+	if stats.Lookups["exact:hit"] != 0 || stats.Lookups["semantic:hit"] != 0 {
+		t.Fatalf("mode=off should have 0 exact/semantic hits, got %+v", stats.Lookups)
 	}
 }

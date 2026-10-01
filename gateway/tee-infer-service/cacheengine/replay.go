@@ -35,9 +35,15 @@ func (r *entryReplayer) Replay(entry *Entry, stream bool) []Segment {
 
 	// 流式请求 + 有分片 → paced 回放
 	// 应用 min_gap / max_gap 钳制（§6.12.3）
+	// 注意：第 0 个分片不钳制（它是时间基准点）
 	segs := make([]Segment, len(entry.Segments))
 	var prev time.Duration
 	for i, s := range entry.Segments {
+		if i == 0 {
+			segs[i] = Segment{Text: s.Text, At: s.At}
+			prev = s.At
+			continue
+		}
 		gap := s.At - prev
 		if r.cfg != nil && r.cfg.Stream.Enabled {
 			if gap < r.cfg.Stream.MinGap {
