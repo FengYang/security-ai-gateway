@@ -40,10 +40,11 @@ type SemanticStore interface {
 
 // semanticStore 语义缓存实现。
 type semanticStore struct {
-	cfg      *CacheConfig
-	embedder Embedder
-	index    VectorIndex
-	nowFn    nowFunc
+	cfg           *CacheConfig
+	embedder      Embedder // 明文域 embedder
+	secureEmbedder Embedder // 密态域 embedder（可选，nil 表示密态降级用明文）
+	index         VectorIndex
+	nowFn         nowFunc
 }
 
 // NewSemanticStore 构造语义缓存存储。
@@ -65,6 +66,16 @@ func NewSemanticStore(cfg *CacheConfig, embedder Embedder, index VectorIndex) (S
 		index:    index,
 		nowFn:    defaultNow,
 	}, nil
+}
+
+// NewSemanticStoreDual 构造带密态 embedder 的双路语义缓存存储。
+func NewSemanticStoreDual(cfg *CacheConfig, plain Embedder, secure Embedder, index VectorIndex) (SemanticStore, error) {
+	ss, err := NewSemanticStore(cfg, plain, index)
+	if err != nil {
+		return nil, err
+	}
+	ss.(*semanticStore).secureEmbedder = secure
+	return ss, nil
 }
 
 // Enabled 语义缓存是否启用。
@@ -93,22 +104,24 @@ func (s *semanticStore) Lookup(ctx LookupContext) (bool, string, float64, string
 	// 获取场景化阈值
 	th := s.sceneThreshold(scene)
 
-	// 计算 query 向量
+	// 计算 query 向量（按安全域选择 embedder）
 	ctx2, cancel := context.WithTimeout(context.Background(), s.cfg.Semantic.Embedder.Timeout)
 	defer cancel()
 
-	vec, err := s.embedder.Embed(ctx2, ctx.PromptText)
+	emb := s.embedderForLevel(ctx.SecurityLevel)
+	vec, err := emb.Embed(ctx2, ctx.PromptText)
 	if err != nil {
 		return false, "", 0, scene, th, "embed_error"
 	}
 
 	// 向量检索（topK + 硬过滤）
 	filter := VectorFilter{
-		TenantID:   ctx.TenantID,
-		EngineType: ctx.EngineType,
-		Model:      ctx.Model,
-		PolicyVer:  ctx.PolicyVer,
-		GuardVer:   ctx.GuardVer,
+		TenantID:      ctx.TenantID,
+		EngineType:    ctx.EngineType,
+		Model:         ctx.Model,
+		PolicyVer:     ctx.PolicyVer,
+		GuardVer:      ctx.GuardVer,
+		SecurityLevel: ctx.SecurityLevel,
 	}
 
 	hits, err := s.index.Search(vec, s.cfg.Semantic.Vector.TopK, filter)
@@ -129,8 +142,10 @@ func (s *semanticStore) Lookup(ctx LookupContext) (bool, string, float64, string
 // 计算 response embedding → upsert 向量索引。
 // 如果 embed 失败，返回错误（由 engine 决定是否回滚 ExactStore）。
 func (s *semanticStore) Store(entryID string, text string, meta VectorMeta) error {
-	if !s.embedder.Available() {
-		return fmt.Errorf("embedder unavailable")
+	// 按安全域选择 embedder
+	emb := s.embedderForLevel(meta.SecurityLevel)
+	if !emb.Available() {
+		return fmt.Errorf("embedder unavailable for level=%s", meta.SecurityLevel)
 	}
 	if text == "" {
 		return fmt.Errorf("empty text")
@@ -139,12 +154,20 @@ func (s *semanticStore) Store(entryID string, text string, meta VectorMeta) erro
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Semantic.Embedder.Timeout)
 	defer cancel()
 
-	vec, err := s.embedder.Embed(ctx, text)
+	vec, err := emb.Embed(ctx, text)
 	if err != nil {
 		return fmt.Errorf("embed response: %w", err)
 	}
 
 	return s.index.Upsert(entryID, vec, meta)
+}
+
+// embedderForLevel 根据安全等级返回对应的 embedder。
+func (s *semanticStore) embedderForLevel(level SecurityLevel) Embedder {
+	if (level == SecLevelSecure || level == SecLevelHSM) && s.secureEmbedder != nil {
+		return s.secureEmbedder
+	}
+	return s.embedder
 }
 
 // Delete 删除指定 entry 的向量索引。

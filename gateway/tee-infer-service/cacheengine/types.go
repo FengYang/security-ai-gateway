@@ -53,6 +53,16 @@ const (
 	ModeFull     CacheMode = "full"
 )
 
+// SecurityLevel 安全域等级（§7.4 密态路径）。
+// plain：明文域（默认） / secure：密态域（TEE 内解密处理）/ hsm：HSM 强安全域
+type SecurityLevel string
+
+const (
+	SecLevelPlain  SecurityLevel = "plain"
+	SecLevelSecure SecurityLevel = "secure"
+	SecLevelHSM    SecurityLevel = "hsm"
+)
+
 // ===== 生成参数 =====
 
 // GenParams 影响输出的生成参数。全部参与缓存键。
@@ -91,6 +101,7 @@ type LookupContext struct {
 	Scene           SceneClass
 	PolicyVer       string
 	GuardVer        string
+	SecurityLevel   SecurityLevel // 安全域等级（默认 plain）
 
 	// 可缓存性信号（§6.0 判定输入）
 	TurnCount     int
@@ -213,6 +224,7 @@ type VectorMeta struct {
 	PolicyVer       string
 	GuardVer        string
 	Scene           SceneClass
+	SecurityLevel   SecurityLevel
 	ExpireAt        int64
 	FingerprintHash string
 }
@@ -226,11 +238,12 @@ type VectorHit struct {
 
 // VectorFilter 硬过滤（不经相似度，直接裁剪候选集）。
 type VectorFilter struct {
-	TenantID   string
-	EngineType string
-	Model      string
-	PolicyVer  string
-	GuardVer   string
+	TenantID      string
+	EngineType    string
+	Model         string
+	PolicyVer     string
+	GuardVer      string
+	SecurityLevel SecurityLevel
 }
 
 // ===== 读时快审 =====

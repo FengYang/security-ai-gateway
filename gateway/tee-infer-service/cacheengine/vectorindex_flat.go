@@ -154,6 +154,9 @@ func (f *flatIndex) Search(query []float32, topK int, filter VectorFilter) ([]Ve
 		if filter.GuardVer != "" && meta.GuardVer != filter.GuardVer {
 			continue
 		}
+		if filter.SecurityLevel != "" && meta.SecurityLevel != filter.SecurityLevel {
+			continue
+		}
 
 		// 过期过滤
 		if meta.ExpireAt > 0 && now >= meta.ExpireAt {

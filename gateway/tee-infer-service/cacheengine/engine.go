@@ -447,14 +447,15 @@ func (e *engine) Store(ctx StoreContext, res InferResult) StoreOutcome {
 	// 写语义层（二期）
 	if e.sem != nil && e.sem.Enabled(ctx.TenantID) {
 		meta := VectorMeta{
-			EntryID:    key, // 用 exact key 作为向量索引 ID，便于回查正文
-			TenantID:   ctx.TenantID,
-			EngineType: ctx.EngineType,
-			Model:      ctx.Model,
-			PolicyVer:  ctx.PolicyVer,
-			GuardVer:   ctx.GuardVer,
-			Scene:      SceneClass(ctx.Scene),
-			ExpireAt:   entry.ExpireAt,
+			EntryID:       key, // 用 exact key 作为向量索引 ID，便于回查正文
+			TenantID:      ctx.TenantID,
+			EngineType:    ctx.EngineType,
+			Model:         ctx.Model,
+			PolicyVer:     ctx.PolicyVer,
+			GuardVer:      ctx.GuardVer,
+			Scene:         SceneClass(ctx.Scene),
+			SecurityLevel: ctx.SecurityLevel,
+			ExpireAt:      entry.ExpireAt,
 		}
 		if err := e.sem.Store(key, res.Text, meta); err != nil {
 			// fail-open：向量写入失败不影响精确层命中
