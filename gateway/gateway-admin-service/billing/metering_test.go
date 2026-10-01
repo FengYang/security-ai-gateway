@@ -1,0 +1,184 @@
+package billing
+
+import (
+	"testing"
+)
+
+// ---------- T-6.3 计量接入单元测试 ----------
+
+func TestAggToEntries_Empty(t *testing.T) {
+	// 空窗口返回空
+	entries := AggToEntries(nil)
+	if len(entries) != 0 {
+		t.Errorf("nil window -> %d entries, want 0", len(entries))
+	}
+
+	entries = AggToEntries(&UsageWindow{Tenants: map[string]*TenantAgg{}})
+	if len(entries) != 0 {
+		t.Errorf("empty tenants -> %d entries, want 0", len(entries))
+	}
+}
+
+func TestAggToEntries_SingleTenantMultiModel(t *testing.T) {
+	win := &UsageWindow{
+		FromNs: 1700000000000000000,
+		ToNs:   1700086400000000000,
+		Tenants: map[string]*TenantAgg{
+			"t1": {
+				TokensIn:  1000,
+				TokensOut: 500,
+				Requests:  10,
+				ByModel: map[string]*ModelAgg{
+					"m1": {TokensIn: 600, TokensOut: 300, Requests: 6},
+					"m2": {TokensIn: 400, TokensOut: 200, Requests: 4},
+				},
+			},
+		},
+		Source:   "pull",
+		EventKey: "pull-1700000000-1700086400",
+	}
+
+	entries := AggToEntries(win)
+	if len(entries) != 2 {
+		t.Fatalf("entries count = %d, want 2", len(entries))
+	}
+
+	// 验证 event_key 确定性（按模型名排序：m1, m2）
+	if entries[0].ModelKey != "m1" {
+		t.Errorf("entries[0].ModelKey = %q, want m1", entries[0].ModelKey)
+	}
+	if entries[0].TokensIn != 600 {
+		t.Errorf("m1 TokensIn = %d, want 600", entries[0].TokensIn)
+	}
+	if entries[1].ModelKey != "m2" {
+		t.Errorf("entries[1].ModelKey = %q, want m2", entries[1].ModelKey)
+	}
+
+	// 验证 event_key 格式
+	expected := "pull-pull-1700000000-1700086400-t1-m1"
+	if entries[0].EventKey != expected {
+		t.Errorf("event_key = %q, want %q", entries[0].EventKey, expected)
+	}
+}
+
+func TestAggToEntries_DayCalculation(t *testing.T) {
+	// 验证 UTC+8 自然日计算
+	// 2023-11-14 23:00 UTC = 2023-11-15 07:00 UTC+8
+	ns := int64(1700000400) * int64(1e9) // 2023-11-14 23:00:00 UTC
+	day := dayOfNs(ns)
+	if day != "2023-11-15" {
+		t.Errorf("dayOfNs(2023-11-14 23:00 UTC) = %q, want 2023-11-15 (UTC+8)", day)
+	}
+}
+
+func TestCanWrite_SyncModes(t *testing.T) {
+	// R-30 / A-12：单写者
+
+	// pull 模式
+	if !CanWrite(SyncModePull, "pull") {
+		t.Error("pull mode should allow pull source")
+	}
+	if CanWrite(SyncModePull, "push") {
+		t.Error("pull mode should NOT allow push source to write ledger")
+	}
+	if !CanWrite(SyncModePull, "manual") {
+		t.Error("pull mode should allow manual source")
+	}
+
+	// push 模式
+	if !CanWrite(SyncModePush, "push") {
+		t.Error("push mode should allow push source")
+	}
+	if CanWrite(SyncModePush, "pull") {
+		t.Error("push mode should NOT allow pull source to write ledger")
+	}
+
+	// 未知模式
+	if CanWrite("both", "pull") {
+		t.Error("unknown sync_mode should deny all writes")
+	}
+}
+
+func TestPushToWindow(t *testing.T) {
+	ev := &PushEvent{
+		EventID:   "evt-123",
+		EventType: "billing_increment",
+		TenantID:  "t1",
+		FromNs:    1000,
+		ToNs:      2000,
+		TokensIn:  100,
+		TokensOut: 50,
+		Requests:  3,
+		RetryToks: 10,
+		ByModel: map[string]*ModelAgg{
+			"m1": {TokensIn: 100, TokensOut: 50, Requests: 3, RetryToks: 10},
+		},
+		SentAt: 3000,
+	}
+
+	win := PushToWindow(ev)
+	if win.Source != "push" {
+		t.Errorf("source = %q, want push", win.Source)
+	}
+	if win.EventKey != "push-evt-123" {
+		t.Errorf("event_key = %q, want push-evt-123", win.EventKey)
+	}
+	if len(win.Tenants) != 1 {
+		t.Fatalf("tenants count = %d, want 1", len(win.Tenants))
+	}
+	ta := win.Tenants["t1"]
+	if ta == nil {
+		t.Fatal("tenant t1 not found")
+	}
+	if ta.RetryToks != 10 {
+		t.Errorf("retry_toks = %d, want 10", ta.RetryToks)
+	}
+}
+
+func TestAggToEntries_ZeroModelSkipped(t *testing.T) {
+	// 零用量模型不生成条目
+	win := &UsageWindow{
+		FromNs: 1000,
+		ToNs:   2000,
+		Tenants: map[string]*TenantAgg{
+			"t1": {
+				TokensIn:  100,
+				TokensOut: 50,
+				Requests:  2,
+				ByModel: map[string]*ModelAgg{
+					"m1": {TokensIn: 100, TokensOut: 50, Requests: 2},
+					"m2": {}, // 零用量
+				},
+			},
+		},
+		Source:   "pull",
+		EventKey: "pull-0-1",
+	}
+	entries := AggToEntries(win)
+	if len(entries) != 1 {
+		t.Errorf("entries = %d, want 1 (zero model skipped)", len(entries))
+	}
+}
+
+func TestAggToEntries_RetryOnlyModel(t *testing.T) {
+	// 仅有 retry token 的模型也应写入（平台成本）
+	win := &UsageWindow{
+		FromNs: 1000,
+		ToNs:   2000,
+		Tenants: map[string]*TenantAgg{
+			"t1": {
+				RetryToks: 50,
+				ByModel: map[string]*ModelAgg{
+					"m1": {RetryToks: 50},
+				},
+			},
+		},
+		Source:   "push",
+		EventKey: "push-evt-1",
+	}
+	entries := AggToEntries(win)
+	// 0 tokens_in/out/requests + 50 retry → 不应跳过（retry 也是数据）
+	if len(entries) != 1 {
+		t.Errorf("entries = %d, want 1 (retry-only model kept)", len(entries))
+	}
+}

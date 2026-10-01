@@ -124,3 +124,31 @@ core gateway_core_ratelimit_rules_total conditional
 core gateway_core_ratelimit_change_total conditional
 core gateway_core_ratelimit_tee_applied_total conditional
 core gateway_core_ratelimit_pull_reject_total conditional
+
+# ---- P0-3 Token billing (gateway-admin-service; opt-in via BILLING_ENABLED=true) ----
+# All conditional: the whole billing subsystem is an opt-in switch. When disabled
+# (default) the registry is empty and /metrics output is unchanged (R-1/M10),
+# so absence must NOT be judged as a failure.
+admin gateway_admin_billing_requests_total conditional
+admin gateway_admin_billing_ledger_entries_total conditional
+admin gateway_admin_billing_ledger_head_seq conditional
+admin gateway_admin_billing_ledger_chain_broken conditional
+admin gateway_admin_billing_pull_total conditional
+admin gateway_admin_billing_push_total conditional
+admin gateway_admin_billing_close_duration_seconds conditional
+admin gateway_admin_billing_bill_issued_total conditional
+admin gateway_admin_billing_api_duration_seconds conditional
+admin gateway_admin_billing_anomaly_total conditional
+admin gateway_admin_billing_reconcile_diff conditional
+admin gateway_admin_billing_quota_remaining_ratio conditional
+admin gateway_admin_billing_quota_apply_duration_seconds conditional
+admin gateway_admin_billing_freeze_total conditional
+admin gateway_admin_billing_export_total conditional
+admin gateway_admin_billing_signature_verify_total conditional
+admin gateway_admin_billing_clock_skew_total conditional
+admin gateway_admin_billing_pricing_missing_total conditional
+admin gateway_admin_billing_platform_retry_tokens conditional
+admin gateway_admin_billing_auto_repull_total conditional
+admin gateway_admin_billing_plan_expiring_total conditional
+admin gateway_admin_billing_assoc_verify_total conditional
+admin gateway_admin_billing_ledger_error_total conditional

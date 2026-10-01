@@ -49,6 +49,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"security-ai-gateway/gateway/gateway-admin-service/billing"
 )
 
 // claimsCtxKey 上下文中 claims 的键（不透出包外）。
@@ -94,6 +96,8 @@ func handleReadyz(brokerHealthy func() bool) http.HandlerFunc {
 func handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	metrics.render(w)
+	// 计费域指标（T10）：billing.enabled=false 时注册表为空 → 渲染 0 字节（输出逐字节不变 R-1/M10）。
+	billing.RenderMetrics(w)
 }
 
 // echoResponse 受保护示例端点响应。
@@ -118,8 +122,9 @@ func handleEcho(w http.ResponseWriter, r *http.Request) {
 // ah 为账号管理审计投递 handler（M3-A，恒注册；审计链未启用时端点返回 503）。
 // sch 为安全中心数据 handler（M3-B，恒注册；G1 链/tee-infer 数据源缺失时按 503 语义返回）。
 // cs 为高敏变更复核 handler（M3-C，nil = 特性关闭；启用后强制 submitter≠reviewer）。
+// bih 为计费域 handler（P0-3，nil = 特性关闭；启用后注册 /billing/* 端点）。
 // legacyBroker 为兼容期开关：true 时管理面端口同时暴露 broker 中转（三步收口第 1 步）。
-func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *modelCatalogHandler, uh *usageHandler, ah *auditEventHandler, sch *secCenterHandler, cs *changeStore, legacyBroker bool) *http.ServeMux {
+func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *modelCatalogHandler, uh *usageHandler, ah *auditEventHandler, sch *secCenterHandler, cs *changeStore, bih *billingHandler, legacyBroker bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/metrics", handleMetrics)
@@ -147,6 +152,9 @@ func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *
 	if cs != nil {
 		mux.HandleFunc(changeAPIBase, authMiddleware(cfg, cs.handleList))
 		mux.HandleFunc(changeAPIBase+"/", authMiddleware(cfg, cs.handleItem))
+	}
+	if bih != nil {
+		bih.register(mux, cfg)
 	}
 
 	var brokerHealthy func() bool
@@ -246,7 +254,23 @@ func main() {
 	if cs == nil {
 		log.Printf("提示：高敏变更复核未启用（ADMIN_CHANGES_FILE 未配置），变更端点不注册")
 	}
-	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, ah, sch, cs, bs.legacyPort)
+	// 计费域（P0-3）：BILLING_ENABLED!=true = 特性关闭（不注册 /billing/*，逐字节一致 R-1/M10）。
+	bcfg, err := billing.LoadBillingConfig()
+	if err != nil {
+		log.Fatalf("计费配置加载失败（fail-closed）：%v", err)
+	}
+	bih, err := newBillingHandler(bcfg, auditChain)
+	if err != nil {
+		log.Fatalf("计费子系统初始化失败（fail-closed）：%v", err)
+	}
+	if bih != nil {
+		log.Printf("计费域已启用：store=%s price_table=%s sync_mode=%s",
+			bcfg.Store.Driver, bcfg.Rating.PriceTable, bcfg.Source.SyncMode)
+		defer func() { _ = bih.store.Close() }()
+	} else {
+		log.Printf("计费域未启用（BILLING_ENABLED!=true），/billing/* 端点不注册")
+	}
+	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, ah, sch, cs, bih, bs.legacyPort)
 
 	// 段① 凭据只读投递端点（Phase 1 门禁 #8；C 项起支持多集合）：
 	// 未配置任何集合 = 不注册（fail-closed：绝不无令牌裸奔投递密钥）。仅供插件内网周期拉取。

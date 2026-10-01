@@ -1,0 +1,182 @@
+package billing
+
+import (
+	"fmt"
+	"sort"
+	"time"
+)
+
+// ---------- 入账核心逻辑（T3b · 聚合→账本条目，§6.3.3） ----------
+
+// dayLayout UTC+8 自然日格式（与 Period.Timezone=UTC+8 对应，P0 硬编码）。
+const dayLayout = "2006-01-02"
+
+// utc8Offset UTC+8 偏移（秒）。
+const utc8Offset = 8 * 3600
+
+// dayOfNs 把 UTC 纳秒时间戳转为 UTC+8 自然日字符串。
+func dayOfNs(ns int64) string {
+	sec := ns / int64(time.Second)
+	utc8Sec := sec + utc8Offset
+	t := time.Unix(utc8Sec, 0).UTC()
+	return t.Format(dayLayout)
+}
+
+// AggToEntries 将一次拉取/推送的聚合窗口转为账本条目列表。
+//
+// 拆分规则（§6.3.3）：
+//  1. 按租户 × 模型维度 拆分为条目（与 ledger 表 model_key 对齐）
+//  2. 同一窗口内按窗口结束时间算日（UTC+8）—— 一次窗口可能跨日，需按日拆分
+//     （P0 简化：窗口 ≤ 1 天则取窗口结束日；超 1 天由调用方分批拉取）
+//  3. event_key 保证幂等："{source}-{windowEventKey}-{tenant}-{model}"
+//  4. 入账时由 RatingEngine 计算 std_in/std_out/price_ver 并锁定（A-32）
+//
+// ★ M9 / A-42：TokensIn/TokensOut 为净量（剔除 retry）；RetryToks 归平台成本。
+func AggToEntries(win *UsageWindow) []LedgerEntry {
+	if win == nil || len(win.Tenants) == 0 {
+		return nil
+	}
+
+	// 按窗口结束日算 day（P0 简化：假设窗口 ≤ 24h，落在结束日；
+	// 真实生产中拉取间隔远小于 1 天，此简化成立。若跨日由下一轮拉取覆盖）
+	day := dayOfNs(win.ToNs)
+	nowNs := time.Now().UnixNano()
+
+	var entries []LedgerEntry
+
+	// 按租户名排序 → 按模型名排序 → 确定性输出（便于测试与对账）
+	tenants := make([]string, 0, len(win.Tenants))
+	for t := range win.Tenants {
+		tenants = append(tenants, t)
+	}
+	sort.Strings(tenants)
+
+	for _, tenant := range tenants {
+		agg := win.Tenants[tenant]
+		if agg == nil {
+			continue
+		}
+
+		if len(agg.ByModel) == 0 {
+			// 无模型维度 → 合并到一条 model_key=""（不应出现，保险）
+			if agg.TokensIn == 0 && agg.TokensOut == 0 && agg.Requests == 0 && agg.RetryToks == 0 {
+				continue
+			}
+			entries = append(entries, LedgerEntry{
+				TenantID:  tenant,
+				ModelKey:  "",
+				Day:       day,
+				TokensIn:  agg.TokensIn,
+				TokensOut: agg.TokensOut,
+				Requests:  agg.Requests,
+				RetryToks: agg.RetryToks,
+				Source:    win.Source,
+				EventKey:  fmt.Sprintf("%s-%s-%s-__all__", win.Source, win.EventKey, tenant),
+				CreatedAt: nowNs,
+			})
+			continue
+		}
+
+		// 有模型维度 → 按模型拆分
+		models := make([]string, 0, len(agg.ByModel))
+		for m := range agg.ByModel {
+			models = append(models, m)
+		}
+		sort.Strings(models)
+
+		var totalRetry int64
+		for _, mk := range models {
+			mu := agg.ByModel[mk]
+			if mu == nil {
+				continue
+			}
+			// 跳过完全无数据的模型（tokens_in/out/requests/retry 全 0）
+			if mu.TokensIn == 0 && mu.TokensOut == 0 && mu.Requests == 0 && mu.RetryToks == 0 {
+				continue
+			}
+			entries = append(entries, LedgerEntry{
+				TenantID:  tenant,
+				ModelKey:  mk,
+				Day:       day,
+				TokensIn:  mu.TokensIn,
+				TokensOut: mu.TokensOut,
+				Requests:  mu.Requests,
+				RetryToks: mu.RetryToks,
+				Source:    win.Source,
+				EventKey:  fmt.Sprintf("%s-%s-%s-%s", win.Source, win.EventKey, tenant, mk),
+				CreatedAt: nowNs,
+			})
+			totalRetry += mu.RetryToks
+		}
+		// 顶层 RetryToks 若有（推送可能直接带总量），差额补到 "__retry__" 模型
+		if agg.RetryToks > totalRetry {
+			entries = append(entries, LedgerEntry{
+				TenantID:  tenant,
+				ModelKey:  "__retry__",
+				Day:       day,
+				Requests:  0,
+				RetryToks: agg.RetryToks - totalRetry,
+				Source:    win.Source,
+				EventKey:  fmt.Sprintf("%s-%s-%s-__retry__", win.Source, win.EventKey, tenant),
+				CreatedAt: nowNs,
+			})
+		}
+	}
+
+	return entries
+}
+
+// ---------- 推送接收（T3b · push，§6.3.2） ----------
+
+// PushEvent 推送事件（与 tee-infer billingWebhook 负载对齐）。
+type PushEvent struct {
+	EventID    string          `json:"event_id"`
+	EventType  string          `json:"event_type"` // billing_increment
+	TenantID   string          `json:"tenant"`
+	FromNs     int64           `json:"from_ns"`
+	ToNs       int64           `json:"to_ns"`
+	TokensIn   int64           `json:"tokens_in"`
+	TokensOut  int64           `json:"tokens_out"`
+	Requests   int64           `json:"requests"`
+	RetryToks  int64           `json:"retry_toks,omitempty"`
+	ByModel    map[string]*ModelAgg `json:"by_model,omitempty"`
+	SentAt     int64           `json:"sent_at"`
+}
+
+// PushToWindow 将单条推送事件转为 UsageWindow（便于复用 AggToEntries）。
+func PushToWindow(ev *PushEvent) *UsageWindow {
+	tenants := map[string]*TenantAgg{
+		ev.TenantID: {
+			TokensIn:  ev.TokensIn,
+			TokensOut: ev.TokensOut,
+			Requests:  ev.Requests,
+			RetryToks: ev.RetryToks,
+			ByModel:   ev.ByModel,
+		},
+	}
+	return &UsageWindow{
+		FromNs:   ev.FromNs,
+		ToNs:     ev.ToNs,
+		Tenants:  tenants,
+		Source:   "push",
+		EventKey: fmt.Sprintf("push-%s", ev.EventID),
+	}
+}
+
+// ---------- 单写者门控（A-12 / R-30） ----------
+
+// CanWrite 判断当前 sync_mode 下某来源是否允许写账本。
+//
+// 规则（§6.3.2/R-30）：
+//   - sync_mode=pull → 只有 pull 来源写账；push 仅更新实时视图（不写账）
+//   - sync_mode=push → 只有 push 来源写账；pull 仅供 L2 对账（不写账）
+func CanWrite(syncMode, source string) bool {
+	switch syncMode {
+	case SyncModePull:
+		return source == "pull" || source == "manual"
+	case SyncModePush:
+		return source == "push" || source == "manual"
+	default:
+		return false
+	}
+}

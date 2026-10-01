@@ -38,7 +38,7 @@ func newChangeTestMux(cfg *config, cs *changeStore, sh *brokerSecretHandler) *ht
 		mux.HandleFunc(changeAPIBase+"/", authMiddleware(cfg, cs.handleItem))
 		return mux
 	}
-	return buildAdminMux(cfg, nil, nil, nil, nil, nil, nil, cs, false)
+	return buildAdminMux(cfg, nil, nil, nil, nil, nil, nil, cs, nil, false)
 }
 
 // changeReq 以指定身份发起请求。

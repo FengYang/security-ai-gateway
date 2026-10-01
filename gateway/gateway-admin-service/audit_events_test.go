@@ -20,7 +20,7 @@ func newAuditEventsTestChain(t *testing.T) *adminAuditChain {
 // postAuditEvent 以指定身份/action/target 调用投递端点，返回响应码与链引用。
 func postAuditEvent(t *testing.T, h *auditEventHandler, cfg *config, sub, role, action, target string) int {
 	t.Helper()
-	mux := buildAdminMux(cfg, nil, nil, nil, nil, h, nil, nil, false)
+	mux := buildAdminMux(cfg, nil, nil, nil, nil, h, nil, nil, nil, false)
 	token := testSignToken(t, cfg.jwtSecret, claims{
 		Sub: sub, Role: role, Iss: defaultIssuer, Aud: defaultAudience,
 	})
@@ -39,7 +39,7 @@ func TestAuditEventsEndpoint(t *testing.T) {
 
 	t.Run("非 POST → 405", func(t *testing.T) {
 		h := &auditEventHandler{chain: newAuditEventsTestChain(t)}
-		mux := buildAdminMux(cfg, nil, nil, nil, nil, h, nil, nil, false)
+		mux := buildAdminMux(cfg, nil, nil, nil, nil, h, nil, nil, nil, false)
 		req := httptest.NewRequest(http.MethodGet, auditEventsPath, nil)
 		req.Header.Set("Authorization", "Bearer "+testSignToken(t, cfg.jwtSecret, claims{
 			Sub: testAdminUser, Role: roleAdmin, Iss: defaultIssuer, Aud: defaultAudience,

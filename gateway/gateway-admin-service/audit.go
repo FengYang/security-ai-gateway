@@ -40,6 +40,14 @@ const (
 	auditActionCredentialUpsert = "credential_upsert"
 	auditActionCredentialDelete = "credential_delete"
 	auditActionQuotaSet         = "quota_set"
+	// P0-3 计费域动作（§4.3.5）。
+	auditActionPlanUpsert  = "plan_upsert"
+	auditActionPlanBind    = "plan_bind"
+	auditActionBillFreeze  = "bill_freeze"
+	auditActionBillUnfreeze = "bill_unfreeze"
+	auditActionBillIssue   = "bill_issue"
+	auditActionBillExport  = "bill_export"
+	auditActionBillVerify  = "bill_verify"
 )
 
 // auditAnchorInterval 每追加 N 条事件锚定一次链尾哈希。

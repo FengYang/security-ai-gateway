@@ -1,0 +1,29 @@
+{
+  "_comment": "P0-3 Token 计费体系 · 单价表样例（BILLING_ENABLED=true 时挂载到 BILLING_RATING_PRICE_TABLE）。字段与详设 §4.1.4/附录 D 对齐；单价单位 = 元/千标准 token；up_to_tokens=0 表示顶档（+∞）。版本号在调价时递增（历史账本 std 已锁定，热更新不改历史金额，A-32）。",
+  "version": "2026-10-01",
+  "currency": "CNY",
+  "models": {
+    "openai/gpt-4o": {
+      "in_coef": 1.0,
+      "out_coef": 1.0,
+      "tiers": [
+        { "up_to_tokens": 1000000, "in_per_1k": 0.03, "out_per_1k": 0.06 },
+        { "up_to_tokens": 0, "in_per_1k": 0.015, "out_per_1k": 0.03 }
+      ]
+    },
+    "qwen/qwen-max": {
+      "in_coef": 1.0,
+      "out_coef": 1.0,
+      "tiers": [
+        { "up_to_tokens": 0, "in_per_1k": 0.02, "out_per_1k": 0.06 }
+      ]
+    },
+    "phala/deepseek-v3": {
+      "in_coef": 1.0,
+      "out_coef": 1.0,
+      "tiers": [
+        { "up_to_tokens": 0, "in_per_1k": 0.001, "out_per_1k": 0.002 }
+      ]
+    }
+  }
+}

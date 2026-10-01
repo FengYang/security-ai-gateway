@@ -15,7 +15,7 @@ import (
 // newSecTestMux 组装安全中心端点 mux（teeURL 为空 = 未配置数据源）。
 func newSecTestMux(cfg *config, chain *adminAuditChain, teeURL string) *http.ServeMux {
 	us := &usageSettings{url: teeURL, token: "tee-tok"}
-	return buildAdminMux(cfg, nil, nil, nil, nil, nil, newSecCenterHandler(chain, us), nil, false)
+	return buildAdminMux(cfg, nil, nil, nil, nil, nil, newSecCenterHandler(chain, us), nil, nil, false)
 }
 
 // secGet 以指定角色发起 GET 请求。
