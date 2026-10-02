@@ -1,0 +1,167 @@
+# GA-AI 网关能力补齐 · P0-3 Token 计费体系 —— §9.3 告警规则清单（PrometheusRule）
+#
+# 单一事实源：**本文件（kind: PrometheusRule）**。
+# 部署：kube-prometheus-stack / PrometheusOperator 环境下 `kubectl apply -f`。
+# 指标前缀 `gateway_admin_billing_`，由 gateway-admin-service /metrics 暴露（source=admin，§9.1）。
+#
+# promtool 单测：见同目录 `billing-prometheusrule-promtool-test.yaml`。
+# promtool 无法直接读 CRD，需先由本文件机械生成"纯规则文件"（顶层 groups:，spec 段去 2 空格缩进）：
+#   PowerShell（在 deploy/monitoring 目录）：
+#     $l = Get-Content billing-prometheusrule.yaml
+#     $i = ($l | Select-String -SimpleMatch '^spec:$').LineNumber
+#     ($l[$i..($l.Count-1)] | ForEach-Object { $_.Substring([Math]::Min(2,$_.Length)) }) |
+#       Set-Content .billing-promtool-rules.yaml -Encoding utf8
+#   生成物 `.billing-promtool-rules.yaml` 为构建产物，不入库。
+#
+# 设计要点（与 §6.12.3 / §9.3 对齐）：
+#   * `gateway_admin_billing_reconcile_diff` 的**值为 L2 差异率**（非绝对差），故阈值直接用 0.001（0.1%）；
+#     出账门禁（diff>0 一律不出账）不在此告警，硬门禁由服务端 fail-closed 保证。
+#   * 计数器类告警一律用 `increase(...[窗])` 而非 `> 0`，避免"历史发生过即永久 firing"。
+#   * `BillingCloseMissed` 为 **M3 代理判据**（§9.1 无"最近日结时间"专用指标）：
+#     "有入账 且 26h 内无日结执行" ⇒ 视为漏跑（含 S-8 缺口扫描未补出）。
+#   * `runbook_url` 为相对占位，部署单位须替换为内部 wiki 绝对 URL。
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: billing-alerts
+  namespace: security-ai-gateway
+  labels:
+    app: billing
+    role: accounting
+spec:
+  groups:
+    - name: billing.rules
+      interval: 30s
+      rules:
+        # ---- 链断裂（critical）：S-6 检出断链 → 已停止出账（fail-closed）----
+        - alert: BillingLedgerChainBroken
+          expr: gateway_admin_billing_ledger_chain_broken == 1
+          for: 1m
+          labels:
+            severity: critical
+            category: billing
+            team: billing-ops
+          annotations:
+            summary: "账本哈希链断裂（出账已停止）"
+            description: "S-6 链校验检出断链（seq 不连续 / prev_hash 悬空 / 哈希不自洽），出账已 fail-closed 停止。排查账本完整性（含 WORM 存储），人工确认后重启校验。"
+            runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
+        # ---- L2 对账：硬分支（critical）ratio > 0.1% → 冻结候选（§6.12.3）----
+        - alert: BillingReconcileDiff
+          expr: gateway_admin_billing_reconcile_diff > 0.001
+          for: 5m
+          labels:
+            severity: critical
+            category: billing
+            team: billing-ops
+          annotations:
+            summary: "L2 对账差异率 > 0.1%（租户 {{ $labels.tenant }}）"
+            description: "账本净量三元组（入/出/请求数）与计量侧差异率 {{ $value | humanizePercentage }}，超过冻结阈值 0.1%。出账已被门禁阻断；S-5 判定后自动冻结，须人工核对账本与审计链锚定。"
+            runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
+        # ---- L2 对账：软分支（warning）0 < ratio ≤ 0.1% → 自动重叠窗口回补（§6.12.3）----
+        - alert: BillingReconcileWarning
+          expr: gateway_admin_billing_reconcile_diff > 0 and gateway_admin_billing_reconcile_diff <= 0.001
+          for: 5m
+          labels:
+            severity: warning
+            category: billing
+            team: billing-ops
+          annotations:
+            summary: "L2 对账差异率 ≤ 0.1%（租户 {{ $labels.tenant }}）"
+            description: "账本与计量侧存在小差异（{{ $value | humanizePercentage }}），已触发一次性重叠窗口回补重拉；不冻结。若下一轮升级为 >0.1% 则按 critical 处置。"
+            runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
+        # ---- 单价缺失（critical）：§6.10.3 拒出账并冻结 ----
+        - alert: BillingPricingMissing
+          expr: increase(gateway_admin_billing_pricing_missing_total[15m]) > 0
+          for: 1m
+          labels:
+            severity: critical
+            category: billing
+            team: billing-ops
+          annotations:
+            summary: "单价表缺少模型（model={{ $labels.model_key }}）"
+            description: "近 15 分钟出现单价表未知的 model_key，已拒出账并触发冻结（§6.10.3）。补齐 pricing 后重新出账并解冻。"
+            runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
+        # ---- 日结漏跑（warning）：M3 代理判据（详见文件头说明）----
+        - alert: BillingCloseMissed
+          expr: |
+            sum(increase(gateway_admin_billing_ledger_entries_total[26h])) > 0
+            and
+            sum(increase(gateway_admin_billing_close_duration_seconds_count{kind="daily"}[26h])) == 0
+          for: 10m
+          labels:
+            severity: warning
+            category: billing
+            team: billing-ops
+          annotations:
+            summary: "日结疑似漏跑（26h 内有入账、无日结）"
+            description: "近 26 小时账本有入账条目，但无任何日结执行（含 S-8 缺口扫描）。排查调度器是否启动/被阻塞、账本与计量侧是否可达。"
+            runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
+        # ---- 用量突增 warning（§6.9.1①/A-36/A-25）----
+        - alert: BillingAnomalySpike
+          expr: increase(gateway_admin_billing_anomaly_total{kind="spike",severity="warning"}[15m]) > 0
+          for: 1m
+          labels:
+            severity: warning
+            category: billing
+            team: billing-ops
+          annotations:
+            summary: "租户日用量突增（warning；不冻结）"
+            description: "近 15 分钟检出 spike warning（比值 ≤ spike_critical_ratio）。人工确认是否正常业务峰，不冻结。"
+            runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
+        # ---- 用量突增 critical（§6.9.1①/A-25）→ 已自动冻结 ----
+        - alert: BillingAnomalySpike
+          expr: increase(gateway_admin_billing_anomaly_total{kind="spike",severity="critical"}[15m]) > 0
+          for: 1m
+          labels:
+            severity: critical
+            category: billing
+            team: billing-ops
+          annotations:
+            summary: "租户日用量突增（critical；已冻结）"
+            description: "近 15 分钟检出 spike critical（比值 > spike_critical_ratio），已联动冻结该租户。人工核对用量真实性后解冻或调整基线。"
+            runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
+        # ---- 配额剩余过低（warning）：§6.11 通知租户 ----
+        - alert: BillingQuotaLow
+          expr: gateway_admin_billing_quota_remaining_ratio < 0.2
+          for: 10m
+          labels:
+            severity: warning
+            category: billing
+            team: billing-ops
+          annotations:
+            summary: "租户配额剩余不足 20%（{{ $labels.tenant }}）"
+            description: "套餐月配额剩余比 {{ $value | humanizePercentage }}，已触发租户通知（S-7）。关注是否需升配或限流。"
+            runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
+        # ---- 拉取连续失败（warning）：tee-infer 可达性 ----
+        - alert: BillingPullErrorSustained
+          expr: increase(gateway_admin_billing_pull_total{result="error"}[10m]) >= 5
+          for: 5m
+          labels:
+            severity: warning
+            category: billing
+            team: billing-ops
+          annotations:
+            summary: "增量拉取连续失败（10 分钟 ≥5 次）"
+            description: "S-1 拉取近 10 分钟失败 ≥5 轮，账本将滞后且出账门禁可能阻断。排查 tee-infer 可达性 / 计量令牌 / 网络。"
+            runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
+        # ---- 关联校验失败（critical；不冻结，事后审计性质，§7.3/A-34）----
+        - alert: BillingAssocVerifyFailed
+          expr: increase(gateway_admin_billing_assoc_verify_total{result="fail"}[15m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+            category: billing
+            team: billing-ops
+          annotations:
+            summary: "账单关联校验失败（账单已标记 assoc_mismatch）"
+            description: "近 15 分钟出现关联校验失败：账单锚定的账本链尾/审计链尾不可复现。相关账单已标记 assoc_mismatch（不阻断已出账）。人工排查链锚一致性与篡改可能。"
+            runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
