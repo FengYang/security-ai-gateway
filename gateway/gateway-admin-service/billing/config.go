@@ -92,8 +92,11 @@ type ScheduleConfig struct {
 }
 
 type SecretsConfig struct {
-	EventsSecretRef  string
-	SigningKeyRef    string // 账单签名密钥（引用式；空 = 不签名）
+	EventsSecretRef string
+	SigningKeyRef   string // 账单签名密钥（引用式；空 = 不签名）
+	// AlertWebhookURL 告警外部交付 Webhook（§6.11；空 = 仅本地日志 + Prometheus 规则）。
+	// 建议以 env 注入（URL 可能含 token）。非密钥引用形式，直接使用。
+	AlertWebhookURL string
 }
 
 type APIConfig struct {
@@ -169,6 +172,7 @@ func LoadBillingConfig() (*BillingConfig, error) {
 	// Secrets
 	cfg.Secrets.EventsSecretRef = os.Getenv(envPrefix + "SECRETS_EVENTS_SECRET_REF")
 	cfg.Secrets.SigningKeyRef = os.Getenv(envPrefix + "SECRETS_SIGNING_KEY_REF")
+	cfg.Secrets.AlertWebhookURL = os.Getenv(envPrefix + "SECRETS_ALERT_WEBHOOK_URL")
 
 	// API
 	cfg.API.Listener = getEnv(envPrefix+"API_LISTENER", "admin")

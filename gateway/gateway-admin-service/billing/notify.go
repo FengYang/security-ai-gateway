@@ -6,9 +6,15 @@
 package billing
 
 import (
+	"bytes"
+	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"time"
 )
 
 // Notifier 计费域通知器（§4.1.x / §6.11）。
@@ -86,4 +92,58 @@ func (n *QuotaNotifier) WarnQuotaLow(tenant string, rem float64, periodKey strin
 		n.sink(tenant, rem, periodKey)
 	}
 	return nil
+}
+
+// ---------- 外部交付 sink（Webhook，§6.11） ----------
+
+// webhookAlertSink 把配额告警 POST 到外部 Webhook（JSON）。
+type webhookAlertSink struct {
+	url    string
+	client *http.Client
+}
+
+// NewWebhookAlertSink 构造 Webhook 交付 sink（供 QuotaNotifier.sink）。
+//
+// url 为空 → 返回 nil（调用方按"无外部交付"处理：仅本地日志 + Prometheus 规则）。
+// 交付失败仅记日志、不向上返回错误（fire-and-forget；租约/告知由指标侧兜底）。
+func NewWebhookAlertSink(url string, timeout time.Duration) func(tenant string, rem float64, periodKey string) {
+	if url == "" {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	s := &webhookAlertSink{url: url, client: &http.Client{Timeout: timeout}}
+	return s.deliver
+}
+
+func (s *webhookAlertSink) deliver(tenant string, rem float64, periodKey string) {
+	body, err := json.Marshal(map[string]any{
+		"kind":            "quota_low",
+		"tenant":          tenant,
+		"remaining_ratio": rem,
+		"period":          periodKey,
+	})
+	if err != nil {
+		log.Printf("[billing] 告警 Webhook 序列化失败 tenant=%s: %v", tenant, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.client.Timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[billing] 告警 Webhook 构造失败 tenant=%s: %v", tenant, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		log.Printf("[billing] 告警 Webhook 投递失败 tenant=%s: %v", tenant, err)
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body) // 排空以复用连接
+	if resp.StatusCode >= 300 {
+		log.Printf("[billing] 告警 Webhook 返回 %d tenant=%s", resp.StatusCode, tenant)
+	}
 }
