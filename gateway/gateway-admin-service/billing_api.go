@@ -17,6 +17,9 @@
 //	POST /v1/adminext/billing/close-monthly           月结（admin）
 //	POST /v1/adminext/billing/freeze                  冻结租户（admin）
 //	POST /v1/adminext/billing/unfreeze                解冻租户（admin）
+//
+// 跨租户隔离（§7.4）：读端点（plans/bills/ledger）按令牌 `tenant` 声明强制隔离——
+// admin 可跨租户；非 admin 仅限自身租户，声明缺失或不符一律 403（fail-closed）。
 package main
 
 import (
@@ -254,6 +257,10 @@ func (h *billingHandler) handleBills(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	tenant := q.Get("tenant")
+	if !h.tenantAllowed(r, tenant) {
+		writeError(w, http.StatusForbidden, "跨租户访问被拒绝")
+		return
+	}
 	limit := atoiDefault(q.Get("limit"), 100)
 	bills, err := h.store.Bills().List(billing.BillQuery{
 		TenantID: tenant, Kind: q.Get("kind"),
@@ -295,6 +302,10 @@ func (h *billingHandler) handleBillItem(w http.ResponseWriter, r *http.Request) 
 	}
 	if bill == nil {
 		writeError(w, http.StatusNotFound, "账单不存在")
+		return
+	}
+	if !h.tenantAllowed(r, bill.TenantID) {
+		writeError(w, http.StatusForbidden, "跨租户访问被拒绝")
 		return
 	}
 
@@ -353,6 +364,10 @@ func (h *billingHandler) handleLedger(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	tenant := q.Get("tenant")
+	if !h.tenantAllowed(r, tenant) {
+		writeError(w, http.StatusForbidden, "跨租户访问被拒绝")
+		return
+	}
 	entries, err := h.store.Ledger().Range(billing.LedgerQuery{
 		TenantID: tenant, DayFrom: q.Get("from"), DayTo: q.Get("to"),
 		Limit: atoiDefault(q.Get("limit"), 1000),
@@ -495,6 +510,22 @@ func (h *billingHandler) handleUnfreeze(w http.ResponseWriter, r *http.Request) 
 }
 
 // ---------- 辅助 ----------
+
+// tenantAllowed 跨租户读隔离（§7.4）：
+//   - admin：可跨租户（运营/财务口径）；
+//   - 非 admin（auditor 等）：仅允许访问令牌 `tenant` 声明所指租户；
+//     声明缺失或与目标不符 → 拒绝（fail-closed）；
+//   - tenant 为空（意图全量列举）→ 非 admin 一律拒绝（禁止越权全量读取）。
+func (h *billingHandler) tenantAllowed(r *http.Request, tenant string) bool {
+	c := claimsFrom(r.Context())
+	if c == nil {
+		return false
+	}
+	if c.Role == roleAdmin {
+		return true
+	}
+	return tenant != "" && c.Tenant != "" && c.Tenant == tenant
+}
 
 // auditAction 落管理面审计链（best-effort；失败仅记日志）。
 func (h *billingHandler) auditAction(r *http.Request, action, target string) {

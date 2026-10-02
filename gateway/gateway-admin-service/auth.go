@@ -42,8 +42,13 @@ type claims struct {
 	Role string `json:"role"`          // admin / auditor（**本服务不采信，见 resolveRole**）
 	Iss  string `json:"iss,omitempty"` // 签发方（higress-console）
 	Aud  string `json:"aud,omitempty"` // 受众（gateway-admin-service）
-	IAT  int64  `json:"iat"`
-	EXP  int64  `json:"exp"`
+	// Tenant GA-计费 P0-3（§7.4）：租户声明（可空）。
+	// 语义：非 admin 会话仅可访问本声明租户的计费数据（跨租户 → 403，fail-closed）；
+	// admin 不受限（可跨租户）。缺省（旧令牌无此字段）→ 非 admin 读计费端点一律 403。
+	// 兼容性：字段可选，旧令牌解析不受影响（json.Unmarshal 缺字段保持零值）。
+	Tenant string `json:"tenant,omitempty"`
+	IAT    int64  `json:"iat"`
+	EXP    int64  `json:"exp"`
 }
 
 var b64 = base64.RawURLEncoding // RFC 7515：base64url 无 padding
