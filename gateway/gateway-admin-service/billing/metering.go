@@ -138,40 +138,63 @@ func AggToEntries(win *UsageWindow) []LedgerEntry {
 	return entries
 }
 
-// ---------- 推送接收（T3b · push，§6.3.2） ----------
+// ---------- 推送接收（T3b · push，§4.1.5 / §6.3.1/§6.3.2） ----------
 
-// PushEvent 推送事件（与 tee-infer billingWebhook 负载对齐）。
+// PushEvent 推送单条计费事件（§4.1.5：与 tee-infer `billingEventPayload` 对齐 + `is_retry`）。
+//
+// 事件级载荷（单租户/单模型/单次推理），非窗口聚合——与 pull 的窗口级载荷不同粒度（§6.3.2）。
 type PushEvent struct {
-	EventID    string          `json:"event_id"`
-	EventType  string          `json:"event_type"` // billing_increment
-	TenantID   string          `json:"tenant"`
-	FromNs     int64           `json:"from_ns"`
-	ToNs       int64           `json:"to_ns"`
-	TokensIn   int64           `json:"tokens_in"`
-	TokensOut  int64           `json:"tokens_out"`
-	Requests   int64           `json:"requests"`
-	RetryToks  int64           `json:"retry_toks,omitempty"`
-	ByModel    map[string]*ModelAgg `json:"by_model,omitempty"`
-	SentAt     int64           `json:"sent_at"`
+	EventID    string `json:"event_id"`
+	TenantID   string `json:"tenant"`
+	RequestID  string `json:"request_id"`
+	EngineType string `json:"engine_type"`
+	Model      string `json:"model"`
+	TokensIn   int    `json:"tokens_in"`
+	TokensOut  int    `json:"tokens_out"`
+	Result     string `json:"result"` // ok | engine_error
+	IsRetry    bool   `json:"is_retry,omitempty"`
+	TS         string `json:"ts"` // RFC3339（与审计 timestamp 同源）
 }
 
-// PushToWindow 将单条推送事件转为 UsageWindow（便于复用 AggToEntries）。
-func PushToWindow(ev *PushEvent) *UsageWindow {
-	tenants := map[string]*TenantAgg{
-		ev.TenantID: {
-			TokensIn:  ev.TokensIn,
-			TokensOut: ev.TokensOut,
-			Requests:  ev.Requests,
-			RetryToks: ev.RetryToks,
-			ByModel:   ev.ByModel,
-		},
+// 已知 result 取值（B-6.3-3：未知值按 ok 兜底落账，仅指标单记 `unknown_result`）。
+const (
+	pushResultOK          = "ok"
+	pushResultEngineError = "engine_error"
+)
+
+// pushEventToWindow 推送事件 → UsageWindow（事件级：单租户单模型）。
+//
+// 返回 nil = 该事件**不落账**：关键字段缺失 / 负 token（B-6.3-4）/ `ts` 非法（无法归日）。
+// event_key：AggToEntries 拼为 `push-{event_id}-{tenant}-{model}`（§6.3.4 事件级幂等）。
+// is_retry=true → retry_toks 归因，`tokens_in/out` 置零（§6.3.4 路①，M9）。
+func pushEventToWindow(ev PushEvent) *UsageWindow {
+	if ev.TenantID == "" || ev.Model == "" || ev.EventID == "" {
+		return nil
+	}
+	if ev.TokensIn < 0 || ev.TokensOut < 0 {
+		return nil // B-6.3-4：负 token（-1）忽略，不落账、不计负
+	}
+	t, err := time.Parse(time.RFC3339Nano, ev.TS)
+	if err != nil {
+		return nil // ts 非法 → 无法归日，不落账
+	}
+	in, out, retry := int64(ev.TokensIn), int64(ev.TokensOut), int64(0)
+	if ev.IsRetry {
+		retry = in + out
+		in, out = 0, 0
 	}
 	return &UsageWindow{
-		FromNs:   ev.FromNs,
-		ToNs:     ev.ToNs,
-		Tenants:  tenants,
+		FromNs: t.UnixNano(), ToNs: t.UnixNano(),
 		Source:   "push",
-		EventKey: fmt.Sprintf("push-%s", ev.EventID),
+		EventKey: ev.EventID,
+		Tenants: map[string]*TenantAgg{
+			ev.TenantID: {
+				TokensIn: in, TokensOut: out, Requests: 1, RetryToks: retry,
+				ByModel: map[string]*ModelAgg{
+					ev.Model: {TokensIn: in, TokensOut: out, Requests: 1, RetryToks: retry},
+				},
+			},
+		},
 	}
 }
 

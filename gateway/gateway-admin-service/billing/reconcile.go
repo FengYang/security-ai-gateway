@@ -189,7 +189,9 @@ func (s *BillingService) repullWindowed(ctx context.Context, widen time.Duration
 	if _, err := s.IngestWindow(ctx, win, s.syncMode); err != nil {
 		IncPull("error")
 		log.Printf("[billing] 对账回补入账失败：%v", err)
+		return
 	}
+	IncPull("ok")
 }
 
 // markRepulledOnce 幂等标记 (tenant,day) 回补已排；返回 true = 首次。

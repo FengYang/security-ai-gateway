@@ -58,6 +58,7 @@ func (s *BillingService) pullOnce(ctx context.Context) {
 		log.Printf("[billing] S-1 入账失败：%v", err)
 		return
 	}
+	IncPull("ok") // 指标 #5（本方法为该指标唯一生产者）
 }
 
 // teeInferPullSource 调用 tee-infer GET /usage?from=&to= 的实现。

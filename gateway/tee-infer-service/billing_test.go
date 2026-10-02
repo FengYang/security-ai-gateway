@@ -148,6 +148,7 @@ func TestBillingWebhookDeliveryAndSignature(t *testing.T) {
 		EventID:   "evt-123", TenantID: "acme", RequestID: "req-1",
 		Action: "infer", Result: "ok", TokensIn: 3, TokensOut: 4,
 		EngineType: "tee_gpu", Model: "qwen",
+		IsRetry: true, // ★ §4.1.5：重试证据随载荷下行
 	}
 	b.notify(ev)
 
@@ -163,6 +164,9 @@ func TestBillingWebhookDeliveryAndSignature(t *testing.T) {
 	}
 	if payload.EngineType != "tee_gpu" || payload.Model != "qwen" {
 		t.Fatalf("推送体模型维度缺失: %+v", payload)
+	}
+	if !payload.IsRetry {
+		t.Fatalf("is_retry 未随载荷推送（§4.1.5）: %+v", payload)
 	}
 	// HMAC-SHA256 签名校验
 	want := "sha256=" + hmacHex(gotBody, secret)

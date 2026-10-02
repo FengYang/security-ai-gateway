@@ -104,39 +104,47 @@ func TestCanWrite_SyncModes(t *testing.T) {
 	}
 }
 
-func TestPushToWindow(t *testing.T) {
-	ev := &PushEvent{
-		EventID:   "evt-123",
-		EventType: "billing_increment",
-		TenantID:  "t1",
-		FromNs:    1000,
-		ToNs:      2000,
-		TokensIn:  100,
-		TokensOut: 50,
-		Requests:  3,
-		RetryToks: 10,
-		ByModel: map[string]*ModelAgg{
-			"m1": {TokensIn: 100, TokensOut: 50, Requests: 3, RetryToks: 10},
-		},
-		SentAt: 3000,
+func TestPushEventToWindow(t *testing.T) {
+	// §4.1.5：事件级载荷 → UsageWindow（单租户单模型）；is_retry 归因（§6.3.4 路①）
+	ts := time.Date(2026, 10, 1, 2, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	win := pushEventToWindow(PushEvent{
+		EventID: "evt-123", TenantID: "t1", Model: "m1",
+		TokensIn: 100, TokensOut: 50, Result: "ok", TS: ts,
+	})
+	if win == nil {
+		t.Fatal("win is nil")
 	}
-
-	win := PushToWindow(ev)
-	if win.Source != "push" {
-		t.Errorf("source = %q, want push", win.Source)
+	if win.Source != "push" || win.EventKey != "evt-123" {
+		t.Errorf("source/event_key = %q/%q, want push/evt-123", win.Source, win.EventKey)
 	}
-	if win.EventKey != "push-evt-123" {
-		t.Errorf("event_key = %q, want push-evt-123", win.EventKey)
-	}
-	if len(win.Tenants) != 1 {
-		t.Fatalf("tenants count = %d, want 1", len(win.Tenants))
+	if win.ToNs != time.Date(2026, 10, 1, 2, 0, 0, 0, time.UTC).UnixNano() {
+		t.Errorf("ToNs = %d, want event ts", win.ToNs)
 	}
 	ta := win.Tenants["t1"]
-	if ta == nil {
-		t.Fatal("tenant t1 not found")
+	if ta == nil || len(ta.ByModel) != 1 {
+		t.Fatalf("tenant/model missing: %+v", ta)
 	}
-	if ta.RetryToks != 10 {
-		t.Errorf("retry_toks = %d, want 10", ta.RetryToks)
+	if ta.TokensIn != 100 || ta.TokensOut != 50 || ta.Requests != 1 {
+		t.Errorf("agg = %+v, want in=100 out=50 req=1", ta)
+	}
+
+	// is_retry=true → retry_toks 归因，tokens_* 置零（M9）
+	rw := pushEventToWindow(PushEvent{
+		EventID: "evt-124", TenantID: "t1", Model: "m1",
+		TokensIn: 100, TokensOut: 50, IsRetry: true, TS: ts,
+	})
+	rt := rw.Tenants["t1"]
+	if rt.RetryToks != 150 || rt.TokensIn != 0 || rt.TokensOut != 0 {
+		t.Errorf("retry agg = %+v, want retry=150 in/out=0", rt)
+	}
+
+	// 负 token → 不落账（B-6.3-4）
+	if pushEventToWindow(PushEvent{EventID: "e", TenantID: "t1", Model: "m1", TokensIn: -1, TS: ts}) != nil {
+		t.Error("negative tokens should yield nil (B-6.3-4)")
+	}
+	// ts 非法 → 不落账（无法归日）
+	if pushEventToWindow(PushEvent{EventID: "e", TenantID: "t1", Model: "m1", TS: "not-a-time"}) != nil {
+		t.Error("bad ts should yield nil")
 	}
 }
 

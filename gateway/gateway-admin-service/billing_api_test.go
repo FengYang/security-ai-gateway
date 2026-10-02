@@ -5,11 +5,16 @@
 package main
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"security-ai-gateway/gateway/gateway-admin-service/billing"
 )
@@ -200,5 +205,124 @@ func TestBillingIsolationDisabledWhenFeatureOff(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("计费关闭时期望 404，实际 %d", resp.StatusCode)
+	}
+}
+
+// ---------- 推送消费 webhook（§6.3.1；S-4/B-6.3-1/2） ----------
+
+const testPushSecretEnv = "TEST_BILLING_PUSH_SECRET"
+
+// newBillingPushTestHandler 构造推送消费 handler（sync_mode=push + HMAC 密钥引用）。
+func newBillingPushTestHandler(t *testing.T, secret string) *billingHandler {
+	t.Helper()
+	t.Setenv(testPushSecretEnv, secret)
+	dir := t.TempDir()
+	pricing := filepath.Join(dir, "pricing.json")
+	if err := os.WriteFile(pricing, []byte(`{"version":"v1","currency":"CNY",
+		"models":{"m1":{"in_coef":1,"out_coef":1,
+		"tiers":[{"up_to_tokens":0,"in_per_1k":1,"out_per_1k":2}]}}}`), 0o644); err != nil {
+		t.Fatalf("写价格表失败: %v", err)
+	}
+	cfg := &billing.BillingConfig{
+		Enabled: true,
+		Store:   billing.StoreConfig{Driver: "sqlite", DSN: filepath.Join(dir, "billing.db")},
+		Rating:  billing.RatingConfig{Rounding: "half_up", PriceTable: pricing},
+		Source: billing.SourceConfig{
+			SyncMode:      billing.SyncModePush,
+			PushSecretRef: "env:" + testPushSecretEnv,
+		},
+	}
+	h, err := newBillingHandler(cfg, nil)
+	if err != nil {
+		t.Fatalf("构造计费 handler 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = h.store.Close() })
+	return h
+}
+
+// signEventsBody 生成推送签名（与 tee-infer `X-Signature: sha256=<hex>` 同构）。
+func signEventsBody(secret string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func TestBillingEventsWebhook(t *testing.T) {
+	const secret = "test-hook-secret"
+	h := newBillingPushTestHandler(t, secret)
+	mux := buildAdminMux(testCfg(), nil, nil, nil, nil, nil, nil, nil, h, false)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	url := srv.URL + billingAPIBase + "/events"
+
+	body := []byte(`{"event_id":"e1","tenant":"t1","model":"m1","tokens_in":100,"tokens_out":50,` +
+		`"result":"ok","ts":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`)
+
+	// 1) 正确签名 → 200 accepted + 入账
+	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req.Header.Set("X-Signature", signEventsBody(secret, body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("正确签名 status = %d, want 200", resp.StatusCode)
+	}
+	entries, _ := h.store.Ledger().Range(billing.LedgerQuery{TenantID: "t1"})
+	if len(entries) != 1 {
+		t.Errorf("ledger entries = %d, want 1", len(entries))
+	}
+
+	// 2) 错误签名 → 401（B-6.3-1）
+	req2, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req2.Header.Set("X-Signature", "sha256=deadbeef")
+	resp2, _ := http.DefaultClient.Do(req2)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("错误签名 status = %d, want 401", resp2.StatusCode)
+	}
+
+	// 3) 无签名 → 401
+	req3, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	resp3, _ := http.DefaultClient.Do(req3)
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusUnauthorized {
+		t.Errorf("无签名 status = %d, want 401", resp3.StatusCode)
+	}
+
+	// 4) 签名正确但 JSON 非法 → 400
+	bad := []byte(`{not json`)
+	req4, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(bad))
+	req4.Header.Set("X-Signature", signEventsBody(secret, bad))
+	resp4, _ := http.DefaultClient.Do(req4)
+	resp4.Body.Close()
+	if resp4.StatusCode != http.StatusBadRequest {
+		t.Errorf("非法 JSON status = %d, want 400", resp4.StatusCode)
+	}
+
+	// 5) GET → 405
+	req5, _ := http.NewRequest(http.MethodGet, url, nil)
+	resp5, _ := http.DefaultClient.Do(req5)
+	resp5.Body.Close()
+	if resp5.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET status = %d, want 405", resp5.StatusCode)
+	}
+}
+
+// 未配置推送密钥 → 端点 fail-closed（一律 401）
+func TestBillingEventsWebhook_NoSecretFailClosed(t *testing.T) {
+	h := newBillingTestHandler(t) // 未配置 PushSecretRef
+	mux := buildAdminMux(testCfg(), nil, nil, nil, nil, nil, nil, nil, h, false)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	body := []byte(`{"event_id":"e1","tenant":"t1","model":"m1","tokens_in":100,"ts":"2026-10-01T00:00:00Z"}`)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+billingAPIBase+"/events", bytes.NewReader(body))
+	req.Header.Set("X-Signature", signEventsBody("anything", body))
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("未配置密钥 status = %d, want 401 (fail-closed)", resp.StatusCode)
 	}
 }

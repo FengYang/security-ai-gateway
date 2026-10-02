@@ -142,6 +142,8 @@ func newBillingWebhook(url, secret string) *billingWebhook {
 }
 
 // billingEventPayload 推送事件（event_id 与审计事件对齐，幂等键）。
+// ★ GA-计费 §4.1.5/§6.3.3：新增 `is_retry`（omitempty，向后兼容；旧消费方忽略），值来自审计
+// 事件证据字段 `IsRetry`（源头＝数据面 `X-Otpmask-Retry-Attempt` 头）。
 type billingEventPayload struct {
 	EventID    string `json:"event_id"`
 	TenantID   string `json:"tenant"`
@@ -151,7 +153,8 @@ type billingEventPayload struct {
 	TokensIn   int    `json:"tokens_in"`
 	TokensOut  int    `json:"tokens_out"`
 	Result     string `json:"result"` // ok / engine_error（部分计费）
-	TS         string `json:"ts"`     // RFC 3339 UTC（与审计 timestamp 同源）
+	IsRetry    bool   `json:"is_retry,omitempty"`
+	TS         string `json:"ts"` // RFC 3339 UTC（与审计 timestamp 同源）
 }
 
 // webhookMaxAttempts 推送重试上限（指数退避：base * 2^n）。
@@ -231,6 +234,7 @@ func (b *billingWebhook) notify(ev AuditEvent) {
 		TokensIn:   ev.TokensIn,
 		TokensOut:  ev.TokensOut,
 		Result:     ev.Result,
+		IsRetry:    ev.IsRetry, // §4.1.5：证据字段（源头＝数据面重试标记）
 		TS:         time.Unix(0, ev.Timestamp).UTC().Format(time.RFC3339Nano),
 	}
 	body, err := json.Marshal(payload)

@@ -17,6 +17,7 @@
 //	POST /v1/adminext/billing/close-monthly           月结（admin）
 //	POST /v1/adminext/billing/freeze                  冻结租户（admin）
 //	POST /v1/adminext/billing/unfreeze                解冻租户（admin）
+//	POST /v1/adminext/billing/events                  推送事件消费（HMAC 鉴权，非 JWT；§6.3.1）
 //
 // 跨租户隔离（§7.4）：读端点（plans/bills/ledger）按令牌 `tenant` 声明强制隔离——
 // admin 可跨租户；非 admin 仅限自身租户，声明缺失或不符一律 403（fail-closed）。
@@ -24,8 +25,12 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -48,6 +53,7 @@ type billingHandler struct {
 	signer         billing.BillSigner
 	pricePublicURL string
 	audit          *adminAuditChain
+	eventsSecret   []byte             // 推送 webhook HMAC 验签密钥（source.push_secret_ref；空 = 一律 401）
 	sched          *billing.Scheduler // nil = 后台调度未启用
 	backfillDays   int                // S-8 回看窗口（日志用）
 }
@@ -126,6 +132,12 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 
 	svc := billing.NewBillingService(store, eng, priceProvider, rec, store.Freezes())
 	svc.SetMonthStdCache(monthCache)
+	// 单写者模式（A-12/R-30）与回补窗口为**非密钥配置** → 无条件注入；
+	// 拉取源依赖计量令牌（未配置 → nil，pullOnce no-op，但推送消费仍按 sync_mode 生效）
+	svc.SetMeteringSource(pullSrc, cfg.Source.PullLookback, cfg.Source.SyncMode)
+
+	// 推送 webhook 验签密钥（§4.2：source.push_secret_ref；未配置 → 端点一律 401，fail-closed）
+	pushSecret, _ := resolveSecretRef(cfg.Source.PushSecretRef)
 
 	h := &billingHandler{
 		store:          store,
@@ -134,6 +146,7 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 		freeze:         billing.NewFreezeController(store.Freezes(), freezeAuditSink{audit}, func() int64 { return time.Now().UnixNano() }),
 		pricePublicURL: cfg.API.PricePublicURL,
 		audit:          audit,
+		eventsSecret:   pushSecret,
 		backfillDays:   cfg.Schedule.BackfillLookbackDays,
 	}
 
@@ -176,10 +189,9 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 		svc.SetSigner(h.signer)
 	}
 
-	// 配额下发器（经 tee-infer）+ S-1 增量拉取源（复用同一计量令牌/拉取源）
+	// 配额下发器（经 tee-infer；复用同一计量令牌）
 	if hasToken {
 		h.applier = billing.NewHTTPQuotaApplier(cfg.Source.TEEURL, string(token), 10*time.Second)
-		svc.SetMeteringSource(pullSrc, cfg.Source.PullLookback, cfg.Source.SyncMode)
 	}
 
 	return h, nil
@@ -199,6 +211,59 @@ func (h *billingHandler) register(mux *http.ServeMux, cfg *config) {
 	mux.HandleFunc(billingAPIBase+"/close-monthly", wrap(h.handleCloseMonthly))
 	mux.HandleFunc(billingAPIBase+"/freeze", wrap(h.handleFreeze))
 	mux.HandleFunc(billingAPIBase+"/unfreeze", wrap(h.handleUnfreeze))
+	// 推送消费（§6.3.1）：由 HMAC（X-Signature）鉴权——推送方无管理面 JWT，故**不经** authMiddleware
+	mux.HandleFunc(billingAPIBase+"/events", h.withMetrics(h.handleBillingEvents))
+}
+
+// billingEventsMaxBytes 推送事件体上限（1 MiB；事件级载荷远小于此）。
+const billingEventsMaxBytes = 1 << 20
+
+// handleBillingEvents POST /v1/adminext/billing/events（§6.3.1）。
+//
+// 流程：HMAC 验签（X-Signature: sha256=<hex>，密钥 = source.push_secret_ref）→ JSON 反序列化
+// → 委托 `ConsumePush`（幂等入账 + 冻结计数均在服务内；账本无第二写入路径 INV-8）。
+// 鉴权：不经 authMiddleware（推送方无管理面 JWT），由 HMAC 承担（B-6.3-1：未验签 → 401）。
+func (h *billingHandler) handleBillingEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, billingEventsMaxBytes))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_body")
+		return
+	}
+	if !h.verifyEventsHMAC(r.Header.Get("X-Signature"), body) {
+		writeError(w, http.StatusUnauthorized, "signature_invalid") // B-6.3-1
+		return
+	}
+	var ev billing.PushEvent
+	if err := json.Unmarshal(body, &ev); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_json")
+		return
+	}
+	if err := h.svc.ConsumePush(ev); err != nil {
+		writeError(w, http.StatusInternalServerError, "ledger_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
+}
+
+// verifyEventsHMAC 校验推送签名（§6.3.1）。
+// 密钥未配置 / 头缺失或非 `sha256=<hex>` / 常量时间不等 → false（fail-closed）。
+func (h *billingHandler) verifyEventsHMAC(sig string, body []byte) bool {
+	const prefix = "sha256="
+	if len(h.eventsSecret) == 0 || !strings.HasPrefix(sig, prefix) {
+		return false
+	}
+	got, err := hex.DecodeString(strings.TrimPrefix(sig, prefix))
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, h.eventsSecret)
+	mac.Write(body)
+	return hmac.Equal(got, mac.Sum(nil))
 }
 
 // billingStatus 捕获响应码（用于指标 #1）。

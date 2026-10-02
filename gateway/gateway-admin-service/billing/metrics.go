@@ -250,6 +250,11 @@ func IncPull(result string) {
 	DefaultMetrics.IncCounter("gateway_admin_billing_pull_total", map[string]string{"result": result}, 1)
 }
 
+// IncPush 推送消费（#6；result=ok|frozen|error|unknown_result）。
+func IncPush(result string) {
+	DefaultMetrics.IncCounter("gateway_admin_billing_push_total", map[string]string{"result": result}, 1)
+}
+
 // IncClockSkew 时钟回拨（#17）。
 func IncClockSkew() { DefaultMetrics.IncCounter("gateway_admin_billing_clock_skew_total", nil, 1) }
 

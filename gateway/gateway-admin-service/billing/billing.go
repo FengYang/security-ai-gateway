@@ -96,18 +96,19 @@ func NewBillingService(store Store, rating RatingEngine, prices PriceTableProvid
 //
 // std 锁定（A-32/A-39）：入账时按当前价格表算好 std_in/std_out 并写入 PriceVer，
 // 之后永不修改（计价路径读锁定值，不重算）。
+//
+// 注（指标所有权）：本方法**不发射** `pull_total`/`push_total`——由调用方按通道发射
+// （`pullOnce`→#5、`ConsumePush`→#6），避免推送被计成拉取。
 func (s *BillingService) IngestWindow(ctx context.Context, win *UsageWindow, syncMode string) (int, error) {
 	if win == nil {
 		return 0, nil
 	}
 	if !CanWrite(syncMode, win.Source) {
-		IncPull("ok") // 拉取/推送成功但非写者（实时视图）
-		return 0, nil
+		return 0, nil // 非写者：仅更新实时视图（P0 无持久化视图 → no-op）
 	}
 	tbl := s.prices.Current()
 	entries := AggToEntries(win)
 	if len(entries) == 0 {
-		IncPull("ok")
 		return 0, nil
 	}
 	// 锁定 std（A-32）：仅入账路径调用 StandardTokens（A-9 唯一入口）
@@ -151,8 +152,35 @@ func (s *BillingService) IngestWindow(ctx context.Context, win *UsageWindow, syn
 			s.monthStdCache.InvalidateDayIfBackfill(entries[i].TenantID, entries[i].Day)
 		}
 	}
-	IncPull("ok")
 	return added, nil
+}
+
+// ConsumePush 消费单条推送事件（§6.3.1/§6.3.2，A-8：账本无第二写入路径）。
+//
+// 单写者门控（A-12/R-30）：`sync_mode=push` 才写账本；`=pull` 时仅更新实时视图（不写账）。
+// 事件级幂等（§6.3.4：`push-{event_id}-{tenant}-{model}` 由 `LedgerStore.Append` 的 UNIQUE 兜底）。
+// `is_retry=true` → `retry_toks` 归因（M9）；冻结租户**仍入账**供人工核账（B-6.3-6）。
+// handler 只做验签/反序列化/委托（§6.3.1）。
+func (s *BillingService) ConsumePush(ev PushEvent) error {
+	win := pushEventToWindow(ev)
+	if win == nil {
+		IncPush("ok") // 正常接收但不落账（负 token B-6.3-4 / 字段缺失 / ts 非法）
+		return nil
+	}
+	frozen := s.checkFrozen(ev.TenantID) != nil
+	if _, err := s.IngestWindow(context.Background(), win, s.syncMode); err != nil {
+		IncPush("error")
+		return err
+	}
+	switch {
+	case frozen:
+		IncPush("frozen") // B-6.3-6：冻结租户仍入账（供人工核账），指标单记
+	case ev.Result != pushResultOK && ev.Result != pushResultEngineError:
+		IncPush("unknown_result") // B-6.3-3：未知 result 值 → 落账按 ok 兜底，指标单记
+	default:
+		IncPush("ok")
+	}
+	return nil
 }
 
 // stamp 为账单锚定审计链尾并签名（T7b）；须在 LedgerHead 设定后调用。
