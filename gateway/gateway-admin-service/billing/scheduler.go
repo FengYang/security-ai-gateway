@@ -179,6 +179,24 @@ func CheckQuotaTask(det *AnomalyDetector, notifier Notifier) func(context.Contex
 	}
 }
 
+// ScanExpiriesTask 构造 S-9 到期扫描任务（§6.4.2 / §6.16）。
+//
+// 到期提醒 → 指标 #21；宽限结束仍逾期 → anomaly_total{kind="plan_expired"}（critical）；
+// **不自动降级**。失败仅记录（下轮重试）。
+func ScanExpiriesTask(svc *BillingService) func(context.Context) {
+	return func(ctx context.Context) {
+		rep, err := svc.ScanExpiries(time.Now().UnixNano())
+		if err != nil {
+			log.Printf("[billing] S-9 到期扫描失败：%v", err)
+			return
+		}
+		if rep.Days30+rep.Days7+rep.Days0+rep.Expired > 0 {
+			log.Printf("[billing] S-9 到期扫描：租户=%d T-30=%d T-7=%d T-0=%d 逾期=%d",
+				rep.Tenants, rep.Days30, rep.Days7, rep.Days0, rep.Expired)
+		}
+	}
+}
+
 // VerifyChainTask 构造 S-6 链校验任务（§6.16）：全量校验账本哈希链 → 指标 #4；
 // 断裂即置 chain_broken 并停出账（fail-closed）。纯读、无外部依赖；失败仅记录（下轮重试）。
 func VerifyChainTask(svc *BillingService) func(context.Context) {

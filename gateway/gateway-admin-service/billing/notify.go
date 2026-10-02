@@ -17,34 +17,35 @@ type Notifier interface {
 	WarnQuotaLow(tenant string, rem float64, periodKey string) error
 }
 
-// QuotaAlertStore 配额告警去重存储（periodKey 幂等，B-6.11-1）。
-type QuotaAlertStore interface {
-	// MarkIfNew 标记 (tenant, periodKey) 已告警；返回 true 表示首次（应发送）。
-	MarkIfNew(tenant, periodKey string, at int64) (bool, error)
+// AlertStore 告警去重存储（(tenant, key) 幂等）。
+// 供 S-7 余额告警（key=月周期 "YYYY-MM"）与 S-9 到期提醒（key=expiry:<到期时间>:<阈值>）复用。
+type AlertStore interface {
+	// MarkIfNew 标记 (tenant, key) 已告警；返回 true 表示首次（应发送）。
+	MarkIfNew(tenant, key string, at int64) (bool, error)
 }
 
-// ensureQuotaAlertSchema 确保 quota_alerts 表存在。
-func ensureQuotaAlertSchema(db *sql.DB) error {
+// ensureAlertSchema 确保 alert_dedup 表存在（通用告警去重）。
+func ensureAlertSchema(db *sql.DB) error {
 	_, err := db.Exec(`
-CREATE TABLE IF NOT EXISTS quota_alerts (
+CREATE TABLE IF NOT EXISTS alert_dedup (
   tenant_id  TEXT NOT NULL,
-  period_key TEXT NOT NULL,
+  dedup_key  TEXT NOT NULL,
   alerted_at INTEGER NOT NULL,
-  PRIMARY KEY (tenant_id, period_key)
+  PRIMARY KEY (tenant_id, dedup_key)
 );`)
 	return err
 }
 
-type sqliteQuotaAlertStore struct {
+type sqliteAlertStore struct {
 	db *sql.DB
 }
 
-// MarkIfNew 首次插入成功 → true；已存在（本周期已告警）→ false。
-func (s *sqliteQuotaAlertStore) MarkIfNew(tenant, periodKey string, at int64) (bool, error) {
-	res, err := s.db.Exec(`INSERT OR IGNORE INTO quota_alerts (tenant_id, period_key, alerted_at)
-		VALUES (?, ?, ?)`, tenant, periodKey, at)
+// MarkIfNew 首次插入成功 → true；已存在（同键已告警）→ false。
+func (s *sqliteAlertStore) MarkIfNew(tenant, key string, at int64) (bool, error) {
+	res, err := s.db.Exec(`INSERT OR IGNORE INTO alert_dedup (tenant_id, dedup_key, alerted_at)
+		VALUES (?, ?, ?)`, tenant, key, at)
 	if err != nil {
-		return false, fmt.Errorf("billing: quota alert mark: %w", err)
+		return false, fmt.Errorf("billing: alert mark: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -53,15 +54,15 @@ func (s *sqliteQuotaAlertStore) MarkIfNew(tenant, periodKey string, at int64) (b
 	return n > 0, nil
 }
 
-// QuotaNotifier 默认通知器：去重（QuotaAlertStore）后经 sink 交付；sink=nil 仅本地日志。
+// QuotaNotifier 默认通知器：去重（AlertStore）后经 sink 交付；sink=nil 仅本地日志。
 type QuotaNotifier struct {
-	store QuotaAlertStore
+	store AlertStore
 	sink  func(tenant string, rem float64, periodKey string) // 可选：邮件/Webhook 交付
 	now   func() int64
 }
 
 // NewQuotaNotifier 构造通知器。sink 可为 nil（仅日志）。
-func NewQuotaNotifier(store QuotaAlertStore,
+func NewQuotaNotifier(store AlertStore,
 	sink func(tenant string, rem float64, periodKey string), now func() int64) *QuotaNotifier {
 	if now == nil {
 		now = func() int64 { return 0 }

@@ -8,12 +8,12 @@ type Plan struct {
 	Name          string       `json:"name"`
 	MonthlyTokens int64        `json:"monthly_tokens"` // 标准 token 月配额（<=0 = 不限/定制）
 	Concurrency   int          `json:"concurrency"`
-	CacheTier     string       `json:"cache_tier"`     // none | exact | semantic
-	ModelScopes   []string     `json:"model_scopes"`   // 允许模型白名单（空 = 全部）
-	OverQuota     string       `json:"over_quota"`     // reject | degrade | charge
+	CacheTier     string       `json:"cache_tier"`   // none | exact | semantic
+	ModelScopes   []string     `json:"model_scopes"` // 允许模型白名单（空 = 全部）
+	OverQuota     string       `json:"over_quota"`   // reject | degrade | charge
 	PriceID       string       `json:"price_id"`
 	ExtraLimits   []QuotaLimit `json:"extra_limits,omitempty"`
-	PayMode       string       `json:"pay_mode"`       // postpaid（P0 仅此值）
+	PayMode       string       `json:"pay_mode"` // postpaid（P0 仅此值）
 	Version       int64        `json:"version"`
 }
 
@@ -40,5 +40,7 @@ type PlanStore interface {
 	ListPlans() ([]Plan, error)
 	Bind(s Subscription) error
 	Resolve(tenant string, now int64) (*Plan, error)
+	// ListSubscriptions 返回 effective_at <= now 的全部订阅（按 effective_at 升序）。
+	// 供到期扫描（S-9）：Resolve 会滤除已过期项，无法用于到期检测，故需此枚举。
+	ListSubscriptions(now int64) ([]Subscription, error)
 }
-

@@ -59,7 +59,7 @@ func (h *billingHandler) StartSchedulers(ctx context.Context) {
 		return
 	}
 	h.sched.Start(ctx)
-	log.Printf("[billing] 后台调度已启动：S-5 异常扫描 + S-6 链校验 + S-7 余额告警 + S-8 缺口扫描（回看 %d 天，启动即执行一次 + 每 24h）+ S-10 关联校验", h.backfillDays)
+	log.Printf("[billing] 后台调度已启动：S-5 异常扫描 + S-6 链校验 + S-7 余额告警 + S-8 缺口扫描（回看 %d 天，启动即执行一次 + 每 24h）+ S-9 到期扫描 + S-10 关联校验", h.backfillDays)
 }
 
 // Close 停止后台任务（幂等；不关闭 store——store 生命周期由调用方管理）。
@@ -113,20 +113,22 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 	//   S-6  链校验（每 verify_interval；断裂 → 停出账，fail-closed）
 	//   S-7  余额告警（每 quota_scan_interval；低于阈值 → 通知，periodKey 幂等）
 	//   S-8  缺口扫描（启动即一次 + 每日；补齐漏跑日账 + 日结后预热 A-37）
+	//   S-9  到期扫描（每 expiry_scan_interval；T-30/7/0 提醒 → 指标 #21，不自动降级）
 	//   S-10 关联校验（每 verify_assoc_interval；不符 → 标记 assoc_mismatch，不阻断）
 	// 说明：S-2「日结」由 S-8 覆盖（缺口扫描每日执行，等价于"确保截至昨日已出账"）；
-	// S-1/S-3/S-9 的接线见进度跟踪文档"剩余项"。L2 对账（reconciler）当前未接线，
+	// S-1/S-3 的接线见进度跟踪文档"剩余项"。L2 对账（reconciler）当前未接线，
 	// 故 S-5 规则② 在现状下为空操作（nil 跳过），规则①③④ 生效。
 	if cfg.Schedule.Enabled {
 		det := billing.NewAnomalyDetectorForStore(store, priceProvider, nil, cfg.Anomaly,
 			func() int64 { return time.Now().UnixNano() })
-		notifier := billing.NewQuotaNotifier(store.QuotaAlerts(), nil,
+		notifier := billing.NewQuotaNotifier(store.AlertDedup(), nil,
 			func() int64 { return time.Now().UnixNano() })
 		h.sched = billing.NewScheduler(cfg.Schedule, billing.SchedulerTasks{
 			ScanAnomalies: billing.ScanAnomaliesTask(det),
 			CheckQuota:    billing.CheckQuotaTask(det, notifier),
 			VerifyChain:   billing.VerifyChainTask(svc),
 			Backfill:      billing.BackfillTask(svc, cfg.Schedule.BackfillLookbackDays),
+			ScanExpiries:  billing.ScanExpiriesTask(svc),
 			VerifyAssoc:   billing.VerifyAssocTask(svc, cfg.Schedule.BackfillLookbackDays),
 		})
 	}

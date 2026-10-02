@@ -13,15 +13,15 @@ func TestQuotaAlertStore_MarkIfNew(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
 
-	first, err := s.QuotaAlerts().MarkIfNew("t1", "2026-10", 1)
+	first, err := s.AlertDedup().MarkIfNew("t1", "2026-10", 1)
 	if err != nil || !first {
 		t.Fatalf("first MarkIfNew = %v, err=%v, want true", first, err)
 	}
-	again, err := s.QuotaAlerts().MarkIfNew("t1", "2026-10", 2)
+	again, err := s.AlertDedup().MarkIfNew("t1", "2026-10", 2)
 	if err != nil || again {
 		t.Fatalf("second MarkIfNew = %v, err=%v, want false", again, err)
 	}
-	other, err := s.QuotaAlerts().MarkIfNew("t1", "2026-11", 3)
+	other, err := s.AlertDedup().MarkIfNew("t1", "2026-11", 3)
 	if err != nil || !other {
 		t.Errorf("new period MarkIfNew = %v, err=%v, want true", other, err)
 	}
@@ -32,7 +32,7 @@ func TestQuotaNotifier_Dedup(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
 	var got []string
-	n := NewQuotaNotifier(s.QuotaAlerts(), func(tenant string, rem float64, periodKey string) {
+	n := NewQuotaNotifier(s.AlertDedup(), func(tenant string, rem float64, periodKey string) {
 		got = append(got, tenant+"@"+periodKey)
 	}, func() int64 { return 1 })
 

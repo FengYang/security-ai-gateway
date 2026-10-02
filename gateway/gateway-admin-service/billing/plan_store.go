@@ -180,6 +180,27 @@ func (s *sqlitePlanStore) Resolve(tenant string, now int64) (*Plan, error) {
 	return s.GetPlan(planID)
 }
 
+// ListSubscriptions 返回 effective_at <= now 的全部订阅（按 effective_at 升序）。
+// 供到期扫描（S-9）：Resolve 会滤除已过期项，无法用于到期检测，故需此枚举。
+func (s *sqlitePlanStore) ListSubscriptions(now int64) ([]Subscription, error) {
+	rows, err := s.db.Query(`SELECT tenant_id, plan_id, effective_at, expires_at, bound_by, bound_at
+		FROM subscriptions WHERE effective_at <= ? ORDER BY effective_at ASC`, now)
+	if err != nil {
+		return nil, fmt.Errorf("billing: list subscriptions: %w", err)
+	}
+	defer rows.Close()
+	var out []Subscription
+	for rows.Next() {
+		var sub Subscription
+		if err := rows.Scan(&sub.TenantID, &sub.PlanID, &sub.EffectiveAt, &sub.ExpiresAt,
+			&sub.BoundBy, &sub.BoundAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sub)
+	}
+	return out, rows.Err()
+}
+
 // ---------- 默认套餐（4 档，§4.1.3） ----------
 
 // DefaultPlans 返回 4 档默认套餐定义（初始化时写入 DB）。
