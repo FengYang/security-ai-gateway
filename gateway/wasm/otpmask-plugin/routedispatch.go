@@ -42,6 +42,19 @@ import (
 // routeDispatchEnabled 插件自持派发开关（initRouteRuntime 按配置设置；默认 false）。
 var routeDispatchEnabled bool
 
+// retryAttemptHeader GA-计费 P0-3（A-1）：重试归因请求头（仅重发时下行；tee-infer 解析→IsRetry）。
+// 值 = 当前尝试序号（首次=1 不写；重发写 2,3,...）。
+const retryAttemptHeader = "X-Otpmask-Retry-Attempt"
+
+// retryAttemptHeaderValue 计算重试头值：attempt<=1（首次）返回 ok=false（不写头）；
+// attempt>=2（重发）返回十进制序号。纯逻辑，便于宿主单测。
+func retryAttemptHeaderValue(attempt int) (string, bool) {
+	if attempt <= 1 {
+		return "", false
+	}
+	return strconv.Itoa(attempt), true
+}
+
 // routeDispatchPolicy 非流式重试策略（纯逻辑；预算按端点独立核算，方案 §6.7）。
 var routeDispatchPolicy = routeengine.NewRetryPolicy(
 	routeengine.RetryConfig{},
@@ -174,6 +187,11 @@ func (d *dispatchState) send(ctx wrapper.HttpContext, config PluginConfig, endpo
 	}
 	if t := tenantHeaderValue(ctx); t != "" {
 		headers = append(headers, [2]string{"X-Tenant-ID", t})
+	}
+	// GA-计费 P0-3（A-1/A-29）：重试归因标记——仅**重发**时下行（首次 Attempt=1 不写），
+	// 使 tee-infer 能把重试流量的 token 归为平台成本（不计用户金额，M9）。
+	if v, ok := retryAttemptHeaderValue(d.state.Attempt); ok {
+		headers = append(headers, [2]string{retryAttemptHeader, v})
 	}
 
 	err = wrapper.HttpCall(wrapper.FQDNCluster{FQDN: target.host, Port: target.port},

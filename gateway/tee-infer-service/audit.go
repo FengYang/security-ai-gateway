@@ -75,6 +75,11 @@ type AuditEvent struct {
 	// 仅 action=output_blocked/output_masked 事件携带（M4 OG-17/18 才有发射点；R3 已裁决）；
 	// M1 只落字段不填值，shadow 事件恒不携带（零值即不序列化）。填值与 /usage 聚合归 M4 OG-19。
 	FilteredTokens int `json:"filtered_tokens,omitempty"`
+	// GA-计费 P0-3（A-23/A-29）：重试归因标记。由数据面经请求头
+	// `X-Otpmask-Retry-Attempt` 下行（唯一数据面改动），tee-infer 解析后落审计。
+	// **证据字段，不进 hash()**（保持 WORM 旧链向后兼容）；重试 token 归平台成本
+	// （不计用户金额，M9），/usage 由此字段按 net/retry 分列（A-35）。
+	IsRetry bool `json:"is_retry,omitempty"`
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。

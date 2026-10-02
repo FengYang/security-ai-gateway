@@ -44,17 +44,26 @@ type pullUsageResp struct {
 }
 
 // billingIncTee 兼容 tee-infer billingIncrement 结构（int + 字段名映射）。
+//
+// GA-计费 P0-3（A-27/A-35）：新增 `_net` 净量与 `retry_tokens` 单列字段；
+// 拉取侧**消费 `_net` 字段入账**（tokens 与 retry 不重叠，M9 与 M1 同保）。
 type billingIncTee struct {
-	TokensIn  int                `json:"tokens_in"`
-	TokensOut int                `json:"tokens_out"`
-	Requests  int                `json:"requests"`
-	ByModel   map[string]*modelUsageTee `json:"by_model"`
+	TokensIn     int                      `json:"tokens_in"`
+	TokensOut    int                      `json:"tokens_out"`
+	Requests     int                      `json:"requests"`
+	TokensInNet  int                      `json:"tokens_in_net"`
+	TokensOutNet int                      `json:"tokens_out_net"`
+	RetryTokens  int                      `json:"retry_tokens"`
+	ByModel      map[string]*modelUsageTee `json:"by_model"`
 }
 
 type modelUsageTee struct {
-	TokensIn  int `json:"tokens_in"`
-	TokensOut int `json:"tokens_out"`
-	Requests  int `json:"requests"`
+	TokensIn     int `json:"tokens_in"`
+	TokensOut    int `json:"tokens_out"`
+	Requests     int `json:"requests"`
+	TokensInNet  int `json:"tokens_in_net"`
+	TokensOutNet int `json:"tokens_out_net"`
+	RetryTokens  int `json:"retry_tokens"`
 }
 
 func (s *teeInferPullSource) Pull(ctx context.Context, fromNs, toNs int64) (*UsageWindow, error) {
@@ -90,20 +99,34 @@ func (s *teeInferPullSource) Pull(ctx context.Context, fromNs, toNs int64) (*Usa
 		return nil, fmt.Errorf("billing pull: decode: %w", err)
 	}
 
-	// 转换为内部 TenantAgg 结构（int → int64，按模型维度保留）
+	// 转换为内部 TenantAgg 结构（int → int64，按模型维度保留）。
+	//
+	// A-27/A-35：入账消费**净量**（tokens_in_net/tokens_out_net），retry 归 RetryToks（平台成本）。
+	// 兼容降级：若对端为旧版（未提供 _net 字段，全 0）而 tokens 非 0 → 视为无 retry 的净量
+	// （保持可加性；retry 归因为 0，与旧行为一致）。
 	tenants := make(map[string]*TenantAgg, len(raw.Tenants))
 	for tenant, inc := range raw.Tenants {
+		inNet, outNet, retry := inc.TokensInNet, inc.TokensOutNet, inc.RetryTokens
+		if inNet == 0 && outNet == 0 && retry == 0 && (inc.TokensIn != 0 || inc.TokensOut != 0) {
+			inNet, outNet = inc.TokensIn, inc.TokensOut // 旧版对端：_net 缺省 = 全量净量
+		}
 		ta := &TenantAgg{
-			TokensIn:  int64(inc.TokensIn),
-			TokensOut: int64(inc.TokensOut),
+			TokensIn:  int64(inNet),
+			TokensOut: int64(outNet),
 			Requests:  int64(inc.Requests),
+			RetryToks: int64(retry),
 			ByModel:   make(map[string]*ModelAgg, len(inc.ByModel)),
 		}
 		for mk, mu := range inc.ByModel {
+			mInNet, mOutNet, mRetry := mu.TokensInNet, mu.TokensOutNet, mu.RetryTokens
+			if mInNet == 0 && mOutNet == 0 && mRetry == 0 && (mu.TokensIn != 0 || mu.TokensOut != 0) {
+				mInNet, mOutNet = mu.TokensIn, mu.TokensOut
+			}
 			ta.ByModel[mk] = &ModelAgg{
-				TokensIn:  int64(mu.TokensIn),
-				TokensOut: int64(mu.TokensOut),
+				TokensIn:  int64(mInNet),
+				TokensOut: int64(mOutNet),
 				Requests:  int64(mu.Requests),
+				RetryToks: int64(mRetry),
 			}
 		}
 		tenants[tenant] = ta

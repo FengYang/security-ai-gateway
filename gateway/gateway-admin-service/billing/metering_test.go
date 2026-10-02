@@ -1,7 +1,12 @@
 package billing
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // ---------- T-6.3 计量接入单元测试 ----------
@@ -180,5 +185,76 @@ func TestAggToEntries_RetryOnlyModel(t *testing.T) {
 	// 0 tokens_in/out/requests + 50 retry → 不应跳过（retry 也是数据）
 	if len(entries) != 1 {
 		t.Errorf("entries = %d, want 1 (retry-only model kept)", len(entries))
+	}
+}
+
+// ---------- 拉取源：净量字段消费（A-27/A-35 跨服务契约） ----------
+
+func TestTEEPullSource_ConsumesNetFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tenants": map[string]any{
+				"t1": map[string]any{
+					"tokens_in": 170, "tokens_out": 80, "requests": 2,
+					"tokens_in_net": 100, "tokens_out_net": 50, "retry_tokens": 100,
+					"by_model": map[string]any{
+						"tee_gpu/qwen": map[string]any{
+							"tokens_in": 170, "tokens_out": 80, "requests": 2,
+							"tokens_in_net": 100, "tokens_out_net": 50, "retry_tokens": 100,
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTEEPullSource(srv.URL, "tok", 5*time.Second)
+	win, err := src.Pull(context.Background(), int64(1)*int64(time.Second), int64(2)*int64(time.Second))
+	if err != nil {
+		t.Fatalf("Pull err: %v", err)
+	}
+	ta := win.Tenants["t1"]
+	if ta == nil {
+		t.Fatal("tenant t1 missing")
+	}
+	// 入账消费净量（非含 retry 的原口径）
+	if ta.TokensIn != 100 || ta.TokensOut != 50 {
+		t.Errorf("net = (%d,%d), want (100,50)", ta.TokensIn, ta.TokensOut)
+	}
+	if ta.RetryToks != 100 {
+		t.Errorf("retry = %d, want 100", ta.RetryToks)
+	}
+	mu := ta.ByModel["tee_gpu/qwen"]
+	if mu == nil || mu.TokensIn != 100 || mu.TokensOut != 50 || mu.RetryToks != 100 {
+		t.Errorf("per-model net/retry wrong: %+v", mu)
+	}
+}
+
+func TestTEEPullSource_LegacyFallback(t *testing.T) {
+	// 旧版对端（无 _net 字段）：回退为 tokens 全量净量，retry=0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tenants": map[string]any{
+				"t1": map[string]any{
+					"tokens_in": 70, "tokens_out": 30, "requests": 1,
+					"by_model": map[string]any{
+						"m1": map[string]any{"tokens_in": 70, "tokens_out": 30, "requests": 1},
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	src := NewTEEPullSource(srv.URL, "", 5*time.Second)
+	win, err := src.Pull(context.Background(), int64(1)*int64(time.Second), int64(2)*int64(time.Second))
+	if err != nil {
+		t.Fatalf("Pull err: %v", err)
+	}
+	ta := win.Tenants["t1"]
+	if ta.TokensIn != 70 || ta.TokensOut != 30 || ta.RetryToks != 0 {
+		t.Errorf("legacy fallback = (%d,%d,retry=%d), want (70,30,0)",
+			ta.TokensIn, ta.TokensOut, ta.RetryToks)
 	}
 }

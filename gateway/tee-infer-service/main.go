@@ -17,6 +17,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -229,11 +230,18 @@ type usageRecord struct {
 }
 
 // modelUsage 模型维度用量（GA-计费 P0-1：同租户混用多模型的分价计费基础）。
+//
+// GA-计费 P0-3（A-27/A-35）：TokensIn/Out 保留原口径（含 retry，向后兼容）；
+// TokensInNet/TokensOutNet 为剔除 retry 的净量，RetryTokens 单列（平台成本）。
+// 恒等（总量守恒）：tokens_in + tokens_out == tokens_in_net + tokens_out_net + retry_tokens。
 type modelUsage struct {
-	TokensIn  int `json:"tokens_in"`
-	TokensOut int `json:"tokens_out"`
-	Requests  int `json:"requests"`
-	Denies    int `json:"denies,omitempty"`
+	TokensIn     int `json:"tokens_in"`
+	TokensOut    int `json:"tokens_out"`
+	Requests     int `json:"requests"`
+	Denies       int `json:"denies,omitempty"`
+	TokensInNet  int `json:"tokens_in_net,omitempty"`
+	TokensOutNet int `json:"tokens_out_net,omitempty"`
+	RetryTokens  int `json:"retry_tokens,omitempty"`
 }
 
 // tenantHeader 租户标识请求头。
@@ -286,7 +294,8 @@ func (s *teeServer) recordUsage(tenant string, tokensIn, tokensOut int, denied b
 // Window 取值：
 //   - ""       累计上限（P1 既有语义，**默认，行为不变**）；
 //   - "minute" 每分钟窗口（对应控制面策略的 tpm）；
-//   - "day"    UTC+8 自然日窗口（对应控制面策略的 daily_budget_tokens）。
+//   - "day"    UTC+8 自然日窗口（对应控制面策略的 daily_budget_tokens）；
+//   - "month"  UTC+8 自然月窗口（GA-计费 P0-3 套餐月配额，A-33）。
 type quotaLimit struct {
 	Window    string `json:"window,omitempty"`
 	MaxTokens int64  `json:"max_tokens"`
@@ -345,16 +354,21 @@ const (
 	quotaWindowNone   = ""
 	quotaWindowMinute = "minute"
 	quotaWindowDay    = "day"
+	// quotaWindowMonth GA-计费 P0-3（P-2/U-2）：UTC+8 自然月窗口，用于套餐月配额
+	// （单位与计费口径统一为标准 token，A-33）。
+	quotaWindowMonth = "month"
 )
 
 // quotaWindowKeyFor 计算窗口标识：翻转即视为新窗口（触发计数重置）。
-// minute = Unix 分钟序号；day = UTC+8 自然日（口径与设计 §3 一致）。
+// minute = Unix 分钟序号；day = UTC+8 自然日；month = UTC+8 自然月（口径与设计 §3 一致）。
 func quotaWindowKeyFor(window string, now time.Time) string {
 	switch window {
 	case quotaWindowMinute:
 		return fmt.Sprintf("%d", now.Unix()/60)
 	case quotaWindowDay:
 		return now.In(time.FixedZone("UTC+8", 8*3600)).Format("2006-01-02")
+	case quotaWindowMonth:
+		return now.In(time.FixedZone("UTC+8", 8*3600)).Format("2006-01")
 	default:
 		return ""
 	}
@@ -363,7 +377,7 @@ func quotaWindowKeyFor(window string, now time.Time) string {
 // validQuotaWindow 校验窗口取值（非法即拒绝，避免"配了不生效"）。
 func validQuotaWindow(w string) bool {
 	switch w {
-	case quotaWindowNone, quotaWindowMinute, quotaWindowDay:
+	case quotaWindowNone, quotaWindowMinute, quotaWindowDay, quotaWindowMonth:
 		return true
 	default:
 		return false
@@ -963,6 +977,25 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(respJSON)
 }
 
+// retryAttemptHeader 数据面下行重试标记请求头（GA-计费 P0-3，A-1：唯一数据面改动）。
+const retryAttemptHeader = "X-Otpmask-Retry-Attempt"
+
+// retryAttemptFromHeader 解析重试尝试序号；空/非法/<=0 → 0（非重试）。
+// 语义（§6.3.3）：数据面在多端点重试时递增写入，tee-infer 仅解析为重试布尔标记，
+// 使重试 token 可归平台成本（M9 不变量）。
+func retryAttemptFromHeader(r *http.Request) int {
+	v := strings.TrimSpace(r.Header.Get(retryAttemptHeader))
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// handleInfer 推理入口。
 func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -970,6 +1003,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := tenantOf(r)
+	isRetry := retryAttemptFromHeader(r) > 0 // GA-计费 P0-3：重试归因（来自数据面下行头）
 	payloadSHA := sha256hex(body) // 审计记录原始 wire 哈希（token=明文 / quote=密文）
 	// P1c 解密入口：有效会话（quote 模式）下请求须为 c2s 信封（fail-closed，防降级攻击）
 	sess := s.sessionByID(r)
@@ -1034,7 +1068,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	// P2/P5（D1）：text 载荷路径——南向统一 text（tee_gpu 流式 / cmaas SDK 通道），
 	// 与 vectors 路径（路线 2 保留）在此分流。
 	if len(req.TextPayload) > 0 {
-		s.handleTextInfer(w, sess, tenant, req, payloadSHA)
+		s.handleTextInfer(w, sess, tenant, req, payloadSHA, isRetry)
 		return
 	}
 
@@ -1142,6 +1176,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		Result: "ok", PayloadSHA: payloadSHA,
 		EngineType: vecEng, // GA-计费 P0-1
 		Model:      req.Model,
+		IsRetry:    isRetry, // GA-计费 P0-3：重试归因（A-23/A-29）
 	})
 	go s.billing.notify(vecEv) // GA-计费 P1-1：Webhook（nil = no-op）
 	// M10：指标
@@ -1286,7 +1321,7 @@ func (r replayEngine) Generate(_ model.GenerateRequest, onDelta func(string) err
 // SSE 逐块 s2c 信封（Stream=true）或单信封聚合响应（Stream=false）。
 // fail-closed：text 载荷仅限证明会话信封通道（token 模式无信封，拒绝）。
 func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
-	tenant string, req *protocol.InferenceRequest, payloadSHA string) {
+	tenant string, req *protocol.InferenceRequest, payloadSHA string, isRetry bool) {
 	if sess == nil {
 		s.denyAndAudit(tenant, req.RequestID, "text_without_session", payloadSHA)
 		http.Error(w, "text 载荷须在证明会话信封内（fail-closed）", http.StatusBadRequest)
@@ -1400,7 +1435,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		// X-3：输出侧整流拦截优先于引擎 error 判定——按实际下发回冲（block+genErr 同此）。
 		if out.Blocked {
 			s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
-				s.countTokens(inputText.String()), out)
+				s.countTokens(inputText.String()), out, isRetry)
 			return
 		}
 		log.Printf("[tee] infer(text) 引擎失败 request=%s engine=%s err=%v", req.RequestID, engType, serr)
@@ -1420,6 +1455,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 				EngineType: engType, Model: req.Model,
 				TransformedHash: txHash,
 				MeteringMode:    s.meteringMode(),
+				IsRetry:         isRetry, // GA-计费 P0-3：重试归因
 			})
 			go s.billing.notify(ev) // GA-计费 P1-1：Webhook（nil = no-op；异步不阻塞主链）
 		} else {
@@ -1432,7 +1468,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	// X-3：正常收尾（genErr=nil）但输出侧在 Process/Finish 整流拦截 → 按实际下发回冲。
 	if out.Blocked {
 		s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
-			s.countTokens(inputText.String()), out)
+			s.countTokens(inputText.String()), out, isRetry)
 		return
 	}
 	// 未命中回填缓存（命中路径不重复回填）。
@@ -1463,6 +1499,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		CacheHit:        cacheHit,         // GF.4.1：精确缓存命中标记
 		KeyFP:           keyFP,            // GF.4.2：服务商 key 指纹（多账号归属）
 		MeteringMode:    s.meteringMode(), // GF.2.4：计量口径标记（estimate=未校准）
+		IsRetry:         isRetry,          // GA-计费 P0-3：重试归因（A-23/A-29）
 	})
 	go s.billing.notify(ev) // GA-计费 P1-1：Webhook（nil = no-op；异步不阻塞主链）
 	s.metrics.incRequest(tenant, "ok")
@@ -1727,7 +1764,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 //   - 部分截断（有下发）：输入保留（已发送并消耗），输出仅按实际下发计费；
 //     infer 审计 result=content_filter（供 from/to 出账聚合）。
 func (s *teeServer) applyOutputBlockBilling(tenant, requestID, payloadSHA, transformedHash,
-	engType, modelName string, tokensIn int, out streamOutcome) {
+	engType, modelName string, tokensIn int, out streamOutcome, isRetry bool) {
 	delivered := out.EmittedTokens
 	if delivered <= 0 {
 		s.rollbackQuota(tenant, int64(tokensIn))
@@ -1745,6 +1782,7 @@ func (s *teeServer) applyOutputBlockBilling(tenant, requestID, payloadSHA, trans
 		PayloadSHA: payloadSHA, TransformedHash: transformedHash,
 		EngineType: engType, Model: modelName,
 		MeteringMode: s.meteringMode(),
+		IsRetry:      isRetry, // GA-计费 P0-3：重试归因
 	})
 	go s.billing.notify(ev)
 	s.metrics.incRequest(tenant, "content_filter")

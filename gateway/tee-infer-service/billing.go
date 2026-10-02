@@ -40,16 +40,26 @@ func parseBillingTime(v string, def int64) (int64, bool) {
 }
 
 // billingIncrement 增量聚合结果（单租户，含模型维度）。
+//
+// GA-计费 P0-3（A-27/A-35）：TokensIn/Out 保留原口径（含 retry，向后兼容）；
+// TokensInNet/TokensOutNet 为剔除 retry 的净量（拉取侧入账以此为准，M9 与 M1 同保）；
+// RetryTokens 单列（平台成本，不计用户金额）。
 type billingIncrement struct {
-	TokensIn  int                    `json:"tokens_in"`
-	TokensOut int                    `json:"tokens_out"`
-	Requests  int                    `json:"requests"`
-	ByModel   map[string]*modelUsage `json:"by_model"`
+	TokensIn     int                    `json:"tokens_in"`
+	TokensOut    int                    `json:"tokens_out"`
+	Requests     int                    `json:"requests"`
+	TokensInNet  int                    `json:"tokens_in_net"`
+	TokensOutNet int                    `json:"tokens_out_net"`
+	RetryTokens  int                    `json:"retry_tokens"`
+	ByModel      map[string]*modelUsage `json:"by_model"`
 }
 
 // aggregateUsage 按审计事件聚合 [from, to) 计量增量（左闭右开，UTC）。
 // 只统计计费事件（action=infer：含 ok 与部分计费的 engine_error）；deny 不计费。
 // 事件时间戳取自审计链 append 时刻（TEE 内时钟，不可由客户端篡改）。
+//
+// GA-计费 P0-3（A-35）：按 `IsRetry` 分流——重试事件计入 RetryTokens（平台成本），
+// 非重试事件计入 `_net` 净量；`tokens_in+tokens_out == tokens_in_net+tokens_out_net+retry_tokens`。
 func aggregateUsage(events []AuditEvent, from, to int64) map[string]*billingIncrement {
 	out := map[string]*billingIncrement{}
 	for _, e := range events {
@@ -73,6 +83,16 @@ func aggregateUsage(events []AuditEvent, from, to int64) map[string]*billingIncr
 		mu.TokensIn += e.TokensIn
 		mu.TokensOut += e.TokensOut
 		mu.Requests++
+		// 重试归因（P0-3）：retry 只计平台成本，不进净量
+		if e.IsRetry {
+			inc.RetryTokens += e.TokensIn + e.TokensOut
+			mu.RetryTokens += e.TokensIn + e.TokensOut
+		} else {
+			inc.TokensInNet += e.TokensIn
+			inc.TokensOutNet += e.TokensOut
+			mu.TokensInNet += e.TokensIn
+			mu.TokensOutNet += e.TokensOut
+		}
 	}
 	return out
 }

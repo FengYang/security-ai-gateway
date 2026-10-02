@@ -174,3 +174,23 @@ func TestDispatchPolicyRetryAcrossEndpoints(t *testing.T) {
 		t.Fatalf("达到最大重试次数后不应重试，实际: %+v", dec)
 	}
 }
+
+// TestRetryAttemptHeaderValue GA-计费 P0-3（A-1/A-29）：
+// 首次尝试（Attempt=1）不写归因头；重发（>=2）写十进制序号，供 tee-infer 判定 IsRetry。
+func TestRetryAttemptHeaderValue(t *testing.T) {
+	if v, ok := retryAttemptHeaderValue(1); ok || v != "" {
+		t.Errorf("首次尝试不应写头，得到 (%q,%v)", v, ok)
+	}
+	if _, ok := retryAttemptHeaderValue(0); ok {
+		t.Errorf("非法 attempt=0 不应写头")
+	}
+	if v, ok := retryAttemptHeaderValue(2); !ok || v != "2" {
+		t.Errorf("重发应为 2，得到 (%q,%v)", v, ok)
+	}
+	if v, ok := retryAttemptHeaderValue(3); !ok || v != "3" {
+		t.Errorf("二次重发应为 3，得到 (%q,%v)", v, ok)
+	}
+	if retryAttemptHeader != "X-Otpmask-Retry-Attempt" {
+		t.Errorf("头名不符（须与 tee-infer 侧一致）: %q", retryAttemptHeader)
+	}
+}
