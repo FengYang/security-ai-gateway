@@ -70,11 +70,17 @@ type DisplayConfig struct {
 }
 
 type ScheduleConfig struct {
-	AnomalyScanInterval   time.Duration
-	VerifyInterval        time.Duration
-	QuotaScanInterval     time.Duration
-	ExpiryScanInterval    time.Duration
-	VerifyAssocInterval   time.Duration
+	// Enabled 是否启动后台调度器（S-8 缺口扫描等；默认 true）。
+	// false = 仅提供 HTTP 手动端点（close-daily 等），不跑后台任务。
+	Enabled bool
+	// BackfillLookbackDays S-8 缺口扫描回看窗口（天；默认 7，<=0 = 不限）。
+	BackfillLookbackDays int
+
+	AnomalyScanInterval time.Duration
+	VerifyInterval      time.Duration
+	QuotaScanInterval   time.Duration
+	ExpiryScanInterval  time.Duration
+	VerifyAssocInterval time.Duration
 }
 
 type SecretsConfig struct {
@@ -139,6 +145,8 @@ func LoadBillingConfig() (*BillingConfig, error) {
 	cfg.Display.AmountDisplay = getEnv(envPrefix+"DISPLAY_AMOUNT_DISPLAY", "false") == "true"
 
 	// Schedule
+	cfg.Schedule.Enabled = getEnv(envPrefix+"SCHEDULE_ENABLED", "true") == "true"
+	cfg.Schedule.BackfillLookbackDays = getIntEnv(envPrefix+"SCHEDULE_BACKFILL_LOOKBACK_DAYS", 7)
 	cfg.Schedule.AnomalyScanInterval = getDurationEnv(envPrefix+"SCHEDULE_ANOMALY_SCAN_INTERVAL", 5*time.Minute)
 	cfg.Schedule.VerifyInterval = getDurationEnv(envPrefix+"SCHEDULE_VERIFY_INTERVAL", 1*time.Hour)
 	cfg.Schedule.QuotaScanInterval = getDurationEnv(envPrefix+"SCHEDULE_QUOTA_SCAN_INTERVAL", 5*time.Minute)

@@ -23,6 +23,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -47,6 +48,26 @@ type billingHandler struct {
 	signer         billing.BillSigner
 	pricePublicURL string
 	audit          *adminAuditChain
+	sched          *billing.Scheduler // nil = 后台调度未启用
+	backfillDays   int                // S-8 回看窗口（日志用）
+}
+
+// StartSchedulers 启动后台任务（S-8 缺口扫描：启动时立即一次 + 每日一次）。
+// **仅由 main 调用**；测试不启动（避免后台 goroutine 干扰断言）。
+func (h *billingHandler) StartSchedulers(ctx context.Context) {
+	if h == nil || h.sched == nil {
+		return
+	}
+	h.sched.Start(ctx)
+	log.Printf("[billing] 后台调度已启动：S-8 缺口扫描（回看 %d 天，启动即执行一次 + 每 24h）", h.backfillDays)
+}
+
+// Close 停止后台任务（幂等；不关闭 store——store 生命周期由调用方管理）。
+func (h *billingHandler) Close() {
+	if h == nil || h.sched == nil {
+		return
+	}
+	h.sched.Stop()
 }
 
 // newBillingHandler 依配置构造计费 handler；enabled=false 返回 (nil,nil)。
@@ -83,6 +104,16 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 		freeze:         billing.NewFreezeController(store.Freezes(), nil, func() int64 { return time.Now().UnixNano() }),
 		pricePublicURL: cfg.API.PricePublicURL,
 		audit:          audit,
+		backfillDays:   cfg.Schedule.BackfillLookbackDays,
+	}
+
+	// 后台调度（S-8 缺口扫描：补齐漏跑日账 + 日结后预热 A-37）。
+	// 说明：S-2「日结」由 S-8 覆盖（缺口扫描每日执行，等价于"确保截至昨日已出账"）；
+	// S-1/S-3/S-5/S-6/S-7/S-9/S-10 的接线见进度跟踪文档"剩余项"。
+	if cfg.Schedule.Enabled {
+		h.sched = billing.NewScheduler(cfg.Schedule, billing.SchedulerTasks{
+			Backfill: billing.BackfillTask(svc, cfg.Schedule.BackfillLookbackDays),
+		})
 	}
 
 	// 签名器（引用式密钥；未配置 = 不签名）

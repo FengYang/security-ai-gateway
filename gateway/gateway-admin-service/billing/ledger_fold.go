@@ -107,6 +107,46 @@ func nextMonthFirstDay(month string) string {
 	return t.AddDate(0, 1, 0).Format(dayLayout)
 }
 
+// Tenants 返回账本中出现过的租户 ID（去重升序）；供缺口扫描（S-8）逐租户补账。
+func (s *sqliteLedgerStore) Tenants() ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT tenant_id FROM billing_ledger ORDER BY tenant_id`)
+	if err != nil {
+		return nil, fmt.Errorf("billing: tenants: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// DaysWithUsage 返回某租户账本中「有用量」（净 token 或重试 token > 0）的自然日（升序）。
+// 供缺口扫描（S-8）：与已出日账求差集，缺者补出（§6.6.2）。
+func (s *sqliteLedgerStore) DaysWithUsage(tenant string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT day, COALESCE(SUM(tokens_in),0) + COALESCE(SUM(tokens_out),0) + COALESCE(SUM(retry_toks),0) AS t
+		FROM billing_ledger WHERE tenant_id = ?
+		GROUP BY day HAVING t > 0 ORDER BY day`, tenant)
+	if err != nil {
+		return nil, fmt.Errorf("billing: days with usage: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var day string
+		var total int64
+		if err := rows.Scan(&day, &total); err != nil {
+			return nil, err
+		}
+		out = append(out, day)
+	}
+	return out, rows.Err()
+}
+
 // ---------- 净量查询（L2 对账用） ----------
 
 // NetTotals 账本净量合计（tokens_in/tokens_out 剔除 retry，与审计链净量三元组同口径 A-42）。

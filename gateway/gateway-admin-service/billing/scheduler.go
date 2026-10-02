@@ -100,6 +100,27 @@ func (s *Scheduler) spawn(ctx context.Context, name string, interval time.Durati
 	}()
 }
 
+// --- 生产任务构造（供 main 接线；§6.16） ---
+
+// BackfillTask 构造 S-8 缺口扫描任务（启动时 + 每日一次，§6.6.2）。
+//
+// lookbackDays: 只回看最近 N 天（<=0 = 不限）。today 取 UTC+8 自然日（与计量归日同口径）。
+// 失败仅记录：任务本身不 panic、不退出（单点失败留待下轮重试）。
+func BackfillTask(svc *BillingService, lookbackDays int) func(context.Context) {
+	return func(ctx context.Context) {
+		today := dayOfNs(time.Now().UnixNano())
+		rep, err := svc.BackfillGaps(ctx, today, lookbackDays)
+		if err != nil {
+			log.Printf("[billing] S-8 缺口扫描失败：%v", err)
+			return
+		}
+		if rep.Missing > 0 || rep.Failed > 0 {
+			log.Printf("[billing] S-8 缺口扫描：租户=%d 缺口=%d 补出=%d 跳过=%d 失败=%d",
+				rep.Tenants, rep.Missing, rep.Closed, rep.Skipped, rep.Failed)
+		}
+	}
+}
+
 // guard 单飞执行：同一任务名并发触发时跳过（防重入）；panic 隔离（B-6.15-1）。
 func (s *Scheduler) guard(name string, fn func(context.Context), ctx context.Context) {
 	s.guardMu.Lock()

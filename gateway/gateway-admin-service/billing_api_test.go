@@ -144,6 +144,47 @@ func TestBillingCrossTenantIsolation(t *testing.T) {
 	})
 }
 
+// TestBillingSchedulerWiring 后台调度接线：schedule.enabled 决定是否构造调度器（S-8）。
+func TestBillingSchedulerWiring(t *testing.T) {
+	dir := t.TempDir()
+	pricing := filepath.Join(dir, "pricing.json")
+	if err := os.WriteFile(pricing, []byte(`{"version":"v1","currency":"CNY","models":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := func(enabled bool) *billing.BillingConfig {
+		return &billing.BillingConfig{
+			Enabled: true,
+			Store:   billing.StoreConfig{Driver: "sqlite", DSN: filepath.Join(t.TempDir(), "b.db")},
+			Rating:  billing.RatingConfig{Rounding: "half_up", PriceTable: pricing},
+			Source:  billing.SourceConfig{SyncMode: billing.SyncModePull},
+			Schedule: billing.ScheduleConfig{
+				Enabled: enabled, BackfillLookbackDays: 7,
+			},
+		}
+	}
+	hOn, err := newBillingHandler(base(true), nil)
+	if err != nil {
+		t.Fatalf("handler(enabled) err: %v", err)
+	}
+	defer hOn.store.Close()
+	if hOn.sched == nil {
+		t.Error("schedule.enabled=true 应构造调度器（S-8）")
+	}
+	if hOn.backfillDays != 7 {
+		t.Errorf("backfillDays = %d, want 7", hOn.backfillDays)
+	}
+	hOn.Close() // 幂等停止（未启动时也安全）
+
+	hOff, err := newBillingHandler(base(false), nil)
+	if err != nil {
+		t.Fatalf("handler(disabled) err: %v", err)
+	}
+	defer hOff.store.Close()
+	if hOff.sched != nil {
+		t.Error("schedule.enabled=false 不应构造调度器")
+	}
+}
+
 // TestBillingIsolationDisabledWhenFeatureOff 计费关闭时不注册端点（R-1/M10）。
 func TestBillingIsolationDisabledWhenFeatureOff(t *testing.T) {
 	mux := buildAdminMux(testCfg(), nil, nil, nil, nil, nil, nil, nil, nil, false)

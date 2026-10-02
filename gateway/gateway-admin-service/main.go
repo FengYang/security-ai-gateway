@@ -266,7 +266,10 @@ func main() {
 	if bih != nil {
 		log.Printf("计费域已启用：store=%s price_table=%s sync_mode=%s",
 			bcfg.Store.Driver, bcfg.Rating.PriceTable, bcfg.Source.SyncMode)
-		defer func() { _ = bih.store.Close() }()
+		// 后台调度（S-8 缺口扫描：启动即执行一次 + 每日一次；补齐漏跑日账并预热月累计缓存）。
+		bih.StartSchedulers(context.Background())
+		defer bih.Close()                        // 先停调度（LIFO：先于 store.Close）
+		defer func() { _ = bih.store.Close() }() // 再关存储
 	} else {
 		log.Printf("计费域未启用（BILLING_ENABLED!=true），/billing/* 端点不注册")
 	}
