@@ -322,8 +322,16 @@ func RegisterHistogramBuckets(name string, buckets []float64) {
 // 默认桶上限 10s 会使 >10s 的观测全部落 +Inf，无法分位刻画 M6（故需自定义桶）。
 var quotaApplyBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 45, 60, 90, 180}
 
+// closeBuckets M3/M4 出账耗时桶（秒）：日结预算 20min（1200s）、月结预算 60min（3600s）。
+//
+// 末尾 1800/3600/7200 的作用：**阈值必须严格落在某桶区间内**——若阈值恰为最高有限桶上界
+// （如 3600），`histogram_quantile` 最大只能取到该上界，`> 3600` **永不成立**；故在预算之上
+// 各留一档（1800 高于日预算、7200 高于月预算），使 p95 > 1200 / > 3600 可判定。
+var closeBuckets = []float64{0.1, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1200, 1800, 3600, 7200}
+
 func init() {
 	RegisterHistogramBuckets("gateway_admin_billing_quota_apply_duration_seconds", quotaApplyBuckets)
+	RegisterHistogramBuckets("gateway_admin_billing_close_duration_seconds", closeBuckets)
 }
 
 // IncBillIssued 出账计数（#8；kind=daily|monthly|overage）。

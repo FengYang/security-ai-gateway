@@ -178,3 +178,12 @@ func TestObserveQuotaApply_CustomBuckets(t *testing.T) {
 		t.Errorf("M6 直方图应含自定义桶 le=60（否则 >10s 全落 +Inf）:\n%s", out)
 	}
 }
+
+// TestObserveClose_CustomBuckets M3/M4（#7）已登记自定义桶（分钟级预算，默认上限 10s 远不够）。
+func TestObserveClose_CustomBuckets(t *testing.T) {
+	ObserveClose("daily", 900) // 15min > 默认上限 10s
+	out := renderDefaultMetrics()
+	if !strings.Contains(out, `gateway_admin_billing_close_duration_seconds_bucket{kind="daily",le="1200"} `) {
+		t.Errorf("close_duration 应含自定义桶 le=1200（日结预算 20min 边界）:\n%s", out)
+	}
+}

@@ -277,6 +277,61 @@ tests:
               description: "套餐变更『受理 → 回读确认』时延 p95 超过 M6 阈值 60s（§6.4.1）。核查 tee-infer 配额下发（POST /usage/quota）与回读（GET /usage/quota）链路及回读确认预算（m6ApplyWithin）。"
               runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
 
+  # ===== 12) 日结耗时 p95 > 20min（M3；#7 自定义桶，阈值 1200s）=====
+  # 全部落 (1200,1800] 桶 → histogram_quantile(0.95) ≈ 1770s > 1200；for: 10m 后 firing。
+  - name: close-daily-p95-slow
+    interval: 5m
+    input_series:
+      - series: 'gateway_admin_billing_close_duration_seconds_bucket{kind="daily",le="600"}'
+        values: '0+0x100'
+      - series: 'gateway_admin_billing_close_duration_seconds_bucket{kind="daily",le="1200"}'
+        values: '0+0x100'
+      - series: 'gateway_admin_billing_close_duration_seconds_bucket{kind="daily",le="1800"}'
+        values: '0+1x100'
+      - series: 'gateway_admin_billing_close_duration_seconds_bucket{kind="daily",le="+Inf"}'
+        values: '0+1x100'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BillingCloseDailySlowP95
+        exp_alerts: [] # for: 10m 未满
+      - eval_time: 60m
+        alertname: BillingCloseDailySlowP95
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: billing
+              team: billing-ops
+            exp_annotations:
+              summary: "日结耗时 p95 超过 20min 预算（M3）"
+              description: "近 24 小时日结（逐租户）耗时 p95 超过 M3 预算 20min（§1.3）。排查账务域 DB 写入/计价/对账耗时与租户规模，避免日结报告持续延后。"
+              runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
+  # ===== 13) 月结耗时 p95 > 60min（M4；阈值 3600s，桶含 7200 使可判定）=====
+  - name: close-monthly-p95-slow
+    interval: 5m
+    input_series:
+      - series: 'gateway_admin_billing_close_duration_seconds_bucket{kind="monthly",le="3600"}'
+        values: '0+0x100'
+      - series: 'gateway_admin_billing_close_duration_seconds_bucket{kind="monthly",le="7200"}'
+        values: '0+1x100'
+      - series: 'gateway_admin_billing_close_duration_seconds_bucket{kind="monthly",le="+Inf"}'
+        values: '0+1x100'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BillingCloseMonthlySlowP95
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: BillingCloseMonthlySlowP95
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: billing
+              team: billing-ops
+            exp_annotations:
+              summary: "月结耗时 p95 超过 60min 预算（M4）"
+              description: "近 24 小时月结（逐租户）耗时 p95 超过 M4 预算 60min（§1.3）。排查账务域 DB/计价/对账耗时与租户规模。"
+              runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
   # ===== 9) 健康基线：全部告警静默 =====
   - name: healthy-baseline
     interval: 30s
@@ -310,6 +365,15 @@ tests:
         values: '0+10x120'
       - series: 'gateway_admin_billing_quota_apply_duration_seconds_bucket{le="+Inf"}'
         values: '0+10x120'
+      # M3/M4 #7 快路径（p95 ≈ 57s，远小于 1200/3600 → 静默）
+      - series: 'gateway_admin_billing_close_duration_seconds_bucket{kind="daily",le="60"}'
+        values: '0+1x120'
+      - series: 'gateway_admin_billing_close_duration_seconds_bucket{kind="daily",le="+Inf"}'
+        values: '0+1x120'
+      - series: 'gateway_admin_billing_close_duration_seconds_bucket{kind="monthly",le="60"}'
+        values: '0+1x120'
+      - series: 'gateway_admin_billing_close_duration_seconds_bucket{kind="monthly",le="+Inf"}'
+        values: '0+1x120'
     alert_rule_test:
       - eval_time: 30m
         alertname: BillingLedgerChainBroken
@@ -343,4 +407,10 @@ tests:
         exp_alerts: []
       - eval_time: 30m
         alertname: BillingQuotaApplySlowP95
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: BillingCloseDailySlowP95
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: BillingCloseMonthlySlowP95
         exp_alerts: []
