@@ -2956,6 +2956,40 @@ func (s *teeServer) quotaLimitsView(tenant string) []quotaLimitView {
 	return out
 }
 
+// handleQuotaReadback 配额回读：GET /usage/quota?tenant=X（★ P-1/M6，只读）。
+//
+// 返回该租户**当前已生效**的限额（window → max_tokens），供账务侧回读确认：
+// POST /usage/quota 返回 2xx **不等于**已生效，M6 判据以本回读为唯一构造点（加计费方案 §6.4.1 2c）。
+// 鉴权：计量查询凭证（管理令牌或只读计量令牌；checkMetering 内含 checkAdmin）。
+func (s *teeServer) handleQuotaReadback(w http.ResponseWriter, r *http.Request) {
+	if !s.checkMetering(r) {
+		http.Error(w, "计量查询认证失败", http.StatusUnauthorized)
+		return
+	}
+	tenant := r.URL.Query().Get("tenant")
+	if tenant == "" {
+		http.Error(w, "bad request（须含 tenant）", http.StatusBadRequest)
+		return
+	}
+	type quotaLimitView struct {
+		Window    string `json:"window"`
+		MaxTokens int64  `json:"max_tokens"`
+	}
+	resp := struct {
+		Tenant string           `json:"tenant"`
+		Limits []quotaLimitView `json:"limits"`
+	}{Tenant: tenant, Limits: []quotaLimitView{}}
+	s.mu.Lock()
+	if q, ok := s.quota[tenant]; ok {
+		for _, l := range q.Limits {
+			resp.Limits = append(resp.Limits, quotaLimitView{Window: l.Window, MaxTokens: l.MaxTokens})
+		}
+	}
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 // handleQuota 配额设置：POST /usage/quota。
 //   - 扁平（S3b）：{"tenant":"acme","max_tokens":1000000,"window":"day"}；max_tokens<=0 解除限制，
 //     window 缺省 = 累计上限（P1 既有语义，行为不变）；
@@ -2965,6 +2999,10 @@ func (s *teeServer) quotaLimitsView(tenant string) []quotaLimitView {
 // S5：可同时下发 shadow（{rpm,tpm,daily_budget_tokens}，只计数不拒绝）。
 // 返回生效主维度（quota/window/window_used，兼容旧消费方）、多维全量（quota_limits）与影子计数。
 func (s *teeServer) handleQuota(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.handleQuotaReadback(w, r) // ★ P-1/M6：回读确认（只读）
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

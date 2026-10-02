@@ -45,17 +45,18 @@ const billingAPIBase = "/v1/adminext/billing"
 
 // billingHandler 计费域 HTTP 处理器。
 type billingHandler struct {
-	store          billing.Store
-	svc            *billing.BillingService
-	compiler       billing.QuotaCompiler
-	applier        billing.QuotaApplier
-	freeze         *billing.FreezeController
-	signer         billing.BillSigner
-	pricePublicURL string
-	audit          *adminAuditChain
-	eventsSecret   []byte             // 推送 webhook HMAC 验签密钥（source.push_secret_ref；空 = 一律 401）
-	sched          *billing.Scheduler // nil = 后台调度未启用
-	backfillDays   int                // S-8 回看窗口（日志用）
+	store            billing.Store
+	svc              *billing.BillingService
+	compiler         billing.QuotaCompiler
+	applier          billing.QuotaApplier
+	freeze           *billing.FreezeController
+	signer           billing.BillSigner
+	pricePublicURL   string
+	audit            *adminAuditChain
+	eventsSecret     []byte             // 推送 webhook HMAC 验签密钥（source.push_secret_ref；空 = 一律 401）
+	quotaApplyBudget time.Duration      // M6 回读确认预算（零值 = m6ApplyWithin；测试可缩短）
+	sched            *billing.Scheduler // nil = 后台调度未启用
+	backfillDays     int                // S-8 回看窗口（日志用）
 }
 
 // StartSchedulers 启动后台任务（S-8 缺口扫描：启动时立即一次 + 每日一次）。
@@ -218,6 +219,12 @@ func (h *billingHandler) register(mux *http.ServeMux, cfg *config) {
 // billingEventsMaxBytes 推送事件体上限（1 MiB；事件级载荷远小于此）。
 const billingEventsMaxBytes = 1 << 20
 
+// M6 回读确认预算与轮询间隔（§6.4.1 2c / A-14；POST 2xx ≠ 生效，以回读为准）。
+const (
+	m6ApplyWithin = 60 * time.Second
+	m6ApplyPoll   = time.Second
+)
+
 // handleBillingEvents POST /v1/adminext/billing/events（§6.3.1）。
 //
 // 流程：HMAC 验签（X-Signature: sha256=<hex>，密钥 = source.push_secret_ref）→ JSON 反序列化
@@ -344,6 +351,7 @@ func (h *billingHandler) handleSubscription(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
 		return
 	}
+	start := time.Now() // ★ A-14：M6 计时起点（套餐变更**受理** → 回读确认）
 	if !requireRole(w, r, "admin") {
 		return
 	}
@@ -384,11 +392,25 @@ func (h *billingHandler) handleSubscription(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "套餐绑定失败")
 		return
 	}
-	// 配额编译 + 下发（M6）
-	updates, err := h.compiler.Compile(req.Tenant, plan)
-	if err == nil && h.applier != nil {
+	// 配额编译 + 下发 + 回读确认（P-1/M6：受理 → 回读确认 ≤ 60s）
+	if updates, cerr := h.compiler.Compile(req.Tenant, plan); cerr != nil {
+		log.Printf("[billing] 配额编译失败 tenant=%s: %v", req.Tenant, cerr)
+	} else if h.applier != nil {
 		if err := h.applier.ApplyQuota(r.Context(), updates); err != nil {
 			log.Printf("[billing] quota apply failed tenant=%s: %v", req.Tenant, err)
+		} else {
+			// 2c 回读确认：POST 2xx ≠ 已生效；确认失败仅告警不回滚（TEE 已生效为准，§6.4.1）
+			if rd, ok := h.applier.(billing.QuotaReader); ok {
+				budget := h.quotaApplyBudget
+				if budget <= 0 {
+					budget = m6ApplyWithin
+				}
+				if err := billing.ConfirmQuotaApplied(r.Context(), rd, req.Tenant, updates,
+					budget, m6ApplyPoll); err != nil {
+					log.Printf("[billing] M6 配额生效未确认 tenant=%s: %v", req.Tenant, err)
+				}
+			}
+			billing.ObserveQuotaApply(time.Since(start).Seconds()) // 指标 #13（M6）
 		}
 	}
 	h.auditAction(r, auditActionPlanBind, req.Tenant)

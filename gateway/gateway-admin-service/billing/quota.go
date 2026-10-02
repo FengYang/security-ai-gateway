@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"time"
 )
@@ -147,4 +148,95 @@ func (a *httpQuotaApplier) ApplyQuota(ctx context.Context, updates []QuotaUpdate
 		}
 	}
 	return nil
+}
+
+// ---------- 配额回读确认（P-1/M6，§6.4.1 2c） ----------
+
+// QuotaReader 配额回读器：读 tee-infer 当前**已生效**限额（window → max_tokens）。
+type QuotaReader interface {
+	GetQuota(ctx context.Context, tenant string) ([]QuotaLimit, error)
+}
+
+// GetQuota 回读实现：GET {base}/usage/quota?tenant=X（§6.4.1 2c 的唯一判据来源）。
+func (a *httpQuotaApplier) GetQuota(ctx context.Context, tenant string) ([]QuotaLimit, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		a.baseURL+"/usage/quota?tenant="+url.QueryEscape(tenant), nil)
+	if err != nil {
+		return nil, fmt.Errorf("billing: build quota readback req: %w", err)
+	}
+	if a.token != "" {
+		req.Header.Set("X-Admin-Token", a.token)
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("billing: quota readback http: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("billing: quota readback status %d", resp.StatusCode)
+	}
+	var out struct {
+		Limits []QuotaLimit `json:"limits"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("billing: quota readback decode: %w", err)
+	}
+	return out.Limits, nil
+}
+
+// ConfirmQuotaApplied 回读确认（P-1/M6）：轮询至"已生效限额 ⊇ 期望"，≤ within 返回 nil。
+//
+// POST /usage/quota 返回 2xx **不等于**已生效；M6 判据以本回读为唯一构造点（§6.4.1 2c）。
+// 比对口径：期望集合中每条 (window,max_tokens) 均已在生效集合中（顺序无关）；期望为空视为已确认。
+func ConfirmQuotaApplied(ctx context.Context, rd QuotaReader, tenant string, want []QuotaUpdate,
+	within, poll time.Duration) error {
+	if rd == nil {
+		return fmt.Errorf("billing: confirm quota: reader is nil")
+	}
+	if poll <= 0 {
+		poll = time.Second
+	}
+	var wantLimits []QuotaLimit
+	for _, u := range want {
+		wantLimits = append(wantLimits, u.Limits...)
+	}
+	deadline := time.Now().Add(within)
+	var last []QuotaLimit
+	for {
+		got, err := rd.GetQuota(ctx, tenant)
+		if err == nil {
+			last = got
+			if quotaLimitsCovered(wantLimits, got) {
+				return nil
+			}
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("billing: quota not confirmed within %s (want=%v got=%v)", within, wantLimits, last)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
+}
+
+// quotaLimitsCovered 期望限额均已生效（顺序无关）。
+func quotaLimitsCovered(want, got []QuotaLimit) bool {
+	if len(want) == 0 {
+		return true
+	}
+	set := make(map[QuotaLimit]bool, len(got))
+	for _, l := range got {
+		set[l] = true
+	}
+	for _, w := range want {
+		if !set[w] {
+			return false
+		}
+	}
+	return true
 }

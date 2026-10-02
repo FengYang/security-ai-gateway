@@ -9,8 +9,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +115,86 @@ func TestUsageQuotaView(t *testing.T) {
 	}
 	if v.Quota != 1000 {
 		t.Fatalf("quota 视图异常: %+v", v)
+	}
+}
+
+// TestQuotaReadbackView GET /usage/quota 回读**已生效**限额（★ P-1/M6，§6.4.1 2c）。
+// 多维下发后回读应含全部维度（顺序无关）；这是 M6「受理 → 生效」判据的唯一来源。
+func TestQuotaReadbackView(t *testing.T) {
+	_, ts := newM9Server(t)
+	body, _ := json.Marshal(map[string]any{
+		"tenant": "acme",
+		"limits": []map[string]any{
+			{"window": "month", "max_tokens": 1000000},
+			{"window": "minute", "max_tokens": 200000},
+		},
+	})
+	resp, err := http.Post(ts.URL+"/usage/quota", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("下发配额失败: %d", resp.StatusCode)
+	}
+
+	rb, err := http.Get(ts.URL + "/usage/quota?tenant=acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rb.Body.Close()
+	if rb.StatusCode != http.StatusOK {
+		t.Fatalf("回读状态码期望 200，实际 %d", rb.StatusCode)
+	}
+	var got struct {
+		Tenant string `json:"tenant"`
+		Limits []struct {
+			Window    string `json:"window"`
+			MaxTokens int64  `json:"max_tokens"`
+		} `json:"limits"`
+	}
+	if err := json.NewDecoder(rb.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Tenant != "acme" {
+		t.Fatalf("回读 tenant 不符: %q", got.Tenant)
+	}
+	want := map[string]int64{"month": 1000000, "minute": 200000}
+	if len(got.Limits) != len(want) {
+		t.Fatalf("回读 limits 条数不符: got %+v", got.Limits)
+	}
+	for _, l := range got.Limits {
+		if want[l.Window] != l.MaxTokens {
+			t.Fatalf("回读限额不符: window=%q max=%d want=%d", l.Window, l.MaxTokens, want[l.Window])
+		}
+	}
+}
+
+// TestQuotaReadbackBoundary 回读边界：缺 tenant → 400；未配置租户 → 200 且 limits 为空数组。
+func TestQuotaReadbackBoundary(t *testing.T) {
+	_, ts := newM9Server(t)
+
+	resp, err := http.Get(ts.URL + "/usage/quota")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("缺 tenant 期望 400，实际 %d", resp.StatusCode)
+	}
+
+	resp2, err := http.Get(ts.URL + "/usage/quota?tenant=ghost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	raw, _ := io.ReadAll(resp2.Body)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("未配置租户期望 200，实际 %d", resp2.StatusCode)
+	}
+	if !strings.Contains(string(raw), `"limits":[]`) {
+		t.Fatalf("未配置租户 limits 应为空数组，实际 %s", string(raw))
 	}
 }
 

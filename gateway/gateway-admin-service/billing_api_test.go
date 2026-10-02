@@ -9,10 +9,13 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -324,5 +327,167 @@ func TestBillingEventsWebhook_NoSecretFailClosed(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("未配置密钥 status = %d, want 401 (fail-closed)", resp.StatusCode)
+	}
+}
+
+// ---------- 套餐热下发 M6（§6.4.1 2c；P-1 回读确认） ----------
+
+// renderAdminMetrics 渲染进程指标文本（断言 #13 用）。
+func renderAdminMetrics() string {
+	var buf bytes.Buffer
+	billing.DefaultMetrics.Render(&buf)
+	return buf.String()
+}
+
+// quotaStub 伪 tee-infer：POST /usage/quota 记录下发；GET /usage/quota 回读已生效限额。
+type quotaStub struct {
+	mu      sync.Mutex
+	applied map[string][]billing.QuotaLimit
+	gets    int  // 回读次数（断言 M6 判据确实走了回读）
+	drop    bool // true = 回读恒为空（模拟"POST 2xx 但未生效"）
+}
+
+func newQuotaStub() *quotaStub { return &quotaStub{applied: map[string][]billing.QuotaLimit{}} }
+
+func (s *quotaStub) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/usage/quota" {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Method {
+		case http.MethodPost:
+			var u billing.QuotaUpdate
+			if err := json.NewDecoder(r.Body).Decode(&u); err != nil {
+				http.Error(w, "bad json", http.StatusBadRequest)
+				return
+			}
+			s.mu.Lock()
+			s.applied[u.Tenant] = u.Limits
+			s.mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			tenant := r.URL.Query().Get("tenant")
+			s.mu.Lock()
+			s.gets++
+			lims := s.applied[tenant]
+			if s.drop {
+				lims = nil
+			}
+			s.mu.Unlock()
+			if lims == nil {
+				lims = []billing.QuotaLimit{}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"tenant": tenant, "limits": lims})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+}
+
+const testM6TokenEnv = "TEST_BILLING_M6_TOKEN"
+
+// newBillingM6TestHandler 构造带配额下发/回读链路的 handler（TEEURL → 伪 tee-infer）。
+func newBillingM6TestHandler(t *testing.T, teeURL string, budget time.Duration) *billingHandler {
+	t.Helper()
+	t.Setenv(testM6TokenEnv, "m6-token")
+	dir := t.TempDir()
+	pricing := filepath.Join(dir, "pricing.json")
+	if err := os.WriteFile(pricing, []byte(`{"version":"v1","currency":"CNY",
+		"models":{"m1":{"in_coef":1,"out_coef":1,
+		"tiers":[{"up_to_tokens":0,"in_per_1k":1,"out_per_1k":2}]}}}`), 0o644); err != nil {
+		t.Fatalf("写价格表失败: %v", err)
+	}
+	cfg := &billing.BillingConfig{
+		Enabled: true,
+		Store:   billing.StoreConfig{Driver: "sqlite", DSN: filepath.Join(dir, "billing.db")},
+		Rating:  billing.RatingConfig{Rounding: "half_up", PriceTable: pricing},
+		Source: billing.SourceConfig{
+			SyncMode:      billing.SyncModePull,
+			TEEURL:        teeURL,
+			AdminTokenRef: "env:" + testM6TokenEnv,
+		},
+	}
+	h, err := newBillingHandler(cfg, nil)
+	if err != nil {
+		t.Fatalf("构造计费 handler 失败: %v", err)
+	}
+	h.quotaApplyBudget = budget
+	t.Cleanup(func() { _ = h.store.Close() })
+	return h
+}
+
+// postSubscription 经管理面绑定套餐，返回状态码。
+func postSubscription(t *testing.T, srvURL string) int {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, srvURL+billingAPIBase+"/subscription",
+		bytes.NewReader([]byte(`{"tenant":"acme","plan_id":"p1"}`)))
+	req.Header.Set("Authorization", bearerToken(t))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// 回读命中 → 200；下发限额正确；M6 指标 #13 有样本
+func TestBillingSubscription_M6Confirmed(t *testing.T) {
+	stub := newQuotaStub()
+	tee := httptest.NewServer(stub.handler())
+	defer tee.Close()
+
+	h := newBillingM6TestHandler(t, tee.URL, 2*time.Second)
+	if err := h.store.Plans().PutPlan(&billing.Plan{ID: "p1", Name: "基础", MonthlyTokens: 1000}); err != nil {
+		t.Fatalf("PutPlan: %v", err)
+	}
+	srv := httptest.NewServer(buildAdminMux(testCfg(), nil, nil, nil, nil, nil, nil, nil, h, false))
+	defer srv.Close()
+
+	if code := postSubscription(t, srv.URL); code != http.StatusOK {
+		t.Fatalf("绑定套餐 status = %d, want 200", code)
+	}
+
+	stub.mu.Lock()
+	got, gets := stub.applied["acme"], stub.gets
+	stub.mu.Unlock()
+	if len(got) != 1 || got[0].Window != "month" || got[0].MaxTokens != 1000 {
+		t.Fatalf("下发限额 = %+v, want [{month 1000}]", got)
+	}
+	if gets < 1 {
+		t.Error("未发生回读（M6 判据须以 GET /usage/quota 构造）")
+	}
+	if !strings.Contains(renderAdminMetrics(), "gateway_admin_billing_quota_apply_duration_seconds_count") {
+		t.Error("M6 指标 #13 未观测")
+	}
+}
+
+// 回读不符（POST 2xx ≠ 生效）→ 确认超时但**仍 200 且不回滚**（§6.4.1：TEE 已生效为准）
+func TestBillingSubscription_M6UnconfirmedStill200(t *testing.T) {
+	stub := newQuotaStub()
+	stub.drop = true // 回读恒空 → 确认必然超时
+	tee := httptest.NewServer(stub.handler())
+	defer tee.Close()
+
+	h := newBillingM6TestHandler(t, tee.URL, 30*time.Millisecond) // 缩短预算（默认 60s）
+	if err := h.store.Plans().PutPlan(&billing.Plan{ID: "p1", Name: "基础", MonthlyTokens: 1000}); err != nil {
+		t.Fatalf("PutPlan: %v", err)
+	}
+	srv := httptest.NewServer(buildAdminMux(testCfg(), nil, nil, nil, nil, nil, nil, nil, h, false))
+	defer srv.Close()
+
+	if code := postSubscription(t, srv.URL); code != http.StatusOK {
+		t.Fatalf("确认失败不应改变响应（不回滚），status = %d, want 200", code)
+	}
+	subs, err := h.store.Plans().ListSubscriptions(time.Now().UnixNano())
+	if err != nil {
+		t.Fatalf("ListSubscriptions: %v", err)
+	}
+	if len(subs) != 1 || subs[0].TenantID != "acme" {
+		t.Fatalf("订阅应仍绑定（不回滚），got %+v", subs)
+	}
+	if !strings.Contains(renderAdminMetrics(), "gateway_admin_billing_quota_apply_duration_seconds_count") {
+		t.Error("确认失败路径也应观测 M6 时延（便于暴露 60s 违约）")
 	}
 }

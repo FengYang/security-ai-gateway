@@ -268,6 +268,12 @@ func ObserveClose(kind string, seconds float64) {
 	DefaultMetrics.ObserveHistogram("gateway_admin_billing_close_duration_seconds", map[string]string{"kind": kind}, seconds)
 }
 
+// ObserveQuotaApply 配额热生效时延（#13，M6，单位秒；§6.4.1）。
+// 计时区间＝**套餐变更受理 → 回读确认**（`confirmQuotaApplied`），非 POST 2xx。
+func ObserveQuotaApply(seconds float64) {
+	DefaultMetrics.ObserveHistogram("gateway_admin_billing_quota_apply_duration_seconds", nil, seconds)
+}
+
 // IncBillIssued 出账计数（#8；kind=daily|monthly|overage）。
 func IncBillIssued(kind string) {
 	DefaultMetrics.IncCounter("gateway_admin_billing_bill_issued_total", map[string]string{"kind": kind}, 1)
