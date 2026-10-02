@@ -220,6 +220,103 @@ func TestCachedMonthStd_MatchesDirectLedger(t *testing.T) {
 	}
 }
 
+// ---------- 预热（A-37） ----------
+
+func TestCachedMonthStd_WarmMakesNextDayHit(t *testing.T) {
+	src := newCountingStdSrc(map[string][2]int64{
+		"2026-10-01": {10, 1},
+		"2026-10-02": {20, 2},
+	})
+	c := NewCachedMonthStd(src)
+
+	// 未预热：以 D3 为起点查询 → 全量回源（10+20=30）
+	if in, _ := c.MonthStdBefore("t1", "m1", "2026-10-03"); in != 30 {
+		t.Fatalf("prime = %d, want 30", in)
+	}
+	// 预热到 D3（含）→ 缓存游标 = D3
+	c.Warm("t1", []string{"m1"}, "2026-10-03")
+
+	// 次日（D4）查询应直接命中（不新增任何回源调用）
+	fullBefore, rngBefore := src.full, src.rng
+	if in, out := c.MonthStdBefore("t1", "m1", "2026-10-04"); in != 30 || out != 3 {
+		t.Fatalf("next-day = (%d,%d), want (30,3)", in, out)
+	}
+	if src.full != fullBefore || src.rng != rngBefore {
+		t.Errorf("warmed next-day query must hit (full %d→%d, rng %d→%d)",
+			fullBefore, src.full, rngBefore, src.rng)
+	}
+}
+
+func TestCachedMonthStd_WarmEmptyModelsNoop(t *testing.T) {
+	src := newCountingStdSrc(map[string][2]int64{"2026-10-01": {5, 1}})
+	c := NewCachedMonthStd(src)
+	c.Warm("t1", nil, "2026-10-01")                 // 无模型 → no-op
+	c.Warm("t1", []string{""}, "2026-10-01")        // 空模型键 → 跳过
+	c.Warm("t1", []string{"m1"}, "bad")             // 非法日期 → no-op
+	if src.full != 0 || src.rng != 0 {
+		t.Errorf("warm no-op cases must not query source (full=%d rng=%d)", src.full, src.rng)
+	}
+}
+
+func TestCachedMonthStd_WarmMatchesDirectLedger(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	for _, e := range []LedgerEntry{
+		{TenantID: "t1", ModelKey: "m1", Day: "2026-10-01", TokensIn: 10, StdIn: 10, EventKey: "a"},
+		{TenantID: "t1", ModelKey: "m2", Day: "2026-10-02", TokensIn: 20, StdIn: 20, EventKey: "b"},
+	} {
+		seedLedger(t, s, e)
+	}
+	ledger := concreteLedger(s)
+	svc := newTestBillingService(s, nil)
+
+	// 预热（经服务：枚举当月模型 → 逐个推进）
+	if err := svc.WarmMonthStd("t1", "2026-10-02"); err != nil {
+		t.Fatalf("WarmMonthStd err: %v", err)
+	}
+
+	cache := svc.monthStdCache
+	for _, mk := range []string{"m1", "m2"} {
+		wIn, wOut := ledger.MonthStdBefore("t1", mk, "2026-10-03")
+		gIn, gOut := cache.MonthStdBefore("t1", mk, "2026-10-03")
+		if gIn != wIn || gOut != wOut {
+			t.Errorf("model %s: warmed = (%d,%d), direct = (%d,%d)", mk, gIn, gOut, wIn, wOut)
+		}
+	}
+	// 预热后 D3 起点查询必须命中
+	hitsBefore, _ := cache.Stats()
+	cache.MonthStdBefore("t1", "m1", "2026-10-03")
+	hitsAfter, _ := cache.Stats()
+	if hitsAfter <= hitsBefore {
+		t.Errorf("warmed query should hit (hits %d→%d)", hitsBefore, hitsAfter)
+	}
+}
+
+// ---------- 日结后自动预热 ----------
+
+func TestCachedMonthStd_CloseDailyWarmsNextDay(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	seedLedger(t, s, LedgerEntry{
+		TenantID: "t1", ModelKey: "cheap-model", Day: "2026-10-01",
+		TokensIn: 1000, StdIn: 1000, EventKey: "seed-1",
+	})
+	svc := newTestBillingService(s, nil)
+	if _, err := svc.CloseDaily(context.Background(), "t1", "2026-10-01"); err != nil {
+		t.Fatalf("CloseDaily err: %v", err)
+	}
+	// 日结后缓存应已推进到当日 → 次日（D2）起点查询命中
+	cache := svc.monthStdCache
+	hitsBefore, _ := cache.Stats()
+	if in, _ := cache.MonthStdBefore("t1", "cheap-model", "2026-10-02"); in != 1000 {
+		t.Fatalf("next-day = %d, want 1000", in)
+	}
+	hitsAfter, _ := cache.Stats()
+	if hitsAfter <= hitsBefore {
+		t.Errorf("next-day query after CloseDaily should hit (hits %d→%d)", hitsBefore, hitsAfter)
+	}
+}
+
 // ---------- 端到端：入账（补账）触发失效 ----------
 
 func TestCachedMonthStd_IngestWindowInvalidatesOnBackfill(t *testing.T) {

@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -34,6 +35,29 @@ func (s *BillingService) SetAuditAnchor(a AuditAnchorProvider) { s.auditAnchor =
 
 // SetMonthStdCache 注入月累计缓存句柄（A-37：入账补账时据此失效对应月份）。
 func (s *BillingService) SetMonthStdCache(c *CachedMonthStd) { s.monthStdCache = c }
+
+// monthModelsLister 枚举某租户某月内出现过的模型键（预热用；账本实现提供）。
+type monthModelsLister interface {
+	ModelKeysInMonth(tenant, month string) ([]string, error)
+}
+
+// WarmMonthStd 预热月累计缓存至 upToDay（A-37）。
+// 供启动/缺口扫描（S-8）与日结后调用；未启用缓存或账本不支持枚举时为 no-op。
+func (s *BillingService) WarmMonthStd(tenant, upToDay string) error {
+	if s.monthStdCache == nil || len(upToDay) < 7 {
+		return nil
+	}
+	lister, ok := s.store.Ledger().(monthModelsLister)
+	if !ok {
+		return nil
+	}
+	modelKeys, err := lister.ModelKeysInMonth(tenant, upToDay[:7])
+	if err != nil {
+		return err
+	}
+	s.monthStdCache.Warm(tenant, modelKeys, upToDay)
+	return nil
+}
 
 // NewBillingService 构造账单生成服务。
 func NewBillingService(store Store, rating RatingEngine, prices PriceTableProvider,
@@ -195,6 +219,11 @@ func (s *BillingService) CloseDaily(ctx context.Context, tenant, day string) (*B
 	}
 	IncBillIssued(BillKindDaily) // 指标 #8
 	ObserveClose(BillKindDaily, time.Since(start).Seconds())
+	// A-37 预热：日结后把当月缓存推进到当日，使次日日结的 monthStdBefore 直接命中。
+	// best-effort（预热失败不影响出账结果，仅退化为下次回源）。
+	if err := s.WarmMonthStd(tenant, day); err != nil {
+		log.Printf("[billing] 月累计缓存预热失败 tenant=%s day=%s: %v", tenant, day, err)
+	}
 	return bill, nil
 }
 

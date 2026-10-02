@@ -2,6 +2,7 @@ package billing
 
 import (
 	"fmt"
+	"time"
 )
 
 // ---------- 账本折叠与月累计（T4/T5 数据源，A-32/A-39） ----------
@@ -73,6 +74,37 @@ func (s *sqliteLedgerStore) SumStdRange(tenant, modelKey, fromDay, toDay string)
 		return 0, 0, fmt.Errorf("billing: sum std range: %w", err)
 	}
 	return stdIn, stdOut, nil
+}
+
+// ModelKeysInMonth 返回某租户在指定月（"YYYY-MM"）内有账本条目的模型键（去重升序）。
+// 供月累计缓存预热枚举（A-37：预热需逐租户逐模型回填当月缓存）。
+func (s *sqliteLedgerStore) ModelKeysInMonth(tenant, month string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT model_key FROM billing_ledger
+		WHERE tenant_id = ? AND day >= ? AND day < ?
+		ORDER BY model_key`,
+		tenant, month+"-01", nextMonthFirstDay(month))
+	if err != nil {
+		return nil, fmt.Errorf("billing: model keys in month: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var mk string
+		if err := rows.Scan(&mk); err != nil {
+			return nil, err
+		}
+		out = append(out, mk)
+	}
+	return out, rows.Err()
+}
+
+// nextMonthFirstDay 返回下月首日（"YYYY-MM" → 次月 "YYYY-MM-01"）；解析失败返回空串（退化为不设上界）。
+func nextMonthFirstDay(month string) string {
+	t, err := time.Parse("2006-01", month)
+	if err != nil {
+		return ""
+	}
+	return t.AddDate(0, 1, 0).Format(dayLayout)
 }
 
 // ---------- 净量查询（L2 对账用） ----------

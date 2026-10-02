@@ -163,6 +163,24 @@ func (c *CachedMonthStd) Stats() (int64, int64) {
 	return c.hits, c.misses
 }
 
+// Warm 预热（A-37）：把 upToDay 所在月内各模型的缓存推进到 upToDay（含），
+// 使下一次以 dayAfter(upToDay) 为起点的查询直接命中（日结/月结热路径）。
+//
+// 语义与 MonthStdBefore 一致（复用其命中/增量/回源三路径并回填），故不引入新口径；
+// 空模型列表 = no-op（该租户该月无账本条目）。
+func (c *CachedMonthStd) Warm(tenant string, modelKeys []string, upToDay string) {
+	if len(upToDay) < 7 {
+		return
+	}
+	period := dayAfter(upToDay) // 以「次日」为查询起点 ⇒ 缓存游标推进到 upToDay
+	for _, mk := range modelKeys {
+		if mk == "" {
+			continue
+		}
+		c.MonthStdBefore(tenant, mk, period)
+	}
+}
+
 // ---------- 日期工具 ----------
 
 // dayBefore 返回 day 的前一日（"2006-01-02"）；解析失败原样返回。
