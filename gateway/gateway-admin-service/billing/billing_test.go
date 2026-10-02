@@ -131,7 +131,7 @@ func TestCloseDaily_ReconcileBlocked(t *testing.T) {
 	defer s.Close()
 	seedLedger(t, s, LedgerEntry{
 		TenantID: "t1", ModelKey: "cheap-model", Day: "2026-10-01",
-		TokensIn: 1000, TokensOut: 0, StdIn: 1000, StdOut: 0, EventKey: "e1",
+		TokensIn: 1000, TokensOut: 0, StdIn: 1000, StdOut: 0, Requests: 1, EventKey: "e1",
 	})
 
 	// reader 返回不匹配的净量（账本 1000，计量侧 900 → diff 100）
@@ -157,7 +157,7 @@ func TestCloseDaily_ReconcilePass(t *testing.T) {
 	defer s.Close()
 	seedLedger(t, s, LedgerEntry{
 		TenantID: "t1", ModelKey: "cheap-model", Day: "2026-10-01",
-		TokensIn: 1000, TokensOut: 500, StdIn: 1000, StdOut: 500, EventKey: "e1",
+		TokensIn: 1000, TokensOut: 500, StdIn: 1000, StdOut: 500, Requests: 1, EventKey: "e1",
 	})
 	// 计量侧与账本一致 → diff=0 → 通过
 	reader := &stubReader{net: NetTotals{TokensIn: 1000, TokensOut: 500, Requests: 1}}

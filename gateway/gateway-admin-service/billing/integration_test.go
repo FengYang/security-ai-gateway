@@ -181,9 +181,9 @@ func TestINT5_ReconcileGateBlocks(t *testing.T) {
 	defer s.Close()
 	seedLedger(t, s, LedgerEntry{
 		TenantID: "t1", ModelKey: "cheap-model", Day: "2026-10-01",
-		TokensIn: 100000, StdIn: 100000, EventKey: "e1",
+		TokensIn: 100000, StdIn: 100000, Requests: 1, EventKey: "e1",
 	})
-	// 差异率 0.05%（100/200000）→ 不出账；且不达冻结阈值 0.1%
+	// 仅入量差 100（请求数一致）→ diff>0 不出账；gateL2 不自动冻结（冻结由 S-5 判定，A-22）
 	reader := &stubReader{net: NetTotals{TokensIn: 99900, Requests: 1}}
 	svc := newTestBillingService(s, reader)
 

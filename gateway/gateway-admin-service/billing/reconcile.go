@@ -43,8 +43,8 @@ func NewReconcilerForStore(store Store, reader NetMeteringReader, alertRatio flo
 
 // L2Result 对账结果。
 type L2Result struct {
-	Diff      int64   // 差异绝对值（token）
-	Ratio     float64 // 差异率 = diff / max(1, 计量侧总量)
+	Diff      int64   // 差异绝对值（入/出 token + 请求数 三项差之和）
+	Ratio     float64 // 差异率 = diff / max(1, 计量侧三元组总量)
 	Pass      bool    // 零容差：diff == 0
 	ShouldFrz bool    // ratio > alertRatio → 冻结候选（A-22）
 }
@@ -63,13 +63,14 @@ func (r *Reconciler) L2(tenant, dayFrom, dayTo string) (L2Result, error) {
 		return L2Result{}, fmt.Errorf("billing: reconcile read metering: %w", err)
 	}
 
-	// 净量差异（入 + 出 + retry 三项各自差之和，取绝对值汇总）
+	// 净量差异三元组（§6.12.2）：入 / 出 / 请求数。
+	// **retry 不入本对账**（另列 RetryToks，由 M9 单独校验平台成本口径）。
 	diffIn := abs64(ledgerNet.TokensIn - remoteNet.TokensIn)
 	diffOut := abs64(ledgerNet.TokensOut - remoteNet.TokensOut)
-	diffRetry := abs64(ledgerNet.RetryToks - remoteNet.RetryToks)
-	diff := diffIn + diffOut + diffRetry
+	diffReq := abs64(ledgerNet.Requests - remoteNet.Requests)
+	diff := diffIn + diffOut + diffReq
 
-	remoteTotal := remoteNet.TokensIn + remoteNet.TokensOut + remoteNet.RetryToks
+	remoteTotal := remoteNet.TokensIn + remoteNet.TokensOut + remoteNet.Requests
 	if remoteTotal <= 0 {
 		remoteTotal = 1
 	}

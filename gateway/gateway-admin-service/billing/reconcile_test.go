@@ -75,39 +75,42 @@ func TestREC2b_LargeDiffFreeze(t *testing.T) {
 }
 
 func TestREC3_RatioBoundary(t *testing.T) {
-	// 阈值边界：ratio 恰为 0.1% → 不冻结（严格 > 才冻结）
+	// 阈值边界（§6.12.2 第三轴=请求数）：ratio 恰为 0.1% → 不冻结（严格 > 才冻结）
 	s := openTestStore(t)
 	defer s.Close()
 	seedLedger(t, s, LedgerEntry{
 		TenantID: "t1", ModelKey: "m1", Day: "2026-10-01",
-		TokensIn: 1001000, StdIn: 1001000, Requests: 1, EventKey: "e1",
+		TokensIn: 1000999, StdIn: 1000999, Requests: 1, EventKey: "e1",
 	})
-	// 差 1000，计量侧 1000000 → ratio = 1000/1000000 = 0.001 = 0.1%
+	// 入量差 1000，计量侧三元组量 = 999999+1 = 1000000 → ratio = 1000/1000000 = 0.001（恰 0.1%）
 	r := NewReconciler(concreteLedger(s), &stubReader{
-		net: NetTotals{TokensIn: 1000000, Requests: 1},
+		net: NetTotals{TokensIn: 999999, Requests: 1},
 	}, 0.001)
 
 	res, _ := r.L2("t1", "2026-10-01", "2026-10-01")
+	if res.Ratio != 0.001 {
+		t.Fatalf("ratio = %.6f, want exactly 0.001", res.Ratio)
+	}
 	if res.ShouldFrz {
 		t.Errorf("ratio = 0.1%% exactly should NOT freeze (boundary), got ratio=%.6f", res.Ratio)
 	}
 }
 
-func TestREC4_RetryCountedInDiff(t *testing.T) {
-	// REC-4：retry 差异计入 (M9 平台成本同口径)
+func TestREC4_RequestsCountedRetryExcluded(t *testing.T) {
+	// REC-4（§6.12.2）：第三轴 = 请求数（计入）；retry 差异**不**计入（另列 RetryToks，M9 单独校验）
 	s := openTestStore(t)
 	defer s.Close()
 	seedLedger(t, s, LedgerEntry{
 		TenantID: "t1", ModelKey: "m1", Day: "2026-10-01",
-		TokensIn: 1000, RetryToks: 50, StdIn: 1000, Requests: 1, EventKey: "e1",
+		TokensIn: 1000, StdIn: 1000, Requests: 3, RetryToks: 50, EventKey: "e1",
 	})
 	r := NewReconciler(concreteLedger(s), &stubReader{
-		net: NetTotals{TokensIn: 1000, RetryToks: 0, Requests: 1}, // retry 差异
+		net: NetTotals{TokensIn: 1000, Requests: 1, RetryToks: 0}, // 请求数差 2；retry 差 50（应被忽略）
 	}, 0.001)
 
 	res, _ := r.L2("t1", "2026-10-01", "2026-10-01")
-	if res.Diff != 50 {
-		t.Errorf("diff = %d, want 50 (retry delta)", res.Diff)
+	if res.Diff != 2 {
+		t.Errorf("diff = %d, want 2 (requests delta only; retry excluded)", res.Diff)
 	}
 }
 
