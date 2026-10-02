@@ -108,11 +108,23 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 		return nil, fmt.Errorf("billing: load price table: %w", err)
 	}
 
+	// 计量令牌（引用式；未配置 → 拉取与 L2 对账降级）
+	token, hasToken := resolveSecretRef(cfg.Source.AdminTokenRef)
+
 	// 计价引擎（A-37：月累计缓存加速；缓存句柄注入服务以便补账失效）
 	ledger := store.Ledger().(billing.MonthStdSource)
 	eng, monthCache := billing.NewRatingEngineWithCache(cfg.Rating.Rounding, ledger)
-	priceProvider := billing.NewStaticPriceTable(tbl) // 供计价与 S-5 单价缺失检测共用
-	svc := billing.NewBillingService(store, eng, priceProvider, nil, store.Freezes())
+	priceProvider := billing.NewStaticPriceTable(tbl) // 供计价、S-5 单价缺失、L2 共用
+
+	// L2 对账器（S-4：每次出账前 + 拉取后门禁；计量侧 reader 复用 tee-infer 拉取源）
+	var pullSrc billing.PullSource
+	var rec *billing.Reconciler
+	if hasToken {
+		pullSrc = billing.NewTEEPullSource(cfg.Source.TEEURL, string(token), 30*time.Second)
+		rec = billing.NewReconcilerForStore(store, billing.NewPullNetReader(pullSrc), cfg.Anomaly.ReconcileAlertRatio)
+	}
+
+	svc := billing.NewBillingService(store, eng, priceProvider, rec, store.Freezes())
 	svc.SetMonthStdCache(monthCache)
 
 	h := &billingHandler{
@@ -135,9 +147,10 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 	//   S-9  到期扫描（每 expiry_scan_interval；T-30/7/0 提醒 → 指标 #21，不自动降级）
 	//   S-10 关联校验（每 verify_assoc_interval；不符 → 标记 assoc_mismatch，不阻断）
 	// 说明：S-2「日结」由 S-8 覆盖（缺口扫描每日执行，等价于"确保截至昨日已出账"）。
-	// L2 对账（reconciler）当前未接线，故 S-5 规则② 在现状下为空操作（nil 跳过），规则①③④ 生效。
+	// L2 对账（reconciler）在配置了计量令牌时激活：出账门禁（diff>0 → 不出账，fail-closed）+
+	// S-5 规则②（reconcile_diff）；未配置令牌时降级为 nil（门禁与规则②跳过）。
 	if cfg.Schedule.Enabled {
-		det := billing.NewAnomalyDetectorForStore(store, priceProvider, nil, cfg.Anomaly,
+		det := billing.NewAnomalyDetectorForStore(store, priceProvider, rec, cfg.Anomaly,
 			func() int64 { return time.Now().UnixNano() })
 		det.SetFreezeLinker(h.freeze) // S-5 critical 异常 → 冻结（§6.10.1）
 		notifier := billing.NewQuotaNotifier(store.AlertDedup(), nil,
@@ -160,12 +173,10 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 		svc.SetSigner(h.signer)
 	}
 
-	// 配额下发器（经 tee-infer）+ S-1 增量拉取源（复用同一计量令牌）
-	if tok, ok := resolveSecretRef(cfg.Source.AdminTokenRef); ok {
-		h.applier = billing.NewHTTPQuotaApplier(cfg.Source.TEEURL, string(tok), 10*time.Second)
-		svc.SetMeteringSource(
-			billing.NewTEEPullSource(cfg.Source.TEEURL, string(tok), 30*time.Second),
-			cfg.Source.PullLookback, cfg.Source.SyncMode)
+	// 配额下发器（经 tee-infer）+ S-1 增量拉取源（复用同一计量令牌/拉取源）
+	if hasToken {
+		h.applier = billing.NewHTTPQuotaApplier(cfg.Source.TEEURL, string(token), 10*time.Second)
+		svc.SetMeteringSource(pullSrc, cfg.Source.PullLookback, cfg.Source.SyncMode)
 	}
 
 	return h, nil

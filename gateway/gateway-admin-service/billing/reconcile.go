@@ -1,7 +1,9 @@
 package billing
 
 import (
+	"context"
 	"fmt"
+	"time"
 )
 
 // ---------- L2 对账（T5/T13，§6.12） ----------
@@ -27,6 +29,18 @@ func NewReconciler(ledger *sqliteLedgerStore, reader NetMeteringReader, alertRat
 	return &Reconciler{ledger: ledger, reader: reader, alertRatio: alertRatio}
 }
 
+// NewReconcilerForStore 构造绑定 Store 的对账器（供 main 接线 S-4；包外无法引用账本具体类型）。
+// reader 为 nil 时 L2 直接通过（降级）。
+func NewReconcilerForStore(store Store, reader NetMeteringReader, alertRatio float64) *Reconciler {
+	var l *sqliteLedgerStore
+	if store != nil {
+		if c, ok := store.Ledger().(*sqliteLedgerStore); ok {
+			l = c
+		}
+	}
+	return &Reconciler{ledger: l, reader: reader, alertRatio: alertRatio}
+}
+
 // L2Result 对账结果。
 type L2Result struct {
 	Diff      int64   // 差异绝对值（token）
@@ -37,8 +51,8 @@ type L2Result struct {
 
 // L2 执行对账（零容差判据 M1）。
 func (r *Reconciler) L2(tenant, dayFrom, dayTo string) (L2Result, error) {
-	if r.reader == nil {
-		return L2Result{Pass: true}, nil // 降级：无计量侧可比
+	if r.reader == nil || r.ledger == nil {
+		return L2Result{Pass: true}, nil // 降级：无计量侧可比 / 账本不可用
 	}
 	ledgerNet, err := r.ledger.SumNet(tenant, dayFrom, dayTo)
 	if err != nil {
@@ -74,4 +88,63 @@ func abs64(a int64) int64 {
 		return -a
 	}
 	return a
+}
+
+// ---------- 计量侧读取器（L2 数据源，§6.12.2） ----------
+
+// pullNetReader 以 PullSource 为计量侧数据源，实现 NetMeteringReader（审计链侧净量三元组）。
+type pullNetReader struct {
+	src     PullSource
+	timeout time.Duration
+}
+
+// NewPullNetReader 构造 L2 计量侧读取器（复用拉取源）。
+// 注：NetMeteringReader 接口无 ctx，内部自设超时（默认 30s）。
+func NewPullNetReader(src PullSource) NetMeteringReader {
+	return &pullNetReader{src: src, timeout: 30 * time.Second}
+}
+
+// NetAggregate 拉取 [dayFrom, dayTo]（UTC+8 自然日闭区间）并取该租户的净量三元组。
+// 租户在窗口内零用量 → 返回零值（对账侧按 0 处理）。
+func (r *pullNetReader) NetAggregate(tenant, dayFrom, dayTo string) (NetTotals, error) {
+	if r.src == nil {
+		return NetTotals{}, fmt.Errorf("billing: net reader: pull source is nil")
+	}
+	fromNs, toNs, err := dayRangeNs(dayFrom, dayTo)
+	if err != nil {
+		return NetTotals{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+	win, err := r.src.Pull(ctx, fromNs, toNs)
+	if err != nil {
+		return NetTotals{}, err
+	}
+	if win == nil || win.Tenants == nil {
+		return NetTotals{}, nil
+	}
+	ta := win.Tenants[tenant]
+	if ta == nil {
+		return NetTotals{}, nil // 该租户零用量
+	}
+	return NetTotals{
+		TokensIn:  ta.TokensIn,
+		TokensOut: ta.TokensOut,
+		RetryToks: ta.RetryToks,
+		Requests:  ta.Requests,
+	}, nil
+}
+
+// dayRangeNs 把 UTC+8 自然日闭区间 [dayFrom, dayTo] 转为 UTC 纳秒左闭右开区间。
+func dayRangeNs(dayFrom, dayTo string) (int64, int64, error) {
+	loc := time.FixedZone("UTC+8", utc8Offset)
+	from, err := time.ParseInLocation(dayLayout, dayFrom, loc)
+	if err != nil {
+		return 0, 0, fmt.Errorf("billing: net reader: bad dayFrom %q: %w", dayFrom, err)
+	}
+	to, err := time.ParseInLocation(dayLayout, dayTo, loc)
+	if err != nil {
+		return 0, 0, fmt.Errorf("billing: net reader: bad dayTo %q: %w", dayTo, err)
+	}
+	return from.UnixNano(), to.AddDate(0, 0, 1).UnixNano(), nil
 }
