@@ -245,6 +245,19 @@ var chainBrokenFlag atomic.Bool
 // ChainBroken 返回链断裂标志（真 = 停止出账，fail-closed）。
 func ChainBroken() bool { return chainBrokenFlag.Load() }
 
+// SetAuditChainBroken 置 tee-infer **审计链**断裂标志（REC-6/B-6.12-4）。
+//
+// 独立的进程内标志：审计链断裂视为 L2 不可信 → **全局**停出账（所有租户）。
+// 与账本链（`SetChainBroken`，指标 #4）是**两条不同的链**，互不覆盖；本标志暂无专用
+// 指标/告警（§9.1 未定义），仅日志留证（如需告警可后续单批补指标）。
+func SetAuditChainBroken(broken bool) { auditChainBrokenFlag.Store(broken) }
+
+// auditChainBrokenFlag 审计链断裂进程内标志（REC-6 → 出账门禁）。
+var auditChainBrokenFlag atomic.Bool
+
+// AuditChainBroken 返回审计链断裂标志（真 = 全局停出账，fail-closed）。
+func AuditChainBroken() bool { return auditChainBrokenFlag.Load() }
+
 // IncPull 拉取轮次（#5；result=ok|error）。
 func IncPull(result string) {
 	DefaultMetrics.IncCounter("gateway_admin_billing_pull_total", map[string]string{"result": result}, 1)

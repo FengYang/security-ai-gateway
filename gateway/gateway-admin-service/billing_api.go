@@ -137,6 +137,10 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 	// 拉取源依赖计量令牌（未配置 → nil，pullOnce no-op，但推送消费仍按 sync_mode 生效）
 	svc.SetMeteringSource(pullSrc, cfg.Source.PullLookback, cfg.Source.SyncMode)
 
+	// REC-6 审计链校验器（tee-infer /audit/verify；断裂 → 全局停出账，B-6.12-4）。
+	// 端点为只读校验；令牌可选（无令牌时省略管理头）。
+	svc.SetAuditChainVerifier(billing.NewTEEAuditVerifier(cfg.Source.TEEURL, string(token), 10*time.Second))
+
 	// 推送 webhook 验签密钥（§4.2：source.push_secret_ref；未配置 → 端点一律 401，fail-closed）
 	pushSecret, _ := resolveSecretRef(cfg.Source.PushSecretRef)
 
@@ -330,6 +334,13 @@ func (h *billingHandler) handlePlans(w http.ResponseWriter, r *http.Request) {
 		if err := billing.ValidatePlan(&p); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		// R-29 交叉约束：charge 套餐须非免费档且单价非全 0（防免费版产出金额账单）
+		if h.svc != nil {
+			if err := h.svc.ValidatePlanPricing(&p); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 		if err := h.store.Plans().PutPlan(&p); err != nil {
 			writeError(w, http.StatusInternalServerError, "套餐写入失败")

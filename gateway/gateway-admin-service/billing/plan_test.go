@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -257,5 +258,35 @@ func TestQuotaCompiler_Errors(t *testing.T) {
 	}
 	if _, err := c.Compile("t1", nil); err == nil {
 		t.Error("expected error for nil plan")
+	}
+}
+
+// ---------- R-29 交叉约束（charge 套餐须非免费档 + 单价非全 0） ----------
+
+func TestValidatePlanPricing_R29(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+
+	chargeFree := &Plan{ID: "c1", OverQuota: "charge", MonthlyTokens: 0}
+	chargePaid := &Plan{ID: "c2", OverQuota: "charge", MonthlyTokens: 1000}
+	rejectPlan := &Plan{ID: "r1", OverQuota: "reject", MonthlyTokens: 0}
+
+	// 价格表含非 0 单价（testPriceTable）
+	svc := newTestBillingService(s, nil)
+	if err := svc.ValidatePlanPricing(chargeFree); err == nil || !strings.Contains(err.Error(), "R-29") {
+		t.Errorf("免费档 charge 应拒（R-29），got %v", err)
+	}
+	if err := svc.ValidatePlanPricing(chargePaid); err != nil {
+		t.Errorf("付费 charge 应通过，got %v", err)
+	}
+	if err := svc.ValidatePlanPricing(rejectPlan); err != nil {
+		t.Errorf("非 charge 套餐应跳过 R-29，got %v", err)
+	}
+
+	// 全 0 价单价表 → charge 拒（防免费版产出金额账单）
+	eng, _ := NewRatingEngineWithCache("half_up", concreteLedger(s))
+	zeroSvc := NewBillingService(s, eng, NewStaticPriceTable(&PriceTable{Version: "v1"}), nil, s.Freezes())
+	if err := zeroSvc.ValidatePlanPricing(chargePaid); err == nil || !strings.Contains(err.Error(), "R-29") {
+		t.Errorf("全 0 价 charge 应拒（R-29），got %v", err)
 	}
 }

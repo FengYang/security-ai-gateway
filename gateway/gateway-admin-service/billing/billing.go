@@ -39,6 +39,9 @@ type BillingService struct {
 
 	// 告警外部交付（S-7 余额 / S-9 到期；nil = 仅本地日志 + Prometheus 规则）
 	alertSink AlertSink
+
+	// 审计链校验器（REC-6/B-6.12-4；nil = 不校验，全局停出账标志不变）
+	auditVerifier AuditChainVerifier
 }
 
 // SetSigner 注入账单签名器（T7b）。
@@ -87,6 +90,28 @@ func NewBillingService(store Store, rating RatingEngine, prices PriceTableProvid
 		freeze:     frz,
 		now:        func() int64 { return time.Now().UnixNano() },
 	}
+}
+
+// ValidatePlanPricing 校验套餐与单价表的**交叉约束**（R-29，§4.2 C-2）。
+//
+// `OverQuota=charge` 的套餐必须同时满足：
+//   - 非免费档（`MonthlyTokens > 0`）；
+//   - 计价能力非"全 0 价"（当前价格表至少一个非 0 单价）；
+//
+// 违反即拒（防"免费版产出金额账单"）。口径说明（P0）：P0 单价表为**全局单表**（按
+// `model_key` 计价），`Plan.PriceID` 尚无到单价表的映射关系，故 R-29 的"`PriceID`
+// 对应单价表"按**当前全局单价表**解释。
+func (s *BillingService) ValidatePlanPricing(p *Plan) error {
+	if p == nil || p.OverQuota != "charge" {
+		return nil
+	}
+	if p.MonthlyTokens <= 0 {
+		return fmt.Errorf("R-29: over_quota=charge 的套餐 %q 必须为非免费档（monthly_tokens > 0）", p.ID)
+	}
+	if s.prices == nil || !s.prices.Current().HasNonZeroPrice() {
+		return fmt.Errorf("R-29: over_quota=charge 的套餐 %q 需单价表存在非 0 单价", p.ID)
+	}
+	return nil
 }
 
 // IngestWindow 把一次拉取/推送窗口入账（§6.1.1 / §6.3.2）。
@@ -216,9 +241,9 @@ func (s *BillingService) CloseDaily(ctx context.Context, tenant, day string) (*B
 		return nil, err
 	}
 
-	// 1b. 链断裂门禁（S-6：断裂 → 停出账，fail-closed；§6.15/§7.1）
-	if ChainBroken() {
-		return nil, ErrChainBroken
+	// 1b. 完整性门禁（S-6 账本链 / REC-6 审计链：断裂 → 停出账，fail-closed；§6.15/§7.1）
+	if err := s.integrityGate(); err != nil {
+		return nil, err
 	}
 
 	// 2. L2 对账门禁
@@ -288,6 +313,11 @@ func (s *BillingService) CloseMonthly(ctx context.Context, tenant, month string)
 	}
 
 	if err := s.checkFrozen(tenant); err != nil {
+		return nil, err
+	}
+
+	// 完整性门禁（S-6 账本链 / REC-6 审计链：断裂 → 停出账，fail-closed；§6.15/§7.1）
+	if err := s.integrityGate(); err != nil {
 		return nil, err
 	}
 

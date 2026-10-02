@@ -1,13 +1,20 @@
-// verify.go — P0-3 Token 计费体系：数据完整性校验接线（S-6 链校验 / S-10 关联校验）。
+// verify.go — P0-3 Token 计费体系：数据完整性校验接线（S-6 链校验 / S-10 关联校验 / REC-6 审计链）。
 //
 // 对应设计：§7.1.2（账本哈希链校验）、§7.3（计费↔审计关联）、§6.16（后台调度器
-// 总表 S-6/S-10，★ A-31：为 `VerifyBillingChain` 补调用点）。
+// 总表 S-6/S-10，★ A-31：为 `VerifyBillingChain` 补调用点）、§6.12.4（B-6.12-4 审计链断裂→全局停出账）。
 //
-// 两个任务均为**纯读 + 事后审计性质**：S-6 断裂即停出账（fail-closed），
-// S-10 不符仅标记账单状态 + 记账指标（**不阻断已出账**）。
+// S-6/S-10 均为**纯读 + 事后审计性质**：S-6 断裂即停出账（fail-closed），
+// S-10 不符仅标记账单状态 + 记账指标（**不阻断已出账**）；REC-6 断裂 → 全局停出账。
 package billing
 
-import "log"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"time"
+)
 
 // ---------- 账单锚定（§7.3：账单→账本链须"重放可复现"） ----------
 
@@ -89,4 +96,86 @@ func (s *BillingService) verifyAssocAfterClose(b *Bill) {
 		return
 	}
 	IncAssocVerify("pass")
+}
+
+// ---------- REC-6 审计链校验（B-6.12-4） ----------
+
+// AuditChainVerifier 校验 tee-infer **审计链**完整性（`GET /audit/verify`）。
+type AuditChainVerifier interface {
+	VerifyAuditChain(ctx context.Context) (ok bool, err error)
+}
+
+// TEEAuditVerifier 以 HTTP 调用 tee-infer `/audit/verify` 的实现。
+type TEEAuditVerifier struct {
+	baseURL string
+	token   string
+	client  *http.Client
+}
+
+// NewTEEAuditVerifier 构造审计链校验器（timeout<=0 → 10s）。
+func NewTEEAuditVerifier(baseURL, token string, timeout time.Duration) *TEEAuditVerifier {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	return &TEEAuditVerifier{baseURL: baseURL, token: token, client: &http.Client{Timeout: timeout}}
+}
+
+// VerifyAuditChain 调用 `/audit/verify` 并解析 `{ok}`。
+func (v *TEEAuditVerifier) VerifyAuditChain(ctx context.Context) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.baseURL+"/audit/verify", nil)
+	if err != nil {
+		return false, fmt.Errorf("billing: build audit verify req: %w", err)
+	}
+	if v.token != "" {
+		req.Header.Set("X-Admin-Token", v.token) // 该端点本身无鉴权；带头无害
+	}
+	resp, err := v.client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("billing: audit verify http: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("billing: audit verify status %d", resp.StatusCode)
+	}
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, fmt.Errorf("billing: audit verify decode: %w", err)
+	}
+	return out.OK, nil
+}
+
+// SetAuditChainVerifier 注入审计链校验器（REC-6；nil = 不校验，标志不变）。
+func (s *BillingService) SetAuditChainVerifier(v AuditChainVerifier) { s.auditVerifier = v }
+
+// VerifyAuditChain 校验 tee-infer 审计链 → 更新全局停出账标志（REC-6/B-6.12-4）。
+//
+// 断裂（ok=false）→ `SetAuditChainBroken(true)` + 日志；完好 → 复位 false。
+// 校验器未注入 或 调用出错 → **不改变**标志（保留上次结果，与 S-6 账本链语义一致）。
+func (s *BillingService) VerifyAuditChain(ctx context.Context) error {
+	if s.auditVerifier == nil {
+		return nil
+	}
+	ok, err := s.auditVerifier.VerifyAuditChain(ctx)
+	if err != nil {
+		return err
+	}
+	SetAuditChainBroken(!ok)
+	if !ok {
+		log.Printf("[billing] REC-6 tee-infer 审计链断裂 → 全局停出账（fail-closed，B-6.12-4）")
+	}
+	return nil
+}
+
+// integrityGate 完整性出账门禁（**全局**，fail-closed，§6.15）：
+// 账本哈希链断裂（S-6）或 tee-infer 审计链断裂（REC-6/B-6.12-4）→ 停出账。
+func (s *BillingService) integrityGate() error {
+	if ChainBroken() {
+		return ErrChainBroken
+	}
+	if AuditChainBroken() {
+		return ErrAuditChainBroken
+	}
+	return nil
 }

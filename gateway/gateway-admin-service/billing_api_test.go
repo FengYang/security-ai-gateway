@@ -491,3 +491,30 @@ func TestBillingSubscription_M6UnconfirmedStill200(t *testing.T) {
 		t.Error("确认失败路径也应观测 M6 时延（便于暴露 60s 违约）")
 	}
 }
+
+// TestBillingPlanUpsert_R29：套餐 upsert 的 R-29 交叉约束（charge 须非免费档 + 单价非全 0）。
+func TestBillingPlanUpsert_R29(t *testing.T) {
+	env := newBillingTestEnv(t)
+	adminTok := testSignToken(t, testSecret, claims{
+		Sub: testAdminUser, Role: roleAdmin, Iss: defaultIssuer, Aud: defaultAudience,
+	})
+	postPlan := func(body string) int {
+		req, _ := http.NewRequest(http.MethodPost, env.srv.URL+billingAPIBase+"/plans", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminTok)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("请求失败: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	// charge + 免费档（monthly_tokens=0）→ 400（R-29）
+	if code := postPlan(`{"id":"free","name":"免费版","over_quota":"charge","pay_mode":"postpaid","cache_tier":"none","monthly_tokens":0}`); code != http.StatusBadRequest {
+		t.Fatalf("R-29 免费档 charge 期望 400，实际 %d", code)
+	}
+	// charge + 付费档 + 非 0 单价表 → 200
+	if code := postPlan(`{"id":"pro","name":"专业版","over_quota":"charge","pay_mode":"postpaid","cache_tier":"none","monthly_tokens":1000}`); code != http.StatusOK {
+		t.Fatalf("合法 charge 期望 200，实际 %d", code)
+	}
+}

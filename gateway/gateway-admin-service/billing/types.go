@@ -37,6 +37,8 @@ var (
 	ErrAuditAnchorMissing = errors.New("billing: audit anchor missing")
 	// ErrChainBroken 账本哈希链断裂（S-6 校验发现；停出账，fail-closed，§6.15/§7.1）。
 	ErrChainBroken = errors.New("billing: ledger chain broken")
+	// ErrAuditChainBroken tee-infer 审计链断裂（REC-6/B-6.12-4：视为 L2 不可信 → 全局停出账）。
+	ErrAuditChainBroken = errors.New("billing: tee-infer audit chain broken")
 )
 
 // IsUnique 判定是否为唯一约束冲突（A-4 收敛，§4.1.8）。

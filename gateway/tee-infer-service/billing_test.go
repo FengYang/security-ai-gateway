@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -310,6 +311,72 @@ func TestHandleUsageIncremental(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("from>=to 应 400: got %d", resp.StatusCode)
+	}
+}
+
+// ---------- S-3 金额域隔离扫描（§10.6 / M10 / INV-4，CI 强制） ----------
+
+// usageForbiddenAmountKeys 金额字段禁用词（小写；命中即视为金额域泄漏）。
+// 依据：§10.6 S-3「/usage 域响应不得含 amount/total/price 等金额字段」（M10/INV-4）。
+var usageForbiddenAmountKeys = map[string]bool{
+	"amount": true, "total": true, "price": true, "cost": true, "fee": true,
+	"currency": true, "subtotal": true, "unit_price": true, "price_version": true,
+}
+
+// collectJSONKeys 递归收集 JSON 中全部对象 key（小写）。
+func collectJSONKeys(v any, out map[string]bool) {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, child := range t {
+			out[strings.ToLower(k)] = true
+			collectJSONKeys(child, out)
+		}
+	case []any:
+		for _, child := range t {
+			collectJSONKeys(child, out)
+		}
+	}
+}
+
+// TestUsageDomainNoAmountFields S-3：`/usage` 域响应**不得含金额字段**（含增量/配额视图全分支）。
+// 金额一律走 `/billing` 域；本用例为 M10/INV-4 的直接证据（CI 强制、离线可跑）。
+func TestUsageDomainNoAmountFields(t *testing.T) {
+	_, ts := newM9Server(t)
+
+	// 造用量 + 配额，使 toks/by_model/quota_limits/shadow 等分支均有数据（扫描面最大化）
+	sessionID, ksig, kenc := setupTestSession(t, ts)
+	if code := quotaInfer(t, ts, sessionID, ksig, kenc, "hello", 1); code != http.StatusOK {
+		t.Fatalf("seed infer failed: %d", code)
+	}
+	setQuota(t, ts, "default", 100)
+
+	now := time.Now().Unix()
+	paths := []string{
+		"/usage",                // 全租户累计视图
+		"/usage?tenant=default", // 单租户累计视图（含配额视图）
+		fmt.Sprintf("/usage?from=%d&to=%d", now-3600, now+1), // 增量聚合视图（出账权威口径）
+	}
+	for _, p := range paths {
+		resp, err := http.Get(ts.URL + p)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", p, resp.StatusCode, string(raw))
+		}
+		var v any
+		if err := json.Unmarshal(raw, &v); err != nil {
+			t.Fatalf("%s decode: %v", p, err)
+		}
+		keys := map[string]bool{}
+		collectJSONKeys(v, keys)
+		for k := range keys {
+			if usageForbiddenAmountKeys[k] {
+				t.Errorf("S-3 违规：%s 响应含金额字段 %q（M10/INV-4）", p, k)
+			}
+		}
 	}
 }
 

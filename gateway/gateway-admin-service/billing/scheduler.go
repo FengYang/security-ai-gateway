@@ -254,16 +254,19 @@ func ScanExpiriesTask(svc *BillingService) func(context.Context) {
 }
 
 // VerifyChainTask 构造 S-6 链校验任务（§6.16）：全量校验账本哈希链 → 指标 #4；
-// 断裂即置 chain_broken 并停出账（fail-closed）。纯读、无外部依赖；失败仅记录（下轮重试）。
+// 断裂即置 chain_broken 并停出账（fail-closed）。另校验 tee-infer 审计链（REC-6/B-6.12-4：
+// 断裂 → 全局停出账）。纯读；失败仅记录（下轮重试）。
 func VerifyChainTask(svc *BillingService) func(context.Context) {
 	return func(ctx context.Context) {
 		brokenAt, err := svc.VerifyLedgerChain()
 		if err != nil {
 			log.Printf("[billing] S-6 链校验失败：%v", err)
-			return
-		}
-		if brokenAt >= 0 {
+		} else if brokenAt >= 0 {
 			log.Printf("[billing] S-6 链校验：断裂 seq=%d", brokenAt)
+		}
+		// REC-6 审计链校验（未注入校验器 → no-op）
+		if err := svc.VerifyAuditChain(ctx); err != nil {
+			log.Printf("[billing] REC-6 审计链校验失败：%v", err)
 		}
 	}
 }

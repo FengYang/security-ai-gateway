@@ -130,6 +130,34 @@ func (t *PriceTable) ModelPriceOf(modelKey string) (*ModelPrice, bool) {
 	return nil, false
 }
 
+// HasNonZeroPrice 价格表是否存在**非 0 单价**（任一模型/默认档的任一步梯 in/out 单价非 0）。
+// 供 R-29 交叉约束：`over_quota=charge` 的套餐不得对应"全 0 价"（防免费版产出金额账单）。
+func (t *PriceTable) HasNonZeroPrice() bool {
+	if t == nil {
+		return false
+	}
+	any := func(mp *ModelPrice) bool {
+		if mp == nil {
+			return false
+		}
+		for _, tr := range mp.Tiers {
+			if tr.InPer1K != 0 || tr.OutPer1K != 0 {
+				return true
+			}
+		}
+		return false
+	}
+	if any(t.Defaults) {
+		return true
+	}
+	for _, mp := range t.Models {
+		if any(mp) {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------- 价格表提供器（静态/热加载） ----------
 
 // staticPriceTable 静态价格表提供器（配置一次性加载）。
