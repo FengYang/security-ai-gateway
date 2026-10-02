@@ -39,6 +39,8 @@ func (s *sqliteLedgerStore) FoldByModel(tenant, dayFrom, dayTo string) (*UsageAg
 // MonthStdBefore 实现 MonthStdProvider：读账本锁定 std 求「当月初至 period 起点前」累计（分轴，A-26）。
 //   - period = "YYYY-MM"（月结）→ 起点即月初 → 返回 (0,0)
 //   - period = "YYYY-MM-DD"（日结）→ 累计 [月初, period)
+//
+// 注：此为**全量回源**语义（每模型一次全月 SUM）；热路径请用 CachedMonthStd 包装（A-37）。
 func (s *sqliteLedgerStore) MonthStdBefore(tenant, modelKey, period string) (int64, int64) {
 	if len(period) < 7 {
 		return 0, 0
@@ -51,16 +53,26 @@ func (s *sqliteLedgerStore) MonthStdBefore(tenant, modelKey, period string) (int
 	if period <= monthStart {
 		return 0, 0
 	}
-	var stdIn, stdOut int64
-	err := s.db.QueryRow(`SELECT COALESCE(SUM(std_in),0), COALESCE(SUM(std_out),0)
-		FROM billing_ledger
-		WHERE tenant_id = ? AND model_key = ? AND day >= ? AND day < ?`,
-		tenant, modelKey, monthStart, period).Scan(&stdIn, &stdOut)
+	stdIn, stdOut, err := s.SumStdRange(tenant, modelKey, monthStart, period)
 	if err != nil {
 		// 读失败按 0 处理（保守：计价起点归零；不阻断出账）
 		return 0, 0
 	}
 	return stdIn, stdOut
+}
+
+// SumStdRange 求和某租户某模型在 [fromDay, toDay) 区间内的账本锁定 std（左闭右开）。
+// 供月累计缓存的增量推进使用（A-37：区间成本 = O(区间内条目数)）。
+func (s *sqliteLedgerStore) SumStdRange(tenant, modelKey, fromDay, toDay string) (int64, int64, error) {
+	var stdIn, stdOut int64
+	err := s.db.QueryRow(`SELECT COALESCE(SUM(std_in),0), COALESCE(SUM(std_out),0)
+		FROM billing_ledger
+		WHERE tenant_id = ? AND model_key = ? AND day >= ? AND day < ?`,
+		tenant, modelKey, fromDay, toDay).Scan(&stdIn, &stdOut)
+	if err != nil {
+		return 0, 0, fmt.Errorf("billing: sum std range: %w", err)
+	}
+	return stdIn, stdOut, nil
 }
 
 // ---------- 净量查询（L2 对账用） ----------

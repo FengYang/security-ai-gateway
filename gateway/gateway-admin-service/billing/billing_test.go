@@ -54,9 +54,11 @@ func concreteLedger(s Store) *sqliteLedgerStore {
 // newTestBillingService 构造测试用账单服务（reader=nil 表示跳过 L2）。
 func newTestBillingService(s Store, reader NetMeteringReader) *BillingService {
 	ledger := concreteLedger(s)
-	eng := NewRatingEngine("half_up", ledger)
+	eng, monthCache := NewRatingEngineWithCache("half_up", ledger) // A-37
 	rec := NewReconciler(ledger, reader, 0.001)
-	return NewBillingService(s, eng, NewStaticPriceTable(testPriceTable()), rec, s.Freezes())
+	svc := NewBillingService(s, eng, NewStaticPriceTable(testPriceTable()), rec, s.Freezes())
+	svc.SetMonthStdCache(monthCache)
+	return svc
 }
 
 // ---------- T-6.6 日结 ----------

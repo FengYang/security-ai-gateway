@@ -67,11 +67,11 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 		return nil, fmt.Errorf("billing: load price table: %w", err)
 	}
 
-	ledger := store.Ledger().(interface {
-		billing.MonthStdProvider
-	})
-	eng := billing.NewRatingEngine(cfg.Rating.Rounding, ledger)
+	// 计价引擎（A-37：月累计缓存加速；缓存句柄注入服务以便补账失效）
+	ledger := store.Ledger().(billing.MonthStdSource)
+	eng, monthCache := billing.NewRatingEngineWithCache(cfg.Rating.Rounding, ledger)
 	svc := billing.NewBillingService(store, eng, billing.NewStaticPriceTable(tbl), nil, store.Freezes())
+	svc.SetMonthStdCache(monthCache)
 
 	h := &billingHandler{
 		store:          store,

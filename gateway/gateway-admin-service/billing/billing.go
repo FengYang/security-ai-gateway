@@ -22,6 +22,7 @@ type BillingService struct {
 	freeze      FreezeStore        // nil = 不判冻结
 	signer      BillSigner         // nil = 不签名（T7b）
 	auditAnchor AuditAnchorProvider // nil = 不锚定审计链（T7b）
+	monthStdCache *CachedMonthStd   // nil = 未启用月累计缓存（A-37）
 	now         func() int64
 }
 
@@ -30,6 +31,9 @@ func (s *BillingService) SetSigner(sig BillSigner) { s.signer = sig }
 
 // SetAuditAnchor 注入审计链锚定提供者（T7b）。
 func (s *BillingService) SetAuditAnchor(a AuditAnchorProvider) { s.auditAnchor = a }
+
+// SetMonthStdCache 注入月累计缓存句柄（A-37：入账补账时据此失效对应月份）。
+func (s *BillingService) SetMonthStdCache(c *CachedMonthStd) { s.monthStdCache = c }
 
 // NewBillingService 构造账单生成服务。
 func NewBillingService(store Store, rating RatingEngine, prices PriceTableProvider,
@@ -98,6 +102,13 @@ func (s *BillingService) IngestWindow(ctx context.Context, win *UsageWindow, syn
 	if err := tx.Commit(); err != nil {
 		IncLedgerError("append")
 		return 0, err
+	}
+	// A-37：补账失效——入账的某日若落在已推进的月累计区间内（迟到数据），
+	// 则对应月份缓存失效；正常前进（day 晚于游标）不失效。价格表热更新不触发失效（A-51）。
+	if s.monthStdCache != nil {
+		for i := range entries {
+			s.monthStdCache.InvalidateDayIfBackfill(entries[i].TenantID, entries[i].Day)
+		}
 	}
 	IncPull("ok")
 	return added, nil
