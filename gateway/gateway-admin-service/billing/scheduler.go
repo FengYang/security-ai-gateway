@@ -190,8 +190,10 @@ func ScanAnomaliesTask(det *AnomalyDetector) func(context.Context) {
 			return
 		}
 		anomalies := det.Scan(tenants, day)
-		if len(anomalies) > 0 {
-			log.Printf("[billing] S-5 异常扫描：租户=%d 异常=%d day=%s", len(tenants), len(anomalies), day)
+		frozen := det.ApplyFreezes(anomalies) // §6.10.1 冻结联动（critical → frozen）
+		if len(anomalies) > 0 || frozen > 0 {
+			log.Printf("[billing] S-5 异常扫描：租户=%d 异常=%d 冻结=%d day=%s",
+				len(tenants), len(anomalies), frozen, day)
 		}
 	}
 }

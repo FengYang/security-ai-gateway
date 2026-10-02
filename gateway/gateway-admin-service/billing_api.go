@@ -70,6 +70,23 @@ func (h *billingHandler) Close() {
 	h.sched.Stop()
 }
 
+// freezeAuditSink 把计费域冻结/解冻落管理面审计链（§6.10.2；系统自动冻结 actor="system"）。
+type freezeAuditSink struct{ chain *adminAuditChain }
+
+func (s freezeAuditSink) RecordFreeze(action, tenant, reason, severity, by string) {
+	if s.chain == nil {
+		return
+	}
+	if err := s.chain.append(adminAuditEvent{
+		Actor:  by,
+		Action: action,
+		Target: tenant,
+		Result: "ok",
+	}); err != nil {
+		log.Printf("[billing] freeze audit append failed action=%s tenant=%s: %v", action, tenant, err)
+	}
+}
+
 // newBillingHandler 依配置构造计费 handler；enabled=false 返回 (nil,nil)。
 func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*billingHandler, error) {
 	if cfg == nil || !cfg.Enabled {
@@ -102,7 +119,7 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 		store:          store,
 		svc:            svc,
 		compiler:       billing.NewQuotaCompiler(),
-		freeze:         billing.NewFreezeController(store.Freezes(), nil, func() int64 { return time.Now().UnixNano() }),
+		freeze:         billing.NewFreezeController(store.Freezes(), freezeAuditSink{audit}, func() int64 { return time.Now().UnixNano() }),
 		pricePublicURL: cfg.API.PricePublicURL,
 		audit:          audit,
 		backfillDays:   cfg.Schedule.BackfillLookbackDays,
@@ -111,7 +128,7 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 	// 后台调度（T8）：
 	//   S-1  增量拉取（每 source.pull_interval；入账受 sync_mode 单写者门控）
 	//   S-3  月结（每月 monthly_close_day @ monthly_close_at；结算"上月"，幂等）
-	//   S-5  异常扫描（每 anomaly_scan_interval；四类规则 → 指标 #10/#12）
+	//   S-5  异常扫描（每 anomaly_scan_interval；四类规则 → 指标 #10/#12；critical → 冻结 §6.10.1）
 	//   S-6  链校验（每 verify_interval；断裂 → 停出账，fail-closed）
 	//   S-7  余额告警（每 quota_scan_interval；低于阈值 → 通知，periodKey 幂等）
 	//   S-8  缺口扫描（启动即一次 + 每日；补齐漏跑日账 + 日结后预热 A-37）
@@ -122,6 +139,7 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 	if cfg.Schedule.Enabled {
 		det := billing.NewAnomalyDetectorForStore(store, priceProvider, nil, cfg.Anomaly,
 			func() int64 { return time.Now().UnixNano() })
+		det.SetFreezeLinker(h.freeze) // S-5 critical 异常 → 冻结（§6.10.1）
 		notifier := billing.NewQuotaNotifier(store.AlertDedup(), nil,
 			func() int64 { return time.Now().UnixNano() })
 		h.sched = billing.NewScheduler(cfg.Schedule, billing.SchedulerTasks{

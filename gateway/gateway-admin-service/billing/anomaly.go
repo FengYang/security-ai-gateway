@@ -2,6 +2,7 @@ package billing
 
 import (
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -36,6 +37,12 @@ type Anomaly struct {
 	Detail   string      `json:"detail,omitempty"`
 }
 
+// FreezeLinker 冻结联动接口（§6.10；由 *FreezeController 实现）。
+type FreezeLinker interface {
+	Frozen(tenant string) (bool, error)
+	Freeze(tenant, reason, severity, by string) error
+}
+
 // AnomalyDetector 异常检测器（S-5，§6.9）。
 type AnomalyDetector struct {
 	ledger *sqliteLedgerStore
@@ -46,7 +53,11 @@ type AnomalyDetector struct {
 	prices     PriceTableProvider // ④ 单价缺失
 	reconciler *Reconciler        // ② L2 对账差异（L2 未接入时 nil）
 	now        func() int64       // 套餐解析时间（默认 time.Now）
+	freeze     FreezeLinker       // 冻结联动（§6.10.1；nil = 不联动）
 }
+
+// SetFreezeLinker 注入冻结联动执行者（§6.10.1）。
+func (d *AnomalyDetector) SetFreezeLinker(f FreezeLinker) { d.freeze = f }
 
 // withDefaults 补齐各阈值缺省值（与配置默认一致，§4.2）。
 func (d *AnomalyDetector) withDefaults() *AnomalyDetector {
@@ -122,6 +133,45 @@ func (d *AnomalyDetector) Scan(tenants []string, day string) []Anomaly {
 		IncAnomaly(string(a.Kind), string(a.Severity)) // 指标 #10（统一出口）
 	}
 	return out
+}
+
+// ApplyFreezes 对 critical 异常执行冻结联动（§6.10.1）：
+// kind ∈ {spike, reconcile_diff, pricing_missing} 且 severity=critical → 冻结（by="system"）。
+// 已冻结者跳过（保留首次 reason，B-6.10-1）；`plan_expired` 不冻结（§6.4.2 不自动降级）。
+// 返回本次新冻结的租户数。未注入 FreezeLinker 时 no-op。
+func (d *AnomalyDetector) ApplyFreezes(anomalies []Anomaly) int {
+	if d.freeze == nil {
+		return 0
+	}
+	n := 0
+	for _, a := range anomalies {
+		if a.Severity != SeverityCritical || !freezeTriggerKind(a.Kind) {
+			continue
+		}
+		already, err := d.freeze.Frozen(a.Tenant)
+		if err != nil {
+			log.Printf("[billing] 冻结联动判定失败 tenant=%s: %v", a.Tenant, err)
+			continue
+		}
+		if already {
+			continue // 已冻结 → 不重复冻结（保留首次原因，B-6.10-1）
+		}
+		if err := d.freeze.Freeze(a.Tenant, string(a.Kind), string(SeverityCritical), "system"); err != nil {
+			log.Printf("[billing] 冻结联动失败 tenant=%s kind=%s: %v", a.Tenant, a.Kind, err)
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// freezeTriggerKind 触发自动冻结的异常类型（§6.10.1）。
+func freezeTriggerKind(k AnomalyKind) bool {
+	switch k {
+	case KindSpike, KindReconcileDiff, KindPricingMissing:
+		return true
+	}
+	return false
 }
 
 // scanReconcile ② L2 对账差异（§6.9.1 ②）。
