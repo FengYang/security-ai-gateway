@@ -59,7 +59,7 @@ func (h *billingHandler) StartSchedulers(ctx context.Context) {
 		return
 	}
 	h.sched.Start(ctx)
-	log.Printf("[billing] 后台调度已启动：S-6 链校验 + S-8 缺口扫描（回看 %d 天，启动即执行一次 + 每 24h）+ S-10 关联校验", h.backfillDays)
+	log.Printf("[billing] 后台调度已启动：S-5 异常扫描 + S-6 链校验 + S-8 缺口扫描（回看 %d 天，启动即执行一次 + 每 24h）+ S-10 关联校验", h.backfillDays)
 }
 
 // Close 停止后台任务（幂等；不关闭 store——store 生命周期由调用方管理）。
@@ -94,7 +94,8 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 	// 计价引擎（A-37：月累计缓存加速；缓存句柄注入服务以便补账失效）
 	ledger := store.Ledger().(billing.MonthStdSource)
 	eng, monthCache := billing.NewRatingEngineWithCache(cfg.Rating.Rounding, ledger)
-	svc := billing.NewBillingService(store, eng, billing.NewStaticPriceTable(tbl), nil, store.Freezes())
+	priceProvider := billing.NewStaticPriceTable(tbl) // 供计价与 S-5 单价缺失检测共用
+	svc := billing.NewBillingService(store, eng, priceProvider, nil, store.Freezes())
 	svc.SetMonthStdCache(monthCache)
 
 	h := &billingHandler{
@@ -108,16 +109,21 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 	}
 
 	// 后台调度（T8）：
+	//   S-5  异常扫描（每 anomaly_scan_interval；四类规则 → 指标 #10/#12）
 	//   S-6  链校验（每 verify_interval；断裂 → 停出账，fail-closed）
 	//   S-8  缺口扫描（启动即一次 + 每日；补齐漏跑日账 + 日结后预热 A-37）
 	//   S-10 关联校验（每 verify_assoc_interval；不符 → 标记 assoc_mismatch，不阻断）
 	// 说明：S-2「日结」由 S-8 覆盖（缺口扫描每日执行，等价于"确保截至昨日已出账"）；
-	// S-1/S-3/S-5/S-7/S-9 的接线见进度跟踪文档"剩余项"。
+	// S-1/S-3/S-7/S-9 的接线见进度跟踪文档"剩余项"。L2 对账（reconciler）当前未接线，
+	// 故 S-5 规则② 在现状下为空操作（nil 跳过），规则①③④ 生效。
 	if cfg.Schedule.Enabled {
+		det := billing.NewAnomalyDetectorForStore(store, priceProvider, nil, cfg.Anomaly,
+			func() int64 { return time.Now().UnixNano() })
 		h.sched = billing.NewScheduler(cfg.Schedule, billing.SchedulerTasks{
-			VerifyChain: billing.VerifyChainTask(svc),
-			Backfill:    billing.BackfillTask(svc, cfg.Schedule.BackfillLookbackDays),
-			VerifyAssoc: billing.VerifyAssocTask(svc, cfg.Schedule.BackfillLookbackDays),
+			ScanAnomalies: billing.ScanAnomaliesTask(det),
+			VerifyChain:   billing.VerifyChainTask(svc),
+			Backfill:      billing.BackfillTask(svc, cfg.Schedule.BackfillLookbackDays),
+			VerifyAssoc:   billing.VerifyAssocTask(svc, cfg.Schedule.BackfillLookbackDays),
 		})
 	}
 

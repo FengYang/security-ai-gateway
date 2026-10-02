@@ -36,21 +36,176 @@ type Anomaly struct {
 	Detail   string      `json:"detail,omitempty"`
 }
 
-// AnomalyDetector 异常检测器（S-5）。
+// AnomalyDetector 异常检测器（S-5，§6.9）。
 type AnomalyDetector struct {
 	ledger *sqliteLedgerStore
 	cfg    AnomalyConfig
+
+	// 可选依赖：nil 时跳过对应规则（① spike 仅需 ledger）。
+	plans      PlanStore          // ③ 配额预警
+	prices     PriceTableProvider // ④ 单价缺失
+	reconciler *Reconciler        // ② L2 对账差异（L2 未接入时 nil）
+	now        func() int64       // 套餐解析时间（默认 time.Now）
 }
 
-// NewAnomalyDetector 构造检测器。
+// withDefaults 补齐各阈值缺省值（与配置默认一致，§4.2）。
+func (d *AnomalyDetector) withDefaults() *AnomalyDetector {
+	if d.cfg.DailySpikeRatio <= 0 {
+		d.cfg.DailySpikeRatio = 3.0
+	}
+	if d.cfg.SpikeCriticalRatio <= 0 {
+		d.cfg.SpikeCriticalRatio = 10.0
+	}
+	if d.cfg.ReconcileAlertRatio <= 0 {
+		d.cfg.ReconcileAlertRatio = 0.001
+	}
+	if d.cfg.QuotaWarnRatio <= 0 {
+		d.cfg.QuotaWarnRatio = 0.2
+	}
+	if d.now == nil {
+		d.now = func() int64 { return time.Now().UnixNano() }
+	}
+	return d
+}
+
+// NewAnomalyDetector 构造仅含账本的检测器（① spike；②/③/④ 跳过）。
 func NewAnomalyDetector(ledger *sqliteLedgerStore, cfg AnomalyConfig) *AnomalyDetector {
-	if cfg.DailySpikeRatio <= 0 {
-		cfg.DailySpikeRatio = 3.0
+	return (&AnomalyDetector{ledger: ledger, cfg: cfg}).withDefaults()
+}
+
+// NewAnomalyDetectorForStore 构造绑定 Store 的检测器（供 S-5 调度接线，§6.9.1 四类规则）。
+//
+// prices 为单价表提供器（nil = 跳过 ④）；rec 为 L2 对账器（nil = 跳过 ②，L2 未接入时）。
+func NewAnomalyDetectorForStore(store Store, prices PriceTableProvider, rec *Reconciler,
+	cfg AnomalyConfig, now func() int64) *AnomalyDetector {
+	d := &AnomalyDetector{prices: prices, reconciler: rec, now: now}
+	if store != nil {
+		if l, ok := store.Ledger().(*sqliteLedgerStore); ok {
+			d.ledger = l
+		}
+		d.plans = store.Plans()
 	}
-	if cfg.SpikeCriticalRatio <= 0 {
-		cfg.SpikeCriticalRatio = 10.0
+	return d.withDefaults()
+}
+
+// Tenants 返回账本中出现过的租户（供 S-5 任务枚举，§6.16）。
+func (d *AnomalyDetector) Tenants() ([]string, error) {
+	if d.ledger == nil {
+		return nil, nil
 	}
-	return &AnomalyDetector{ledger: ledger, cfg: cfg}
+	return d.ledger.Tenants()
+}
+
+// Scan 执行 §6.9.1 四类异常检测（S-5）。
+//
+//	① spike：当日 > 前 7 日均值 × spike_ratio（A-36 样本 <3 天不判）
+//	② reconcile_diff：L2 差异率 > 0（依赖 reconciler）
+//	③ quota_warn：剩余比 < quota_warn_ratio（依赖 plans；并回填指标 #12）
+//	④ pricing_missing：当日出现过单价表未知的 modelKey（依赖 prices）
+//
+// 指标 #10 anomaly_total 的**唯一生产者**＝本方法返回点（逐条发射，★ O-8）。
+func (d *AnomalyDetector) Scan(tenants []string, day string) []Anomaly {
+	var out []Anomaly
+	for _, t := range tenants {
+		if a, err := d.ScanSpike(t, day); err == nil && a != nil {
+			out = append(out, *a)
+		}
+		if a := d.scanReconcile(t, day); a != nil {
+			out = append(out, *a)
+		}
+		if a := d.scanQuota(t, day); a != nil {
+			out = append(out, *a)
+		}
+		out = append(out, d.scanPricingMissing(t, day)...)
+	}
+	for _, a := range out {
+		IncAnomaly(string(a.Kind), string(a.Severity)) // 指标 #10（统一出口）
+	}
+	return out
+}
+
+// scanReconcile ② L2 对账差异（§6.9.1 ②）。
+func (d *AnomalyDetector) scanReconcile(tenant, day string) *Anomaly {
+	if d.reconciler == nil {
+		return nil
+	}
+	res, err := d.reconciler.L2(tenant, day, day)
+	if err != nil || res.Ratio <= 0 {
+		return nil
+	}
+	return &Anomaly{Tenant: tenant, Kind: KindReconcileDiff,
+		Severity: severityOf(res.Ratio, d.cfg.ReconcileAlertRatio),
+		Day:      day, Ratio: res.Ratio,
+		Detail: fmt.Sprintf("diff=%d ratio=%.6f", res.Diff, res.Ratio)}
+}
+
+// scanQuota ③ 配额预警（§6.9.1 ③）；回填指标 #12 quota_remaining_ratio。
+func (d *AnomalyDetector) scanQuota(tenant, day string) *Anomaly {
+	if d.plans == nil || d.ledger == nil || len(day) < 7 {
+		return nil
+	}
+	plan, err := d.plans.Resolve(tenant, d.now())
+	if err != nil || plan == nil || plan.MonthlyTokens <= 0 {
+		return nil // 无套餐 / 不限量 → 不告警（B-6.11-3）
+	}
+	used, err := d.monthStdUsed(tenant, day)
+	if err != nil {
+		return nil
+	}
+	remaining := plan.MonthlyTokens - used
+	if remaining < 0 {
+		remaining = 0
+	}
+	SetQuotaRemainingRatio(tenant, float64(remaining)/float64(plan.MonthlyTokens)) // 指标 #12
+	return d.ScanQuotaWarn(tenant, day, used, plan.MonthlyTokens)
+}
+
+// scanPricingMissing ④ 单价缺失（§6.9.1 ④）。
+func (d *AnomalyDetector) scanPricingMissing(tenant, day string) []Anomaly {
+	if d.prices == nil || d.ledger == nil {
+		return nil
+	}
+	tbl := d.prices.Current()
+	if tbl == nil {
+		return nil
+	}
+	entries, err := d.ledger.Range(LedgerQuery{TenantID: tenant, DayFrom: day, DayTo: day})
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []Anomaly
+	for _, e := range entries {
+		if e.ModelKey == "__retry__" || seen[e.ModelKey] {
+			continue // retry 聚合行无计价需求
+		}
+		seen[e.ModelKey] = true
+		if _, ok := tbl.ModelPriceOf(e.ModelKey); !ok {
+			out = append(out, PricingMissing(tenant, e.ModelKey))
+		}
+	}
+	return out
+}
+
+// monthStdUsed 某租户当月（自然月）截至 day（含）的标准 token 合计（std_in+std_out）。
+func (d *AnomalyDetector) monthStdUsed(tenant, day string) (int64, error) {
+	totals, err := d.ledger.DailyStdTotals(tenant, day[:7]+"-01", day)
+	if err != nil {
+		return 0, err
+	}
+	var sum int64
+	for _, v := range totals {
+		sum += v
+	}
+	return sum, nil
+}
+
+// severityOf 按临界阈值分级：> threshold → critical；否则 warning（A-25 同维度阈值）。
+func severityOf(ratio, criticalThreshold float64) Severity {
+	if ratio > criticalThreshold {
+		return SeverityCritical
+	}
+	return SeverityWarning
 }
 
 // ScanSpike 单日用量突增检测（§6.9.1 ①）。
@@ -93,13 +248,11 @@ func (d *AnomalyDetector) ScanSpike(tenant, day string) (*Anomaly, error) {
 	}
 	ratio := float64(today) / avg
 	if ratio > d.cfg.SpikeCriticalRatio {
-		IncAnomaly(string(KindSpike), string(SeverityCritical)) // 指标 #10
 		return &Anomaly{Tenant: tenant, Kind: KindSpike, Severity: SeverityCritical,
 			Day: day, Ratio: ratio,
 			Detail: fmt.Sprintf("today=%d avg=%.0f ratio=%.2f", today, avg, ratio)}, nil
 	}
 	if ratio > d.cfg.DailySpikeRatio {
-		IncAnomaly(string(KindSpike), string(SeverityWarning)) // 指标 #10
 		return &Anomaly{Tenant: tenant, Kind: KindSpike, Severity: SeverityWarning,
 			Day: day, Ratio: ratio,
 			Detail: fmt.Sprintf("today=%d avg=%.0f ratio=%.2f", today, avg, ratio)}, nil

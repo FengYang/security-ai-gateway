@@ -279,6 +279,12 @@ func IncAnomaly(kind, severity string) {
 		map[string]string{"kind": kind, "severity": severity}, 1)
 }
 
+// SetQuotaRemainingRatio 配额剩余比（#12；tenant）。唯一生产者 = S-5 扫描（§6.9.1 ③）。
+func SetQuotaRemainingRatio(tenant string, ratio float64) {
+	DefaultMetrics.SetGauge("gateway_admin_billing_quota_remaining_ratio",
+		map[string]string{"tenant": tenant}, ratio)
+}
+
 // IncFreeze 冻结计数（#14）。
 func IncFreeze() { DefaultMetrics.IncCounter("gateway_admin_billing_freeze_total", nil, 1) }
 

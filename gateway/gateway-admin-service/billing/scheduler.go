@@ -121,6 +121,29 @@ func BackfillTask(svc *BillingService, lookbackDays int) func(context.Context) {
 	}
 }
 
+// ScanAnomaliesTask 构造 S-5 异常扫描任务（§6.9 / §6.16）。
+//
+// 逐租户执行四类规则（spike / reconcile_diff / quota_warn / pricing_missing），
+// 命中即记指标 #10（由 Scan 统一出口发射）；扫描日取 UTC+8 自然日（实时监控当日）。
+// 失败仅记录（下轮重试）。
+func ScanAnomaliesTask(det *AnomalyDetector) func(context.Context) {
+	return func(ctx context.Context) {
+		day := dayOfNs(time.Now().UnixNano())
+		tenants, err := det.Tenants()
+		if err != nil {
+			log.Printf("[billing] S-5 异常扫描：租户枚举失败：%v", err)
+			return
+		}
+		if len(tenants) == 0 {
+			return
+		}
+		anomalies := det.Scan(tenants, day)
+		if len(anomalies) > 0 {
+			log.Printf("[billing] S-5 异常扫描：租户=%d 异常=%d day=%s", len(tenants), len(anomalies), day)
+		}
+	}
+}
+
 // VerifyChainTask 构造 S-6 链校验任务（§6.16）：全量校验账本哈希链 → 指标 #4；
 // 断裂即置 chain_broken 并停出账（fail-closed）。纯读、无外部依赖；失败仅记录（下轮重试）。
 func VerifyChainTask(svc *BillingService) func(context.Context) {
