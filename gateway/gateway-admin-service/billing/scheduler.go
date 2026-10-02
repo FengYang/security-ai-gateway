@@ -144,6 +144,41 @@ func ScanAnomaliesTask(det *AnomalyDetector) func(context.Context) {
 	}
 }
 
+// CheckQuotaTask 构造 S-7 余额告警任务（§6.11 / §6.16）。
+//
+// 逐租户计算当月配额剩余比；低于 quota_warn_ratio → notifier.WarnQuotaLow
+// （periodKey = 当月，幂等：同租户同月只告警一次）；无套餐/不限量不告警（B-6.11-3）。
+// 失败仅记录。
+func CheckQuotaTask(det *AnomalyDetector, notifier Notifier) func(context.Context) {
+	return func(ctx context.Context) {
+		day := dayOfNs(time.Now().UnixNano())
+		tenants, err := det.Tenants()
+		if err != nil {
+			log.Printf("[billing] S-7 余额告警：租户枚举失败：%v", err)
+			return
+		}
+		periodKey := day[:7] // 自然月周期
+		threshold := det.QuotaWarnThreshold()
+		warned := 0
+		for _, t := range tenants {
+			rem, ok := det.QuotaRemaining(t, day)
+			if !ok || rem >= threshold {
+				continue
+			}
+			warned++
+			if notifier == nil {
+				continue
+			}
+			if err := notifier.WarnQuotaLow(t, rem, periodKey); err != nil {
+				log.Printf("[billing] S-7 余额告警发送失败 tenant=%s: %v", t, err)
+			}
+		}
+		if warned > 0 {
+			log.Printf("[billing] S-7 余额告警：命中租户=%d period=%s", warned, periodKey)
+		}
+	}
+}
+
 // VerifyChainTask 构造 S-6 链校验任务（§6.16）：全量校验账本哈希链 → 指标 #4；
 // 断裂即置 chain_broken 并停出账（fail-closed）。纯读、无外部依赖；失败仅记录（下轮重试）。
 func VerifyChainTask(svc *BillingService) func(context.Context) {

@@ -139,25 +139,52 @@ func (d *AnomalyDetector) scanReconcile(tenant, day string) *Anomaly {
 		Detail: fmt.Sprintf("diff=%d ratio=%.6f", res.Diff, res.Ratio)}
 }
 
-// scanQuota ③ 配额预警（§6.9.1 ③）；回填指标 #12 quota_remaining_ratio。
+// scanQuota ③ 配额预警（§6.9.1 ③）；回填指标 #12 quota_remaining_ratio（不限于低于阈值）。
 func (d *AnomalyDetector) scanQuota(tenant, day string) *Anomaly {
-	if d.plans == nil || d.ledger == nil || len(day) < 7 {
+	ratio, ok := d.QuotaRemaining(tenant, day)
+	if !ok {
 		return nil
+	}
+	SetQuotaRemainingRatio(tenant, ratio) // 指标 #12（O-8 唯一生产者）
+	return d.quotaWarnAnomaly(tenant, day, ratio)
+}
+
+// QuotaRemaining 某租户当月（截至 day）配额剩余比；无套餐/不限量 → ok=false（B-6.11-3）。
+// 供 S-5 规则③ 与 S-7 余额告警复用。
+func (d *AnomalyDetector) QuotaRemaining(tenant, day string) (float64, bool) {
+	if d.plans == nil || d.ledger == nil || len(day) < 7 {
+		return 0, false
 	}
 	plan, err := d.plans.Resolve(tenant, d.now())
 	if err != nil || plan == nil || plan.MonthlyTokens <= 0 {
-		return nil // 无套餐 / 不限量 → 不告警（B-6.11-3）
+		return 0, false // 无套餐 / 不限量 → 不告警（B-6.11-3）
 	}
 	used, err := d.monthStdUsed(tenant, day)
 	if err != nil {
-		return nil
+		return 0, false
 	}
 	remaining := plan.MonthlyTokens - used
 	if remaining < 0 {
 		remaining = 0
 	}
-	SetQuotaRemainingRatio(tenant, float64(remaining)/float64(plan.MonthlyTokens)) // 指标 #12
-	return d.ScanQuotaWarn(tenant, day, used, plan.MonthlyTokens)
+	return float64(remaining) / float64(plan.MonthlyTokens), true
+}
+
+// QuotaWarnThreshold 配额告警阈值（quota_warn_ratio，R-21；供 S-7 复用）。
+func (d *AnomalyDetector) QuotaWarnThreshold() float64 { return d.cfg.QuotaWarnRatio }
+
+// quotaWarnAnomaly 按剩余比生成配额预警：≥ 阈值 → nil；已耗尽（rem=0）→ critical（B-6.11-2）。
+func (d *AnomalyDetector) quotaWarnAnomaly(tenant, day string, ratio float64) *Anomaly {
+	if ratio >= d.cfg.QuotaWarnRatio {
+		return nil
+	}
+	sev := SeverityWarning
+	if ratio <= 0 {
+		sev = SeverityCritical // B-6.11-2：已耗尽 → critical
+	}
+	return &Anomaly{Tenant: tenant, Kind: KindQuotaWarn, Severity: sev,
+		Day: day, Ratio: ratio,
+		Detail: fmt.Sprintf("remaining_ratio=%.3f", ratio)}
 }
 
 // scanPricingMissing ④ 单价缺失（§6.9.1 ④）。
@@ -260,7 +287,8 @@ func (d *AnomalyDetector) ScanSpike(tenant, day string) (*Anomaly, error) {
 	return nil, nil
 }
 
-// ScanQuotaWarn 配额预警（§6.9.1 ③）：剩余比例 < quota_warn_ratio → warning。
+// ScanQuotaWarn 配额预警（§6.9.1 ③）：剩余比例 < quota_warn_ratio → 告警
+// （已耗尽 rem=0 → critical，B-6.11-2）。
 func (d *AnomalyDetector) ScanQuotaWarn(tenant, day string, used, limit int64) *Anomaly {
 	if limit <= 0 {
 		return nil
@@ -269,13 +297,7 @@ func (d *AnomalyDetector) ScanQuotaWarn(tenant, day string, used, limit int64) *
 	if remaining < 0 {
 		remaining = 0
 	}
-	ratio := float64(remaining) / float64(limit)
-	if ratio < d.cfg.QuotaWarnRatio {
-		return &Anomaly{Tenant: tenant, Kind: KindQuotaWarn, Severity: SeverityWarning,
-			Day: day, Ratio: ratio,
-			Detail: fmt.Sprintf("remaining_ratio=%.3f", ratio)}
-	}
-	return nil
+	return d.quotaWarnAnomaly(tenant, day, float64(remaining)/float64(limit))
 }
 
 // PricingMissing 缺单价异常（供 Rate 失败时构造）。
