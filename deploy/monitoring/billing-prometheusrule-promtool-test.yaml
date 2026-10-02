@@ -222,6 +222,30 @@ tests:
               description: "近 26 小时账本有入账条目，但无任何日结执行（含 S-8 缺口扫描）。排查调度器是否启动/被阻塞、账本与计量侧是否可达。"
               runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
 
+  # ===== 10) 冻结持续 > 24h（warning；#24 gauge）=====
+  # 采样间隔须 ≤ Prometheus 默认 5m lookback，否则样本陈旧会使告警状态中断、`for` 永不累计。
+  - name: frozen-sustained
+    interval: 5m
+    input_series:
+      - series: 'gateway_admin_billing_frozen{tenant="t1"}'
+        values: '1+0x320'
+    alert_rule_test:
+      - eval_time: 23h
+        alertname: BillingFrozenSustained
+        exp_alerts: [] # for: 24h 未满
+      - eval_time: 26h
+        alertname: BillingFrozenSustained
+        exp_alerts:
+          - exp_labels:
+              tenant: t1
+              severity: warning
+              category: billing
+              team: billing-ops
+            exp_annotations:
+              summary: "租户冻结持续超过 24 小时（t1）"
+              description: "租户已被冻结超过 24 小时仍未解除（manual / pricing_missing 须人工；reconcile_diff 待对账恢复后自动解冻）。核实冻结原因并升级处置。"
+              runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
   # ===== 9) 健康基线：全部告警静默 =====
   - name: healthy-baseline
     interval: 30s
@@ -241,6 +265,8 @@ tests:
       - series: 'gateway_admin_billing_pull_total{result="error"}'
         values: '0+0x120'
       - series: 'gateway_admin_billing_assoc_verify_total{result="fail"}'
+        values: '0+0x120'
+      - series: 'gateway_admin_billing_frozen{tenant="t1"}'
         values: '0+0x120'
     alert_rule_test:
       - eval_time: 30m
@@ -269,4 +295,7 @@ tests:
         exp_alerts: []
       - eval_time: 30m
         alertname: BillingCloseMissed
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: BillingFrozenSustained
         exp_alerts: []

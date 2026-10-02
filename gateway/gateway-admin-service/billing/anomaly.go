@@ -177,6 +177,23 @@ func freezeTriggerKind(k AnomalyKind) bool {
 	return false
 }
 
+// SyncFrozenGauge 以冻结存储为准回填 gateway_admin_billing_frozen（#24）。
+//
+// 进程重启后 gauge 归零（且历史冻结仍在 DB），本方法在每个扫描周期把「当前生效冻结」重新置 1；
+// 解冻路径（FreezeController.Unfreeze）已置 0。未注入 FreezeLinker 时 no-op。
+func (d *AnomalyDetector) SyncFrozenGauge() {
+	if d.freeze == nil {
+		return
+	}
+	recs, err := d.freeze.ListFrozen()
+	if err != nil {
+		return
+	}
+	for _, r := range recs {
+		SetFrozen(r.TenantID, true)
+	}
+}
+
 // AutoUnfreeze 对「由 reconcile_diff 触发」且对账已恢复（L2 Pass）的冻结执行自动解冻（B-6.10-2）。
 //
 // 仅 `reconcile_diff` 触发者可自动解冻；`manual`/`pricing_missing` 等**不**自动解冻（须人工）。

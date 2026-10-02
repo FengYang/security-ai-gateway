@@ -181,6 +181,7 @@ func CloseMonthlyTask(svc *BillingService) func(context.Context) {
 func ScanAnomaliesTask(det *AnomalyDetector) func(context.Context) {
 	return func(ctx context.Context) {
 		day := dayOfNs(time.Now().UnixNano())
+		det.SyncFrozenGauge() // 指标 #24：以冻结存储回填冻结状态（重启恢复）
 		tenants, err := det.Tenants()
 		if err != nil {
 			log.Printf("[billing] S-5 异常扫描：租户枚举失败：%v", err)

@@ -140,6 +140,19 @@ spec:
             description: "套餐月配额剩余比 {{ $value | humanizePercentage }}，已触发租户通知（S-7）。关注是否需升配或限流。"
             runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
 
+        # ---- 冻结持续（warning）：>24h 未解除 → 升级（§6.10）----
+        - alert: BillingFrozenSustained
+          expr: gateway_admin_billing_frozen == 1
+          for: 24h
+          labels:
+            severity: warning
+            category: billing
+            team: billing-ops
+          annotations:
+            summary: "租户冻结持续超过 24 小时（{{ $labels.tenant }}）"
+            description: "租户已被冻结超过 24 小时仍未解除（manual / pricing_missing 须人工；reconcile_diff 待对账恢复后自动解冻）。核实冻结原因并升级处置。"
+            runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
         # ---- 拉取连续失败（warning）：tee-infer 可达性 ----
         - alert: BillingPullErrorSustained
           expr: increase(gateway_admin_billing_pull_total{result="error"}[10m]) >= 5

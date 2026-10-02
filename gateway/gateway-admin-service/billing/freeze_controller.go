@@ -74,7 +74,8 @@ func (c *FreezeController) Freeze(tenant, reason, severity, by string) error {
 	if err := c.store.Put(rec); err != nil {
 		return err
 	}
-	IncFreeze() // 指标 #14
+	IncFreeze()             // 指标 #14
+	SetFrozen(tenant, true) // 指标 #24（冻结状态）
 	if c.audit != nil {
 		c.audit.RecordFreeze("bill_freeze", tenant, reason, severity, by)
 	}
@@ -86,6 +87,7 @@ func (c *FreezeController) Unfreeze(tenant, by string) error {
 	if err := c.store.Delete(tenant); err != nil {
 		return err
 	}
+	SetFrozen(tenant, false) // 指标 #24（冻结状态）
 	if c.audit != nil {
 		c.audit.RecordFreeze("bill_unfreeze", tenant, "", "", by)
 	}
