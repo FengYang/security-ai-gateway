@@ -424,3 +424,13 @@ func monthRange(month string) (string, string) {
 	last := t.AddDate(0, 1, -1).Format(dayLayout)
 	return first, last
 }
+
+// prevMonth 返回某自然日（"YYYY-MM-DD"）的上一月（"YYYY-MM"）；解析失败返回空串。
+// 供 S-3 月结：monthly_close_day 当日结算"上月"。
+func prevMonth(day string) string {
+	t, err := time.Parse(dayLayout, day)
+	if err != nil {
+		return ""
+	}
+	return t.AddDate(0, -1, 0).Format("2006-01")
+}

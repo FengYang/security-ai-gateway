@@ -22,6 +22,18 @@ func dayOfNs(ns int64) string {
 	return t.Format(dayLayout)
 }
 
+// clockOfNs 把 UTC 纳秒时间戳转为 UTC+8 的 "HH:MM"（供 S-3 月结按时刻触发）。
+func clockOfNs(ns int64) string {
+	sec := ns/int64(time.Second) + utc8Offset
+	return time.Unix(sec, 0).UTC().Format("15:04")
+}
+
+// dayOfMonthOfNs 返回 UTC+8 自然日的"日"（1..31；供 S-3 月结按日触发）。
+func dayOfMonthOfNs(ns int64) int {
+	sec := ns/int64(time.Second) + utc8Offset
+	return time.Unix(sec, 0).UTC().Day()
+}
+
 // AggToEntries 将一次拉取/推送的聚合窗口转为账本条目列表。
 //
 // 拆分规则（§6.3.3）：

@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -65,6 +66,9 @@ func (s *Scheduler) Start(ctx context.Context) {
 		go s.guard("S-8-backfill", s.tasks.Backfill, ctx)
 		s.spawn(ctx, "S-8-backfill-daily", 24*time.Hour, s.tasks.Backfill)
 	}
+
+	// S-3 月结：每月 monthly_close_day @ monthly_close_at（UTC+8）
+	s.spawnMonthly(ctx, "S-3-monthly", s.cfg.MonthlyCloseDay, s.cfg.MonthlyCloseAt, s.tasks.CloseMonthly)
 }
 
 // Stop 停止全部任务并等待在途任务完成（优雅关闭 §6.15）。
@@ -117,6 +121,44 @@ func BackfillTask(svc *BillingService, lookbackDays int) func(context.Context) {
 		if rep.Missing > 0 || rep.Failed > 0 {
 			log.Printf("[billing] S-8 缺口扫描：租户=%d 缺口=%d 补出=%d 跳过=%d 失败=%d",
 				rep.Tenants, rep.Missing, rep.Closed, rep.Skipped, rep.Failed)
+		}
+	}
+}
+
+// CloseMonthlyTask 构造 S-3 月结任务（§6.7 / §6.16）：对全部租户结算「上月」。
+//
+// 幂等（UNIQUE(tenant,monthly,period)：重复触发返回既有账单，故当日重复触发安全）；
+// 冻结租户跳过（解冻后由下轮补出）；逐租户独立，单点失败不阻断其余。失败仅记录。
+func CloseMonthlyTask(svc *BillingService) func(context.Context) {
+	return func(ctx context.Context) {
+		month := prevMonth(dayOfNs(time.Now().UnixNano()))
+		if month == "" {
+			return
+		}
+		lister, ok := svc.store.Ledger().(tenantDayLister)
+		if !ok {
+			return // 账本不支持枚举 → 无操作
+		}
+		tenants, err := lister.Tenants()
+		if err != nil {
+			log.Printf("[billing] S-3 月结：租户枚举失败：%v", err)
+			return
+		}
+		closed, skipped, failed := 0, 0, 0
+		for _, t := range tenants {
+			if _, err := svc.CloseMonthly(ctx, t, month); err != nil {
+				if errors.Is(err, ErrFrozen) {
+					skipped++ // 冻结期不出账（解冻后由下轮补出）
+					continue
+				}
+				failed++
+				log.Printf("[billing] S-3 月结失败 tenant=%s month=%s: %v", t, month, err)
+				continue
+			}
+			closed++
+		}
+		if closed+skipped+failed > 0 {
+			log.Printf("[billing] S-3 月结 month=%s 处理=%d 跳过=%d 失败=%d", month, closed, skipped, failed)
 		}
 	}
 }
@@ -231,6 +273,37 @@ func VerifyAssocTask(svc *BillingService, lookbackDays int) func(context.Context
 			log.Printf("[billing] S-10 关联校验：巡检=%d 不符=%d（已标记 assoc_mismatch，不阻断）", checked, failed)
 		}
 	}
+}
+
+// spawnMonthly 在每月 closeDay 日（UTC+8）达 closeAt（"HH:MM"）后触发 fn。
+//
+// 实现：每 10 分钟检查一次当前 UTC+8 的"日"与"时刻"；命中即经 guard 单飞执行。
+// 由于 CloseMonthly 依 UNIQUE(tenant,kind,period) 幂等，当日重复触发**安全**（返回既有账单），
+// 故无需额外"当日一次"状态。fn 为 nil 或参数非法时跳过。
+func (s *Scheduler) spawnMonthly(ctx context.Context, name string, closeDay int, closeAt string, fn func(context.Context)) {
+	if fn == nil || closeDay < 1 || closeAt == "" {
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		t := time.NewTicker(10 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-s.stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				now := time.Now().UnixNano()
+				if dayOfMonthOfNs(now) != closeDay || clockOfNs(now) < closeAt {
+					continue
+				}
+				s.guard(name, fn, ctx)
+			}
+		}
+	}()
 }
 
 // guard 单飞执行：同一任务名并发触发时跳过（防重入）；panic 隔离（B-6.15-1）。

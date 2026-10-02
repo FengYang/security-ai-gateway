@@ -81,6 +81,11 @@ type ScheduleConfig struct {
 	QuotaScanInterval   time.Duration
 	ExpiryScanInterval  time.Duration
 	VerifyAssocInterval time.Duration
+
+	// MonthlyCloseDay / MonthlyCloseAt 月结触发（日 1..3 ｜ HH:MM，UTC+8；§6.16 S-3）。
+	// 与 period 段同源（LoadBillingConfig 同步），供调度器按"每月某日某刻"触发 CloseMonthly。
+	MonthlyCloseDay int
+	MonthlyCloseAt  string
 }
 
 type SecretsConfig struct {
@@ -152,6 +157,9 @@ func LoadBillingConfig() (*BillingConfig, error) {
 	cfg.Schedule.QuotaScanInterval = getDurationEnv(envPrefix+"SCHEDULE_QUOTA_SCAN_INTERVAL", 5*time.Minute)
 	cfg.Schedule.ExpiryScanInterval = getDurationEnv(envPrefix+"SCHEDULE_EXPIRY_SCAN_INTERVAL", 6*time.Hour)
 	cfg.Schedule.VerifyAssocInterval = getDurationEnv(envPrefix+"SCHEDULE_VERIFY_ASSOC_INTERVAL", 24*time.Hour)
+	// 月结触发（同步自 period 段；§6.16 S-3）
+	cfg.Schedule.MonthlyCloseDay = cfg.Period.MonthlyCloseDay
+	cfg.Schedule.MonthlyCloseAt = cfg.Period.MonthlyCloseAt
 
 	// Secrets
 	cfg.Secrets.EventsSecretRef = os.Getenv(envPrefix + "SECRETS_EVENTS_SECRET_REF")
