@@ -171,6 +171,11 @@ func (s *BillingService) CloseDaily(ctx context.Context, tenant, day string) (*B
 		return nil, err
 	}
 
+	// 1b. 链断裂门禁（S-6：断裂 → 停出账，fail-closed；§6.15/§7.1）
+	if ChainBroken() {
+		return nil, ErrChainBroken
+	}
+
 	// 2. L2 对账门禁
 	if reason, err := s.gateL2(tenant, day, day); err != nil {
 		return nil, err
@@ -195,7 +200,8 @@ func (s *BillingService) CloseDaily(ctx context.Context, tenant, day string) (*B
 	}
 
 	// 5. 写账单
-	head, _ := s.store.Ledger().Head()
+	// ledger_head 锚定"本租户本日链尾"（§7.3：账单→账本链须"重放可复现"；
+	// 账本为全局单链，全局链尾不可由本租户重放复现）。
 	bill := &Bill{
 		ID:           id,
 		TenantID:     tenant,
@@ -206,7 +212,7 @@ func (s *BillingService) CloseDaily(ctx context.Context, tenant, day string) (*B
 		Currency:     tbl.Currency,
 		PriceVersion: tbl.Version,
 		Status:       BillStatusIssued,
-		LedgerHead:   head.EntryHash,
+		LedgerHead:   s.periodTailHash(tenant, day, day),
 		GeneratedAt:  s.now(),
 	}
 	s.stamp(bill)
@@ -224,6 +230,8 @@ func (s *BillingService) CloseDaily(ctx context.Context, tenant, day string) (*B
 	if err := s.WarmMonthStd(tenant, day); err != nil {
 		log.Printf("[billing] 月累计缓存预热失败 tenant=%s day=%s: %v", tenant, day, err)
 	}
+	// S-10 出账后即时关联校验（不阻断已出账；失败仅标记 assoc_mismatch + 指标 #22，§7.3/A-34）
+	s.verifyAssocAfterClose(bill)
 	return bill, nil
 }
 
@@ -258,7 +266,8 @@ func (s *BillingService) CloseMonthly(ctx context.Context, tenant, month string)
 	if err != nil {
 		return nil, err
 	}
-	head, _ := s.store.Ledger().Head()
+	// ledger_head 锚定"本租户本月链尾"（§7.3 重放可复现，同 CloseDaily）
+	tail := s.periodTailHash(tenant, first, last)
 
 	bill := &Bill{
 		ID:           id,
@@ -270,7 +279,7 @@ func (s *BillingService) CloseMonthly(ctx context.Context, tenant, month string)
 		Currency:     tbl.Currency,
 		PriceVersion: tbl.Version,
 		Status:       BillStatusIssued,
-		LedgerHead:   head.EntryHash,
+		LedgerHead:   tail,
 		GeneratedAt:  s.now(),
 	}
 	s.stamp(bill)
@@ -283,10 +292,12 @@ func (s *BillingService) CloseMonthly(ctx context.Context, tenant, month string)
 	IncBillIssued(BillKindMonthly) // 指标 #8
 
 	// 4b. 超额单列账单（A-45：charge 套餐超标独立成单，各自一次取整 R-16）
-	if err := s.closeOverage(tenant, month, agg, tbl, head.EntryHash); err != nil {
+	if err := s.closeOverage(tenant, month, agg, tbl, tail); err != nil {
 		return nil, err
 	}
 
+	// S-10 出账后即时关联校验（不阻断已出账；失败仅标记 assoc_mismatch + 指标 #22，§7.3/A-34）
+	s.verifyAssocAfterClose(bill)
 	return bill, nil
 }
 

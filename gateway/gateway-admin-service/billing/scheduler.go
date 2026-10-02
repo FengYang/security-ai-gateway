@@ -121,6 +121,42 @@ func BackfillTask(svc *BillingService, lookbackDays int) func(context.Context) {
 	}
 }
 
+// VerifyChainTask 构造 S-6 链校验任务（§6.16）：全量校验账本哈希链 → 指标 #4；
+// 断裂即置 chain_broken 并停出账（fail-closed）。纯读、无外部依赖；失败仅记录（下轮重试）。
+func VerifyChainTask(svc *BillingService) func(context.Context) {
+	return func(ctx context.Context) {
+		brokenAt, err := svc.VerifyLedgerChain()
+		if err != nil {
+			log.Printf("[billing] S-6 链校验失败：%v", err)
+			return
+		}
+		if brokenAt >= 0 {
+			log.Printf("[billing] S-6 链校验：断裂 seq=%d", brokenAt)
+		}
+	}
+}
+
+// VerifyAssocTask 构造 S-10 关联校验任务（每日低峰巡检，§6.16，★ A-31/A-34）。
+//
+// lookbackDays > 0：只巡检最近 N 日出账的账单；<= 0：全量。
+// 不符 → 标记账单 assoc_mismatch + 记指标 #22（**不阻断已出账**）。
+func VerifyAssocTask(svc *BillingService, lookbackDays int) func(context.Context) {
+	return func(ctx context.Context) {
+		from := ""
+		if lookbackDays > 0 {
+			from = dayOfNs(time.Now().AddDate(0, 0, -lookbackDays).UnixNano())
+		}
+		checked, failed, err := svc.VerifyAssocRecent(from)
+		if err != nil {
+			log.Printf("[billing] S-10 关联校验失败：%v", err)
+			return
+		}
+		if failed > 0 {
+			log.Printf("[billing] S-10 关联校验：巡检=%d 不符=%d（已标记 assoc_mismatch，不阻断）", checked, failed)
+		}
+	}
+}
+
 // guard 单飞执行：同一任务名并发触发时跳过（防重入）；panic 隔离（B-6.15-1）。
 func (s *Scheduler) guard(name string, fn func(context.Context), ctx context.Context) {
 	s.guardMu.Lock()

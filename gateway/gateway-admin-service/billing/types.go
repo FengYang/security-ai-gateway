@@ -35,6 +35,8 @@ var (
 	ErrLedgerAnchorMismatch = errors.New("billing: ledger anchor mismatch")
 	// ErrAuditAnchorMissing 审计链锚定不存在（§7.3）。
 	ErrAuditAnchorMissing = errors.New("billing: audit anchor missing")
+	// ErrChainBroken 账本哈希链断裂（S-6 校验发现；停出账，fail-closed，§6.15/§7.1）。
+	ErrChainBroken = errors.New("billing: ledger chain broken")
 )
 
 // IsUnique 判定是否为唯一约束冲突（A-4 收敛，§4.1.8）。

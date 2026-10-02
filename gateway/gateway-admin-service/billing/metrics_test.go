@@ -76,6 +76,7 @@ func TestRenderMetrics_EmptyWhenDisabled(t *testing.T) {
 
 func TestMetricsProducers(t *testing.T) {
 	// 生产者最小验证：调用不 panic 且默认注册表出现样本
+	defer SetChainBroken(false) // chain_broken 为进程级标志，测后复位避免污染出账门禁
 	IncLedgerEntries(1)
 	SetLedgerHeadSeq(5)
 	SetChainBroken(true)

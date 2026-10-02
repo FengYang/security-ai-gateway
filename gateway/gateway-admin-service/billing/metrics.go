@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // ---------- 计费域指标（T10，§9.1） ----------
@@ -228,13 +229,21 @@ func SetLedgerHeadSeq(seq uint64) {
 }
 
 // SetChainBroken 链断裂标志（#4；S-6 Verify 结果）。
+// 同时置进程内标志，供出账门禁读取（S-6「断裂 → 停出账」，fail-closed）。
 func SetChainBroken(broken bool) {
 	v := 0.0
 	if broken {
 		v = 1
 	}
 	DefaultMetrics.SetGauge("gateway_admin_billing_ledger_chain_broken", nil, v)
+	chainBrokenFlag.Store(broken)
 }
+
+// chainBrokenFlag 链断裂进程内标志（S-6 → CloseDaily/CloseMonthly 门禁）。
+var chainBrokenFlag atomic.Bool
+
+// ChainBroken 返回链断裂标志（真 = 停止出账，fail-closed）。
+func ChainBroken() bool { return chainBrokenFlag.Load() }
 
 // IncPull 拉取轮次（#5；result=ok|error）。
 func IncPull(result string) {

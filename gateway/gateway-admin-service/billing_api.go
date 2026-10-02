@@ -59,7 +59,7 @@ func (h *billingHandler) StartSchedulers(ctx context.Context) {
 		return
 	}
 	h.sched.Start(ctx)
-	log.Printf("[billing] 后台调度已启动：S-8 缺口扫描（回看 %d 天，启动即执行一次 + 每 24h）", h.backfillDays)
+	log.Printf("[billing] 后台调度已启动：S-6 链校验 + S-8 缺口扫描（回看 %d 天，启动即执行一次 + 每 24h）+ S-10 关联校验", h.backfillDays)
 }
 
 // Close 停止后台任务（幂等；不关闭 store——store 生命周期由调用方管理）。
@@ -107,12 +107,17 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 		backfillDays:   cfg.Schedule.BackfillLookbackDays,
 	}
 
-	// 后台调度（S-8 缺口扫描：补齐漏跑日账 + 日结后预热 A-37）。
+	// 后台调度（T8）：
+	//   S-6  链校验（每 verify_interval；断裂 → 停出账，fail-closed）
+	//   S-8  缺口扫描（启动即一次 + 每日；补齐漏跑日账 + 日结后预热 A-37）
+	//   S-10 关联校验（每 verify_assoc_interval；不符 → 标记 assoc_mismatch，不阻断）
 	// 说明：S-2「日结」由 S-8 覆盖（缺口扫描每日执行，等价于"确保截至昨日已出账"）；
-	// S-1/S-3/S-5/S-6/S-7/S-9/S-10 的接线见进度跟踪文档"剩余项"。
+	// S-1/S-3/S-5/S-7/S-9 的接线见进度跟踪文档"剩余项"。
 	if cfg.Schedule.Enabled {
 		h.sched = billing.NewScheduler(cfg.Schedule, billing.SchedulerTasks{
-			Backfill: billing.BackfillTask(svc, cfg.Schedule.BackfillLookbackDays),
+			VerifyChain: billing.VerifyChainTask(svc),
+			Backfill:    billing.BackfillTask(svc, cfg.Schedule.BackfillLookbackDays),
+			VerifyAssoc: billing.VerifyAssocTask(svc, cfg.Schedule.BackfillLookbackDays),
 		})
 	}
 
