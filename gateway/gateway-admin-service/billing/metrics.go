@@ -44,14 +44,15 @@ type metricFamily struct {
 
 // Registry 指标注册表（并发安全）。
 type Registry struct {
-	mu       sync.Mutex
-	families map[string]*metricFamily
-	order    []string
+	mu          sync.Mutex
+	families    map[string]*metricFamily
+	order       []string
+	histBuckets map[string][]float64 // 指标名 → 自定义直方图桶（未登记 = defaultBuckets）
 }
 
 // NewRegistry 构造空注册表。
 func NewRegistry() *Registry {
-	return &Registry{families: map[string]*metricFamily{}}
+	return &Registry{families: map[string]*metricFamily{}, histBuckets: map[string][]float64{}}
 }
 
 // DefaultMetrics 计费域默认注册表（进程级单例；供 /metrics 渲染）。
@@ -117,11 +118,36 @@ func (r *Registry) SetGauge(name string, labels map[string]string, v float64) {
 // defaultBuckets 默认直方图桶（秒）。
 var defaultBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
 
+// RegisterHistogram 为指定直方图登记**自定义桶**（SLA 跨度显著大于默认上限者，如 M6 配额热生效 ≤60s）。
+//
+// ⚠️ 必须在**首次观测前**调用：样本按桶边界累计，事后改桶会使历史计数与新边界不一致。
+// 空名/空切片 = no-op。登记后，对该指标名的 `ObserveHistogram` 一律使用自定义桶。
+func (r *Registry) RegisterHistogram(name string, buckets []float64) {
+	if name == "" || len(buckets) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cp := append([]float64(nil), buckets...)
+	r.histBuckets[name] = cp
+	if f := r.families[name]; f != nil {
+		f.buckets = cp // 兼容"先观测后登记"（不推荐，见上）
+	}
+}
+
+// histogramBuckets 某直方图应使用的桶（自定义优先，否则默认）。调用方须持 r.mu。
+func (r *Registry) histogramBuckets(name string) []float64 {
+	if b, ok := r.histBuckets[name]; ok {
+		return b
+	}
+	return defaultBuckets
+}
+
 // ObserveHistogram 记录一个观测值。
 func (r *Registry) ObserveHistogram(name string, labels map[string]string, v float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	f := r.family(name, "", kindHistogram, defaultBuckets)
+	f := r.family(name, "", kindHistogram, r.histogramBuckets(name))
 	key := labelKey(labels)
 	s := f.series[key]
 	if s == nil {
@@ -285,6 +311,19 @@ func ObserveClose(kind string, seconds float64) {
 // 计时区间＝**套餐变更受理 → 回读确认**（`confirmQuotaApplied`），非 POST 2xx。
 func ObserveQuotaApply(seconds float64) {
 	DefaultMetrics.ObserveHistogram("gateway_admin_billing_quota_apply_duration_seconds", nil, seconds)
+}
+
+// RegisterHistogramBuckets 为默认注册表中的直方图登记自定义桶（须在首次观测前；§9.1）。
+func RegisterHistogramBuckets(name string, buckets []float64) {
+	DefaultMetrics.RegisterHistogram(name, buckets)
+}
+
+// quotaApplyBuckets M6 配额热生效时延桶（秒）：SLA ≤ 60s，跨 3 个数量级——
+// 默认桶上限 10s 会使 >10s 的观测全部落 +Inf，无法分位刻画 M6（故需自定义桶）。
+var quotaApplyBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 45, 60, 90, 180}
+
+func init() {
+	RegisterHistogramBuckets("gateway_admin_billing_quota_apply_duration_seconds", quotaApplyBuckets)
 }
 
 // IncBillIssued 出账计数（#8；kind=daily|monthly|overage）。

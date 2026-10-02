@@ -135,3 +135,46 @@ func TestLedger_MetricsOnAppend(t *testing.T) {
 		t.Error("expected ledger entries metric recorded by Append")
 	}
 }
+
+// ---------- 自定义直方图桶 ----------
+
+// TestRegistry_CustomHistogramBuckets 登记自定义桶后，观测值按自定义边界累积。
+func TestRegistry_CustomHistogramBuckets(t *testing.T) {
+	r := NewRegistry()
+	r.RegisterHistogram("test_hist_custom", []float64{1, 5, 60})
+	r.ObserveHistogram("test_hist_custom", nil, 30) // 落 (5,60]
+
+	var buf bytes.Buffer
+	r.Render(&buf)
+	out := buf.String()
+	for _, want := range []string{
+		`test_hist_custom_bucket{le="1"} 0`,
+		`test_hist_custom_bucket{le="5"} 0`,
+		`test_hist_custom_bucket{le="60"} 1`,
+		`test_hist_custom_bucket{le="+Inf"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("缺 %q（自定义桶未生效）:\n%s", want, out)
+		}
+	}
+	// 未登记 → 仍用默认桶（上限 10，无 le=60）
+	r2 := NewRegistry()
+	r2.ObserveHistogram("test_hist_default", nil, 30)
+	var buf2 bytes.Buffer
+	r2.Render(&buf2)
+	if strings.Contains(buf2.String(), `le="60"`) {
+		t.Errorf("未登记不应含自定义桶 le=60:\n%s", buf2.String())
+	}
+	if !strings.Contains(buf2.String(), `le="10"`) {
+		t.Errorf("未登记应含默认桶 le=10:\n%s", buf2.String())
+	}
+}
+
+// TestObserveQuotaApply_CustomBuckets M6（#13）已登记自定义桶（默认上限 10s < SLA 60s）。
+func TestObserveQuotaApply_CustomBuckets(t *testing.T) {
+	ObserveQuotaApply(30) // > 默认上限 10s
+	out := renderDefaultMetrics()
+	if !strings.Contains(out, `gateway_admin_billing_quota_apply_duration_seconds_bucket{le="60"} `) {
+		t.Errorf("M6 直方图应含自定义桶 le=60（否则 >10s 全落 +Inf）:\n%s", out)
+	}
+}
