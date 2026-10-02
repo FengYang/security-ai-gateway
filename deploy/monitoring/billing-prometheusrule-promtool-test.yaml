@@ -8,9 +8,9 @@
 #          Set-Content .billing-promtool-rules.yaml -Encoding utf8
 #   2) 运行：
 #        promtool test rules billing-prometheusrule-promtool-test.yaml
-#      无本地 promtool 时可用官方镜像：
-#        docker run --rm -v "$PWD:/w" -w /w prom/prometheus:v2.53.2 \
-#          promtool test rules billing-prometheusrule-promtool-test.yaml
+#      无本地 promtool 时可用官方镜像（注意镜像 entrypoint 为 prometheus，须 --entrypoint promtool）：
+#        docker run --rm -v "$PWD:/w" -w /w --entrypoint promtool prom/prometheus:v2.53.2 \
+#          test rules billing-prometheusrule-promtool-test.yaml
 #
 # 生成物 `.billing-promtool-rules.yaml` 为构建产物，不入库。
 rule_files:
@@ -246,6 +246,37 @@ tests:
               description: "租户已被冻结超过 24 小时仍未解除（manual / pricing_missing 须人工；reconcile_diff 待对账恢复后自动解冻）。核实冻结原因并升级处置。"
               runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
 
+  # ===== 11) 配额热生效时延 p95 > 60s（M6；#13 直方图自定义桶）=====
+  # 全部观测落 (60,90] 桶 → histogram_quantile(0.95) ≈ 88.5s > 60；for: 10m 后 firing。
+  - name: quota-apply-p95-slow
+    interval: 1m
+    input_series:
+      - series: 'gateway_admin_billing_quota_apply_duration_seconds_bucket{le="0.5"}'
+        values: '0+0x60'
+      - series: 'gateway_admin_billing_quota_apply_duration_seconds_bucket{le="1"}'
+        values: '0+0x60'
+      - series: 'gateway_admin_billing_quota_apply_duration_seconds_bucket{le="60"}'
+        values: '0+0x60'
+      - series: 'gateway_admin_billing_quota_apply_duration_seconds_bucket{le="90"}'
+        values: '0+1x60'
+      - series: 'gateway_admin_billing_quota_apply_duration_seconds_bucket{le="+Inf"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BillingQuotaApplySlowP95
+        exp_alerts: [] # for: 10m 未满
+      - eval_time: 40m
+        alertname: BillingQuotaApplySlowP95
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: billing
+              team: billing-ops
+            exp_annotations:
+              summary: "配额热生效时延 p95 > 60s（M6 违约）"
+              description: "套餐变更『受理 → 回读确认』时延 p95 超过 M6 阈值 60s（§6.4.1）。核查 tee-infer 配额下发（POST /usage/quota）与回读（GET /usage/quota）链路及回读确认预算（m6ApplyWithin）。"
+              runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
   # ===== 9) 健康基线：全部告警静默 =====
   - name: healthy-baseline
     interval: 30s
@@ -268,6 +299,17 @@ tests:
         values: '0+0x120'
       - series: 'gateway_admin_billing_frozen{tenant="t1"}'
         values: '0+0x120'
+      # M6 #13 快路径（p95 ≈ 0.75s < 60 → 静默）
+      - series: 'gateway_admin_billing_quota_apply_duration_seconds_bucket{le="0.5"}'
+        values: '0+9x120'
+      - series: 'gateway_admin_billing_quota_apply_duration_seconds_bucket{le="1"}'
+        values: '0+10x120'
+      - series: 'gateway_admin_billing_quota_apply_duration_seconds_bucket{le="60"}'
+        values: '0+10x120'
+      - series: 'gateway_admin_billing_quota_apply_duration_seconds_bucket{le="90"}'
+        values: '0+10x120'
+      - series: 'gateway_admin_billing_quota_apply_duration_seconds_bucket{le="+Inf"}'
+        values: '0+10x120'
     alert_rule_test:
       - eval_time: 30m
         alertname: BillingLedgerChainBroken
@@ -298,4 +340,7 @@ tests:
         exp_alerts: []
       - eval_time: 30m
         alertname: BillingFrozenSustained
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: BillingQuotaApplySlowP95
         exp_alerts: []

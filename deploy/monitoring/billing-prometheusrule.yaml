@@ -8,7 +8,7 @@
 # promtool 无法直接读 CRD，需先由本文件机械生成"纯规则文件"（顶层 groups:，spec 段去 2 空格缩进）：
 #   PowerShell（在 deploy/monitoring 目录）：
 #     $l = Get-Content billing-prometheusrule.yaml
-#     $i = ($l | Select-String -SimpleMatch '^spec:$').LineNumber
+#     $i = ($l | Select-String '^spec:$' | Select-Object -First 1).LineNumber
 #     ($l[$i..($l.Count-1)] | ForEach-Object { $_.Substring([Math]::Min(2,$_.Length)) }) |
 #       Set-Content .billing-promtool-rules.yaml -Encoding utf8
 #   生成物 `.billing-promtool-rules.yaml` 为构建产物，不入库。
@@ -177,4 +177,22 @@ spec:
           annotations:
             summary: "账单关联校验失败（账单已标记 assoc_mismatch）"
             description: "近 15 分钟出现关联校验失败：账单锚定的账本链尾/审计链尾不可复现。相关账单已标记 assoc_mismatch（不阻断已出账）。人工排查链锚一致性与篡改可能。"
+            runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
+
+        # ---- 配额热生效时延 p95（warning）：M6（§6.4.1）----
+        # 依据：指标 #13 gateway_admin_billing_quota_apply_duration_seconds（已备含 60s 边界自定义桶）。
+        # 窗口 30m：套餐变更为低频事件，短窗样本不足；p95 > 60s 持续 10m → 判定 M6 违约（受理→回读确认）。
+        - alert: BillingQuotaApplySlowP95
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(gateway_admin_billing_quota_apply_duration_seconds_bucket[30m])) by (le)
+            ) > 60
+          for: 10m
+          labels:
+            severity: warning
+            category: billing
+            team: billing-ops
+          annotations:
+            summary: "配额热生效时延 p95 > 60s（M6 违约）"
+            description: "套餐变更『受理 → 回读确认』时延 p95 超过 M6 阈值 60s（§6.4.1）。核查 tee-infer 配额下发（POST /usage/quota）与回读（GET /usage/quota）链路及回读确认预算（m6ApplyWithin）。"
             runbook_url: "docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md"
