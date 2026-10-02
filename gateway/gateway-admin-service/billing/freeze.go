@@ -21,6 +21,8 @@ type FreezeRecord struct {
 type FreezeStore interface {
 	Put(f FreezeRecord) error
 	Get(tenant string) (*FreezeRecord, error)
+	// List 返回全部冻结记录（供自动解冻枚举，B-6.10-2）。
+	List() ([]FreezeRecord, error)
 	Delete(tenant string) error
 }
 
@@ -81,4 +83,23 @@ func (s *sqliteFreezeStore) Delete(tenant string) error {
 		return fmt.Errorf("billing: delete freeze: %w", err)
 	}
 	return nil
+}
+
+// List 返回全部冻结记录（按 tenant_id 升序）。
+func (s *sqliteFreezeStore) List() ([]FreezeRecord, error) {
+	rows, err := s.db.Query(`SELECT tenant_id, reason, severity, frozen_at, until, by
+		FROM freezes ORDER BY tenant_id`)
+	if err != nil {
+		return nil, fmt.Errorf("billing: list freezes: %w", err)
+	}
+	defer rows.Close()
+	var out []FreezeRecord
+	for rows.Next() {
+		var f FreezeRecord
+		if err := rows.Scan(&f.TenantID, &f.Reason, &f.Severity, &f.FrozenAt, &f.Until, &f.By); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
 }

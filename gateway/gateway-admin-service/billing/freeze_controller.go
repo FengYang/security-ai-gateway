@@ -39,6 +39,22 @@ func (c *FreezeController) Frozen(tenant string) (bool, error) {
 	return true, nil
 }
 
+// ListFrozen 返回当前生效（未到期）的冻结记录（供自动解冻枚举，B-6.10-2）。
+func (c *FreezeController) ListFrozen() ([]FreezeRecord, error) {
+	recs, err := c.store.List()
+	if err != nil {
+		return nil, err
+	}
+	var active []FreezeRecord
+	for _, r := range recs {
+		if r.Until != 0 && r.Until <= c.now() {
+			continue // 已自动到期
+		}
+		active = append(active, r)
+	}
+	return active, nil
+}
+
 // Freeze 冻结租户（幂等：已冻结则更新原因/严重级）。落审计 bill_freeze。
 func (c *FreezeController) Freeze(tenant, reason, severity, by string) error {
 	if tenant == "" {

@@ -41,6 +41,9 @@ type Anomaly struct {
 type FreezeLinker interface {
 	Frozen(tenant string) (bool, error)
 	Freeze(tenant, reason, severity, by string) error
+	Unfreeze(tenant, by string) error
+	// ListFrozen 返回当前生效的冻结记录（供自动解冻枚举，B-6.10-2）。
+	ListFrozen() ([]FreezeRecord, error)
 }
 
 // AnomalyDetector 异常检测器（S-5，§6.9）。
@@ -172,6 +175,41 @@ func freezeTriggerKind(k AnomalyKind) bool {
 		return true
 	}
 	return false
+}
+
+// AutoUnfreeze 对「由 reconcile_diff 触发」且对账已恢复（L2 Pass）的冻结执行自动解冻（B-6.10-2）。
+//
+// 仅 `reconcile_diff` 触发者可自动解冻；`manual`/`pricing_missing` 等**不**自动解冻（须人工）。
+// 返回本次解冻的租户数。未注入 FreezeLinker 或 reconciler 时 no-op。
+func (d *AnomalyDetector) AutoUnfreeze(day string) int {
+	if d.freeze == nil || d.reconciler == nil {
+		return 0
+	}
+	recs, err := d.freeze.ListFrozen()
+	if err != nil {
+		log.Printf("[billing] 自动解冻：枚举冻结失败：%v", err)
+		return 0
+	}
+	n := 0
+	for _, r := range recs {
+		if r.Reason != string(KindReconcileDiff) {
+			continue // 仅 reconcile_diff 触发者可自动解冻（B-6.10-2）
+		}
+		res, err := d.reconciler.L2(r.TenantID, day, day)
+		if err != nil {
+			log.Printf("[billing] 自动解冻：对账读取失败 tenant=%s: %v", r.TenantID, err)
+			continue
+		}
+		if !res.Pass {
+			continue // 对账仍未恢复 → 保持冻结
+		}
+		if err := d.freeze.Unfreeze(r.TenantID, "system"); err != nil {
+			log.Printf("[billing] 自动解冻失败 tenant=%s: %v", r.TenantID, err)
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // scanReconcile ② L2 对账差异（§6.9.1 ②）。
