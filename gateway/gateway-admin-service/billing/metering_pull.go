@@ -124,7 +124,9 @@ func (s *teeInferPullSource) Pull(ctx context.Context, fromNs, toNs int64) (*Usa
 		return nil, fmt.Errorf("billing pull: build req: %w", err)
 	}
 	if s.token != "" {
-		req.Header.Set("Authorization", "Bearer "+s.token)
+		// tee-infer 计量端点鉴权头为 `X-Admin-Token`（checkMetering，accepts 管理令牌或只读计量令牌）——
+		// **不是** `Authorization: Bearer`（后者由 tee-infer 忽略 → 受保护实例下恒 401；E2E-1 实测暴露）。
+		req.Header.Set("X-Admin-Token", s.token)
 	}
 
 	resp, err := s.client.Do(req)

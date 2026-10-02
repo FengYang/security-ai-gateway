@@ -216,6 +216,7 @@ func (h *billingHandler) register(mux *http.ServeMux, cfg *config) {
 	mux.HandleFunc(billingAPIBase+"/close-monthly", wrap(h.handleCloseMonthly))
 	mux.HandleFunc(billingAPIBase+"/freeze", wrap(h.handleFreeze))
 	mux.HandleFunc(billingAPIBase+"/unfreeze", wrap(h.handleUnfreeze))
+	mux.HandleFunc(billingAPIBase+"/verify-chain", wrap(h.handleVerifyChain))
 	// 推送消费（§6.3.1）：由 HMAC（X-Signature）鉴权——推送方无管理面 JWT，故**不经** authMiddleware
 	mux.HandleFunc(billingAPIBase+"/events", h.withMetrics(h.handleBillingEvents))
 }
@@ -691,6 +692,39 @@ func (h *billingHandler) handleUnfreeze(w http.ResponseWriter, r *http.Request) 
 	}
 	h.auditAction(r, auditActionBillUnfreeze, req.Tenant)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tenant": req.Tenant})
+}
+
+// ---------- 完整性校验（手动触发） ----------
+
+// handleVerifyChain 手动触发全量完整性校验：账本哈希链（S-6，§7.1.2）+ tee-infer 审计链
+// （REC-6/B-6.12-4，§6.12.4）。
+//
+// 定位：调度器按 `verify_interval` 周期执行同一逻辑（`VerifyChainTask`）；本端点供运维/测试
+// **即时**核对，断裂即置链标志并停出账（fail-closed）。返回账本断链位置（-1 = 完好）。
+func (h *billingHandler) handleVerifyChain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
+		return
+	}
+	if !requireRole(w, r, "admin") {
+		return
+	}
+	if h.svc == nil {
+		writeError(w, http.StatusServiceUnavailable, "计费服务未就绪")
+		return
+	}
+	brokenAt, err := h.svc.VerifyLedgerChain()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	auditErr := h.svc.VerifyAuditChain(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ledger_broken_at": brokenAt,      // -1 = 完好
+		"ledger_broken":    brokenAt >= 0, // 已停出账（fail-closed）
+		"audit_chain_ok":   auditErr == nil,
+	})
 }
 
 // ---------- 辅助 ----------

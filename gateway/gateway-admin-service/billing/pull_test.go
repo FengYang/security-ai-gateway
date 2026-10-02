@@ -3,11 +3,36 @@ package billing
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
 
 // ---------- S-1 增量拉取（§6.1.1） ----------
+
+// TestTEEPullSource_AuthHeader 回归：拉取源须用 tee-infer 计量鉴权头 `X-Admin-Token`
+// （此前误用 `Authorization: Bearer` → 受保护 tee-infer 下恒 401；由 §10.3 E2E-1 暴露）。
+func TestTEEPullSource_AuthHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Admin-Token") != "tok" {
+			http.Error(w, "计量查询认证失败", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tenants":{"t1":{"tokens_in_net":1,"tokens_out_net":1,"requests":1}}}`))
+	}))
+	defer srv.Close()
+
+	src := NewTEEPullSource(srv.URL, "tok", time.Second)
+	win, err := src.Pull(context.Background(), 0, int64(time.Hour))
+	if err != nil {
+		t.Fatalf("Pull err（认证头不符即 401）: %v", err)
+	}
+	if win == nil || win.Tenants["t1"] == nil {
+		t.Fatalf("聚合异常: %+v", win)
+	}
+}
 
 type fakePullSource struct {
 	win   *UsageWindow

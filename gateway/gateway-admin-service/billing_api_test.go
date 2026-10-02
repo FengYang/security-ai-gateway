@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -516,5 +517,49 @@ func TestBillingPlanUpsert_R29(t *testing.T) {
 	// charge + 付费档 + 非 0 单价表 → 200
 	if code := postPlan(`{"id":"pro","name":"专业版","over_quota":"charge","pay_mode":"postpaid","cache_tier":"none","monthly_tokens":1000}`); code != http.StatusOK {
 		t.Fatalf("合法 charge 期望 200，实际 %d", code)
+	}
+}
+
+// TestBillingVerifyChain：手动完整性校验端点（S-6 账本链 + REC-6 审计链）。
+func TestBillingVerifyChain(t *testing.T) {
+	env := newBillingTestEnv(t)
+	adminTok := testSignToken(t, testSecret, claims{
+		Sub: testAdminUser, Role: roleAdmin, Iss: defaultIssuer, Aud: defaultAudience,
+	})
+	auditorTok := testSignToken(t, testSecret, claims{
+		Sub: "bob", Role: roleAuditor, Iss: defaultIssuer, Aud: defaultAudience,
+	})
+	call := func(method, token string) (int, []byte) {
+		req, _ := http.NewRequest(method, env.srv.URL+billingAPIBase+"/verify-chain", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("请求失败: %v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, body
+	}
+
+	if code, _ := call(http.MethodGet, adminTok); code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET 期望 405，实际 %d", code)
+	}
+	if code, _ := call(http.MethodPost, auditorTok); code != http.StatusForbidden {
+		t.Fatalf("auditor 期望 403，实际 %d", code)
+	}
+	code, body := call(http.MethodPost, adminTok)
+	if code != http.StatusOK {
+		t.Fatalf("admin 期望 200，实际 %d body=%s", code, body)
+	}
+	var out struct {
+		LedgerBrokenAt int64 `json:"ledger_broken_at"`
+		LedgerBroken   bool  `json:"ledger_broken"`
+		AuditChainOK   bool  `json:"audit_chain_ok"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("响应解析失败: %v", err)
+	}
+	if out.LedgerBrokenAt != -1 || out.LedgerBroken {
+		t.Fatalf("空账本应链完好（-1/false），got %+v", out)
 	}
 }
