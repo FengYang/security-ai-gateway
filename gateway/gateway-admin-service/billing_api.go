@@ -153,8 +153,10 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 		det := billing.NewAnomalyDetectorForStore(store, priceProvider, rec, cfg.Anomaly,
 			func() int64 { return time.Now().UnixNano() })
 		det.SetFreezeLinker(h.freeze) // S-5 critical 异常 → 冻结（§6.10.1）
-		notifier := billing.NewQuotaNotifier(store.AlertDedup(),
-			billing.NewWebhookAlertSink(cfg.Secrets.AlertWebhookURL, 10*time.Second),
+		// 告警外部交付（Webhook；空 URL → nil 降级）：S-7 余额 + S-9 到期共用
+		alertSink := billing.NewWebhookAlertSink(cfg.Secrets.AlertWebhookURL, 10*time.Second)
+		svc.SetAlertSink(alertSink)
+		notifier := billing.NewQuotaNotifier(store.AlertDedup(), alertSink,
 			func() int64 { return time.Now().UnixNano() })
 		h.sched = billing.NewScheduler(cfg.Schedule, billing.SchedulerTasks{
 			Pull:          billing.PullTask(svc),

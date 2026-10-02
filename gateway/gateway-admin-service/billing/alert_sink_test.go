@@ -42,7 +42,7 @@ func TestWebhookAlertSink_Posts(t *testing.T) {
 	if sink == nil {
 		t.Fatal("sink is nil")
 	}
-	sink("t1", 0.08, "2026-10")
+	sink(AlertEvent{Kind: "quota_low", Tenant: "t1", RemainingRatio: 0.08, Period: "2026-10"})
 
 	select {
 	case p := <-got:
@@ -60,7 +60,9 @@ func TestWebhookAlertSink_Non2xxNoPanic(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-	NewWebhookAlertSink(srv.URL, 2*time.Second)("t1", 0.1, "2026-10") // 不应 panic
+	s1 := NewWebhookAlertSink(srv.URL, 2*time.Second)
+	s1(AlertEvent{Kind: "quota_low", Tenant: "t1"}) // 不应 panic
 
-	NewWebhookAlertSink("http://127.0.0.1:1/unreachable", 500*time.Millisecond)("t1", 0.1, "2026-10")
+	s2 := NewWebhookAlertSink("http://127.0.0.1:1/unreachable", 500*time.Millisecond)
+	s2(AlertEvent{Kind: "quota_low", Tenant: "t1"})
 }

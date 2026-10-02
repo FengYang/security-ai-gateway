@@ -98,3 +98,33 @@ func TestScanExpiriesTask_Runs(t *testing.T) {
 	svc := newTestBillingService(s, nil)
 	ScanExpiriesTask(svc)(context.Background())
 }
+
+// S-9 租户通知：阈值提醒经 AlertSink 交付，且每订阅每阈值仅一次（与指标同闸）
+func TestScanExpiries_Notifies(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	svc := newTestBillingService(s, nil)
+	var events []AlertEvent
+	svc.SetAlertSink(func(e AlertEvent) { events = append(events, e) })
+
+	now := time.Now().UnixNano()
+	bindExpiry(t, s, "t1", now-1, now+25*nsPerDay) // 剩余 25 天 → T-30
+
+	if _, err := svc.ScanExpiries(now); err != nil {
+		t.Fatalf("ScanExpiries err: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %+v, want 1", events)
+	}
+	if events[0].Kind != "plan_expiring" || events[0].Tenant != "t1" || events[0].Days != 30 {
+		t.Errorf("event = %+v, want plan_expiring/t1/30", events[0])
+	}
+
+	// 幂等：重复扫描不重复通知
+	if _, err := svc.ScanExpiries(now); err != nil {
+		t.Fatalf("ScanExpiries#2 err: %v", err)
+	}
+	if len(events) != 1 {
+		t.Errorf("events = %d, want 1 (dedup)", len(events))
+	}
+}

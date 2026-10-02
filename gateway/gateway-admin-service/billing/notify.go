@@ -60,16 +60,28 @@ func (s *sqliteAlertStore) MarkIfNew(tenant, key string, at int64) (bool, error)
 	return n > 0, nil
 }
 
+// AlertEvent 告警事件（外部交付载荷，§6.11 / §6.4.2）。
+type AlertEvent struct {
+	Kind           string  `json:"kind"` // quota_low | plan_expiring
+	Tenant         string  `json:"tenant"`
+	Severity       string  `json:"severity,omitempty"`
+	RemainingRatio float64 `json:"remaining_ratio,omitempty"` // quota_low
+	Period         string  `json:"period,omitempty"`          // quota_low: 月周期；plan_expiring: 到期日（UTC+8）
+	Days           int     `json:"days,omitempty"`            // plan_expiring: 30|7|0
+}
+
+// AlertSink 告警外部交付器（nil = 仅本地日志 + Prometheus 规则）。
+type AlertSink func(event AlertEvent)
+
 // QuotaNotifier 默认通知器：去重（AlertStore）后经 sink 交付；sink=nil 仅本地日志。
 type QuotaNotifier struct {
 	store AlertStore
-	sink  func(tenant string, rem float64, periodKey string) // 可选：邮件/Webhook 交付
+	sink  AlertSink // 可选：邮件/Webhook 交付
 	now   func() int64
 }
 
 // NewQuotaNotifier 构造通知器。sink 可为 nil（仅日志）。
-func NewQuotaNotifier(store AlertStore,
-	sink func(tenant string, rem float64, periodKey string), now func() int64) *QuotaNotifier {
+func NewQuotaNotifier(store AlertStore, sink AlertSink, now func() int64) *QuotaNotifier {
 	if now == nil {
 		now = func() int64 { return 0 }
 	}
@@ -89,24 +101,28 @@ func (n *QuotaNotifier) WarnQuotaLow(tenant string, rem float64, periodKey strin
 	}
 	log.Printf("[billing] 余额告警 tenant=%s period=%s remaining=%.3f", tenant, periodKey, rem)
 	if n.sink != nil {
-		n.sink(tenant, rem, periodKey)
+		sev := string(SeverityWarning)
+		if rem <= 0 {
+			sev = string(SeverityCritical) // B-6.11-2：已耗尽 → critical
+		}
+		n.sink(AlertEvent{Kind: "quota_low", Tenant: tenant, RemainingRatio: rem, Period: periodKey, Severity: sev})
 	}
 	return nil
 }
 
-// ---------- 外部交付 sink（Webhook，§6.11） ----------
+// ---------- 外部交付 sink（Webhook，§6.11 / §6.4.2） ----------
 
-// webhookAlertSink 把配额告警 POST 到外部 Webhook（JSON）。
+// webhookAlertSink 把告警事件 POST 到外部 Webhook（JSON）。
 type webhookAlertSink struct {
 	url    string
 	client *http.Client
 }
 
-// NewWebhookAlertSink 构造 Webhook 交付 sink（供 QuotaNotifier.sink）。
+// NewWebhookAlertSink 构造 Webhook 交付 sink（供配额告警与到期提醒共用）。
 //
 // url 为空 → 返回 nil（调用方按"无外部交付"处理：仅本地日志 + Prometheus 规则）。
-// 交付失败仅记日志、不向上返回错误（fire-and-forget；租约/告知由指标侧兜底）。
-func NewWebhookAlertSink(url string, timeout time.Duration) func(tenant string, rem float64, periodKey string) {
+// 交付失败仅记日志、不向上返回错误（fire-and-forget；可靠性由 Prometheus 规则侧兜底）。
+func NewWebhookAlertSink(url string, timeout time.Duration) AlertSink {
 	if url == "" {
 		return nil
 	}
@@ -117,33 +133,28 @@ func NewWebhookAlertSink(url string, timeout time.Duration) func(tenant string, 
 	return s.deliver
 }
 
-func (s *webhookAlertSink) deliver(tenant string, rem float64, periodKey string) {
-	body, err := json.Marshal(map[string]any{
-		"kind":            "quota_low",
-		"tenant":          tenant,
-		"remaining_ratio": rem,
-		"period":          periodKey,
-	})
+func (s *webhookAlertSink) deliver(event AlertEvent) {
+	body, err := json.Marshal(event)
 	if err != nil {
-		log.Printf("[billing] 告警 Webhook 序列化失败 tenant=%s: %v", tenant, err)
+		log.Printf("[billing] 告警 Webhook 序列化失败 tenant=%s: %v", event.Tenant, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.client.Timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url, bytes.NewReader(body))
 	if err != nil {
-		log.Printf("[billing] 告警 Webhook 构造失败 tenant=%s: %v", tenant, err)
+		log.Printf("[billing] 告警 Webhook 构造失败 tenant=%s: %v", event.Tenant, err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
-		log.Printf("[billing] 告警 Webhook 投递失败 tenant=%s: %v", tenant, err)
+		log.Printf("[billing] 告警 Webhook 投递失败 tenant=%s: %v", event.Tenant, err)
 		return
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body) // 排空以复用连接
 	if resp.StatusCode >= 300 {
-		log.Printf("[billing] 告警 Webhook 返回 %d tenant=%s", resp.StatusCode, tenant)
+		log.Printf("[billing] 告警 Webhook 返回 %d tenant=%s", resp.StatusCode, event.Tenant)
 	}
 }

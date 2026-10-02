@@ -65,6 +65,16 @@ func (s *BillingService) ScanExpiries(now int64) (ExpiryReport, error) {
 				continue // 该订阅该阈值已提醒
 			}
 			IncPlanExpiring(th) // 指标 #21
+			// 通知租户（§6.4.2；与指标同闸（fresh）→ 每订阅每阈值仅一次）
+			if s.alertSink != nil {
+				s.alertSink(AlertEvent{
+					Kind:     "plan_expiring",
+					Tenant:   sub.TenantID,
+					Days:     th,
+					Severity: string(SeverityWarning),
+					Period:   dayOfNs(sub.ExpiresAt), // 到期日（UTC+8）
+				})
+			}
 			switch th {
 			case 30:
 				rep.Days30++

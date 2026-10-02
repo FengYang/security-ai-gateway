@@ -32,8 +32,8 @@ func TestQuotaNotifier_Dedup(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
 	var got []string
-	n := NewQuotaNotifier(s.AlertDedup(), func(tenant string, rem float64, periodKey string) {
-		got = append(got, tenant+"@"+periodKey)
+	n := NewQuotaNotifier(s.AlertDedup(), func(e AlertEvent) {
+		got = append(got, e.Tenant+"@"+e.Period)
 	}, func() int64 { return 1 })
 
 	if err := n.WarnQuotaLow("t1", 0.10, "2026-10"); err != nil {

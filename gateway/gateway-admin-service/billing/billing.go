@@ -36,10 +36,16 @@ type BillingService struct {
 	// 对账回补（§6.12.3）：(tenant,day) 进程内幂等，避免同 warning 反复触发
 	repullMu sync.Mutex
 	repulled map[string]bool
+
+	// 告警外部交付（S-7 余额 / S-9 到期；nil = 仅本地日志 + Prometheus 规则）
+	alertSink AlertSink
 }
 
 // SetSigner 注入账单签名器（T7b）。
 func (s *BillingService) SetSigner(sig BillSigner) { s.signer = sig }
+
+// SetAlertSink 注入告警外部交付器（S-7 余额 / S-9 到期；nil = 仅本地日志 + Prometheus 规则）。
+func (s *BillingService) SetAlertSink(sink AlertSink) { s.alertSink = sink }
 
 // SetAuditAnchor 注入审计链锚定提供者（T7b）。
 func (s *BillingService) SetAuditAnchor(a AuditAnchorProvider) { s.auditAnchor = a }
