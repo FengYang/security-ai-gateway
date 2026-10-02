@@ -86,6 +86,9 @@ type ScheduleConfig struct {
 	// 与 period 段同源（LoadBillingConfig 同步），供调度器按"每月某日某刻"触发 CloseMonthly。
 	MonthlyCloseDay int
 	MonthlyCloseAt  string
+
+	// PullInterval 增量拉取周期（S-1，§6.16）。与 source.pull_interval 同源（避免重复定义）。
+	PullInterval time.Duration
 }
 
 type SecretsConfig struct {
@@ -160,6 +163,8 @@ func LoadBillingConfig() (*BillingConfig, error) {
 	// 月结触发（同步自 period 段；§6.16 S-3）
 	cfg.Schedule.MonthlyCloseDay = cfg.Period.MonthlyCloseDay
 	cfg.Schedule.MonthlyCloseAt = cfg.Period.MonthlyCloseAt
+	// 增量拉取周期（同步自 source 段；§6.16 S-1）
+	cfg.Schedule.PullInterval = cfg.Source.PullInterval
 
 	// Secrets
 	cfg.Secrets.EventsSecretRef = os.Getenv(envPrefix + "SECRETS_EVENTS_SECRET_REF")

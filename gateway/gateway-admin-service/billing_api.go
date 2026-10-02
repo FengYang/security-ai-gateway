@@ -59,7 +59,7 @@ func (h *billingHandler) StartSchedulers(ctx context.Context) {
 		return
 	}
 	h.sched.Start(ctx)
-	log.Printf("[billing] 后台调度已启动：S-3 月结 + S-5 异常扫描 + S-6 链校验 + S-7 余额告警 + S-8 缺口扫描（回看 %d 天，启动即执行一次 + 每 24h）+ S-9 到期扫描 + S-10 关联校验", h.backfillDays)
+	log.Printf("[billing] 后台调度已启动：S-1 增量拉取 + S-3 月结 + S-5 异常扫描 + S-6 链校验 + S-7 余额告警 + S-8 缺口扫描（回看 %d 天，启动即执行一次 + 每 24h）+ S-9 到期扫描 + S-10 关联校验", h.backfillDays)
 }
 
 // Close 停止后台任务（幂等；不关闭 store——store 生命周期由调用方管理）。
@@ -109,6 +109,7 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 	}
 
 	// 后台调度（T8）：
+	//   S-1  增量拉取（每 source.pull_interval；入账受 sync_mode 单写者门控）
 	//   S-3  月结（每月 monthly_close_day @ monthly_close_at；结算"上月"，幂等）
 	//   S-5  异常扫描（每 anomaly_scan_interval；四类规则 → 指标 #10/#12）
 	//   S-6  链校验（每 verify_interval；断裂 → 停出账，fail-closed）
@@ -116,15 +117,15 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 	//   S-8  缺口扫描（启动即一次 + 每日；补齐漏跑日账 + 日结后预热 A-37）
 	//   S-9  到期扫描（每 expiry_scan_interval；T-30/7/0 提醒 → 指标 #21，不自动降级）
 	//   S-10 关联校验（每 verify_assoc_interval；不符 → 标记 assoc_mismatch，不阻断）
-	// 说明：S-2「日结」由 S-8 覆盖（缺口扫描每日执行，等价于"确保截至昨日已出账"）；
-	// S-1 的接线见进度跟踪文档"剩余项"。L2 对账（reconciler）当前未接线，
-	// 故 S-5 规则② 在现状下为空操作（nil 跳过），规则①③④ 生效。
+	// 说明：S-2「日结」由 S-8 覆盖（缺口扫描每日执行，等价于"确保截至昨日已出账"）。
+	// L2 对账（reconciler）当前未接线，故 S-5 规则② 在现状下为空操作（nil 跳过），规则①③④ 生效。
 	if cfg.Schedule.Enabled {
 		det := billing.NewAnomalyDetectorForStore(store, priceProvider, nil, cfg.Anomaly,
 			func() int64 { return time.Now().UnixNano() })
 		notifier := billing.NewQuotaNotifier(store.AlertDedup(), nil,
 			func() int64 { return time.Now().UnixNano() })
 		h.sched = billing.NewScheduler(cfg.Schedule, billing.SchedulerTasks{
+			Pull:          billing.PullTask(svc),
 			CloseMonthly:  billing.CloseMonthlyTask(svc),
 			ScanAnomalies: billing.ScanAnomaliesTask(det),
 			CheckQuota:    billing.CheckQuotaTask(det, notifier),
@@ -141,9 +142,12 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 		svc.SetSigner(h.signer)
 	}
 
-	// 配额下发器（经 tee-infer）
+	// 配额下发器（经 tee-infer）+ S-1 增量拉取源（复用同一计量令牌）
 	if tok, ok := resolveSecretRef(cfg.Source.AdminTokenRef); ok {
 		h.applier = billing.NewHTTPQuotaApplier(cfg.Source.TEEURL, string(tok), 10*time.Second)
+		svc.SetMeteringSource(
+			billing.NewTEEPullSource(cfg.Source.TEEURL, string(tok), 30*time.Second),
+			cfg.Source.PullLookback, cfg.Source.SyncMode)
 	}
 
 	return h, nil

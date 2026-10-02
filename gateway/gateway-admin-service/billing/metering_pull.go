@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 )
@@ -15,6 +16,48 @@ import (
 type PullSource interface {
 	// Pull 拉取 [fromNs, toNs) 区间的计量增量（左闭右开，UTC 纳秒）。
 	Pull(ctx context.Context, fromNs, toNs int64) (*UsageWindow, error)
+}
+
+// SetMeteringSource 注入增量拉取源与参数（S-1，§6.1.1）。
+// lookback: 重叠回补窗口（R-7）；syncMode: 账本单写者（A-12/R-30）。
+func (s *BillingService) SetMeteringSource(src PullSource, lookback time.Duration, syncMode string) {
+	s.source = src
+	s.pullLookback = lookback
+	s.syncMode = syncMode
+}
+
+// pullOnce 单次增量拉取 [now-lookback, now) 并入账（S-1，§6.1.1）。
+//
+// 时钟回拨（B-6.1-3）：`now < 上次轮询时刻` → 记指标 #17 并跳过本轮（防"负区间"）。
+// 拉取/入账失败 → 记指标 #5 `error`；**游标为滑动窗口 `now-lookback`，不因失败而丢失数据**
+// （下轮重拉同区间，`event_key` 幂等去重 B-6.1-8）。成功入账的 #5 `ok` 由 `IngestWindow` 发射。
+func (s *BillingService) pullOnce(ctx context.Context) {
+	if s.source == nil {
+		return
+	}
+	now := s.now()
+	if now < s.lastPollNs {
+		IncClockSkew() // 指标 #17（唯一生产者）
+		s.lastPollNs = now
+		return
+	}
+	s.lastPollNs = now
+
+	win, err := s.source.Pull(ctx, now-int64(s.pullLookback), now)
+	if err != nil {
+		IncPull("error") // 不推进游标（下轮重拉，幂等）
+		log.Printf("[billing] S-1 拉取失败：%v", err)
+		return
+	}
+	if win == nil {
+		IncPull("ok")
+		return
+	}
+	if _, err := s.IngestWindow(ctx, win, s.syncMode); err != nil {
+		IncPull("error")
+		log.Printf("[billing] S-1 入账失败：%v", err)
+		return
+	}
 }
 
 // teeInferPullSource 调用 tee-infer GET /usage?from=&to= 的实现。

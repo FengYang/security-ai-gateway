@@ -50,6 +50,8 @@ func (s *Scheduler) Start(ctx context.Context) {
 	}
 	s.stop = make(chan struct{})
 
+	// S-1 增量拉取（可重入；guard 仅防重叠轮次）
+	s.spawn(ctx, "S-1-pull", s.cfg.PullInterval, s.tasks.Pull)
 	// S-5 异常扫描
 	s.spawn(ctx, "S-5-anomaly", s.cfg.AnomalyScanInterval, s.tasks.ScanAnomalies)
 	// S-6 链校验
@@ -123,6 +125,14 @@ func BackfillTask(svc *BillingService, lookbackDays int) func(context.Context) {
 				rep.Tenants, rep.Missing, rep.Closed, rep.Skipped, rep.Failed)
 		}
 	}
+}
+
+// PullTask 构造 S-1 增量拉取任务（§6.1.1 / §6.16）。
+//
+// 调度器按 `source.pull_interval` 提供周期（≡ 文档 `RunMeteringLoop` 的 ticker）；
+// 单轮 `pullOnce` 可重入，重叠窗口由 `event_key` 幂等去重（B-6.1-8）。
+func PullTask(svc *BillingService) func(context.Context) {
+	return func(ctx context.Context) { svc.pullOnce(ctx) }
 }
 
 // CloseMonthlyTask 构造 S-3 月结任务（§6.7 / §6.16）：对全部租户结算「上月」。

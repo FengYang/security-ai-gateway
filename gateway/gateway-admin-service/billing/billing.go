@@ -25,6 +25,12 @@ type BillingService struct {
 	auditAnchor AuditAnchorProvider // nil = 不锚定审计链（T7b）
 	monthStdCache *CachedMonthStd   // nil = 未启用月累计缓存（A-37）
 	now         func() int64
+
+	// S-1 增量拉取（§6.1.1）
+	source       PullSource    // nil = 不拉取
+	pullLookback time.Duration // 重叠回补窗口（R-7）
+	syncMode     string        // 账本单写者（A-12/R-30）
+	lastPollNs   int64         // 上次轮询时刻（时钟回拨保护 B-6.1-3）
 }
 
 // SetSigner 注入账单签名器（T7b）。
