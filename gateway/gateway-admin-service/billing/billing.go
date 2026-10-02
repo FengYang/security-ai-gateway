@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 )
 
@@ -31,6 +32,10 @@ type BillingService struct {
 	pullLookback time.Duration // 重叠回补窗口（R-7）
 	syncMode     string        // 账本单写者（A-12/R-30）
 	lastPollNs   int64         // 上次轮询时刻（时钟回拨保护 B-6.1-3）
+
+	// 对账回补（§6.12.3）：(tenant,day) 进程内幂等，避免同 warning 反复触发
+	repullMu sync.Mutex
+	repulled map[string]bool
 }
 
 // SetSigner 注入账单签名器（T7b）。
@@ -409,6 +414,11 @@ func (s *BillingService) gateL2(tenant, dayFrom, dayTo string) (string, error) {
 	}
 	SetReconcileDiff(tenant, res.Ratio) // 指标 #11（M1 判据）
 	if !res.Pass {
+		// §6.12.3 软分支：0<ratio≤alertRatio（ShouldFrz=false）→ 非阻塞排一次重叠窗口回补；
+		// 不改变"diff>0 一律不出账"硬门禁（A-22）。硬分支（ratio>0.1%）由 S-5 判定冻结。
+		if !res.ShouldFrz {
+			s.onReconcileWarning(tenant, dayTo)
+		}
 		return fmt.Sprintf("diff=%d ratio=%.6f", res.Diff, res.Ratio), nil
 	}
 	return "", nil

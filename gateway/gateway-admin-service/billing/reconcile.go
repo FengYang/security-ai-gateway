@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -79,8 +80,8 @@ func (r *Reconciler) L2(tenant, dayFrom, dayTo string) (L2Result, error) {
 	return L2Result{
 		Diff:      diff,
 		Ratio:     ratio,
-		Pass:      diff == 0,             // 零容差硬门禁
-		ShouldFrz: ratio > r.alertRatio,  // A-22：>0.1% 冻结候选
+		Pass:      diff == 0,            // 零容差硬门禁
+		ShouldFrz: ratio > r.alertRatio, // A-22：>0.1% 冻结候选
 	}, nil
 }
 
@@ -148,4 +149,60 @@ func dayRangeNs(dayFrom, dayTo string) (int64, int64, error) {
 		return 0, 0, fmt.Errorf("billing: net reader: bad dayTo %q: %w", dayTo, err)
 	}
 	return from.UnixNano(), to.AddDate(0, 0, 1).UnixNano(), nil
+}
+
+// ---------- 对账回补重拉（§6.12.3 软分支，指标 #20） ----------
+
+// onReconcileWarning L2 软分支（0<ratio≤alertRatio）→ 非阻塞排一次"重叠窗口回补"重拉（§6.12.3）。
+//
+// 窗口加宽为 2×pull_lookback（仅本次，回补迟到数据）；入账幂等由 `event_key` 兜底（§6.3.4）。
+// 幂等：同 (tenant,day) 进程内**仅一次**（同 warning 不反复触发）。指标 #20 `auto_repull_total`
+// 的**唯一生产者**。未注入拉取源 / lookback 非法时 no-op。
+func (s *BillingService) onReconcileWarning(tenant, day string) {
+	if s.source == nil || s.pullLookback <= 0 {
+		return
+	}
+	if !s.markRepulledOnce(tenant, day) {
+		return // 同 (tenant,day) 已排过回补
+	}
+	widen := 2 * s.pullLookback // 窗口加倍（仅本次）
+	go func() {
+		defer IncAutoRepull() // 指标 #20
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s.repullWindowed(ctx, widen)
+	}()
+}
+
+// repullWindowed 以加宽窗口重拉并入账（回补；与常规拉取同 `event_key`，不重复入账）。
+func (s *BillingService) repullWindowed(ctx context.Context, widen time.Duration) {
+	now := s.now()
+	win, err := s.source.Pull(ctx, now-int64(widen), now)
+	if err != nil {
+		IncPull("error")
+		log.Printf("[billing] 对账回补重拉失败：%v", err)
+		return
+	}
+	if win == nil {
+		return
+	}
+	if _, err := s.IngestWindow(ctx, win, s.syncMode); err != nil {
+		IncPull("error")
+		log.Printf("[billing] 对账回补入账失败：%v", err)
+	}
+}
+
+// markRepulledOnce 幂等标记 (tenant,day) 回补已排；返回 true = 首次。
+func (s *BillingService) markRepulledOnce(tenant, day string) bool {
+	key := tenant + "|" + day
+	s.repullMu.Lock()
+	defer s.repullMu.Unlock()
+	if s.repulled == nil {
+		s.repulled = map[string]bool{}
+	}
+	if s.repulled[key] {
+		return false
+	}
+	s.repulled[key] = true
+	return true
 }
