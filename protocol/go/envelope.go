@@ -65,6 +65,31 @@ const SuiteSM4GCM byte = 2
 // envelopeNoncePrefix nonce 固定前缀（与其他 GCM 用途的 nonce 空间域分离）。
 var envelopeNoncePrefix = []byte("OTPE")
 
+// 方向子密钥 HKDF info 域分离标签（wire 常量，双端必须逐字一致）。
+//
+// **单一事实源**：`cryptoops.DeriveSubkey`（Go 服务/sidecar 内联派生）与插件侧
+// `cryptop sidecar /v1/kdf`（R8-P1-1：插件经本 info 派生方向子密钥 KeyRef）**共同引用**本函数，
+// 避免两处字面量漂移导致插件信封与 tee-infer `OpenEnvelope` 不可互通。
+const (
+	// subkeyInfoC2S 客户端→TEE 方向子密钥 info。
+	subkeyInfoC2S = "otpmask/kdf/enc/c2s/v1"
+	// subkeyInfoS2C TEE→客户端方向子密钥 info。
+	subkeyInfoS2C = "otpmask/kdf/enc/s2c/v1"
+)
+
+// EnvelopeSubkeyInfo 返回方向子密钥的 HKDF info 标签字节（B-5.1-3 冻结）。
+// 两个合法方向恒返回非 nil；未知方向返回 nil（调用方应 fail-closed 拒绝）。
+func EnvelopeSubkeyInfo(dir Direction) []byte {
+	switch dir {
+	case DirectionC2S:
+		return []byte(subkeyInfoC2S)
+	case DirectionS2C:
+		return []byte(subkeyInfoS2C)
+	default:
+		return nil
+	}
+}
+
 // 段① 信封绑定的南向端点（AAD endpoint 字段取值）。
 // 双端常量对齐，不随网关路由别名漂移（如 tee-infer 的 /infer 别名仍绑定 /v1/infer）。
 const (

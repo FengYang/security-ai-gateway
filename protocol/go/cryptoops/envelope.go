@@ -103,12 +103,14 @@ func suiteKeySize(suite byte) int {
 	}
 }
 
-// subkeyInfo 方向子密钥 HKDF info（域分离标签）。
+// subkeyInfo 方向子密钥 HKDF info（域分离标签）——**单一事实源在 `protocol.EnvelopeSubkeyInfo`**。
 // 标签随**方向**不随 suite（§7.2：KDF 域标签保持不变，算法随 profile）——故 AES 与 SM4
 // 子密钥**前缀相同属预期**（HKDF-Expand 截断）；二者算法不同且长度分派由 suiteKeySize 保证。
-var subkeyInfo = map[protocol.Direction][]byte{
-	protocol.DirectionC2S: []byte("otpmask/kdf/enc/c2s/v1"),
-	protocol.DirectionS2C: []byte("otpmask/kdf/enc/s2c/v1"),
+//
+// v1.7（R8-P1-1）：字面量收敛至 `protocol/go` framing 包，插件侧经 `/v1/kdf` 引用同一函数，
+// 杜绝"插件派生 info ≠ cryptoops 派生 info"导致信封不可互通的整类缺陷。
+func subkeyInfo(dir protocol.Direction) []byte {
+	return protocol.EnvelopeSubkeyInfo(dir)
 }
 
 // DeriveSubkey 从会话 K_enc 派生方向子密钥（HKDF-SHA256 域分离），**输出长度随 suite**。
@@ -117,8 +119,8 @@ var subkeyInfo = map[protocol.Direction][]byte{
 // v1.2 修复 N-P0-1：签名增 `suite` 形参——v1.1 硬编码 32B 时，sm 档进程解 AES wire（需 32B）
 // 与解 SM4 wire（需 16B）无法同时成立 ⇒ 双读不可实现。**open 侧须先读 wire `Envelope.Suite` 再派生**。
 func DeriveSubkey(kEnc []byte, dir protocol.Direction, suite byte) ([]byte, error) {
-	info, ok := subkeyInfo[dir]
-	if !ok {
+	info := subkeyInfo(dir)
+	if info == nil {
 		return nil, fmt.Errorf("envelope: 未知方向 %d", byte(dir))
 	}
 	n := suiteKeySize(suite)

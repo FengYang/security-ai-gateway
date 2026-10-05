@@ -397,6 +397,39 @@ func (c *Client) Verify(ref *KeyRef, pub, data, sig []byte, alg string, cb func(
 	})
 }
 
+// KDF /v1/kdf（§4.3.6）：从父 KeyRef 派生子密钥，**仅返回子 KeyRef**（不返回密钥字节，C-5）。
+//
+// 用途（v1.7 R8-P1-1）：信封方向子密钥派生。`SessionBegin` 返回的 `key_ref_enc` 是**原始 K_enc**，
+// 而信封 AEAD key 是 `DeriveSubkey(kEnc,dir,suite)`（info = `otpmask/kdf/enc/{c2s,s2c}/v1`）——**非** K_enc。
+// 故插件须在 `SessionBegin` 后以 salt=nil、info=`protocol.EnvelopeSubkeyInfo(dir)`、outLen=32 派生
+// 两个方向子密钥 KeyRef，再以之调 `Seal`/`Open`（§4.3.4 / §5.4.5）。
+func (c *Client) KDF(ref KeyRef, salt, info []byte, outLen int, alias string, cb func(child KeyRef, err error)) {
+	req := map[string]any{
+		"key_ref": string(ref),
+		"salt":    b64(salt),
+		"info":    b64(info),
+		"out_len": outLen,
+		"alias":   alias,
+	}
+	c.call(OpKDF, pathKDF, nil, req, func(body []byte, err error) {
+		if err != nil {
+			cb("", err)
+			return
+		}
+		var r struct{ KeyRef string `json:"key_ref"` }
+		if e := c.decode(OpKDF, body, &r); e != nil {
+			cb("", e)
+			return
+		}
+		if r.KeyRef == "" {
+			c.fail(OpKDF)
+			cb("", ErrMalformed)
+			return
+		}
+		cb(KeyRef(r.KeyRef), nil)
+	})
+}
+
 // MaskStream /v1/mask/stream（§4.3.7）：取 count 个 [0,modulus) 掩码元素。
 // 掩码版本由构造期 Config.MaskVersion 经 X-OTPMask-MaskVersion 头下发（B-5.3-1）。
 func (c *Client) MaskStream(ref KeyRef, domain []byte, count int, modulus uint64, cb func(vals []uint64, err error)) {

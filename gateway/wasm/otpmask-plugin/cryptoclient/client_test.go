@@ -275,6 +275,55 @@ func TestMaskStreamSendsVersionHeader(t *testing.T) {
 	}
 }
 
+// TestKDFReturnsChildKeyRef 校验 /v1/kdf 映射（R8-P1-1：信封方向子密钥派生）。
+// 出参仅子 KeyRef（C-5：不返回密钥字节）。
+func TestKDFReturnsChildKeyRef(t *testing.T) {
+	m := &mockTransport{resp: `{"key_ref":"session/ab/enc/c2s"}`}
+	c, rm := newClient(m, Config{})
+	var child KeyRef
+	var gotErr error
+	c.KDF("session/ab/enc", nil, []byte("otpmask/kdf/enc/c2s/v1"), 32, "otpmask/kdf/enc/c2s/v1",
+		func(kr KeyRef, err error) { child, gotErr = kr, err })
+	if gotErr != nil {
+		t.Fatalf("KDF: %v", gotErr)
+	}
+	if child != "session/ab/enc/c2s" {
+		t.Fatalf("子 KeyRef 错: %q", child)
+	}
+	call := lastCall(t, m)
+	if call.path != pathKDF {
+		t.Fatalf("path=%s", call.path)
+	}
+	if bodyField(t, call, "key_ref") != "session/ab/enc" {
+		t.Fatalf("父 key_ref 字段错")
+	}
+	if bodyField(t, call, "alias") != "otpmask/kdf/enc/c2s/v1" {
+		t.Fatalf("alias 字段错")
+	}
+	var body map[string]any
+	_ = json.Unmarshal(call.body, &body)
+	if body["out_len"] != float64(32) {
+		t.Fatalf("out_len 字段错: %v", body["out_len"])
+	}
+	if len(rm.calls) != 1 || rm.calls[0] != OpKDF {
+		t.Fatalf("#13 应记 kdf: %v", rm.calls)
+	}
+}
+
+// TestKDFEmptyChildIsFailClosed 校验空 key_ref（sidecar 未注册/异常）→ fail-closed（C-4）。
+func TestKDFEmptyChildIsFailClosed(t *testing.T) {
+	m := &mockTransport{resp: `{}`}
+	c, rm := newClient(m, Config{})
+	var gotErr error
+	c.KDF("x", nil, nil, 32, "alias", func(_ KeyRef, err error) { gotErr = err })
+	if !errors.Is(gotErr, ErrMalformed) {
+		t.Fatalf("空子 ref 应 fail-closed，得 %v", gotErr)
+	}
+	if len(rm.failclosed) != 1 || rm.failclosed[0] != OpKDF {
+		t.Fatalf("#14 应记 kdf: %v", rm.failclosed)
+	}
+}
+
 func TestSessionBeginEnd(t *testing.T) {
 	m := &mockTransport{resp: `{"key_ref_sig":"session/ab/sig","key_ref_enc":"session/ab/enc","client_pub":"Q0M="}`}
 	c, _ := newClient(m, Config{TimeoutMS: 50})
