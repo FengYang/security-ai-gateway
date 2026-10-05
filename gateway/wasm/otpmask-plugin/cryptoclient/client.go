@@ -323,9 +323,17 @@ func (c *Client) HMAC(ref KeyRef, data []byte, cb func(mac []byte, err error)) {
 	})
 }
 
-// Seal /v1/seal：AEAD 封装。nonce 为空时由 sidecar 生成（返回生成的 nonce）。
-func (c *Client) Seal(ref KeyRef, aad, pt []byte, cb func(nonce, ct []byte, err error)) {
+// Seal /v1/seal：AEAD 封装。
+//
+// nonce 语义（§4.3.4 `nonce?`）：
+//   - `len(nonce)==0` → 请求体不含 `nonce` 字段，由 **sidecar 生成**（返回生成的 nonce）；
+//   - `len(nonce)>0` → **使用调用方给定 nonce**（信封路径必须传确定性 `protocol.EnvelopeNonce(counter)`，
+//     与 tee-infer `OpenEnvelope` 的 nonce 派生一致，否则信封不可互通——§5.4.6 / R8-P1-1）。
+func (c *Client) Seal(ref KeyRef, aad, nonce, pt []byte, cb func(nonce, ct []byte, err error)) {
 	req := map[string]any{"key_ref": string(ref), "aad": b64(aad), "plaintext": b64(pt)}
+	if len(nonce) > 0 {
+		req["nonce"] = b64(nonce)
+	}
 	c.call(OpSeal, pathSeal, nil, req, func(body []byte, err error) {
 		if err != nil {
 			cb(nil, nil, err)

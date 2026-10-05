@@ -153,7 +153,7 @@ func TestSealDecodesMockResponse(t *testing.T) {
 	c, rm := newClient(m, Config{})
 	var gotNonce, gotCT []byte
 	var gotErr error
-	c.Seal("static/aead", []byte("aad"), []byte("pt"), func(nonce, ct []byte, err error) {
+	c.Seal("static/aead", []byte("aad"), nil, []byte("pt"), func(nonce, ct []byte, err error) {
 		gotNonce, gotCT, gotErr = nonce, ct, err
 	})
 	if gotErr != nil {
@@ -172,11 +172,36 @@ func TestSealDecodesMockResponse(t *testing.T) {
 	if bodyField(t, call, "key_ref") != "static/aead" {
 		t.Fatalf("key_ref 字段错")
 	}
+	// nonce 为空 → 请求体**不含** nonce 字段（由 sidecar 生成，§4.3.4）。
+	var body map[string]any
+	_ = json.Unmarshal(call.body, &body)
+	if _, present := body["nonce"]; present {
+		t.Fatalf("空 nonce 不应出现在请求体: %v", body)
+	}
 	if len(rm.calls) != 1 || rm.calls[0] != OpSeal {
 		t.Fatalf("#13 应记 seal: %v", rm.calls)
 	}
 	if len(rm.failclosed) != 0 {
 		t.Fatalf("成功不应计 #14: %v", rm.failclosed)
+	}
+}
+
+// TestSealSendsExplicitNonce 校验信封路径的确定性 nonce 透传（§5.4.6 / R8-P1-1）：
+// 非空 nonce 必须出现在请求体，使 sidecar 用 `EnvelopeNonce(counter)` 封装（与 tee-infer 互通）。
+func TestSealSendsExplicitNonce(t *testing.T) {
+	m := &mockTransport{resp: `{"nonce":"QkJCQkJCQkJCQkJCQkJC","ciphertext":"Q0M="}`}
+	c, _ := newClient(m, Config{})
+	nonce := []byte("OTPE\x00\x00\x00\x00\x00\x00\x00\x01")
+	c.Seal("session/ab/enc/c2s", []byte("aad"), nonce, []byte("pt"), func(_, _ []byte, err error) {
+		if err != nil {
+			t.Fatalf("Seal: %v", err)
+		}
+	})
+	call := lastCall(t, m)
+	var body map[string]any
+	_ = json.Unmarshal(call.body, &body)
+	if body["nonce"] != b64(nonce) {
+		t.Fatalf("nonce 未透传: got %v want %s", body["nonce"], b64(nonce))
 	}
 }
 
