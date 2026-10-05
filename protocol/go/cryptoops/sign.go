@@ -8,37 +8,23 @@ package cryptoops
 import (
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/binary"
 
 	protocol "security-ai-gateway/protocol/go"
 )
 
-// signMessage 计算 HMAC-SHA256 签名。
+// signMessage 计算 HMAC-SHA256 签名（求值部分）。
+// 待签名消息的 framing（`request_id || ts || nonce || payload`）复用 framing 包
+// `protocol.SignMessageInput`，与插件经 sidecar `/v1/hmac` 的构造**逐字节一致**。
 func signMessage(kSig []byte, reqID string, ts int64, nonce, payload []byte) []byte {
 	mac := hmac.New(sha256.New, kSig)
-	_, _ = mac.Write([]byte(reqID))
-	var tsb [8]byte
-	binary.BigEndian.PutUint64(tsb[:], uint64(ts))
-	_, _ = mac.Write(tsb[:])
-	_, _ = mac.Write(nonce)
-	_, _ = mac.Write(payload)
+	_, _ = mac.Write(protocol.SignMessageInput(reqID, ts, nonce, payload))
 	return mac.Sum(nil)
 }
 
 // SignRequest 对请求签名（覆盖 request_id || ts || nonce || 向量负载 || 密文文本 || text 载荷）。
 // 返回的签名写入 req.Signature。
 func SignRequest(kSig []byte, req *protocol.InferenceRequest) {
-	payload := make([]byte, 0)
-	payload = protocol.PutString(payload, req.Model)
-	payload = protocol.PutUint64(payload, uint64(req.MaxNewTokens))
-	payload = protocol.PutUint64(payload, uint64(len(req.CipherVectors)))
-	for _, v := range req.CipherVectors {
-		payload = append(payload, protocol.EncodeVector(v)...)
-	}
-	payload = protocol.PutBytes(payload, req.CipherText)  // M9-4：密文文本纳入签名
-	payload = protocol.PutBytes(payload, req.TextPayload) // P2/P5：text 载荷纳入签名
-	payload = protocol.PutUint64(payload, protocol.BoolWord(req.Stream))
-	req.Signature = signMessage(kSig, req.RequestID, req.TimestampNS, req.Nonce, payload)
+	req.Signature = signMessage(kSig, req.RequestID, req.TimestampNS, req.Nonce, protocol.RequestSignPayload(req))
 }
 
 // VerifyRequest 校验请求签名（HMAC 常量时间比较）。
@@ -50,11 +36,7 @@ func VerifyRequest(kSig []byte, req *protocol.InferenceRequest) bool {
 
 // SignResponse 对响应签名。
 func SignResponse(kSig []byte, resp *protocol.InferenceResponse) {
-	payload := make([]byte, 0)
-	payload = protocol.PutUint64(payload, uint64(resp.Status))
-	payload = append(payload, protocol.EncodeVector(resp.CipherOutput)...)
-	payload = protocol.PutUint64(payload, uint64(resp.TokensGenerated))
-	resp.Signature = signMessage(kSig, resp.RequestID, resp.TimestampNS, nil, payload)
+	resp.Signature = signMessage(kSig, resp.RequestID, resp.TimestampNS, nil, protocol.ResponseSignPayload(resp))
 }
 
 // VerifyResponse 校验响应签名。
