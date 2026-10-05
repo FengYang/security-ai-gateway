@@ -28,6 +28,7 @@ import (
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 
+	"security-ai-gateway/gateway/wasm/otpmask-plugin/cryptoclient"
 	"security-ai-gateway/protocol/go"
 	"security-ai-gateway/protocol/go/cryptoops"
 )
@@ -108,6 +109,19 @@ type PluginConfig struct {
 	// 本插件仅在启用且上游未带 label meta（SawLabel=false）时于流首注入一次（去重语义）。
 	ContentLabelEnabled bool   `json:"content_label_enabled"`
 	ContentLabelText    string `json:"content_label_text"` // 空 = 缺省「内容由人工智能生成」
+
+	// ---- P0-4 §12.3：cryptop sidecar 接线（插件零密码，全部密码经此唯一 HTTP 面）----
+	// 必填：未配置 crypto_service 时插件无任何本地密码实现，密码路径一律 fail-closed（C-4/R-11）。
+	CryptoService              string `json:"crypto_service"`       // sidecar cluster FQDN
+	CryptoServicePort          int64  `json:"crypto_service_port"` // sidecar 端口
+	CryptoProfile              string `json:"crypto_profile"`      // intl | sm-software | sm-module（R-17 须与 sidecar 一致）
+	MaskPRG                    string `json:"mask_prg"`            // hmac-sha256 | sm4 | bridge（R-21）
+	SigKeyRef                  string `json:"sig_key_ref"`         // 协议签名密钥 KeyRef（替代 sig_key 明文）
+	JWTSecretRef               string `json:"jwt_secret_ref"`      // 门户 JWT 密钥 KeyRef（替代 jwt_secret 明文）
+	RouteVerifyKeyRef          string `json:"route_verify_key_ref"`
+	CryptoCallTimeoutMS        int64  `json:"crypto_call_timeout_ms"`      // R-3（缺省 50）
+	CryptoCircuitThreshold     int64  `json:"crypto_circuit_threshold"`    // R-4（缺省 5）
+	CryptoCircuitCooldownMS    int64  `json:"crypto_circuit_cooldown_ms"`  // R-4（缺省 30000）
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -146,6 +160,27 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	// B1 强标标识（默认 off；空文案兜底缺省，文案合规性由注入点侧 fail-closed 校验承担）。
 	config.ContentLabelEnabled = json.Get("content_label_enabled").Bool()
 	config.ContentLabelText = json.Get("content_label_text").String()
+	// P0-4 §12.3：cryptop sidecar 接线配置（缺省 intl/50ms/5 次/30s）。
+	config.CryptoService = json.Get("crypto_service").String()
+	config.CryptoServicePort = json.Get("crypto_service_port").Int()
+	config.CryptoProfile = json.Get("crypto_profile").String()
+	config.MaskPRG = json.Get("mask_prg").String()
+	config.SigKeyRef = json.Get("sig_key_ref").String()
+	config.JWTSecretRef = json.Get("jwt_secret_ref").String()
+	config.RouteVerifyKeyRef = json.Get("route_verify_key_ref").String()
+	config.CryptoCallTimeoutMS = json.Get("crypto_call_timeout_ms").Int()
+	config.CryptoCircuitThreshold = json.Get("crypto_circuit_threshold").Int()
+	config.CryptoCircuitCooldownMS = json.Get("crypto_circuit_cooldown_ms").Int()
+	if config.CryptoProfile == "" {
+		config.CryptoProfile = "intl"
+	}
+	if config.MaskPRG == "" {
+		if config.CryptoProfile == "intl" {
+			config.MaskPRG = cryptoclient.MaskPRGHMAC
+		} else {
+			config.MaskPRG = cryptoclient.MaskPRGSM4
+		}
+	}
 	if config.ContentLabelText == "" {
 		config.ContentLabelText = defaultContentLabelText
 	}
@@ -208,6 +243,8 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	initCredentialRuntime(*config)
 	// 限流表拉取（Phase 1 门禁 #7 / 判据 5；未启用则零影响：不拉取、不介入请求）。
 	initRateLimitRuntime(*config, log)
+	// P0-4 §12.3：装配 cryptop sidecar 客户端 + 启动期载入 capabilities（R-18）。
+	initCryptoRuntime(*config, log)
 	log.Infof("otpmask-plugin: 配置已加载 config_version=%q mask_modulus=%d model=%q embedding=%s:%d tee=%s:%d require_auth=%v",
 		orStr(config.ConfigVersion, "unset"), config.MaskModulus, config.Model, config.EmbeddingService, config.EmbeddingPort,
 		config.TEEService, config.TEEPort, config.RequireAuth)

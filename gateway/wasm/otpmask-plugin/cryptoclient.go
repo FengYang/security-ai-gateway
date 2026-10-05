@@ -18,10 +18,84 @@ import (
 	"time"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
+	logs "github.com/higress-group/wasm-go/pkg/log"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 
 	"security-ai-gateway/gateway/wasm/otpmask-plugin/cryptoclient"
+	"security-ai-gateway/protocol/go"
 )
+
+// ---- 插件级 sidecar 客户端与运行时状态（§12.3 / §4.7）----
+//
+// proxy-wasm 单线程回调语义：全局变量按「配置期写入、请求期只读」使用，无需原子。
+var (
+	// CryptoClient 插件唯一密码 HTTP 面（§4.7）。未配置 crypto_service 时为 nil——
+	// 密码路径一律 fail-closed（C-4/R-11：无本地回退）。
+	CryptoClient *cryptoclient.Client
+	// cryptoSuite wire 信封 suite 字节（1=AES-GCM / 2=SM4-GCM），由 /v1/capabilities 载入（§5.1）。
+	cryptoSuite byte = protocol.SuiteAESGCM
+	// cryptoProfile sidecar 生效 profile（intl|sm-software|sm-module），供日志/校验。
+	cryptoProfile = "intl"
+	// cryptoReady 启动期 /v1/capabilities 校验通过（R-17/R-18）——未就绪时密码路径 fail-closed。
+	cryptoReady bool
+)
+
+// defaultCryptoServicePort sidecar 缺省端口（19097；与 gateway-admin 的 19095/19096 相邻空闲档）。
+const defaultCryptoServicePort int64 = 19097
+
+// cryptoCircuitCooldownR4 R-4 缺省熔断冷却（30s）。
+const cryptoCircuitCooldownR4 = 30 * time.Second
+
+// initCryptoRuntime 装配 sidecar 客户端并启动期载入 capabilities（R-18）。
+//
+// ⚠️ parseConfig 同步、proxy-wasm 无阻塞 HTTP：R-18「启动拒」以 **fail-closed 就绪位** 落地——
+// capabilities 未成功载入前 `cryptoReady=false`，所有密码调用即拒绝（C-4，不降级），
+// 效果等价于启动拒（不下沉任何明文/密文）。
+func initCryptoRuntime(config PluginConfig, log logs.Log) {
+	if config.CryptoService == "" {
+		CryptoClient = nil
+		cryptoReady = false
+		log.Warnf("otpmask-plugin: 未配置 crypto_service → 全部密码路径 fail-closed（C-4/R-11）")
+		return
+	}
+	port := config.CryptoServicePort
+	if port == 0 {
+		port = defaultCryptoServicePort
+	}
+	timeout := uint32(config.CryptoCallTimeoutMS)
+	if timeout == 0 {
+		timeout = cryptoclient.DefaultTimeoutMS // R-3
+	}
+	threshold := int(config.CryptoCircuitThreshold)
+	if threshold <= 0 {
+		threshold = 5 // R-4
+	}
+	cooldown := time.Duration(config.CryptoCircuitCooldownMS) * time.Millisecond
+	if cooldown <= 0 {
+		cooldown = cryptoCircuitCooldownR4 // R-4
+	}
+	CryptoClient = newPluginCryptoClient(config.CryptoService, port, timeout, config.MaskPRG, threshold, cooldown)
+	cryptoReady = false
+	CryptoClient.LoadCapabilities(func(caps cryptoclient.Capabilities, err error) {
+		if err != nil {
+			log.Errorf("otpmask-plugin: sidecar capabilities 载入失败（R-18）: %v（密码路径 fail-closed）", err)
+			return
+		}
+		if caps.Profile != config.CryptoProfile {
+			log.Errorf("otpmask-plugin: crypto_profile 不一致：插件=%q sidecar=%q（R-17，密码路径 fail-closed）",
+				config.CryptoProfile, caps.Profile)
+			return
+		}
+		cryptoSuite = byte(caps.Suite)
+		cryptoProfile = caps.Profile
+		cryptoReady = true
+		log.Infof("otpmask-plugin: cryptop sidecar 就绪 profile=%s suite=%d mask_prg=%s note=%q",
+			caps.Profile, caps.Suite, caps.MaskPRG, caps.ComplianceNote)
+	})
+}
+
+// cryptoUsable 密码路径可用性（客户端已装配 + 就绪位）。
+func cryptoUsable() bool { return CryptoClient != nil && cryptoReady }
 
 // ---- Transport（出站经 Envoy cluster）----
 
