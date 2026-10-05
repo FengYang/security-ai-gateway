@@ -200,15 +200,15 @@ func BenchmarkFill(b *testing.B) {
 	}
 }
 
-// TestZeroize 清零后 seed 不再可读。
+// TestZeroize 清零后 PRG 与缓冲被断开。
 func TestZeroize(t *testing.T) {
 	seed := randomSeed(t)
 	s, _ := NewStream(seed, 1<<32)
 	_ = s.Next()
 	s.Zeroize()
-	// Zeroize 后字段被置 nil；再次调用 Next 会 panic（nil seed），
-	// 但测试只验证 Zeroize 本身不 panic 且 seed 引用被断开。
-	if s.seed != nil || s.domain != nil {
+	// Zeroize 后 prg/buf 被置 nil；再次调用 Next 会 panic（nil prg），
+	// 但测试只验证 Zeroize 本身不 panic 且内部引用被断开。
+	if s.prg != nil || s.buf != nil {
 		t.Fatal("Zeroize 未清理内部状态")
 	}
 }

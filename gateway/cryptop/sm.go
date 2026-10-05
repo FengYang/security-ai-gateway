@@ -34,6 +34,7 @@ import (
 
 const (
 	smSymmetricKeySize = 16 // SM4 分组 128 位
+	smBlockSize        = 16 // SM4 分组长度（CTR keystream 每块字节数）
 	smNonceSize        = 12 // GCM 标准 nonce
 	smHashSize         = sm3.Size
 	smPrivKeySize      = 32 // SM2 私钥标量长度
@@ -140,6 +141,38 @@ func (p *smProvider) KDF(secret, salt, info []byte, outLen int) ([]byte, error) 
 	z = append(z, l[:]...)
 	z = append(z, info...)
 	return kdf.Kdf(sm3.New, z, outLen), nil
+}
+
+// Keystream sm 档：**SM4-CTR keystream**（只取流，不做认证）。
+//
+// 计数器块 = Hash(domain) 前 8 字节（域分离，防跨用途碰撞）‖ BE64(counter)；
+// 逐块 SM4 加密计数器块取 16 字节流，counter 递增。key 长度须 = SM4 分组密钥 16B。
+func (p *smProvider) Keystream(key, domain []byte, counter uint64, n int) ([]byte, error) {
+	if n < 0 {
+		return nil, errors.New("cryptop: Keystream 长度非法")
+	}
+	if n == 0 {
+		return []byte{}, nil
+	}
+	if len(key) != smSymmetricKeySize {
+		return nil, ErrInvalidKeySize
+	}
+	blk, err := sm4.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	dh := p.Hash(domain) // SM3(domain)
+	out := make([]byte, 0, n+smBlockSize)
+	var ctrBlk [16]byte
+	for len(out) < n {
+		copy(ctrBlk[:8], dh[:8])
+		binary.BigEndian.PutUint64(ctrBlk[8:], counter)
+		var ks [16]byte
+		blk.Encrypt(ks[:], ctrBlk[:])
+		out = append(out, ks[:]...)
+		counter++
+	}
+	return out[:n], nil
 }
 
 // pad32 左侧补零至 SM2 私钥标量长度（D.Bytes() 可能省略前导零）。

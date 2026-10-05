@@ -9,6 +9,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"io"
 )
@@ -117,6 +118,38 @@ func (p *intlProvider) KDF(secret, salt, info []byte, outLen int) ([]byte, error
 		return nil, err
 	}
 	return out, nil
+}
+
+// Keystream intl 档：HMAC-SHA256 PRG，**逐字节等价 cipher/mask 现役实现**
+// （`cipher/mask/mask.go` 每个候选元素 = HMAC-SHA256(seed, BE64(counter)‖domain) 前 8 字节）。
+//
+// 输出 = concat_{k=0..} HMAC-SHA256(key, BE64(counter+k)‖domain)[:8]，截断到 n 字节。
+// 仅产流不做认证（掩码"打散"用）。与 cipher/mask 的 hmacPRG 逐字节一致（T-5.3-8）。
+// key 长度须 = intlSymmetricKeySize（32B，随 profile）——fail-closed 防误配（如误传 sm 16B 密钥）。
+func (p *intlProvider) Keystream(key, domain []byte, counter uint64, n int) ([]byte, error) {
+	if n < 0 {
+		return nil, errors.New("cryptop: Keystream 长度非法")
+	}
+	if n == 0 {
+		return []byte{}, nil
+	}
+	if len(key) != intlSymmetricKeySize {
+		return nil, ErrInvalidKeySize
+	}
+	out := make([]byte, 0, n+8)
+	var ctr [8]byte
+	for len(out) < n {
+		binary.BigEndian.PutUint64(ctr[:], counter)
+		mac := hmac.New(sha256.New, key)
+		_, _ = mac.Write(ctr[:]) // hash.Hash.Write 按规范永不返回错误
+		if len(domain) > 0 {
+			_, _ = mac.Write(domain)
+		}
+		sum := mac.Sum(nil)
+		out = append(out, sum[:8]...)
+		counter++
+	}
+	return out[:n], nil
 }
 
 func (p *intlProvider) GenerateECDHKeyPair() ([]byte, []byte, error) {

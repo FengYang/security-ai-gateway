@@ -93,6 +93,14 @@ type Provider interface {
 	// KDF 密钥派生（intl=HKDF-SHA256；sm-*=基于 SM3 的 KDF）。
 	KDF(secret, salt, info []byte, outLen int) ([]byte, error)
 
+	// Keystream 生成确定性密钥流（P0-4 §5.3.2；19→20 方法）。
+	//   intl = HMAC-SHA256 PRG（每个 8 字节块 = HMAC-SHA256(key, BE64(counter+k)‖domain) 前 8 字节，
+	//          **等价 cipher/mask 现役实现**，保向后兼容与 T-5.3-8 逐字节一致）；
+	//   sm   = SM4-CTR keystream（IV = Hash(domain) 前 8 字节 ‖ BE64(counter)，逐块递增）。
+	// domain 为域分离标签；counter 为流起点（BE64 块号）；n 为请求字节数（≥0；上限见 §4.3 R-8）。
+	// ⚠️ 本原语只产流、不做认证（掩码"打散"用，完整性由上层保证）——不得用于替代 AEAD。
+	Keystream(key, domain []byte, counter uint64, n int) ([]byte, error)
+
 	// GenerateECDHKeyPair 生成密钥协商密钥对，返回 (私钥, 公钥) 字节（intl=X25519；sm-*=SM2）。
 	GenerateECDHKeyPair() (priv, pub []byte, err error)
 	// ECDH 密钥协商（intl=X25519；sm-*=SM2 密钥交换）。
