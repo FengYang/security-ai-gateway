@@ -13,7 +13,7 @@
 // 信封 wire（Varint + length-prefixed，与既有消息风格一致）：
 //
 //	varint version      信封格式版本（当前 1）
-//	varint suite        密码套件 ID（1 = AES-256-GCM；国密 SM4-GCM 预留）
+//	varint suite        密码套件 ID（1 = AES-256-GCM；2 = SM4-GCM，国密 S2 §5.1.2）
 //	byte  direction     1 = c2s（网关→TEE），2 = s2c（TEE→网关）
 //	8 字节大端 counter  64bit 单调计数器
 //	bytes ciphertext    varint 长度 + AEAD 密文（含 16 字节 GCM tag）
@@ -76,14 +76,34 @@ var subkeyInfo = map[Direction][]byte{
 	DirectionS2C: []byte("otpmask/kdf/enc/s2c/v1"),
 }
 
-// DeriveSubkey 从会话 K_enc 派生方向子密钥（HKDF-SHA256 域分离）。
+// suiteKeySize 子密钥长度随 suite（§5.1.2 不变式 3）：AES-256-GCM→32；SM4-GCM→16；
+// 未知 suite→0（调用点据 0 返回协议错误，**fail-closed**——不得默认 32，否则 sm 档解 SM4 wire 不可实现）。
+func suiteKeySize(suite byte) int {
+	switch suite {
+	case SuiteAESGCM:
+		return 32
+	case SuiteSM4GCM:
+		return sm4GCMSuiteKeyLen
+	default:
+		return 0
+	}
+}
+
+// DeriveSubkey 从会话 K_enc 派生方向子密钥（HKDF-SHA256 域分离），**输出长度随 suite**。
 // K_enc 仅存在于两端（插件内存 / tee-infer 会话）；子密钥由调用方用后零化。
-func DeriveSubkey(kEnc []byte, dir Direction) ([]byte, error) {
+//
+// v1.2 修复 N-P0-1：签名增 `suite` 形参——v1.1 硬编码 32B 时，sm 档进程解 AES wire（需 32B）
+// 与解 SM4 wire（需 16B）无法同时成立 ⇒ 双读不可实现。**open 侧须先读 wire `Envelope.Suite` 再派生**。
+func DeriveSubkey(kEnc []byte, dir Direction, suite byte) ([]byte, error) {
 	info, ok := subkeyInfo[dir]
 	if !ok {
 		return nil, fmt.Errorf("envelope: 未知方向 %d", byte(dir))
 	}
-	return hkdfSHA256(kEnc, nil, info, 32), nil
+	n := suiteKeySize(suite)
+	if n == 0 {
+		return nil, fmt.Errorf("envelope: 未知密码套件 %d（无法派生密钥）", suite)
+	}
+	return hkdfSHA256(kEnc, nil, info, n), nil
 }
 
 // envelopeNonce 由计数器确定性派生 12 字节 GCM nonce。
@@ -239,18 +259,31 @@ func DecodeEnvelope(data []byte) (*Envelope, error) {
 // SealEnvelope 以会话 K_enc 加密明文（默认 AES-256-GCM）并编码信封 wire。
 // counter 由发送方保证同一方向下唯一（单调递增即可）。
 func SealEnvelope(kEnc []byte, sessionID, endpoint string, dir Direction, counter uint64, plaintext []byte) ([]byte, error) {
-	subkey, err := DeriveSubkey(kEnc, dir)
+	return SealEnvelopeWithSuite(kEnc, SuiteAESGCM, sessionID, endpoint, dir, counter, plaintext)
+}
+
+// SealEnvelopeWithSuite 以调用者指定的 suite 加密明文并编码信封 wire（国密 S2 §5.1.2）。
+//
+// suite = 本端本次会话协商出的套件（AES→32B / SM4→16B 密钥），密钥长度随 suite 派生
+// （`suiteKeySize`）。该 suite 必须已 `RegisterSuite`，否则 fail-closed。
+// 既有 `SealEnvelope` 即 `SealEnvelopeWithSuite(..., SuiteAESGCM, ...)`（保 wire 语义不变）。
+func SealEnvelopeWithSuite(kEnc []byte, suite byte, sessionID, endpoint string, dir Direction, counter uint64, plaintext []byte) ([]byte, error) {
+	s, err := suiteFor(suite)
+	if err != nil {
+		return nil, err
+	}
+	subkey, err := DeriveSubkey(kEnc, dir, suite)
 	if err != nil {
 		return nil, err
 	}
 	defer wipeSlice(subkey)
-	ct, err := aesGCMSuite{}.Seal(subkey, envelopeNonce(counter), EnvelopeAAD(sessionID, dir, counter, endpoint), plaintext)
+	ct, err := s.Seal(subkey, envelopeNonce(counter), EnvelopeAAD(sessionID, dir, counter, endpoint), plaintext)
 	if err != nil {
 		return nil, err
 	}
 	return EncodeEnvelope(&Envelope{
 		Version:    EnvelopeVersion,
-		Suite:      SuiteAESGCM,
+		Suite:      suite,
 		Direction:  dir,
 		Counter:    counter,
 		Ciphertext: ct,
@@ -274,7 +307,9 @@ func OpenEnvelope(kEnc []byte, sessionID, endpoint string, expectDir Direction, 
 	if err != nil {
 		return nil, 0, err
 	}
-	subkey, err := DeriveSubkey(kEnc, expectDir)
+	// 先按 wire suite 派生（长度随 suite：AES 32B / SM4 16B），再解密——
+	// sm 档进程据此可解 AES(Suite=1) 与 SM4(Suite=2) 两种 wire（双读，§5.1.3；未知 suite 已在 suiteFor 拒绝）。
+	subkey, err := DeriveSubkey(kEnc, expectDir, e.Suite)
 	if err != nil {
 		return nil, 0, err
 	}

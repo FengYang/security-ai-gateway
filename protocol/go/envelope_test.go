@@ -72,8 +72,8 @@ func TestEnvelopeDirectionMismatch(t *testing.T) {
 		t.Fatal("方向不匹配未被拒绝")
 	}
 	// 方向子密钥独立（c2s/s2c 派生结果不同）
-	kc2s, _ := DeriveSubkey(testKEnc(), DirectionC2S)
-	ks2c, _ := DeriveSubkey(testKEnc(), DirectionS2C)
+	kc2s, _ := DeriveSubkey(testKEnc(), DirectionC2S, SuiteAESGCM)
+	ks2c, _ := DeriveSubkey(testKEnc(), DirectionS2C, SuiteAESGCM)
 	if bytes.Equal(kc2s, ks2c) {
 		t.Fatal("方向子密钥不应相同")
 	}
@@ -156,7 +156,13 @@ func TestCryptoSuiteSeam(t *testing.T) {
 	if err := RegisterSuite(xorTestSuite{}); err == nil {
 		t.Fatal("重复注册未被拒绝")
 	}
-	subkey, err := DeriveSubkey(testKEnc(), DirectionC2S)
+	// 注册表可解析已注册套件
+	if _, err := suiteFor(0xEE); err != nil {
+		t.Fatalf("suiteFor 未解析已注册套件: %v", err)
+	}
+	// 接缝套件直接往返（v1.2 起 DeriveSubkey 长度按 suiteKeySize 闭合集分派：
+	// AES→32 / SM4→16；故 0xEE 这类测试套件的密钥用 AES 长度派生，验套件自身 Seal/Open 接缝）
+	subkey, err := DeriveSubkey(testKEnc(), DirectionC2S, SuiteAESGCM)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,17 +170,17 @@ func TestCryptoSuiteSeam(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	pt, err := xorTestSuite{}.Open(subkey, envelopeNonce(4), EnvelopeAAD("sess-1", DirectionC2S, 4, "/v1/infer"), ct)
+	if err != nil || !bytes.Equal(pt, []byte("sm4-placeholder")) {
+		t.Fatalf("接缝套件往返不一致: %q err=%v", pt, err)
+	}
+	// 非闭合集 suite（0xEE 已注册但 suiteKeySize 不识）经 OpenEnvelope 派生失败 ⇒ fail-closed
 	wire, err := EncodeEnvelope(&Envelope{Version: EnvelopeVersion, Suite: 0xEE, Direction: DirectionC2S, Counter: 4, Ciphertext: ct})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// OpenEnvelope 按 wire 套件 ID 分派到已注册套件
-	pt, counter, err := OpenEnvelope(testKEnc(), "sess-1", "/v1/infer", DirectionC2S, wire)
-	if err != nil {
-		t.Fatalf("接缝套件解密失败: %v", err)
-	}
-	if !bytes.Equal(pt, []byte("sm4-placeholder")) || counter != 4 {
-		t.Fatalf("接缝套件往返不一致: %q counter=%d", pt, counter)
+	if _, _, err := OpenEnvelope(testKEnc(), "sess-1", "/v1/infer", DirectionC2S, wire); err == nil {
+		t.Fatal("非闭合集 suite 的信封未被拒绝（应 fail-closed）")
 	}
 }
 
