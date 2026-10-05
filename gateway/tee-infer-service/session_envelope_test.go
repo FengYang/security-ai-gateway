@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 // setupCompletedSession 建立已完成会话并返回（会话、客户端派生 K_enc）。
@@ -50,7 +51,7 @@ func TestSessionKeyIsolation(t *testing.T) {
 		t.Fatal("不同会话 K_sig 相同（隔离失败）")
 	}
 	// 会话 1 的 c2s 信封投给会话 2 的入口 → 拒绝（K_enc 不同）
-	wire1, err := protocol.SealEnvelope(kenc1, s1.ID, protocol.EndpointInfer, protocol.DirectionC2S, 1, []byte("x"))
+	wire1, err := cryptoops.SealEnvelope(kenc1, s1.ID, protocol.EndpointInfer, protocol.DirectionC2S, 1, []byte("x"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +59,7 @@ func TestSessionKeyIsolation(t *testing.T) {
 		t.Fatal("跨会话信封未被拒绝（密钥隔离失败）")
 	}
 	// 会话 2 自身信封正常
-	wire2, err := protocol.SealEnvelope(kenc2, s2.ID, protocol.EndpointInfer, protocol.DirectionC2S, 1, []byte("x"))
+	wire2, err := cryptoops.SealEnvelope(kenc2, s2.ID, protocol.EndpointInfer, protocol.DirectionC2S, 1, []byte("x"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestSessionKeyIsolation(t *testing.T) {
 		t.Fatalf("会话自身信封被拒: %v", err)
 	}
 	// sessionID 混淆：会话 2 密钥 + 会话 1 sessionID（AAD 绑定）→ 拒绝
-	wire3, err := protocol.SealEnvelope(kenc2, s1.ID, protocol.EndpointInfer, protocol.DirectionC2S, 2, []byte("x"))
+	wire3, err := cryptoops.SealEnvelope(kenc2, s1.ID, protocol.EndpointInfer, protocol.DirectionC2S, 2, []byte("x"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +80,7 @@ func TestSessionKeyIsolation(t *testing.T) {
 func TestSessionEnvelopeReplayServer(t *testing.T) {
 	s, kenc := setupCompletedSession(t)
 	seal := func(counter uint64, pt string) []byte {
-		w, err := protocol.SealEnvelope(kenc, s.ID, protocol.EndpointKeyIssue, protocol.DirectionC2S, counter, []byte(pt))
+		w, err := cryptoops.SealEnvelope(kenc, s.ID, protocol.EndpointKeyIssue, protocol.DirectionC2S, counter, []byte(pt))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -121,7 +122,7 @@ func TestSessionEnvelopeReplayServer(t *testing.T) {
 // TestSessionDestroyAndZeroize 会话销毁：seal/open 拒绝 + K_enc/K_sig 零化（best-effort）。
 func TestSessionDestroyAndZeroize(t *testing.T) {
 	s, kenc := setupCompletedSession(t)
-	wire, err := protocol.SealEnvelope(kenc, s.ID, protocol.EndpointInfer, protocol.DirectionC2S, 1, []byte("x"))
+	wire, err := cryptoops.SealEnvelope(kenc, s.ID, protocol.EndpointInfer, protocol.DirectionC2S, 1, []byte("x"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +186,7 @@ func TestSessionPlaintextFailClosed(t *testing.T) {
 		t.Fatalf("dev 模式明文入口应放行，got %d", resp2.StatusCode)
 	}
 	// dev 模式下响应出口仍为 s2c 信封（出口不降级）
-	if _, _, err := protocol.OpenEnvelope(kenc, sessionID, protocol.EndpointKeyIssue, protocol.DirectionS2C, mustReadAll(t, resp2.Body)); err != nil {
+	if _, _, err := cryptoops.OpenEnvelope(kenc, sessionID, protocol.EndpointKeyIssue, protocol.DirectionS2C, mustReadAll(t, resp2.Body)); err != nil {
 		t.Fatalf("dev 模式响应应为 s2c 信封（出口不降级）: %v", err)
 	}
 }

@@ -4,18 +4,14 @@
 // v1.0 曾让 `sm4GCMSuite{p}.Seal` 直接复用 `p.Seal`——但 `Provider.Seal` 的算法由 p 的
 // profile 决定，在 intl 进程里它会执行 AES-GCM 却对外声明 `SuiteID()==2`（SM4），即
 // "贴错标签的密码算法"。故本套件**仅可绑定 sm-* provider**，构造期断言，不符即拒。
-
-package protocol
+package cryptoops
 
 import (
 	"fmt"
 
 	"security-ai-gateway/gateway/cryptop"
+	protocol "security-ai-gateway/protocol/go"
 )
-
-// SuiteSM4GCM 国密密码套件：SM4-GCM。
-// wire suite 字节恒为 2（`SuiteAESGCM=1` 已冻结，B-5.1-3——新增 suite 不得改变既有 suite 的字节值）。
-const SuiteSM4GCM byte = 2
 
 // sm4GCMSuiteKeyLen SM4 分组密钥长度（GB/T 32907，128 位）。
 const sm4GCMSuiteKeyLen = 16
@@ -41,8 +37,8 @@ func newSM4Suite(p cryptop.Provider) (CryptoSuite, error) {
 }
 
 // RegisterSM4Suite 以 sm provider 构造并注册 SM4-GCM suite（§5.1.2 注册矩阵的装配入口）。
-// 套件 ID 进程内唯一：`SuiteSM4GCM` 已注册则返回错误（`RegisterSuite` 语义）。
-// 注：`SuiteAESGCM` 由 envelope.go 内置标准库实现默认注册，intl/sm 两档皆可解 AES wire（双读）。
+// 套件 ID 进程内唯一：`protocol.SuiteSM4GCM` 已注册则返回错误（`RegisterSuite` 语义）。
+// 注：`protocol.SuiteAESGCM` 由本包内置标准库实现默认注册，intl/sm 两档皆可解 AES wire（双读）。
 func RegisterSM4Suite(p cryptop.Provider) error {
 	s, err := newSM4Suite(p)
 	if err != nil {
@@ -51,7 +47,7 @@ func RegisterSM4Suite(p cryptop.Provider) error {
 	return RegisterSuite(s)
 }
 
-func (s sm4GCMSuite) SuiteID() byte { return SuiteSM4GCM }
+func (s sm4GCMSuite) SuiteID() byte { return protocol.SuiteSM4GCM }
 
 // Seal 以 SM4-GCM 封装；key 长度须 = 16B（显式校验，不符返回 cryptop.ErrInvalidKeySize → fail-closed，G-2）。
 func (s sm4GCMSuite) Seal(key, nonce, aad, plaintext []byte) ([]byte, error) {

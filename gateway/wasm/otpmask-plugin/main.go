@@ -29,6 +29,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 func main() {}
@@ -639,7 +640,7 @@ func finishTextFlow(ctx wrapper.HttpContext, config PluginConfig, req *textReque
 				infReq.CipherText = ct
 			}
 			if kSig := requestK_sig(config); kSig != nil {
-				protocol.SignRequest(kSig, infReq)
+				cryptoops.SignRequest(kSig, infReq)
 			}
 			encBody, err := protocol.EncodeRequest(infReq)
 			if err != nil {
@@ -723,7 +724,7 @@ func finishTextDirect(ctx wrapper.HttpContext, config PluginConfig, req *textReq
 		infReq.CipherText = ct
 	}
 	if kSig := requestK_sig(config); kSig != nil {
-		protocol.SignRequest(kSig, infReq)
+		cryptoops.SignRequest(kSig, infReq)
 	}
 	encBody, err := protocol.EncodeRequest(infReq)
 	if err != nil {
@@ -928,7 +929,7 @@ func processOutputBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 		log.Warnf("otpmask-plugin: 非协议/非 mock 响应，透传错误体: %v", err)
 		return body, true
 	}
-	if kSig := requestK_sig(config); kSig != nil && !protocol.VerifyResponse(kSig, resp) {
+	if kSig := requestK_sig(config); kSig != nil && !cryptoops.VerifyResponse(kSig, resp) {
 		log.Errorf("otpmask-plugin: 响应签名无效 req=%s", resp.RequestID[:8])
 		return nil, false
 	}

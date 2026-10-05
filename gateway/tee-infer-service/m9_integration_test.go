@@ -21,6 +21,7 @@ import (
 	"security-ai-gateway/gateway/tee-infer-service/model"
 	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 const testAttest = "m9-test-attest-token"
@@ -129,7 +130,7 @@ func TestRemoteAttestationE2E(t *testing.T) {
 	// 5. 用会话 K_sig 签发密钥并推理（X-Session-ID 头；P1c 段① 信封全链路）
 	// key/issue：请求体入 c2s 信封（counter=1），响应从 s2c 信封解出
 	keyBody, _ := json.Marshal(map[string]string{"model": "mock", "request_id": nextTestRequestID("ses")})
-	keySealed, err := protocol.SealEnvelope(clientKenc, ar.SessionID, protocol.EndpointKeyIssue, protocol.DirectionC2S, 1, keyBody)
+	keySealed, err := cryptoops.SealEnvelope(clientKenc, ar.SessionID, protocol.EndpointKeyIssue, protocol.DirectionC2S, 1, keyBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +144,7 @@ func TestRemoteAttestationE2E(t *testing.T) {
 		raw, _ := io.ReadAll(keyResp.Body)
 		t.Fatalf("会话 key/issue 返回 %d: %s", keyResp.StatusCode, string(raw))
 	}
-	keyPlain, _, err := protocol.OpenEnvelope(clientKenc, ar.SessionID, protocol.EndpointKeyIssue, protocol.DirectionS2C, mustReadAll(t, keyResp.Body))
+	keyPlain, _, err := cryptoops.OpenEnvelope(clientKenc, ar.SessionID, protocol.EndpointKeyIssue, protocol.DirectionS2C, mustReadAll(t, keyResp.Body))
 	if err != nil {
 		t.Fatalf("key/issue 响应信封解密失败: %v", err)
 	}
@@ -171,10 +172,10 @@ func TestRemoteAttestationE2E(t *testing.T) {
 		EngineType:    protocol.EngineTypeTEEGPU,
 		AttestType:    protocol.AttestTypeQuote,
 	}
-	protocol.SignRequest(clientKsig, infReq) // 会话 K_sig 签名
+	cryptoops.SignRequest(clientKsig, infReq) // 会话 K_sig 签名
 	enc, _ := protocol.EncodeRequest(infReq)
 	// infer：请求体入 c2s 信封（counter=2，与 key/issue 共享 c2s 计数器——插件侧同语义）
-	infSealed, err := protocol.SealEnvelope(clientKenc, ar.SessionID, protocol.EndpointInfer, protocol.DirectionC2S, 2, enc)
+	infSealed, err := cryptoops.SealEnvelope(clientKenc, ar.SessionID, protocol.EndpointInfer, protocol.DirectionC2S, 2, enc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +191,7 @@ func TestRemoteAttestationE2E(t *testing.T) {
 		t.Fatalf("会话 infer 返回 %d: %s", infResp.StatusCode, string(raw))
 	}
 	// 响应从 s2c 信封解出（counter=2：key/issue 响应已用 1）
-	infPlain, _, err := protocol.OpenEnvelope(clientKenc, ar.SessionID, protocol.EndpointInfer, protocol.DirectionS2C, mustReadAll(t, infResp.Body))
+	infPlain, _, err := cryptoops.OpenEnvelope(clientKenc, ar.SessionID, protocol.EndpointInfer, protocol.DirectionS2C, mustReadAll(t, infResp.Body))
 	if err != nil {
 		t.Fatalf("infer 响应信封解密失败: %v", err)
 	}
@@ -198,7 +199,7 @@ func TestRemoteAttestationE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("响应解码失败: %v", err)
 	}
-	if !protocol.VerifyResponse(clientKsig, protoResp) {
+	if !cryptoops.VerifyResponse(clientKsig, protoResp) {
 		t.Fatal("会话 K_sig 响应验签失败")
 	}
 
@@ -502,7 +503,7 @@ func buildInfer(t *testing.T, srv *teeServer, seed []byte, nonceHex, text string
 		CipherVectors: []protocol.CipherVector{{Data: cipherVec}},
 		CipherText:    ct,
 	}
-	protocol.SignRequest(srv.kSig, req)
+	cryptoops.SignRequest(srv.kSig, req)
 	enc, err := protocol.EncodeRequest(req)
 	if err != nil {
 		t.Fatalf("编码请求失败: %v", err)

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 // 会话密钥有效期，跟主密钥轮换对齐
@@ -109,7 +110,7 @@ func (s *teeSession) sealPayload(endpoint string, plaintext []byte) ([]byte, err
 	}
 	counter := s.sendCounter
 	s.sendCounter++
-	return protocol.SealEnvelope(s.K_enc, s.ID, endpoint, protocol.DirectionS2C, counter, plaintext)
+	return cryptoops.SealEnvelope(s.K_enc, s.ID, endpoint, protocol.DirectionS2C, counter, plaintext)
 }
 
 // openPayload 解密 c2s 信封并做反重放窗口校验（请求入口；重放/越窗拒绝）。
@@ -119,7 +120,7 @@ func (s *teeSession) openPayload(endpoint string, wire []byte) ([]byte, error) {
 	if !s.Completed || len(s.K_enc) != 32 {
 		return nil, errors.New("session: 会话未完成或 K_enc 缺失")
 	}
-	pt, counter, err := protocol.OpenEnvelope(s.K_enc, s.ID, endpoint, protocol.DirectionC2S, wire)
+	pt, counter, err := cryptoops.OpenEnvelope(s.K_enc, s.ID, endpoint, protocol.DirectionC2S, wire)
 	if err != nil {
 		return nil, err
 	}

@@ -23,6 +23,7 @@ import (
 	"security-ai-gateway/cipher/mask"
 	"security-ai-gateway/gateway/tee-infer-service/model"
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 const (
@@ -94,7 +95,7 @@ func main() {
 		Model: "mock", MaxNewTokens: 1, Nonce: nonce,
 		CipherVectors: []protocol.CipherVector{{Data: cipher}},
 	}
-	protocol.SignRequest(kSig, infReq)
+	cryptoops.SignRequest(kSig, infReq)
 	enc, _ := protocol.EncodeRequest(infReq)
 	infResp, err := http.Post(inferURL, "application/x-otpmask", bytes.NewReader(enc))
 	if err != nil {
@@ -106,7 +107,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	if !protocol.VerifyResponse(kSig, iresp) {
+	if !cryptoops.VerifyResponse(kSig, iresp) {
 		panic("响应签名无效")
 	}
 

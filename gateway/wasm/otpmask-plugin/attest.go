@@ -37,6 +37,7 @@ import (
 	logs "github.com/higress-group/wasm-go/pkg/log"
 
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 // attestSession 插件侧会话（进程级单例，跨请求复用）。
@@ -98,7 +99,7 @@ func (s *attestSession) sealPayload(endpoint string, plaintext []byte) ([]byte, 
 	}
 	counter := s.sendCounter
 	s.sendCounter++
-	return protocol.SealEnvelope(s.K_enc, s.SessionID, endpoint, protocol.DirectionC2S, counter, plaintext)
+	return cryptoops.SealEnvelope(s.K_enc, s.SessionID, endpoint, protocol.DirectionC2S, counter, plaintext)
 }
 
 // openPayload 解密 s2c 信封并做反重放窗口校验（重放/越窗拒绝）。
@@ -108,7 +109,7 @@ func (s *attestSession) openPayload(endpoint string, wire []byte) ([]byte, error
 	if s.SessionID == "" || len(s.K_enc) != 32 {
 		return nil, errors.New("envelope: 会话未建立或 K_enc 缺失")
 	}
-	pt, counter, err := protocol.OpenEnvelope(s.K_enc, s.SessionID, endpoint, protocol.DirectionS2C, wire)
+	pt, counter, err := cryptoops.OpenEnvelope(s.K_enc, s.SessionID, endpoint, protocol.DirectionS2C, wire)
 	if err != nil {
 		return nil, err
 	}

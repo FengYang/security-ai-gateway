@@ -1,7 +1,7 @@
 package main
 
 // P1b SSE 加密流解密测试：合法流重组、乱序/重放/截断/篡改拒绝、isSSEBody 判定。
-// 服务端等价物 = protocol.SealEnvelope（跨语言一致性已由 protocol 包测试与
+// 服务端等价物 = cryptoops.SealEnvelope（跨语言一致性已由 protocol 包测试与
 // cross_test.py 覆盖），此处只测插件侧流状态机。
 
 import (
@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 // buildSSEStream 服务端等价：构造加密 SSE 响应体（hex 信封分片 + [DONE]）。
@@ -23,7 +24,7 @@ func buildSSEStream(t *testing.T, kenc []byte, sessionID string, chunks []stream
 		if err != nil {
 			t.Fatal(err)
 		}
-		wire, err := protocol.SealEnvelope(kenc, sessionID, protocol.EndpointInfer, protocol.DirectionS2C, counters[i], plain)
+		wire, err := cryptoops.SealEnvelope(kenc, sessionID, protocol.EndpointInfer, protocol.DirectionS2C, counters[i], plain)
 		if err != nil {
 			t.Fatal(err)
 		}

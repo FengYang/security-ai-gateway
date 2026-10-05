@@ -15,6 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	protocol "security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 // TestE2E_Billing 覆盖 §10.3 E2E-1/3/4 + E2E-2（基础）。
@@ -67,7 +68,7 @@ func teeInfer(t *testing.T, teeURL, tenant string, vectors int) (int, []byte) {
 		ireq.CipherVectors[i] = protocol.CipherVector{Data: []uint64{uint64(i + 1)}}
 	}
 	ksig, _ := hex.DecodeString(teeSigKeyHex)
-	protocol.SignRequest(ksig, ireq)
+	cryptoops.SignRequest(ksig, ireq)
 	enc, err := protocol.EncodeRequest(ireq)
 	if err != nil {
 		t.Fatalf("请求编码失败: %v", err)
@@ -80,7 +81,7 @@ func teeInfer(t *testing.T, teeURL, tenant string, vectors int) (int, []byte) {
 		if perr != nil {
 			t.Fatalf("响应解码失败: %v", perr)
 		}
-		if !protocol.VerifyResponse(ksig, resp) {
+		if !cryptoops.VerifyResponse(ksig, resp) {
 			t.Fatal("响应验签失败（全局 K_sig）")
 		}
 	}

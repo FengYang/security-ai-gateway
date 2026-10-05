@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 // newSessionForTest 建立带双密钥的测试会话（测试结束清除，串行执行下互不干扰）。
@@ -81,7 +82,7 @@ func TestPluginSealPayloadRoundtrip(t *testing.T) {
 	if env.Counter != 1 || env.Direction != protocol.DirectionC2S {
 		t.Fatalf("首信封 counter/direction 异常: counter=%d direction=%d", env.Counter, env.Direction)
 	}
-	pt, gotCounter, err := protocol.OpenEnvelope(kenc, Session.SessionID, protocol.EndpointInfer, protocol.DirectionC2S, wire)
+	pt, gotCounter, err := cryptoops.OpenEnvelope(kenc, Session.SessionID, protocol.EndpointInfer, protocol.DirectionC2S, wire)
 	if err != nil || string(pt) != "hello-tensor" || gotCounter != 1 {
 		t.Fatalf("c2s 往返失败: %v %q counter=%d", err, pt, gotCounter)
 	}
@@ -92,7 +93,7 @@ func TestPluginSealPayloadRoundtrip(t *testing.T) {
 		t.Fatalf("计数器未递增: %d", env2.Counter)
 	}
 	// c2s 密文不能被当作 s2c 解开（方向子密钥）
-	if _, _, err := protocol.OpenEnvelope(kenc, Session.SessionID, protocol.EndpointInfer, protocol.DirectionS2C, wire); err == nil {
+	if _, _, err := cryptoops.OpenEnvelope(kenc, Session.SessionID, protocol.EndpointInfer, protocol.DirectionS2C, wire); err == nil {
 		t.Fatal("c2s 信封按 s2c 解开未被拒绝")
 	}
 }
@@ -102,7 +103,7 @@ func TestPluginOpenPayloadReplay(t *testing.T) {
 	_, kenc := newSessionForTest(t)
 	var wires [][]byte
 	for i := uint64(1); i <= 3; i++ {
-		w, err := protocol.SealEnvelope(kenc, Session.SessionID, protocol.EndpointInfer, protocol.DirectionS2C, i, []byte{byte(i)})
+		w, err := cryptoops.SealEnvelope(kenc, Session.SessionID, protocol.EndpointInfer, protocol.DirectionS2C, i, []byte{byte(i)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -130,7 +131,7 @@ func TestPluginOpenPayloadReplay(t *testing.T) {
 // TestPluginOpenPayloadEndpointBinding 跨端点信封（/key/issue 密文投给 /v1/infer）→ 拒绝。
 func TestPluginOpenPayloadEndpointBinding(t *testing.T) {
 	_, kenc := newSessionForTest(t)
-	wire, err := protocol.SealEnvelope(kenc, Session.SessionID, protocol.EndpointKeyIssue, protocol.DirectionS2C, 1, []byte("k"))
+	wire, err := cryptoops.SealEnvelope(kenc, Session.SessionID, protocol.EndpointKeyIssue, protocol.DirectionS2C, 1, []byte("k"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +143,7 @@ func TestPluginOpenPayloadEndpointBinding(t *testing.T) {
 // TestPluginOpenPayloadTamper 篡改密文 → 拒绝。
 func TestPluginOpenPayloadTamper(t *testing.T) {
 	_, kenc := newSessionForTest(t)
-	wire, _ := protocol.SealEnvelope(kenc, Session.SessionID, protocol.EndpointInfer, protocol.DirectionS2C, 1, []byte("secret"))
+	wire, _ := cryptoops.SealEnvelope(kenc, Session.SessionID, protocol.EndpointInfer, protocol.DirectionS2C, 1, []byte("secret"))
 	wire[len(wire)-1] ^= 0xFF
 	if _, err := Session.openPayload(protocol.EndpointInfer, wire); err == nil {
 		t.Fatal("篡改信封未被拒绝")

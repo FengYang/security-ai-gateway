@@ -28,6 +28,7 @@ import (
 	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/internal/memzero"
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 // maskModulus 掩码模 R（与 otpmask-plugin 对齐 2^32）。
@@ -1027,7 +1028,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 验签
-	if !protocol.VerifyRequest(s.sessionK_sig(r), req) {
+	if !cryptoops.VerifyRequest(s.sessionK_sig(r), req) {
 		s.denyAndAudit(tenant, req.RequestID, "bad_signature", payloadSHA)
 		http.Error(w, "签名无效", http.StatusUnauthorized)
 		return
@@ -1156,7 +1157,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		CipherOutput:    protocol.CipherVector{Data: cipherOut},
 		TokensGenerated: 1, // M7：单 token 采样（自回归生成 M8）
 	}
-	protocol.SignResponse(s.sessionK_sig(r), resp)
+	cryptoops.SignResponse(s.sessionK_sig(r), resp)
 	enc, err := protocol.EncodeResponse(resp)
 	if err != nil {
 		s.denyAndAudit(tenant, req.RequestID, "encode_error", payloadSHA)

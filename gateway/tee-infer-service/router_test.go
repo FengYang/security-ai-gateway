@@ -11,6 +11,7 @@ import (
 
 	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 // TestRouteConfigParse 路由配置解析。
@@ -102,7 +103,7 @@ func TestDualRouteInferE2E(t *testing.T) {
 			EngineType:    engineType,
 			AttestType:    protocol.AttestTypeToken,
 		}
-		protocol.SignRequest(bytes.Repeat([]byte{0x42}, 32), req)
+		cryptoops.SignRequest(bytes.Repeat([]byte{0x42}, 32), req)
 		enc, _ := protocol.EncodeRequest(req)
 		infReq, _ := http.NewRequest("POST", ts.URL+"/v1/infer", bytes.NewReader(enc))
 		resp, err := http.DefaultClient.Do(infReq)

@@ -66,38 +66,12 @@ func TestResponseRoundtrip(t *testing.T) {
 	}
 }
 
-func TestSignVerify(t *testing.T) {
-	kSig := []byte("test-k-sig-32-bytes-key-material")
-	req := &InferenceRequest{
-		RequestID:    "req-002",
-		TimestampNS:  time.Now().UnixNano(),
-		Model:        "mock",
-		Nonce:        []byte("n1"),
-		CipherVectors: []CipherVector{{Data: []uint64{100, 200}}},
-	}
-	SignRequest(kSig, req)
-	if !VerifyRequest(kSig, req) {
-		t.Fatal("合法签名校验失败")
-	}
-	// 篡改：修改向量后签名应失效
-	req.CipherVectors[0].Data[0]++
-	if VerifyRequest(kSig, req) {
-		t.Fatal("篡改请求签名未被拒绝")
-	}
-	// 错误密钥
-	req.CipherVectors[0].Data[0]--
-	SignRequest(kSig, req)
-	if VerifyRequest([]byte("wrong-key"), req) {
-		t.Fatal("错误密钥校验通过")
-	}
-}
+// 签名/验签测试已下沉 `protocol/go/cryptoops`（sign_test.go）。
 
 func TestReplayProtection(t *testing.T) {
-	kSig := []byte("k-sig-for-replay-test")
 	now := time.Now().UnixNano()
 	seen := make(map[string]bool)
 	req := &InferenceRequest{RequestID: "req-003", TimestampNS: now, Nonce: []byte("n")}
-	SignRequest(kSig, req)
 	if err := CheckReplay(req.RequestID, req.TimestampNS, now, seen); err != nil {
 		t.Fatalf("首见请求被拒绝: %v", err)
 	}

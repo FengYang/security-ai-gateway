@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 func die(format string, args ...any) {
@@ -50,9 +51,9 @@ func main() {
 			out, _ := json.Marshal(map[string]any{
 				"request_id": req.RequestID, "timestamp_ns": req.TimestampNS,
 				"model": req.Model, "max_new_tokens": req.MaxNewTokens,
-				"nonce": hex.EncodeToString(req.Nonce),
+				"nonce":          hex.EncodeToString(req.Nonce),
 				"cipher_vectors": vectors, "cipher_text": hex.EncodeToString(req.CipherText),
-				"signature": hex.EncodeToString(req.Signature),
+				"signature":   hex.EncodeToString(req.Signature),
 				"engine_type": req.EngineType, "attest_type": req.AttestType,
 				"text_payload": hex.EncodeToString(req.TextPayload), "stream": req.Stream,
 			})
@@ -80,9 +81,9 @@ func main() {
 		}
 		if kind == "request" {
 			req := &protocol.InferenceRequest{
-				RequestID:   f["request_id"].(string),
-				TimestampNS: int64(f["timestamp_ns"].(float64)),
-				Model:       f["model"].(string),
+				RequestID:    f["request_id"].(string),
+				TimestampNS:  int64(f["timestamp_ns"].(float64)),
+				Model:        f["model"].(string),
 				MaxNewTokens: uint32(f["max_new_tokens"].(float64)),
 			}
 			req.Nonce, _ = hex.DecodeString(f["nonce"].(string))
@@ -110,7 +111,7 @@ func main() {
 			if st, ok := f["stream"].(bool); ok {
 				req.Stream = st
 			}
-			protocol.SignRequest(kSig, req)
+			cryptoops.SignRequest(kSig, req)
 			data, err := protocol.EncodeRequest(req)
 			if err != nil {
 				die("EncodeRequest: %v", err)
@@ -140,7 +141,7 @@ func main() {
 		if err != nil {
 			die("plaintext hex 解码失败: %v", err)
 		}
-		wire, err := protocol.SealEnvelope(kEnc, os.Args[3], os.Args[4], protocol.Direction(dir), counter, pt)
+		wire, err := cryptoops.SealEnvelope(kEnc, os.Args[3], os.Args[4], protocol.Direction(dir), counter, pt)
 		if err != nil {
 			die("SealEnvelope: %v", err)
 		}
@@ -162,7 +163,7 @@ func main() {
 		if err != nil {
 			die("envelope hex 解码失败: %v", err)
 		}
-		pt, counter, err := protocol.OpenEnvelope(kEnc, os.Args[3], os.Args[4], protocol.Direction(dir), wire)
+		pt, counter, err := cryptoops.OpenEnvelope(kEnc, os.Args[3], os.Args[4], protocol.Direction(dir), wire)
 		if err != nil {
 			die("OpenEnvelope: %v", err)
 		}

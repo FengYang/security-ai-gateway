@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 // buildTextInferRequest 构造 text 载荷推理请求（会话签名 + c2s 信封）。
@@ -34,12 +35,12 @@ func buildTextInferRequest(t *testing.T, fullURL, sessionID string, ksig, kenc [
 		TextPayload:  []byte(`[{"role":"user","content":` + strconvQuote(text) + `}]`),
 		Stream:       stream,
 	}
-	protocol.SignRequest(ksig, req)
+	cryptoops.SignRequest(ksig, req)
 	enc, err := protocol.EncodeRequest(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealed, err := protocol.SealEnvelope(kenc, sessionID, protocol.EndpointInfer, protocol.DirectionC2S, counter, enc)
+	sealed, err := cryptoops.SealEnvelope(kenc, sessionID, protocol.EndpointInfer, protocol.DirectionC2S, counter, enc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func decodeTextSSE(t *testing.T, body []byte, sessionID string, kenc []byte) (st
 		if err != nil {
 			t.Fatalf("SSE 分片非 hex: %v", err)
 		}
-		pt, counter, err := protocol.OpenEnvelope(kenc, sessionID, protocol.EndpointInfer, protocol.DirectionS2C, wire)
+		pt, counter, err := cryptoops.OpenEnvelope(kenc, sessionID, protocol.EndpointInfer, protocol.DirectionS2C, wire)
 		if err != nil {
 			t.Fatalf("SSE 分片解密失败: %v", err)
 		}
@@ -110,7 +111,7 @@ func TestTextInferRequiresSession(t *testing.T) {
 		AttestType:  protocol.AttestTypeToken, // token 模式：无会话
 		TextPayload: []byte(`[{"role":"user","content":"hi"}]`),
 	}
-	protocol.SignRequest(bytes.Repeat([]byte{0x42}, 32), req) // 全局 K_sig（newM9Server 固定）
+	cryptoops.SignRequest(bytes.Repeat([]byte{0x42}, 32), req) // 全局 K_sig（newM9Server 固定）
 	enc, _ := protocol.EncodeRequest(req)
 	hr, _ := http.NewRequest("POST", ts.URL+"/v1/infer", bytes.NewReader(enc))
 	resp, err := http.DefaultClient.Do(hr)

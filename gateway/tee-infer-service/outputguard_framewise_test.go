@@ -33,6 +33,7 @@ import (
 
 	"security-ai-gateway/gateway/tee-infer-service/model"
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 // deliveredFrame 一帧已下发内容（断言器的最小输入单元）。
@@ -187,7 +188,7 @@ func parseWireFrames(t *testing.T, body []byte, sessionID string, kenc []byte) [
 		if err != nil {
 			t.Fatalf("SSE 分片非 hex（逐帧断言须抓 wire 形态）: %v", err)
 		}
-		pt, counter, err := protocol.OpenEnvelope(kenc, sessionID, protocol.EndpointInfer, protocol.DirectionS2C, wire)
+		pt, counter, err := cryptoops.OpenEnvelope(kenc, sessionID, protocol.EndpointInfer, protocol.DirectionS2C, wire)
 		if err != nil {
 			t.Fatalf("SSE 分片解密失败: %v", err)
 		}

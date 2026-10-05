@@ -16,6 +16,7 @@ import (
 
 	"security-ai-gateway/cipher/mask"
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 const (
@@ -82,7 +83,7 @@ func main() {
 		Nonce:         nonce,
 		CipherVectors: []protocol.CipherVector{{Data: cipher}},
 	}
-	protocol.SignRequest(kSig, reqInfer)
+	cryptoops.SignRequest(kSig, reqInfer)
 	enc, _ := protocol.EncodeRequest(reqInfer)
 
 	// 4. 调用推理
@@ -100,7 +101,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	if !protocol.VerifyResponse(kSig, iresp) {
+	if !cryptoops.VerifyResponse(kSig, iresp) {
 		fmt.Println("[FAIL] 响应签名无效")
 		return
 	}

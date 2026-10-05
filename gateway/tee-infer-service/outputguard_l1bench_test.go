@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 // 分位数采样：500 批 × 100 次/批 = 50000 次调用。
@@ -188,7 +189,7 @@ func BenchmarkFrameSeal(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for n := range b.N {
-		wire, err := protocol.SealEnvelope(key, sid, protocol.EndpointInfer, protocol.DirectionS2C, uint64(n+1), chunk)
+		wire, err := cryptoops.SealEnvelope(key, sid, protocol.EndpointInfer, protocol.DirectionS2C, uint64(n+1), chunk)
 		if err != nil {
 			b.Fatal(err)
 		}

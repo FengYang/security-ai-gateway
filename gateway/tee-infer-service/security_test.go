@@ -12,6 +12,7 @@ import (
 
 	"security-ai-gateway/cipher/mask"
 	"security-ai-gateway/protocol/go"
+	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 // maskTextLocal 文本掩码（与插件侧对称，R=256 域分离通道）。
@@ -66,7 +67,7 @@ func TestA6NoPlaintextInObservability(t *testing.T) {
 		EngineType:    protocol.EngineTypeTEEGPU,
 		AttestType:    protocol.AttestTypeToken,
 	}
-	protocol.SignRequest(bytes.Repeat([]byte{0x42}, 32), req)
+	cryptoops.SignRequest(bytes.Repeat([]byte{0x42}, 32), req)
 	enc, _ := protocol.EncodeRequest(req)
 	infReq, _ := http.NewRequest("POST", ts.URL+"/v1/infer", bytes.NewReader(enc))
 	infResp, err := http.DefaultClient.Do(infReq)

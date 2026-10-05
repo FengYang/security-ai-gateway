@@ -3,16 +3,17 @@
 // 手写 Varint 二进制编解码（wire format 与 Protobuf 兼容），纯标准库，
 // 可在 Go 原生 wasm（wasip1）中编译。权威定义见 protocol/proto/otpmask.proto。
 //
-// 本包同时实现签名与防重放：
-// - 签名：HMAC-SHA256(K_sig, request_id || timestamp_ns || nonce || payload)
-// - K_sig 与掩码密钥分离，MVP 静态注入，生产由 TEE 签发
-// - 防重放：时间戳窗口 + request_id 去重（校验方维护 seen 集合）
+// **本包为 framing / 编码-only**（P0-4 §5.4.5 拆包）：不含任何密码求值，
+// 故 Wasm 插件可安全链接（R-11 / §9.1 门禁 1）。签名（HMAC-SHA256）与信封 AEAD
+// 已下沉 `protocol/go/cryptoops`（仅 Go 服务/sidecar 链接）。
+//
+// 历史注释（签名语义，实现见 cryptoops）：
+//   - 签名：HMAC-SHA256(K_sig, request_id || timestamp_ns || nonce || payload)
+//   - K_sig 与掩码密钥分离，MVP 静态注入，生产由 TEE 签发
+//   - 防重放：时间戳窗口 + request_id 去重（校验方维护 seen 集合）
 package protocol
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
 )
@@ -45,9 +46,9 @@ const DefaultEngineType = EngineTypeTEEGPU
 const DefaultAttestType = AttestTypeToken
 
 const (
-	StatusOK           Status = 0
-	StatusError        Status = 1
-	StatusRateLimited  Status = 2
+	StatusOK            Status = 0
+	StatusError         Status = 1
+	StatusRateLimited   Status = 2
 	StatusModelNotFound Status = 3
 )
 
@@ -79,12 +80,12 @@ type InferenceRequest struct {
 
 // InferenceResponse 推理响应。
 type InferenceResponse struct {
-	RequestID      string
-	TimestampNS    int64
-	Status         Status
-	CipherOutput   CipherVector
+	RequestID       string
+	TimestampNS     int64
+	Status          Status
+	CipherOutput    CipherVector
 	TokensGenerated uint32
-	Signature      []byte
+	Signature       []byte
 }
 
 // ---------- Varint 编解码 ----------
@@ -103,16 +104,20 @@ func putVarint(buf []byte, v uint64) []byte {
 	return append(buf, byte(v))
 }
 
-func putBytes(buf []byte, b []byte) []byte {
+// PutBytes 追加 length-prefixed 字节串（varint 长度 + 原始字节）。
+// 导出供 `protocol/go/cryptoops` 复用（签名 / AAD 序列化），保证 wire 编码唯一实现。
+func PutBytes(buf []byte, b []byte) []byte {
 	buf = putVarint(buf, uint64(len(b)))
 	return append(buf, b...)
 }
 
-func putString(buf []byte, s string) []byte {
-	return putBytes(buf, []byte(s))
+// PutString 追加 length-prefixed 字符串。
+func PutString(buf []byte, s string) []byte {
+	return PutBytes(buf, []byte(s))
 }
 
-func putUint64(buf []byte, v uint64) []byte { return putVarint(buf, v) }
+// PutUint64 追加 varint 编码的无符号 64 位整数。
+func PutUint64(buf []byte, v uint64) []byte { return putVarint(buf, v) }
 
 func readVarint(data []byte, pos int) (uint64, int, error) {
 	var v uint64
@@ -196,24 +201,24 @@ func EncodeRequest(req *InferenceRequest) ([]byte, error) {
 	if req.RequestID == "" {
 		return nil, errors.New("protocol: request_id 为空")
 	}
-	buf := putString(nil, req.RequestID)
-	buf = putUint64(buf, uint64(req.TimestampNS))
-	buf = putString(buf, req.Model)
-	buf = putUint64(buf, uint64(req.MaxNewTokens))
-	buf = putBytes(buf, req.Nonce)
-	buf = putUint64(buf, uint64(len(req.CipherVectors)))
+	buf := PutString(nil, req.RequestID)
+	buf = PutUint64(buf, uint64(req.TimestampNS))
+	buf = PutString(buf, req.Model)
+	buf = PutUint64(buf, uint64(req.MaxNewTokens))
+	buf = PutBytes(buf, req.Nonce)
+	buf = PutUint64(buf, uint64(len(req.CipherVectors)))
 	for _, v := range req.CipherVectors {
 		buf = append(buf, EncodeVector(v)...)
 	}
-	buf = putBytes(buf, req.CipherText) // M9-4 密文文本通道（可空）
-	buf = putBytes(buf, req.Signature)
+	buf = PutBytes(buf, req.CipherText) // M9-4 密文文本通道（可空）
+	buf = PutBytes(buf, req.Signature)
 	// 协议扩展（可选字段，追加于末尾；空 engine_type 不编码，保持向后兼容）。
 	// P2/P5：text 载荷请求必然声明 engine_type，故 TextPayload/Stream 随扩展段编码。
 	if req.EngineType != "" {
-		buf = putString(buf, req.EngineType)
-		buf = putString(buf, req.AttestType)
-		buf = putBytes(buf, req.TextPayload)
-		buf = putUint64(buf, boolWord(req.Stream))
+		buf = PutString(buf, req.EngineType)
+		buf = PutString(buf, req.AttestType)
+		buf = PutBytes(buf, req.TextPayload)
+		buf = PutUint64(buf, BoolWord(req.Stream))
 	}
 	return buf, nil
 }
@@ -289,8 +294,8 @@ func DecodeRequest(data []byte) (*InferenceRequest, error) {
 	return req, nil
 }
 
-// boolWord 布尔 → wire 字（0/1）。
-func boolWord(b bool) uint64 {
+// BoolWord 布尔 → wire 字（0/1）。导出供 `protocol/go/cryptoops` 复用（签名载荷序列化）。
+func BoolWord(b bool) uint64 {
 	if b {
 		return 1
 	}
@@ -301,12 +306,12 @@ func boolWord(b bool) uint64 {
 
 // EncodeResponse 编码推理响应。
 func EncodeResponse(resp *InferenceResponse) ([]byte, error) {
-	buf := putString(nil, resp.RequestID)
-	buf = putUint64(buf, uint64(resp.TimestampNS))
-	buf = putUint64(buf, uint64(resp.Status))
+	buf := PutString(nil, resp.RequestID)
+	buf = PutUint64(buf, uint64(resp.TimestampNS))
+	buf = PutUint64(buf, uint64(resp.Status))
 	buf = append(buf, EncodeVector(resp.CipherOutput)...)
-	buf = putUint64(buf, uint64(resp.TokensGenerated))
-	buf = putBytes(buf, resp.Signature)
+	buf = PutUint64(buf, uint64(resp.TokensGenerated))
+	buf = PutBytes(buf, resp.Signature)
 	return buf, nil
 }
 
@@ -342,60 +347,10 @@ func DecodeResponse(data []byte) (*InferenceResponse, error) {
 	return resp, nil
 }
 
-// ---------- 签名与防重放 ----------
-
-// signMessage 计算 HMAC-SHA256 签名。
-func signMessage(kSig []byte, reqID string, ts int64, nonce, payload []byte) []byte {
-	mac := hmac.New(sha256.New, kSig)
-	_, _ = mac.Write([]byte(reqID))
-	var tsb [8]byte
-	binary.BigEndian.PutUint64(tsb[:], uint64(ts))
-	_, _ = mac.Write(tsb[:])
-	_, _ = mac.Write(nonce)
-	_, _ = mac.Write(payload)
-	return mac.Sum(nil)
-}
-
-// SignRequest 对请求签名（覆盖 request_id || ts || nonce || 向量负载 || 密文文本 || text 载荷）。
-// 返回的签名写入 req.Signature。
-func SignRequest(kSig []byte, req *InferenceRequest) {
-	payload := make([]byte, 0)
-	payload = putString(payload, req.Model)
-	payload = putUint64(payload, uint64(req.MaxNewTokens))
-	payload = putUint64(payload, uint64(len(req.CipherVectors)))
-	for _, v := range req.CipherVectors {
-		payload = append(payload, EncodeVector(v)...)
-	}
-	payload = putBytes(payload, req.CipherText) // M9-4：密文文本纳入签名
-	payload = putBytes(payload, req.TextPayload) // P2/P5：text 载荷纳入签名
-	payload = putUint64(payload, boolWord(req.Stream))
-	req.Signature = signMessage(kSig, req.RequestID, req.TimestampNS, req.Nonce, payload)
-}
-
-// VerifyRequest 校验请求签名（HMAC 常量时间比较）。
-func VerifyRequest(kSig []byte, req *InferenceRequest) bool {
-	got := req.Signature
-	SignRequest(kSig, req)
-	return hmac.Equal(got, req.Signature)
-}
-
-// SignResponse 对响应签名。
-func SignResponse(kSig []byte, resp *InferenceResponse) {
-	payload := make([]byte, 0)
-	payload = putUint64(payload, uint64(resp.Status))
-	payload = append(payload, EncodeVector(resp.CipherOutput)...)
-	payload = putUint64(payload, uint64(resp.TokensGenerated))
-	resp.Signature = signMessage(kSig, resp.RequestID, resp.TimestampNS, nil, payload)
-}
-
-// VerifyResponse 校验响应签名。
-func VerifyResponse(kSig []byte, resp *InferenceResponse) bool {
-	got := resp.Signature
-	SignResponse(kSig, resp)
-	return hmac.Equal(got, resp.Signature)
-}
-
 // ---------- 防重放辅助 ----------
+//
+// 签名（HMAC-SHA256）实现已下沉 `protocol/go/cryptoops`（SignRequest/VerifyRequest/
+// SignResponse/VerifyResponse）——本包保持零密码依赖（§5.4.5 拆包 / §9.1 门禁 1）。
 
 // ReplayWindow 时间戳有效窗口（纳秒）。
 const ReplayWindow int64 = 30 * 1e9
