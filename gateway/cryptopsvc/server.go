@@ -57,6 +57,12 @@ const (
 	kdfInfoEnc  = "otpmask/kdf/enc/v1"
 	sessionTTL  = 5 * time.Minute
 
+	// 会话方向子密钥 KeyRef 确定性后缀（v1.7 §5.4.5 / §4.3.6）：插件在 `SessionBegin` 后以
+	// `/v1/kdf` 派生 `otpmask/kdf/enc/{c2s,s2c}/v1` 子密钥，**alias 须取 `<key_ref_enc>/<dir>`**
+	// （会话内唯一，避跨会话 Register 覆盖致 #6 净值不归零）。`session/end` 据此前缀一并销毁（T-5.4-6）。
+	subkeySuffixC2S = "/c2s"
+	subkeySuffixS2C = "/s2c"
+
 	// R-8 上限。
 	maxRandLen   = 4096
 	maxMaskCount = 65536
@@ -574,7 +580,11 @@ func (s *Server) runSessionBegin(raw []byte) (map[string]any, *apiError) {
 	}, nil
 }
 
-// runSessionEnd /v1/session/end（§4.3.8）：零化两个会话 KeyRef（发 #8），令 #6 净值归零（T-5.4-6）。
+// runSessionEnd /v1/session/end（§4.3.8）：零化会话全部 KeyRef（发 #8），令 #6 净值归零（T-5.4-6）。
+//
+// v1.7 §5.4.5（R8-P1-1）：每会话实为 **4 个 KeyRef**（sig / enc / enc+c2s / enc+s2c）——两个方向子密钥
+// 由插件在 `SessionBegin` 后经 `/v1/kdf`（alias = `<key_ref_enc>/<dir>`，见 subkeySuffix*）派生。
+// 故本端点除 `key_ref_sig`/`key_ref_enc` 外，还按确定性后缀销毁两个子密钥 KeyRef，否则其只增不减。
 func (s *Server) runSessionEnd(raw []byte) (map[string]any, *apiError) {
 	var req struct {
 		KeyRefSig string `json:"key_ref_sig"`
@@ -583,12 +593,21 @@ func (s *Server) runSessionEnd(raw []byte) (map[string]any, *apiError) {
 	if aerr := unmarshal(raw, &req); aerr != nil {
 		return nil, aerr
 	}
+	// sig/enc 为会话注册的必备 ref，缺失即协议错（fail-closed）。
 	for _, ref := range []string{req.KeyRefSig, req.KeyRefEnc} {
 		if ref == "" {
 			continue
 		}
 		if err := s.km.Destroy(keystore.KeyRef(ref)); err != nil {
 			return nil, toAPIError(err)
+		}
+	}
+	// 方向子密钥为**可选**（会话未被使用时插件未派生）：best-effort 销毁，未注册则跳过（不报错）。
+	if req.KeyRefEnc != "" {
+		for _, suf := range []string{subkeySuffixC2S, subkeySuffixS2C} {
+			if err := s.km.Destroy(keystore.KeyRef(req.KeyRefEnc + suf)); err != nil && !errors.Is(err, keystore.ErrUnknownKeyRef) {
+				return nil, toAPIError(err)
+			}
 		}
 	}
 	return map[string]any{"ok": true}, nil

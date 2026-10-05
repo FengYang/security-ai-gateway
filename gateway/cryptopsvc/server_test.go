@@ -318,6 +318,21 @@ func TestSessionBeginEndNetZero(t *testing.T) {
 		t.Fatalf("会话键 seal 失败: %d %+v", code, out)
 	}
 
+	// v1.7 §5.4.5（R8-P1-1）：信封方向子密钥经 /v1/kdf 派生，alias 取 <key_ref_enc>/<dir>
+	// （会话内唯一）——插件即以此二 ref 调 /v1/seal。派生后再验 session/end 一并销毁（4-ref 净值归零）。
+	for _, suf := range []string{"/c2s", "/s2c"} {
+		code, out = postJSON(t, ts, "/v1/kdf", map[string]any{
+			"key_ref": kenc, "info": b64([]byte("otpmask/kdf/enc/" + suf[1:] + "/v1")),
+			"out_len": 32, "alias": kenc + suf,
+		}, nil)
+		if code != 200 || out["key_ref"] != kenc+suf {
+			t.Fatalf("kdf 派生 %s 失败: %d %+v", suf, code, out)
+		}
+	}
+	if got := activeKeyRefs(s.m, keystore.ScopeSession) - base; got != 4 {
+		t.Fatalf("派生后应 +4 KeyRef（sig/enc/c2s/s2c），得 %d", got)
+	}
+
 	code, out = postJSON(t, ts, "/v1/session/end", map[string]any{"key_ref_sig": ksig, "key_ref_enc": kenc}, nil)
 	if code != 200 || out["ok"] != true {
 		t.Fatalf("session/end 失败: %d %+v", code, out)
@@ -329,6 +344,13 @@ func TestSessionBeginEndNetZero(t *testing.T) {
 	code, out = postJSON(t, ts, "/v1/seal", map[string]any{"key_ref": kenc, "plaintext": b64([]byte("hi"))}, nil)
 	if code != 404 || errCode(t, out) != "unknown_key_ref" {
 		t.Fatalf("销毁后使用应 404，得 %d %+v", code, out)
+	}
+	// 方向子密钥亦随会话一并销毁（R8-P1-1：4-ref 全部归零）
+	code, out = postJSON(t, ts, "/v1/open", map[string]any{
+		"key_ref": kenc + "/c2s", "nonce": b64(make([]byte, 12)), "ciphertext": b64([]byte("x")),
+	}, nil)
+	if code != 404 || errCode(t, out) != "unknown_key_ref" {
+		t.Fatalf("子密钥销毁后使用应 404，得 %d %+v", code, out)
 	}
 }
 
