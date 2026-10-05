@@ -50,13 +50,18 @@ func (m *MockTSA) Sign(messageImprint []byte) (*TST, error) {
 	}
 	mac := hmac.New(sha256.New, m.key)
 	mac.Write(messageImprint)
+	// TSAPublicKey = 密钥指纹（SHA-256(key)），**仅供标识，绝不暴露密钥字节**。
+	// 修复 F-9/U-7：原式 `sha256.New().Sum(append([]byte(nil), m.key...))[:16]` 的 Sum 语义为
+	// "把当前（空输入的）摘要附加到入参之后"，故其返回值前 16 字节 = HMAC key 的前 16 字节，
+	// 直接把密钥写进公开 TST —— 属泄密缺陷。
+	fp := sha256.Sum256(m.key)
 	return &TST{
 		Version:        1,
 		Algorithm:      "sha256",
 		TimestampNS:    time.Now().UnixNano(),
 		MessageImprint: hex.EncodeToString(messageImprint),
 		Signature:      hex.EncodeToString(mac.Sum(nil)),
-		TSAPublicKey:   hex.EncodeToString(sha256.New().Sum(append([]byte(nil), m.key...))[:16]),
+		TSAPublicKey:   hex.EncodeToString(fp[:]),
 		Source:         "mock",
 	}, nil
 }
