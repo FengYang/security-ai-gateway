@@ -23,6 +23,7 @@
 //	GET  /v1/adminext/usage                      用量查询（M2 A-2'；auditor 可读；代理 tee-infer）
 //	POST /v1/adminext/usage/quota                 配额设置（M2 A-2'；**admin**；落审计链）
 //	POST /v1/adminext/audit-events                账号管理审计投递（M3-A；**admin**；落审计链，action 白名单）
+//	POST /v1/adminext/cryptop/profile             密码 profile/mask_prg 切换（P0-4 §4.3.10；**admin**；落审计链）
 //	GET  /v1/adminext/broker-providers           托管凭据列表（已认证可读）
 //	GET  /v1/adminext/broker-providers/{name}    托管凭据详情（已认证可读）
 //	POST /v1/adminext/broker-providers/{name}    写入/轮换凭据（**admin**；返回 customUrl）
@@ -287,6 +288,14 @@ func main() {
 	} else {
 		log.Printf("段① 凭据投递未启用（ADMIN_CREDENTIAL_SETS / ADMIN_CREDENTIAL_TOKEN 均未配置）")
 	}
+
+	// P0-4 §4.3.10（B5-c）：profile 切换管理端点——不做密码运算，仅校验/一致性/审计/#12。
+	// CRYPTOPSVC_URL 未配置时切换前校验无法执行，端点 fail-closed 返回 503。
+	cryptopSwitcher := newCryptopProfileSwitcher(auditChain, os.Getenv("CRYPTOPSVC_URL"))
+	if cryptopSwitcher.sidecarURL == "" {
+		log.Printf("提示：CRYPTOPSVC_URL 未配置——profile 切换端点将 fail-closed 返回 503")
+	}
+	adminMux.HandleFunc(cryptopProfileSwitchPath, authMiddleware(cfg, cryptopSwitcher.handle))
 
 	if bh != nil {
 		if bs.brokerListen == cfg.listen {

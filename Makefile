@@ -78,3 +78,38 @@ wasm-guard:
 	@out=$$($(GO) list -deps -f '{{.ImportPath}}' security-ai-gateway/protocol/go | grep -E '(^crypto/(aes|cipher|hmac|sha256|sha512|ecdh|ecdsa)|gmsm)' || true); \
 	if [ -n "$$out" ]; then echo "FAIL: protocol/go 链入密码包——"; echo "$$out"; exit 1; fi; \
 	echo "PASS: protocol/go 零密码"
+
+# ---- P0-4 §12.6 profile 切换工具（B5-c）----
+# CRYPTOPSVC_URL/ADMIN_URL 缺省指向本机 loopback；ADMIN_TOKEN 须经环境提供（端点强制 admin）。
+CRYPTOPSVC_URL ?= http://127.0.0.1:8082
+ADMIN_URL      ?= http://127.0.0.1:8081
+ADMIN_TOKEN    ?=
+FROM           ?=
+TO             ?=
+MODE           ?=
+PRG            ?=
+CRYPTO_CONSISTENCY_TARGETS ?=
+
+# cryptop-switch —— 切换/回滚 profile（或仅切 mask_prg）。
+#   make cryptop-switch TO=<profile> [FROM=<profile>] [MODE=restart|hot] [PRG=hmac-sha256|sm4|bridge]
+# FROM 缺省经 sidecar /v1/capabilities 探测当前生效 profile。
+.PHONY: cryptop-switch
+cryptop-switch:
+	@: "$${TO:?用法: make cryptop-switch TO=<profile> [MODE=...] [PRG=...]}"
+	@FROM="$(FROM)"; \
+	if [ -z "$$FROM" ]; then \
+	  FROM=$$(curl -fsS --max-time 2 "$(CRYPTOPSVC_URL)/v1/capabilities" \
+	    | sed -n 's/.*"profile":"\([^"]*\)".*/\1/p'); \
+	fi; \
+	[ -n "$$FROM" ] || { echo "无法探测当前 profile：显式传 FROM= 或检查 CRYPTOPSVC_URL" >&2; exit 1; }; \
+	FROM="$$FROM" TO="$(TO)" MODE="$(MODE)" PRG="$(PRG)" \
+	ADMIN="$(ADMIN_URL)" ADMIN_TOKEN="$(ADMIN_TOKEN)" \
+	CRYPTOPSVC_URL="$(CRYPTOPSVC_URL)" \
+	bash scripts/cryptop-switch-profile.sh
+
+# cryptop-verify —— 全域一致性校验（§7.5；TO 缺省仅校验合法矩阵不比对 profile）。
+.PHONY: cryptop-verify
+cryptop-verify:
+	@CRYPTOPSVC_URL="$(CRYPTOPSVC_URL)" \
+	CRYPTO_CONSISTENCY_TARGETS="$(CRYPTO_CONSISTENCY_TARGETS)" \
+	bash scripts/cryptop-verify-consistency.sh "$(TO)"

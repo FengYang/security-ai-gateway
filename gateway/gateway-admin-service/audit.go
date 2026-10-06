@@ -49,6 +49,8 @@ const (
 	auditActionBillIssue   = "bill_issue"
 	auditActionBillExport  = "bill_export"
 	auditActionBillVerify  = "bill_verify"
+	// P0-4 §4.3.10：密码 profile/mask_prg 切换（B5-c）。
+	auditActionCryptopProfileSwitch = "cryptop.profile.switch"
 )
 
 // auditAnchorInterval 每追加 N 条事件锚定一次链尾哈希。
@@ -81,6 +83,11 @@ type adminAuditEvent struct {
 	Target         string `json:"target,omitempty"`          // 目标资源名（M3-A 账号管理：目标账号；其余动作为空）
 	RequestID      string `json:"request_id"`
 	Result         string `json:"result"` // 恒 "ok"（失败路径不落链）
+	// P0-4 §4.3.10：profile 切换事件明细（B5-c；空时不进 hash，旧链逐字节不变）。
+	ProfileFrom string `json:"profile_from,omitempty"` // 切换前 profile
+	ProfileTo   string `json:"profile_to,omitempty"`   // 目标 profile
+	SwitchMode  string `json:"switch_mode,omitempty"`  // restart / hot
+	MaskPRG     string `json:"mask_prg,omitempty"`     // hmac-sha256 / sm4 / bridge（仅切换事件）
 	// HashAlg P0-4 §5.2.2：本条事件哈希算法自述（**证据字段，不进 hash()**，B-5.2-1）。
 	// R-13：空/缺省 = SHA-256；"sm3" = SM3；R-12：其它值非法。
 	// 注：`KeyFingerprint` 为**标识类**字段（API 可见、跨服务引用），恒 SHA-256，不随本标签迁移。
@@ -147,6 +154,13 @@ func (e *adminAuditEvent) hashWithErr() (string, error) {
 	// 重启恢复时旧链校验不受影响；新事件带值才写入。长度前缀已消除拼接歧义。
 	if e.Target != "" {
 		writeLP(e.Target)
+	}
+	// §4.3.10 切换明细同法条件编码：空值（既有事件）不进哈希，旧链逐字节不变。
+	if e.ProfileFrom != "" {
+		writeLP(e.ProfileFrom)
+		writeLP(e.ProfileTo)
+		writeLP(e.SwitchMode)
+		writeLP(e.MaskPRG)
 	}
 	writeLP(e.RequestID)
 	writeLP(e.Result)

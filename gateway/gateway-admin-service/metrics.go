@@ -11,6 +11,7 @@
 // gateway_admin_broker_config_reload_failed_total 凭据目录热加载失败计数（M2 A-1；失败保留旧配置）
 // gateway_admin_audit_events                        审计链当前事件数（G1）
 // gateway_admin_broker_audit_write_failed_total     审计链写入失败计数（G1；fail-closed 拒绝变更）
+// gateway_cryptop_profile_switch_total{from,to}    密码 profile/mask_prg 切换计数（P0-4 §4.3.10，#12）
 package main
 
 import (
@@ -29,11 +30,14 @@ type adminMetrics struct {
 	reloadFailed    int64
 	auditEvents     int64 // gauge：审计链当前事件数（G1）
 	auditWriteFails int64
+	profileSwitch   map[string]int64 // #12：key = from|to（P0-4 §4.3.10）
 }
 
 var metrics = newAdminMetrics()
 
-func newAdminMetrics() *adminMetrics { return &adminMetrics{broker: map[string]int64{}} }
+func newAdminMetrics() *adminMetrics {
+	return &adminMetrics{broker: map[string]int64{}, profileSwitch: map[string]int64{}}
+}
 
 func (m *adminMetrics) request() {
 	m.mu.Lock()
@@ -76,6 +80,14 @@ func (m *adminMetrics) brokerRequest(provider, code, reason string) {
 	m.mu.Unlock()
 }
 
+// incProfileSwitch 记录一次 profile/mask_prg 切换（#12 唯一生产者）。
+// from/to 均为枚举值（handler 已校验），无基数爆炸风险。
+func (m *adminMetrics) incProfileSwitch(from, to string) {
+	m.mu.Lock()
+	m.profileSwitch[from+"|"+to]++
+	m.mu.Unlock()
+}
+
 func (m *adminMetrics) render(w io.Writer) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -101,5 +113,17 @@ func (m *adminMetrics) render(w io.Writer) {
 		// %q 转义 \、" 与换行，满足 Prometheus label 值转义要求
 		fmt.Fprintf(w, "gateway_admin_broker_requests_total{provider=%q,code=%q,reason=%q} %d\n",
 			parts[0], parts[1], parts[2], m.broker[k])
+	}
+
+	fmt.Fprintf(w, "# HELP gateway_cryptop_profile_switch_total 密码 profile/mask_prg 切换计数（§4.3.10）\n# TYPE gateway_cryptop_profile_switch_total counter\n")
+	swKeys := make([]string, 0, len(m.profileSwitch))
+	for k := range m.profileSwitch {
+		swKeys = append(swKeys, k)
+	}
+	sort.Strings(swKeys) // 确定性输出，便于 diff/测试断言
+	for _, k := range swKeys {
+		parts := strings.SplitN(k, "|", 2)
+		fmt.Fprintf(w, "gateway_cryptop_profile_switch_total{from=%q,to=%q} %d\n",
+			parts[0], parts[1], m.profileSwitch[k])
 	}
 }
