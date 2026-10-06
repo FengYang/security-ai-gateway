@@ -203,6 +203,10 @@ func main() {
 	if len(cfg.roleAdmins) == 0 {
 		log.Printf("提示：ADMIN_SVC_ROLE_ADMINS 未配置——角色全按 JWT 声明（M3-A：Java 控制台账号表派生）；该白名单仅作运维层强制加成")
 	}
+	// P0-4 §5.4.4/§12.3：装配进程级密码 provider（intl 逐字节等价；非法档 = 启动拒）。
+	if err := initCryptoRuntime(); err != nil {
+		log.Fatalf("%v", err)
+	}
 
 	// broker 可选启用：凭据目录存在即接管（含空目录 = 0 provider），否则回落环境变量路径；
 	// 均无则返回 nil（特性关闭，零影响既有行为）。配置无效 fail-closed 拒绝启动。

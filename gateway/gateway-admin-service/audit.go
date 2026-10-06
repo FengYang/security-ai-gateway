@@ -246,6 +246,11 @@ func (c *adminAuditChain) append(e adminAuditEvent) error {
 	if e.EventID == "" {
 		e.EventID = fmt.Sprintf("evt-%d", e.Timestamp)
 	}
+	// §5.2.2 写入端打标：按本进程 profile（intl → ""（缺省=SHA-256），sm-* → "sm3"）。
+	// 注：`KeyFingerprint` 恒 SHA-256（标识类），故 sm 档该字段与链哈希算法不同档——见 §5.2.2 例外条。
+	if e.HashAlg == "" {
+		e.HashAlg = hashAlgTag()
+	}
 	// R-12：算法非法即拒绝落链（凭据变更不留痕/不可复算不可接受）
 	if _, herr := e.hashWithErr(); herr != nil {
 		return fmt.Errorf("audit: 事件哈希算法非法: %w", herr)

@@ -25,8 +25,7 @@ package main
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -273,9 +272,9 @@ func (h *billingHandler) verifyEventsHMAC(sig string, body []byte) bool {
 	if err != nil {
 		return false
 	}
-	mac := hmac.New(sha256.New, h.eventsSecret)
-	mac.Write(body)
-	return hmac.Equal(got, mac.Sum(nil))
+	// MAC 经 cryptop（intl=HMAC-SHA256；sm=HMAC-SM3）；常量时间比较。
+	mac := cryptoProvider.HMAC(h.eventsSecret, body)
+	return subtle.ConstantTimeCompare(got, mac) == 1
 }
 
 // billingStatus 捕获响应码（用于指标 #1）。

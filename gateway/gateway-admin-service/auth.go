@@ -18,8 +18,7 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -82,9 +81,10 @@ func verifyInternalToken(token string, cfg *config) (*claims, error) {
 	if err != nil {
 		return nil, errors.New("auth: 签名段非 base64url")
 	}
-	mac := hmac.New(sha256.New, cfg.jwtSecret)
-	_, _ = mac.Write([]byte(signingInput))
-	if !hmac.Equal(sig, mac.Sum(nil)) {
+	// 签名校验：signingInput = header.payload，MAC 经 cryptop（intl=HMAC-SHA256；sm=HMAC-SM3）。
+	// key 不落插件/日志；比较为常量时间（§5.4.2 二分口径：Go 侧 subtle 可保留）。
+	mac := cryptoProvider.HMAC(cfg.jwtSecret, []byte(signingInput))
+	if subtle.ConstantTimeCompare(sig, mac) != 1 {
 		return nil, errors.New("auth: 签名校验失败（共享密钥不匹配或令牌被篡改）")
 	}
 

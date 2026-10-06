@@ -17,7 +17,6 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -141,8 +140,9 @@ func providerFileName(name string) string { return name + brokerFileSuffix }
 func providerFilePath(dir, name string) string { return filepath.Join(dir, providerFileName(name)) }
 
 // keyFingerprint 计算 Key 指纹（SHA-256 前 8 位十六进制，不可逆推）。
+// **恒 SHA-256**：属标识类字段（API 可见、跨服务引用），不随 profile 迁移（见 crypto_runtime.go 注）。
 func keyFingerprint(key []byte) string {
-	sum := sha256.Sum256(key)
+	sum := hashProvSHA256.Hash(key)
 	return hex.EncodeToString(sum[:4])
 }
 
