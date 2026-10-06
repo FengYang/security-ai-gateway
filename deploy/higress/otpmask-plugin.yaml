@@ -65,6 +65,14 @@ spec:
       sig_key: "__SIG_KEY_HEX__"
       attest_token: "__ATTEST_TOKEN_HEX__"
       attest_mode: "quote"
+      # ---- P0-4 §12.1：cryptop sidecar（与网关同 Pod，明文不出 Pod）----
+      # 簇经 McpBridge static 注册（见 mcp-bridge-registries.yaml，127.0.0.1:19097），
+      # 名口径 outbound|19097||cryptop-svc.static；sidecar 容器经
+      # cryptopsvc-sidecar-patch.yaml 注入网关 Deployment。
+      crypto_service: "cryptop-svc.static"
+      crypto_service_port: "19097"
+      crypto_profile: "intl"
+      mask_prg: "hmac-sha256"
       # ---- 段① 凭据运行态拉取（Phase 1 门禁 #8 / GF.2.5）----
       # 启用后：插件按 credential_interval 周期从管理面**只读**端点
       # （GET /v1/adminext/credentials/<credential_name>）拉取 sig_key/attest_token，

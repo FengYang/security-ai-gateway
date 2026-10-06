@@ -167,3 +167,11 @@ spec:
     port: 8085
     type: dns
     protocol: HTTP
+  # cryptop sidecar（P0-4 §12.1）：与网关同 Pod，故用 **static** 指 127.0.0.1
+  # （非跨 Pod 服务，不能写集群 FQDN）；生成簇名 outbound|19097||cryptop-svc.static。
+  # 容器注入见 cryptopsvc-sidecar-patch.yaml。
+  - name: cryptop-svc
+    domain: 127.0.0.1
+    port: 19097
+    type: static
+    protocol: HTTP

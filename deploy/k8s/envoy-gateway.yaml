@@ -123,7 +123,11 @@ data:
                             "tee_service": "tee_infer_service",
                             "tee_port": 19090,
                             "sig_key": "3031323334353637383961626364656630313233343536373839616263646566",
-                            "attest_token": "3031323334353637383961626364656630313233343536373839616263646566"
+                            "attest_token": "3031323334353637383961626364656630313233343536373839616263646566",
+                            "crypto_service": "cryptop-svc.dns",
+                            "crypto_service_port": 19097,
+                            "crypto_profile": "intl",
+                            "mask_prg": "hmac-sha256"
                           }
               - name: envoy.filters.http.router
                 typed_config:
@@ -193,6 +197,37 @@ data:
                   socket_address:
                     address: tee-infer-service
                     port_value: 19090
+      # cryptop sidecar：与 Envoy 同 Pod，STATIC 直连 127.0.0.1:19097（明文不出 Pod，
+      # R-20/C-6）。簇名须与插件 wrapper.FQDNCluster 拼装口径一致：outbound|<port>||<fqdn>。
+      - name: "outbound|19097||cryptop-svc.dns"
+        connect_timeout: 5s
+        type: STATIC
+        dns_lookup_family: V4_ONLY
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: "outbound|19097||cryptop-svc.dns"
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: 127.0.0.1
+                    port_value: 19097
+---
+# cryptopsvc 静态测试密钥（与插件 KeyRef 命名一致）。
+# ⚠️ 下列为开发演示值（intl 32B hex）；生产由部署流水线替换为 K8s Secret 注入。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cryptop-static-keys
+  namespace: otpmask
+type: Opaque
+stringData:
+  static-keys.json: |
+    {
+      "session/sig/v1": "3031323334353637383961626364656630313233343536373839616263646566",
+      "session/hmac/v1": "3031323334353637383961626364656630313233343536373839616263646566"
+    }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -248,6 +283,35 @@ spec:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           runAsNonRoot: false # envoy 需绑定特权端口场景可放宽；生产收敛
+          capabilities:
+            drop: ["ALL"]
+      # cryptopsvc sidecar（§12.1：与 Envoy 同 Pod，loopback；R-2/R-14/R-16/R-20/R-21
+      # 启动期校验失败即 exit1）。
+      - name: cryptopsvc
+        image: otpmask/cryptopsvc:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - "-listen"
+        - "127.0.0.1:19097"
+        - "-profile"
+        - "intl"
+        env:
+        - name: CRYPTO_STATIC_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: cryptop-static-keys
+              key: static-keys.json
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 500m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
           capabilities:
             drop: ["ALL"]
       volumes:

@@ -1,0 +1,59 @@
+# cryptopsvc sidecar 注入补丁（P0-4 §12.1：设计要求 cryptop 与 Envoy 同 Pod，明文不出 Pod）。
+#
+# 用法（strategic merge patch；Higress 独立部署网关 Deployment 名缺省 higress-gateway）：
+#   kubectl -n higress-system patch deployment higress-gateway \
+#     --patch-file deploy/higress/cryptopsvc-sidecar-patch.yaml
+# 或 apply 前用 kustomize 叠加。回滚：kubectl rollout undo deployment/higress-gateway。
+#
+# 配套：① WasmPlugin CR（otpmask-plugin.yaml）crypto_service=cryptop-svc.static；
+#       ② McpBridge static 注册（mcp-bridge-registries.yaml，127.0.0.1:19097）。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cryptop-static-keys
+  namespace: higress-system
+type: Opaque
+# ⚠️ 开发演示值（intl 32B hex）；生产由部署流水线替换（勿提交真实密钥）。
+stringData:
+  static-keys.json: |
+    {
+      "session/sig/v1": "3031323334353637383961626364656630313233343536373839616263646566",
+      "session/hmac/v1": "3031323334353637383961626364656630313233343536373839616263646566"
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: higress-gateway
+  namespace: higress-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: cryptopsvc
+        image: otpmask/cryptopsvc:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - "-listen"
+        - "127.0.0.1:19097"
+        - "-profile"
+        - "intl"
+        env:
+        - name: CRYPTO_STATIC_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: cryptop-static-keys
+              key: static-keys.json
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 500m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop: ["ALL"]

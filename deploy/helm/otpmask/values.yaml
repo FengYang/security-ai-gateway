@@ -17,6 +17,25 @@ images:
   embeddingService: otpmask/embedding-service
   teeInferService: otpmask/tee-infer-service
   envoyGateway: otpmask/envoy-gateway
+  cryptopsvc: otpmask/cryptopsvc
+
+# cryptop sidecar（§12.1：与 Envoy 同 Pod，loopback 19097；插件密码唯一 HTTP 面）
+cryptop:
+  enabled: true
+  port: 19097
+  profile: intl # intl | sm-software | sm-module（须与插件 crypto_profile 一致）
+  maskPRG: hmac-sha256 # hmac-sha256 | sm4 | bridge
+  # CRYPTO_STATIC_KEYS 原文（JSON：KeyRef→hex；R-16 长度随 profile：intl 32B/sm 16B）。
+  # ⚠️ 下列为开发演示值；生产经 -f 覆盖或改由既有 Secret（见 cryptop.existingSecret）。
+  staticKeysJSON: |
+    {
+      "session/sig/v1": "3031323334353637383961626364656630313233343536373839616263646566",
+      "session/hmac/v1": "3031323334353637383961626364656630313233343536373839616263646566"
+    }
+  existingSecret: "" # 非空时改从该 Secret 的 static-keys.json 键读取（不再用 staticKeysJSON）
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits: { cpu: 500m, memory: 128Mi }
 
 # 网关（Envoy + otpmask wasm 插件）
 envoy:

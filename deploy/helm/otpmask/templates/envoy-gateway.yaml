@@ -69,7 +69,11 @@ data:
                             "tee_service": "tee_infer_service",
                             "tee_port": {{ .Values.teeInfer.port }},
                             "sig_key": "{{ .Values.secret.sigKey }}",
-                            "attest_token": "{{ .Values.secret.attestToken }}"
+                            "attest_token": "{{ .Values.secret.attestToken }}",
+                            "crypto_service": "cryptop-svc.dns",
+                            "crypto_service_port": {{ .Values.cryptop.port }},
+                            "crypto_profile": "{{ .Values.cryptop.profile }}",
+                            "mask_prg": "{{ .Values.cryptop.maskPRG }}"
                           }
               - name: envoy.filters.http.router
                 typed_config:
@@ -138,6 +142,24 @@ data:
                   socket_address:
                     address: tee-infer-service
                     port_value: {{ .Values.teeInfer.port }}
+      {{- if .Values.cryptop.enabled }}
+      # cryptop sidecar：STATIC 直连 127.0.0.1（明文不出 Pod，R-20/C-6）。
+      # 簇名与插件 wrapper.FQDNCluster 拼装口径一致：outbound|<port>||<fqdn>。
+      - name: "outbound|{{ .Values.cryptop.port }}||cryptop-svc.dns"
+        connect_timeout: 5s
+        type: STATIC
+        dns_lookup_family: V4_ONLY
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: "outbound|{{ .Values.cryptop.port }}||cryptop-svc.dns"
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: 127.0.0.1
+                    port_value: {{ .Values.cryptop.port }}
+      {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -195,6 +217,40 @@ spec:
           readOnlyRootFilesystem: true
           capabilities:
             drop: ["ALL"]
+      {{- if .Values.cryptop.enabled }}
+      - name: cryptopsvc
+        image: {{ printf "%s%s:%s" .Values.images.registry .Values.images.cryptopsvc .Values.images.tag }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        args:
+        - "-listen"
+        - "127.0.0.1:{{ .Values.cryptop.port }}"
+        - "-profile"
+        - "{{ .Values.cryptop.profile }}"
+        env:
+        - name: CRYPTO_STATIC_KEYS
+          {{- if .Values.cryptop.existingSecret }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.cryptop.existingSecret }}
+              key: static-keys.json
+          {{- else }}
+          value: |
+            {{- .Values.cryptop.staticKeysJSON | nindent 12 }}
+          {{- end }}
+        resources:
+          requests:
+            cpu: {{ .Values.cryptop.resources.requests.cpu }}
+            memory: {{ .Values.cryptop.resources.requests.memory }}
+          limits:
+            cpu: {{ .Values.cryptop.resources.limits.cpu }}
+            memory: {{ .Values.cryptop.resources.limits.memory }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop: ["ALL"]
+      {{- end }}
       volumes:
       - name: envoy-config
         configMap:
