@@ -1,4 +1,6 @@
 # tee-infer-service：TEE 密态推理（MVP 模拟飞地，生产迁移 TDX/SGX）
+# 威胁模型 GAP-01/GAP-05：本清单为演示/开发形态（mock 飞地、无管理令牌），显式声明 -dev-mode；
+# 生产须移除 -dev-mode 并配置 -admin-token（否则启动守卫拒绝启动）。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,6 +42,8 @@ spec:
         - "$(CMAAS_URL)"
         - "-cmaas-model"
         - "$(CMAAS_MODEL)"
+        # 开发/演示逃生口（GAP-01/GAP-05）；生产必须移除并改配 -admin-token。
+        - "-dev-mode"
         env:
         - name: SIG_KEY
           valueFrom:

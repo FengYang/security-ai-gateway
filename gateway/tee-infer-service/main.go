@@ -561,6 +561,7 @@ func (s *teeServer) shadowObserve(tenant, requestID string, tokensIn int, engine
 	s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: requestID, Action: "shadow",
 		TokensIn: tokensIn, Result: "would_reject", PayloadSHA: payloadSHA,
+		HashAlg: hashAlgTag(), // §5.2.2：与 PayloadSHA 同档自述
 		EngineType: engineType, Model: model,
 		ShadowRule: strings.Join(hits, ","),
 	})
@@ -910,7 +911,7 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("读取请求失败: %v", err), http.StatusBadRequest)
 		return
 	}
-	payloadSHA := sha256hex(body) // 审计记录原始 wire 哈希（token=明文 / quote=密文）
+	payloadSHA := payloadHashHex(body) // 审计记录原始 wire 哈希（随 profile：intl=SHA-256 / sm=SM3，§5.2.2）
 	// P1c 解密入口：会话建立后请求须为 c2s 信封（fail-closed，防降级攻击）
 	if sess != nil {
 		pt, oerr := sess.openPayload(protocol.EndpointKeyIssue, body)
@@ -950,7 +951,7 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 	// M9-3：审计
 	s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: req.RequestID, Action: "key_issue",
-		Result: "ok", PayloadSHA: payloadSHA,
+		Result: "ok", PayloadSHA: payloadSHA, HashAlg: hashAlgTag(),
 	})
 	// M10：指标
 	s.metrics.incKeyIssue(tenant)
@@ -1005,7 +1006,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant := tenantOf(r)
 	isRetry := retryAttemptFromHeader(r) > 0 // GA-计费 P0-3：重试归因（来自数据面下行头）
-	payloadSHA := sha256hex(body) // 审计记录原始 wire 哈希（token=明文 / quote=密文）
+	payloadSHA := payloadHashHex(body) // 审计记录原始 wire 哈希（随 profile：intl=SHA-256 / sm=SM3，§5.2.2）
 	// P1c 解密入口：有效会话（quote 模式）下请求须为 c2s 信封（fail-closed，防降级攻击）
 	sess := s.sessionByID(r)
 	if sess != nil {
@@ -1174,7 +1175,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	vecEv := s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: req.RequestID, Action: "infer",
 		TokensIn: len(req.CipherVectors), TokensOut: len(tokens),
-		Result: "ok", PayloadSHA: payloadSHA,
+		Result: "ok", PayloadSHA: payloadSHA, HashAlg: hashAlgTag(),
 		EngineType: vecEng, // GA-计费 P0-1
 		Model:      req.Model,
 		IsRetry:    isRetry, // GA-计费 P0-3：重试归因（A-23/A-29）
@@ -1452,7 +1453,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 			ev := s.audit.append(AuditEvent{
 				TenantID: tenant, RequestID: req.RequestID, Action: "infer",
 				TokensIn: tokensIn, TokensOut: tokensOut,
-				Result: "engine_error", PayloadSHA: payloadSHA,
+				Result: "engine_error", PayloadSHA: payloadSHA, HashAlg: hashAlgTag(),
 				EngineType: engType, Model: req.Model,
 				TransformedHash: txHash,
 				MeteringMode:    s.meteringMode(),
@@ -1492,7 +1493,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	ev := s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: req.RequestID, Action: "infer",
 		TokensIn: tokensIn, TokensOut: tokensOut,
-		Result: "ok", PayloadSHA: payloadSHA,
+		Result: "ok", PayloadSHA: payloadSHA, HashAlg: hashAlgTag(),
 		// P2a：双 hash 审计——PayloadSHA 为入站密文哈希，TransformedHash 为引擎实收内容哈希
 		TransformedHash: txHash,
 		EngineType:      engType,          // GA-计费 P0-1：模型/引擎维度（分价计费）
@@ -1780,7 +1781,7 @@ func (s *teeServer) applyOutputBlockBilling(tenant, requestID, payloadSHA, trans
 	ev := s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: requestID, Action: "infer",
 		TokensIn: tokensIn, TokensOut: delivered, Result: "content_filter",
-		PayloadSHA: payloadSHA, TransformedHash: transformedHash,
+		PayloadSHA: payloadSHA, TransformedHash: transformedHash, HashAlg: hashAlgTag(),
 		EngineType: engType, Model: modelName,
 		MeteringMode: s.meteringMode(),
 		IsRetry:      isRetry, // GA-计费 P0-3：重试归因
@@ -1796,7 +1797,7 @@ func (s *teeServer) denyAndAudit(tenant, requestID, reason, payloadSHA string) {
 	s.recordUsage(tenant, 0, 0, true)
 	s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: requestID, Action: "deny",
-		Result: reason, PayloadSHA: payloadSHA,
+		Result: reason, PayloadSHA: payloadSHA, HashAlg: hashAlgTag(),
 	})
 	s.metrics.incDeny(tenant, reason)
 }
@@ -3431,7 +3432,8 @@ func main() {
 	addr := flag.String("listen", ":19090", "监听地址")
 	sigKeyHex := flag.String("sig-key", "", "协议签名密钥 K_sig（32 字节 hex；默认随机生成并打印）")
 	attestToken := flag.String("attest-token", "", "远程证明共享令牌（模拟）；默认随机生成并打印")
-	adminToken := flag.String("admin-token", "", "管理端点（/metrics /audit /usage）认证令牌；为空 = 开发模式不拦截")
+	adminToken := flag.String("admin-token", "", "管理端点（/metrics /audit /usage）认证令牌；生产必填，为空 = 开发模式不拦截")
+	devMode := flag.Bool("dev-mode", false, "开发模式（威胁模型 GAP-01/GAP-05 逃生口）：显式声明后允许 mock 飞地与空管理令牌；生产严禁开启")
 	meterToken := flag.String("meter-token", "", "独立只读计量令牌（GA-计费 P1-2）：仅可读 /usage（含 from/to 增量），不可写配额/读审计；为空 = 仅管理令牌可用")
 	billingURL := flag.String("billing-url", "", "计费 Webhook 推送地址（GA-计费 P1-1，如 http://billing:8080/events）；为空 = 推送关闭，拉取为主")
 	billingSecret := flag.String("billing-secret", "", "计费 Webhook HMAC-SHA256 签名密钥（与 billing-url 同时配置；为空 = 不签名，仅内网明文模式）")
@@ -3446,6 +3448,9 @@ func main() {
 	requireAttest := flag.Bool("require-attest", false, "强制证明模式")
 	enclaveMode := flag.String("enclave", "mock", "飞地实现：mock|tdx|sgx")
 	sealFile := flag.String("seal-file", "", "飞地密封数据文件（主密钥/K_sig 经 Seal 持久化；为空 = 内存模式，重启重新生成）")
+	// P0-4 §12.3：进程级密码档（intl 逐字节等价；profile 是配置而非编译开关，§11.5）。
+	cryptoProfile := flag.String("crypto-profile", "intl", "密码算法档（P0-4 §12.3）：intl|sm-software|sm-module（默认 intl；sm-module 未实现=启动拒，绝不回退冒充）")
+	cryptoMaskPRG := flag.String("mask-prg", "", "掩码 PRG 档（P0-4 §5.3.2/R-14）：hmac-sha256|sm4|bridge；为空=随 profile（intl→hmac-sha256，sm→sm4）。bridge 须 sm 档（R-21）")
 	routeConfigFile := flag.String("route-config", "", "双路线路由配置 JSON")
 	tokenQuota := flag.Int64("token-quota", 0, "每租户 token 配额上限（累计输入+输出；<=0 = 不限，P1；未单独配置租户的默认值）")
 	piiMode := flag.String("pii-mode", "block", "PII 处理模式：block（拦截，默认，fail-closed）| mask（脱敏替换后放行，P2a）；SQL 注入/提示注入任何模式均拦截")
@@ -3487,6 +3492,19 @@ func main() {
 
 	// S5：进程启动时刻（对账判据——链中存在早于此时刻的事件 ⇒ 内存用量计数已在重启时丢失）
 	startedAt := time.Now().UnixNano()
+
+	// 启动期安全守卫（威胁模型 GAP-01 mock 飞地 / GAP-05 空管理令牌）：生产形态 fail-closed。
+	// 须在飞地初始化与任何监听之前判定，避免"先起服务后校验"的窗口。
+	if err := validateStartupSecurity(*enclaveMode, *adminToken, *devMode); err != nil {
+		log.Fatalf("%v", err)
+	}
+	// P0-4 §5.4.4/§12.3：装配进程级密码 provider（intl 逐字节等价；非法组合=启动拒，R-2/R-14/R-21）。
+	if err := initCryptoRuntime(*cryptoProfile, *cryptoMaskPRG); err != nil {
+		log.Fatalf("%v", err)
+	}
+	if *devMode {
+		log.Printf("⚠️ 开发模式（-dev-mode）：已放行 mock 飞地 / 空管理令牌；生产环境严禁使用")
+	}
 
 	// 双路线路由配置
 	routeCfg := DefaultRouteConfig()

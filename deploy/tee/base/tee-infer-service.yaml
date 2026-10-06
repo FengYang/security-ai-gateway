@@ -1,5 +1,7 @@
 # tee-infer-service
 # 生产参数：-enclave mock（开发/CI）| tdx/sgx（硬件接入后切换）
+# 威胁模型 GAP-01/GAP-05：本 base 为开发/CI 形态（mock 飞地、无管理令牌），故显式声明 -dev-mode。
+# 生产/TDX overlay 必须移除 -dev-mode 并配置 -admin-token，否则服务启动守卫将拒绝启动（fail-closed）。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,6 +36,8 @@ spec:
         - "$(ATTEST_TOKEN)"
         - "-tsa"
         - "mock"
+        # 开发/CI 逃生口（GAP-01/GAP-05）；生产必须移除并改配 -admin-token。
+        - "-dev-mode"
         env:
         - name: ENCLAVE_MODE
           value: "mock" # overlay 可覆盖为 tdx/sgx

@@ -36,6 +36,10 @@ spec:
         - "-engine-url"
         - "{{ .Values.teeInfer.engineUrl }}"
         {{- end }}
+        {{- if .Values.teeInfer.devMode }}
+        # 开发/演示逃生口（GAP-01/GAP-05）；生产须置 teeInfer.devMode=false 并配置真飞地/管理令牌。
+        - "-dev-mode"
+        {{- end }}
         env:
         - name: SIG_KEY
           valueFrom:

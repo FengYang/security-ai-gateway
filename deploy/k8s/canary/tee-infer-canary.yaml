@@ -36,6 +36,8 @@ spec:
         - "$(SIG_KEY)"
         - "-attest-token"
         - "$(ATTEST_TOKEN)"
+        # 开发/演示逃生口（GAP-01/GAP-05）；生产必须移除并改配 -admin-token。
+        - "-dev-mode"
         env:
         - name: SIG_KEY
           valueFrom:

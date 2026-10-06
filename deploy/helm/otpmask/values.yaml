@@ -39,6 +39,11 @@ teeInfer:
   replicas: 2
   port: 19090
   engineUrl: "" # 非空时经 vLLM 适配器远程推理（M12 对接层），如 http://vllm-adapter:19190
+  # 威胁模型 GAP-01/GAP-05：本 Chart 默认 mock 飞地、无管理令牌，属开发/演示形态，
+  # 故 devMode 默认 true（透传 -dev-mode）。生产必须设 devMode=false，并提供真 TDX 飞地
+  # 与管理令牌，否则 tee-infer 启动守卫会拒绝启动（fail-closed）。
+  # 注：本 Chart 暂未模板化 -enclave/-admin-token，生产启用前需扩展（见部署指南）。
+  devMode: true
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 1000m, memory: 512Mi }
