@@ -162,12 +162,12 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 	}
 	defer wipe(seed)
 	layerDomain := fmt.Sprintf("otpmask/layer/%d/v1", req.Layer)
-	stream, err := mask.NewStreamDomain(seed, maskModulus, []byte(layerDomain))
+	stream, err := newLayerStream(seed, maskModulus, []byte(layerDomain))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("掩码流派生失败: %v", err), http.StatusInternalServerError)
 		return
 	}
-	nextStream, err := mask.NewStreamDomain(seed, maskModulus, []byte(fmt.Sprintf("otpmask/layer/%d/v1", req.Layer+1)))
+	nextStream, err := newLayerStream(seed, maskModulus, []byte(fmt.Sprintf("otpmask/layer/%d/v1", req.Layer+1)))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("下一层掩码流派生失败: %v", err), http.StatusInternalServerError)
 		return
@@ -255,16 +255,32 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 }
 
 // sessionSeed 取会话请求密钥（经 cryptop.Provider.KDF；intl=HKDF-SHA256 逐字节等价）。
+// seed 长度**随 PRG 而非 profile**（§5.3.2 选择表）：hmac-sha256 → 32；sm4 → p.SymmetricKeySize()。
 func (s *teeServer) sessionSeed(r *http.Request) ([]byte, error) {
 	sess := s.sessionByID(r)
 	if sess == nil || len(sess.K_enc) == 0 {
 		return nil, errors.New("会话密钥缺失")
 	}
-	seed, err := cryptoProvider.KDF(sess.K_enc, nil, []byte("otpmask/recompute-seed/v1"), 32)
+	seedLen := 32
+	if cryptoMaskPRG == "sm4" {
+		seedLen = cryptoProvider.SymmetricKeySize()
+	}
+	seed, err := cryptoProvider.KDF(sess.K_enc, nil, []byte("otpmask/recompute-seed/v1"), seedLen)
 	if err != nil {
 		return nil, fmt.Errorf("掩码 seed 派生失败: %w", err)
 	}
 	return seed, nil
+}
+
+// newLayerStream 按 `mask_prg` 选构造器（P0-4 §5.3.2 选择表，唯一选择点）：
+//   - `hmac-sha256`（intl 默认）→ `NewStreamDomain`（hmacPRG，profile 无关，逐字节等价现役实现）；
+//   - `sm4` → `NewStreamWithProvider`（SM4-CTR，key 长度须 = SymmetricKeySize，由 seed 长度保证）；
+//   - `bridge` → sm 档迁移桥接，层掩码无请求头可依，按 profile 目标态取 `sm4`。
+func newLayerStream(seed []byte, modulus uint64, domain []byte) (*mask.Stream, error) {
+	if cryptoMaskPRG == "sm4" || cryptoMaskPRG == "bridge" {
+		return mask.NewStreamWithProvider(cryptoProvider, seed, domain, modulus)
+	}
+	return mask.NewStreamDomain(seed, modulus, domain)
 }
 
 func verifyRecomputeSig(kSig []byte, req *recomputeRequest) bool {
