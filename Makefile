@@ -22,6 +22,12 @@ test:
 test-short:
 	$(GO) test -race -short ./...
 
+# test-e2e —— §11.4/11.5 进程级集成/端到端回归（INT-1..5 + E2E-01..04/06；
+# 真实二进制子进程 + 仅 HTTP 驱动；E2E-05 完整切换演练留部署环境，见 make drill）。
+.PHONY: test-e2e
+test-e2e:
+	$(GO) test -tags e2e -count=1 -v -timeout 15m ./e2e/
+
 .PHONY: fuzz
 fuzz:
 	$(GO) test -fuzz=FuzzDecrypt -fuzztime=30s ./cipher/paillier/

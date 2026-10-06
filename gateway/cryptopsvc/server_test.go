@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"security-ai-gateway/gateway/cryptop"
 	"security-ai-gateway/gateway/cryptop/keystore"
@@ -27,6 +28,10 @@ func newTestServer(t testing.TB, profile cryptop.Profile) (*Server, *httptest.Se
 	}
 	cfg := Config{
 		Profile: profile,
+		// 全仓 `go test ./...` 多包并行时 Windows 调度抖动（时间片/Defender）偶发使
+		// 单次 loopback 调用达数十 ms（产品缺省 R-3=50ms 会误判超时）；产品缺省值不动，
+		// T-8.2 的 P99≤10ms 断言仍独立锁定真实分布；R-3 触发语义另由 TestR3CallTimeoutFailClosed。
+		CallTimeout: time.Second,
 		StaticKeys: map[string][]byte{
 			"static/aead": bytes.Repeat([]byte{0xAB}, p.SymmetricKeySize()), // R-16：键长匹配 profile
 			"static/hmac": bytes.Repeat([]byte{0xCD}, p.SymmetricKeySize()),
@@ -437,6 +442,47 @@ func TestNewServerConfigValidation(t *testing.T) {
 		"static/aead": bytes.Repeat([]byte{0xAB}, intl.SymmetricKeySize()),
 	}}); err != nil {
 		t.Fatalf("长度匹配的静态键应登记成功: %v", err)
+	}
+}
+
+// TestR3CallTimeoutFailClosed R-3：内层 handler 处理超 CallTimeout 预算时 →
+// HTTP 500 internal「调用超时（R-3）」，缓冲响应不落半内容（fail-closed）。
+//
+// 直接对 withTimeout 中间件构造确定 sleep 的假 handler（超时与具体 op 无关）；
+// 不用 1ns 量级——Windows 单调钟紧循环读数可返回 0（#12 已实证），sleep 20ms 在
+// Windows 上亦可靠（实际睡眠 ≥ 请求值）。
+func TestR3CallTimeoutFailClosed(t *testing.T) {
+	p, _ := cryptop.New(cryptop.ProfileIntl)
+	s, err := NewServer(p, Config{
+		Profile:     cryptop.ProfileIntl,
+		CallTimeout: 5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	slow := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	})
+	ts := httptest.NewServer(s.withTimeout(slow))
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Post(ts.URL, "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("R-3 超时期望 500，得 %d", resp.StatusCode)
+	}
+	var out struct {
+		Error map[string]any `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Error["message"] != "调用超时（R-3）" {
+		t.Fatalf("R-3 错误体异常: %+v", out)
 	}
 }
 
