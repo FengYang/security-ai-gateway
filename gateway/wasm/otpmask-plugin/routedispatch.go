@@ -174,17 +174,7 @@ func (d *dispatchState) send(ctx wrapper.HttpContext, config PluginConfig, endpo
 		failClosed(log, "路由派发端点配置非法: "+err.Error())
 		return
 	}
-	payload := d.body
 	headers := [][2]string{{"Content-Type", "application/octet-stream"}}
-	if config.AttestMode == "quote" {
-		sealed, err := Session.sealPayload(protocol.EndpointInfer, d.body)
-		if err != nil {
-			failClosed(log, "推理请求加密失败: "+err.Error())
-			return
-		}
-		payload = sealed
-		headers = append(headers, [2]string{"X-Session-ID", Session.SessionID})
-	}
 	if t := tenantHeaderValue(ctx); t != "" {
 		headers = append(headers, [2]string{"X-Tenant-ID", t})
 	}
@@ -193,25 +183,39 @@ func (d *dispatchState) send(ctx wrapper.HttpContext, config PluginConfig, endpo
 	if v, ok := retryAttemptHeaderValue(d.state.Attempt); ok {
 		headers = append(headers, [2]string{retryAttemptHeader, v})
 	}
-
-	err = wrapper.HttpCall(wrapper.FQDNCluster{FQDN: target.host, Port: target.port},
-		http.MethodPost, target.rawURL(), headers, payload,
-		func(statusCode int, hdr http.Header, respBody []byte) {
-			// 结果回写（EWMA 失败率/熔断/动态权重/降级迟滞）：与响应头阶段同一入口，语义一致。
-			recordRouteResult(ctx, statusCode)
-			if retryableInferStatus(statusCode) && d.retry(ctx, config, endpoint, log) {
+	doSend := func(payload []byte, hdrs [][2]string) {
+		err := wrapper.HttpCall(wrapper.FQDNCluster{FQDN: target.host, Port: target.port},
+			http.MethodPost, target.rawURL(), hdrs, payload,
+			func(statusCode int, hdr http.Header, respBody []byte) {
+				// 结果回写（EWMA 失败率/熔断/动态权重/降级迟滞）：与响应头阶段同一入口，语义一致。
+				recordRouteResult(ctx, statusCode)
+				if retryableInferStatus(statusCode) && d.retry(ctx, config, endpoint, log) {
+					return
+				}
+				d.writeResponse(ctx, config, statusCode, hdr, respBody, log)
+			}, dispatchTimeoutMs)
+		if err != nil {
+			// 连接错误（§6.5.8：连接错误可重试，切换端点；计入失败率）
+			recordRouteResult(ctx, http.StatusBadGateway)
+			if d.retry(ctx, config, endpoint, log) {
 				return
 			}
-			d.writeResponse(ctx, config, statusCode, hdr, respBody, log)
-		}, dispatchTimeoutMs)
-	if err != nil {
-		// 连接错误（§6.5.8：连接错误可重试，切换端点；计入失败率）
-		recordRouteResult(ctx, http.StatusBadGateway)
-		if d.retry(ctx, config, endpoint, log) {
-			return
+			failClosed(log, fmt.Sprintf("路由派发失败: %v", err))
 		}
-		failClosed(log, fmt.Sprintf("路由派发失败: %v", err))
 	}
+	// §5.4.6.1：quote 模式信封 seal 经 cryptop sidecar（异步）→ 回调内补 X-Session-ID 后派发。
+	if config.AttestMode == "quote" {
+		Session.sealPayload(protocol.EndpointInfer, d.body, func(sealed []byte, serr error) {
+			if serr != nil {
+				failClosed(log, "推理请求加密失败: "+serr.Error())
+				return
+			}
+			hdrs := append(headers, [2]string{"X-Session-ID", Session.SessionID})
+			doSend(sealed, hdrs)
+		})
+		return
+	}
+	doSend(d.body, headers)
 }
 
 // retry 判定并执行一次端点切换重发；返回 true 表示已重发（调用方不再回写）。
@@ -252,30 +256,31 @@ func (d *dispatchState) available() []string {
 }
 
 // writeResponse 解密/组装明文并一次性回写客户端（非流式）。
-// 复用 processOutputBody（信封解密 + 验签 + 解掩码 + SSE 组装），状态码经上下文传递
-// （body 阶段读不到响应伪头，与既有路径同因）。
+// 复用 processOutputBodyAsync（信封解密 + 验签 + 解掩码 + SSE 组装，均经 sidecar 异步），
+// 状态码经上下文传递（body 阶段读不到响应伪头，与既有路径同因）。
 func (d *dispatchState) writeResponse(ctx wrapper.HttpContext, config PluginConfig,
 	status int, hdr http.Header, body []byte, log logs.Log) {
 	ctx.SetContext(ctxKeyRespStatus, strconv.Itoa(status))
-	out, passthrough := processOutputBody(ctx, config, body, log)
-	if passthrough {
-		// 非 200 错误体：原样回写（保留上游 content-type）
-		h := make([][2]string, 0, 1)
-		if ct := hdr.Get("Content-Type"); ct != "" {
-			h = append(h, [2]string{"Content-Type", ct})
+	processOutputBodyAsync(ctx, config, body, log, func(out []byte, passthrough, ok bool) {
+		if passthrough {
+			// 非 200 错误体：原样回写（保留上游 content-type）
+			h := make([][2]string, 0, 1)
+			if ct := hdr.Get("Content-Type"); ct != "" {
+				h = append(h, [2]string{"Content-Type", ct})
+			}
+			_ = proxywasm.SendHttpResponse(uint32(status), h, out, -1)
+			return
 		}
-		_ = proxywasm.SendHttpResponse(uint32(status), h, out, -1)
-		return
-	}
-	if out == nil {
-		metricDecryptError.incr()
-		failClosed(log, "推理响应解密失败（路由派发路径）")
-		return
-	}
-	// 与 onHttpResponseHeaders 的判定保持一致：quote 成功响应总是 SSE 信封明文。
-	ct := "application/json"
-	if requestWantsSSE || (config.AttestMode == "quote" && !pendingVectorsPlain) {
-		ct = "text/event-stream"
-	}
-	_ = proxywasm.SendHttpResponse(http.StatusOK, [][2]string{{"Content-Type", ct}}, out, -1)
+		if !ok {
+			metricDecryptError.incr()
+			failClosed(log, "推理响应解密失败（路由派发路径）")
+			return
+		}
+		// 与 onHttpResponseHeaders 的判定保持一致：quote 成功响应总是 SSE 信封明文。
+		ct := "application/json"
+		if requestWantsSSE || (config.AttestMode == "quote" && !pendingVectorsPlain) {
+			ct = "text/event-stream"
+		}
+		_ = proxywasm.SendHttpResponse(http.StatusOK, [][2]string{{"Content-Type", ct}}, out, -1)
+	})
 }

@@ -93,7 +93,7 @@ func initRouteRuntime(config PluginConfig, log logs.Log) {
 		return
 	}
 	routeRuntime.key = key
-	routeRuntime.cache = routecache.NewWithOptions(key, routecache.Options{
+	routeRuntime.cache = routecache.NewWithOptions(sidecarTableVerifier{}, routeVerifyKeyRef(config), routecache.Options{
 		MaxStale: time.Duration(config.MaxStaleSeconds) * time.Second,
 	})
 	routeRuntime.service = config.GatewayCoreService

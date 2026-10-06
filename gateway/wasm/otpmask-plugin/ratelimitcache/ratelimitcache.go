@@ -12,8 +12,6 @@
 package ratelimitcache
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/json"
 	"sync"
 )
@@ -52,43 +50,49 @@ func (t *Table) canon() []byte {
 	return b
 }
 
-// Verify 校验表签名（HMAC-SHA256 over canon）；失败必须拒绝该表（保留旧表）。
-func Verify(key []byte, t *Table) bool {
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write(t.canon())
-	return hmac.Equal(t.Signature, mac.Sum(nil))
-}
-
-// Sign 用同一密钥计算签名（供测试与本地演练构造**合法**表；生产由 gateway-core 签发）。
-func Sign(key []byte, t *Table) {
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write(t.canon())
-	t.Signature = mac.Sum(nil)
+// Verifier 表签名校验接缝（P0-4 §4.7 分层：本包为纯逻辑，**不 import 密码/hostcall**）。
+// 插件注入经 cryptop sidecar（`/v1/hmac` 出 MAC + 常量时间比较，密钥字节恒驻 sidecar）的实现；
+// 单测注入**同步**实现，令 CPS 调用同步完成（同 cryptoseam_test.go 手法）。
+type Verifier interface {
+	// VerifySym 校验 canon 字节 data 的对称 MAC sig（keyRef = K_rx 句柄，§6.3 命名）。
+	// cb(ok, err)：err 非空 = 校验不可用（fail-closed，调用方须拒绝该表）。
+	VerifySym(keyRef string, data, sig []byte, cb func(ok bool, err error))
 }
 
 // Cache 限流表缓存（单表 + 版本单调准入）。
 type Cache struct {
-	mu    sync.RWMutex
-	key   []byte
-	table *Table
+	mu       sync.RWMutex
+	verifier Verifier
+	keyRef   string
+	table    *Table
 }
 
-// New 构造缓存（key = K_rx，与路由表同一密钥族）。
-func New(key []byte) *Cache { return &Cache{key: key} }
+// New 构造缓存（keyRef = K_rx 句柄，与路由表同一密钥族；verifier 为 §4.7 注入的验签接缝）。
+func New(verifier Verifier, keyRef string) *Cache {
+	return &Cache{verifier: verifier, keyRef: keyRef}
+}
 
-// Update 验签 + 防回滚（版本必须严格递增）后写入缓存；返回是否入缓存。
-// 拒绝情形：验签失败 / 版本未递增（重复或回退）→ 调用方保留旧表并计数。
-func (c *Cache) Update(t *Table) bool {
-	if t == nil || !Verify(c.key, t) {
-		return false
+// Update 验签 + 防回滚（版本必须严格递增）后写入缓存（CPS 交付）。
+// 拒绝情形：验签失败/不可用 / 版本未递增（重复或回退）→ 调用方保留旧表并计数。
+func (c *Cache) Update(t *Table, cb func(accepted bool)) {
+	if t == nil || c.verifier == nil {
+		cb(false)
+		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.table != nil && t.Version <= c.table.Version {
-		return false
-	}
-	c.table = t
-	return true
+	c.verifier.VerifySym(c.keyRef, t.canon(), t.Signature, func(ok bool, err error) {
+		if err != nil || !ok {
+			cb(false)
+			return
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.table != nil && t.Version <= c.table.Version {
+			cb(false)
+			return
+		}
+		c.table = t
+		cb(true)
+	})
 }
 
 // Loaded 是否已有可用的已验签表（false = 从未拉到 → 按设计 §6 放行 + 告警）。

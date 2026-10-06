@@ -18,8 +18,6 @@
 package routeengine
 
 import (
-	"crypto/rand"
-	"encoding/binary"
 	"math"
 	"sort"
 	"sync"
@@ -533,37 +531,38 @@ func (e *Engine) pickByWeight() Decision {
 		return Decision{Reason: "no_available_in_priority_group"}
 	}
 
-	// 第二遍：加权随机选择
-	r := randomFloat64() * totalWeight
-	var cum float64
-	var first *EndpointState
+	// 第二遍：加权随机选择。随机源经 §4.7 注入接缝取得（本包不 import 密码）；
+	// 随机源未注入/暂不可用 → 确定性取组内第一个（不阻塞请求路径）。
+	if rv, ok := randFloat64(); ok {
+		r := rv * totalWeight
+		var cum float64
+		for _, ep := range e.state {
+			if !ep.IsUsable() || ep.Priority != minPrio {
+				continue
+			}
+			cum += ep.Weight
+			if r < cum {
+				return Decision{
+					EndpointName: ep.Name,
+					EndpointURL:  ep.URL,
+					Strategy:     StrategyWeighted,
+					Reason:       "weighted_random",
+				}
+			}
+		}
+	}
+	// 兜底：返回组内第一个（随机源不可用 / 浮点误差防护）
 	for _, ep := range e.state {
-		if !ep.IsUsable() || ep.Priority != minPrio {
-			continue
-		}
-		if first == nil {
-			first = ep
-		}
-		cum += ep.Weight
-		if r < cum {
+		if ep.IsUsable() && ep.Priority == minPrio {
 			return Decision{
 				EndpointName: ep.Name,
 				EndpointURL:  ep.URL,
 				Strategy:     StrategyWeighted,
-				Reason:       "weighted_random",
+				Reason:       "weighted_fallback",
 			}
 		}
 	}
-	// 兜底：返回组内第一个（浮点误差防护）
-	if first == nil {
-		return Decision{Reason: "no_available_in_priority_group"}
-	}
-	return Decision{
-		EndpointName: first.Name,
-		EndpointURL:  first.URL,
-		Strategy:     StrategyWeighted,
-		Reason:       "weighted_fallback",
-	}
+	return Decision{Reason: "no_available_in_priority_group"}
 }
 
 // RecordResult 记录一次请求结果（成功/失败），更新 EWMA 失败率、熔断器状态和动态权重。
@@ -887,17 +886,19 @@ func pickByWeightStateless(usable []Endpoint) Decision {
 	if len(group) == 0 || totalWeight <= 0 {
 		return Decision{Reason: "no_available_in_priority_group"}
 	}
-	// 加权随机
-	r := randomFloat64() * totalWeight
-	var cum float64
-	for _, ep := range group {
-		cum += ep.Weight
-		if r < cum {
-			return Decision{
-				EndpointName: ep.Name,
-				EndpointURL:  ep.URL,
-				Strategy:     StrategyWeighted,
-				Reason:       "weighted_random",
+	// 加权随机（随机源经 §4.7 注入；不可用 → 确定性取组内第一个）
+	if rv, ok := randFloat64(); ok {
+		r := rv * totalWeight
+		var cum float64
+		for _, ep := range group {
+			cum += ep.Weight
+			if r < cum {
+				return Decision{
+					EndpointName: ep.Name,
+					EndpointURL:  ep.URL,
+					Strategy:     StrategyWeighted,
+					Reason:       "weighted_random",
+				}
 			}
 		}
 	}
@@ -910,15 +911,27 @@ func pickByWeightStateless(usable []Endpoint) Decision {
 }
 
 // ============================================================
-// 工具函数
+// 随机源接缝（§4.7 分层：本包不 import 密码/hostcall）
 // ============================================================
 
-// randomFloat64 返回 [0, 1) 之间的随机浮点数。
-// 使用 crypto/rand 保证均匀性（避免 math/rand 的全局锁问题）。
-func randomFloat64() float64 {
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	// 转换为 [0,1)：取 53 位精度（float64 尾数）
-	n := binary.BigEndian.Uint64(b[:])
-	return float64(n>>11) / (1 << 53)
+// RandSource 加权选择的随机源接缝：由插件在装配期注入经 cryptop sidecar `/v1/rand`
+// （B-4.6-2）的实现；单测注入**同步**实现即可令 CPS 调用同步完成（同 cryptoseam_test.go 手法）。
+type RandSource interface {
+	// Float64 返回 [0,1) 均匀随机数；随机源暂不可用时返回 ok=false
+	// （调用方按确定性主备回退，不阻塞请求路径、不回退插件内密码运算）。
+	Float64() (v float64, ok bool)
+}
+
+// randSource 进程级随机源（wasm 单线程：装配期写入、请求期只读）。
+var randSource RandSource
+
+// SetRandSource 注入随机源（nil = 未注入 → 加权选择回退确定性主备）。
+func SetRandSource(rs RandSource) { randSource = rs }
+
+// randFloat64 取一个 [0,1) 随机数；随机源未注入/暂不可用返回 (0,false)。
+func randFloat64() (float64, bool) {
+	if randSource == nil {
+		return 0, false
+	}
+	return randSource.Float64()
 }

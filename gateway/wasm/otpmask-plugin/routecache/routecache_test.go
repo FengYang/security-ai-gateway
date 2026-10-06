@@ -8,6 +8,37 @@ import (
 
 func testKey() []byte { return []byte("0123456789abcdef0123456789abcdef") }
 
+// testVerifier 同步 HMAC-SHA256 验签接缝（单测专用；crypto/* 仅测试允许）。
+// 生产路径由插件注入经 cryptop sidecar 的实现（§4.7），语义等价（同步交付即可视为 CPS 立即完成）。
+type testVerifier struct{ key []byte }
+
+func (v testVerifier) VerifySym(_ string, data, sig []byte, cb func(ok bool, err error)) {
+	m := hmac.New(sha256.New, v.key)
+	_, _ = m.Write(data)
+	cb(hmac.Equal(sig, m.Sum(nil)), nil)
+}
+
+// newTestCache / newTestCacheOpts 构造注入同步验签接缝的缓存。
+func newTestCache(key []byte) *Cache { return New(testVerifier{key: key}, "") }
+
+func newTestCacheOpts(key []byte, opt Options) *Cache {
+	return NewWithOptions(testVerifier{key: key}, "", opt)
+}
+
+// updateSync 同步驱动 CPS Update（seam 同步回调），返回是否接受。
+func updateSync(c *Cache, t *RouteTable) bool {
+	var ok bool
+	c.Update(t, func(a bool) { ok = a })
+	return ok
+}
+
+// verifySync 同步驱动验签（等价于原 Verify(key, t)）。
+func verifySync(v Verifier, t *RouteTable) bool {
+	var ok bool
+	v.VerifySym("", t.canon(), t.Signature, func(a bool, _ error) { ok = a })
+	return ok
+}
+
 func sign(key []byte, t *RouteTable) {
 	h := hmac.New(sha256.New, key)
 	_, _ = h.Write(t.canon())
@@ -21,10 +52,10 @@ func validTable(version int) *RouteTable {
 }
 
 func TestUpdateAndLookup(t *testing.T) {
-	c := New(testKey())
+	c := newTestCache(testKey())
 	tbl := validTable(1)
 	sign(testKey(), tbl)
-	if !c.Update(tbl) {
+	if !updateSync(c, tbl) {
 		t.Fatal("合法表应接受")
 	}
 	if c.Version() != 1 {
@@ -40,11 +71,11 @@ func TestUpdateAndLookup(t *testing.T) {
 }
 
 func TestRejectBadSignature(t *testing.T) {
-	c := New(testKey())
+	c := newTestCache(testKey())
 	// 用错误密钥签名
 	tbl := validTable(1)
 	sign([]byte("00000000000000000000000000000000"), tbl)
-	if c.Update(tbl) {
+	if updateSync(c, tbl) {
 		t.Fatal("签名无效的表应拒绝")
 	}
 	if c.Version() != 0 {
@@ -53,11 +84,11 @@ func TestRejectBadSignature(t *testing.T) {
 }
 
 func TestRejectRollback(t *testing.T) {
-	c := New(testKey())
+	c := newTestCache(testKey())
 	for _, v := range []int{3, 2, 1, 5, 4} {
 		tbl := validTable(v)
 		sign(testKey(), tbl)
-		c.Update(tbl)
+		updateSync(c, tbl)
 	}
 	if c.Version() != 5 {
 		t.Fatalf("缓存应保留最高版本 5，got %d", c.Version())
@@ -65,21 +96,21 @@ func TestRejectRollback(t *testing.T) {
 }
 
 func TestTamperedRejected(t *testing.T) {
-	c := New(testKey())
+	c := newTestCache(testKey())
 	tbl := validTable(1)
 	sign(testKey(), tbl)
 	tbl.Routes[0].DefaultEngine = "evil"
 	// 篡改后未重新签名
-	if c.Update(tbl) {
+	if updateSync(c, tbl) {
 		t.Fatal("篡改后未重签应拒绝")
 	}
 }
 
 func TestDecidePriority(t *testing.T) {
-	c := New(testKey())
+	c := newTestCache(testKey())
 	tbl := validTable(3) // tenant-a/qwen-plus -> cmaas
 	sign(testKey(), tbl)
-	c.Update(tbl)
+	updateSync(c, tbl)
 
 	// L1 处方引擎优先
 	if d := c.Decide("tenant-a", "qwen-plus", "yrproxy"); d.Engine != "yrproxy" || d.Target != "" {
@@ -97,7 +128,7 @@ func TestDecidePriority(t *testing.T) {
 
 // P0-1 新增：多端点配置缓存 + 验签
 func TestUpdateMultiEndpoint(t *testing.T) {
-	c := New(testKey())
+	c := newTestCache(testKey())
 	tbl := &RouteTable{
 		Version: 1, UpdatedAt: 1725500000,
 		Routes: []TableRoute{
@@ -111,7 +142,7 @@ func TestUpdateMultiEndpoint(t *testing.T) {
 		},
 	}
 	sign(testKey(), tbl)
-	if !c.Update(tbl) {
+	if !updateSync(c, tbl) {
 		t.Fatal("多端点配置应接受")
 	}
 	r := c.Lookup("tenant-a", "gpt-4")
@@ -125,7 +156,7 @@ func TestUpdateMultiEndpoint(t *testing.T) {
 
 // P0-1 新增：篡改 Endpoints 字段应被拒绝（防篡改）
 func TestTamperEndpointsRejected(t *testing.T) {
-	c := New(testKey())
+	c := newTestCache(testKey())
 	tbl := &RouteTable{
 		Version: 1, UpdatedAt: 1725500000,
 		Routes: []TableRoute{
@@ -135,17 +166,17 @@ func TestTamperEndpointsRejected(t *testing.T) {
 	}
 	sign(testKey(), tbl)
 	tbl.Routes[0].Endpoints[0].Name = "evil" // 篡改
-	if c.Update(tbl) {
+	if updateSync(c, tbl) {
 		t.Fatal("篡改 Endpoints 后未重签应被拒绝")
 	}
 }
 
 // P0-1 新增：v1 格式（无 Endpoints）向后兼容
 func TestV1FormatBackwardCompatible(t *testing.T) {
-	c := New(testKey())
+	c := newTestCache(testKey())
 	tbl := validTable(1) // v1 格式，无 Endpoints
 	sign(testKey(), tbl)
-	if !c.Update(tbl) {
+	if !updateSync(c, tbl) {
 		t.Fatal("v1 格式（无 Endpoints）应仍被接受")
 	}
 	r := c.Lookup("tenant-a", "qwen-plus")

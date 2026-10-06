@@ -15,7 +15,7 @@ func endpointTable(version int, updatedAt int64, tenant, model, strategy string,
 	t := &routecache.RouteTable{Version: version, UpdatedAt: updatedAt, Routes: []routecache.TableRoute{
 		{Tenant: tenant, Model: model, Strategy: strategy, Endpoints: eps},
 	}}
-	routecache.Sign(routeKey(), t)
+	signTableForTest(routeKey(), t)
 	return t
 }
 
@@ -53,12 +53,12 @@ func TestRouteEndpointSuccess(t *testing.T) {
 
 // TestEntryForNilWhenNoEndpoints 向后兼容：未命中路由表或无端点 → nil（行为零变化）。
 func TestEntryForNilWhenNoEndpoints(t *testing.T) {
-	c := routecache.New(routeKey())
+	c := newRouteCacheForTest(routeKey())
 	if e := entryFor(c, "t-none", "m-none"); e != nil {
 		t.Fatal("空缓存应返回 nil 条目")
 	}
 	// 命中路由表但未配置端点（v1 二元模式）→ 同样 nil。
-	c.Update(signedTable(1, time.Now().Unix()))
+	updateRouteCacheSync(c, signedTable(1, time.Now().Unix()))
 	if e := entryFor(c, "tenant-a", "qwen-plus"); e != nil {
 		t.Fatal("无 Endpoints 的条目应返回 nil（回退 v1 二元模式）")
 	}
@@ -75,8 +75,8 @@ func TestEntryForSmoothMigration(t *testing.T) {
 		{Name: "ep-b", Weight: 1, Priority: 1},
 	}
 	now := time.Now().Unix()
-	c := routecache.New(routeKey())
-	c.Update(endpointTable(1, now, tenant, model, "weighted", eps))
+	c := newRouteCacheForTest(routeKey())
+	updateRouteCacheSync(c, endpointTable(1, now, tenant, model, "weighted", eps))
 
 	e1 := entryFor(c, tenant, model)
 	if e1 == nil {
@@ -90,7 +90,7 @@ func TestEntryForSmoothMigration(t *testing.T) {
 	rate1, _ := e1.engine.GetEndpointFailureRate("ep-a")
 
 	// 版本升级（同端点，仅权重变化）→ 平滑迁移：实例复用、状态保留。
-	c.Update(endpointTable(2, now+1, tenant, model, "weighted", []routecache.TableEndpoint{
+	updateRouteCacheSync(c, endpointTable(2, now+1, tenant, model, "weighted", []routecache.TableEndpoint{
 		{Name: "ep-a", Weight: 2, Priority: 1},
 		{Name: "ep-b", Weight: 1, Priority: 1},
 	}))

@@ -10,8 +10,6 @@
 package routecache
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/json"
 	"sync"
 	"time"
@@ -79,19 +77,18 @@ func (t *RouteTable) canon() []byte {
 	return b
 }
 
-// Verify 校验表签名（HMAC-SHA256），有效返回 true。失败时必须拒绝该表。
-func Verify(key []byte, t *RouteTable) bool {
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write(t.canon())
-	return hmac.Equal(t.Signature, mac.Sum(nil))
-}
+// CanonicalBytes 导出规范字节（= canon），供**外部签发端/跨模块测试**构造签名
+// （字段序与 gateway-core internal/route.CanonicalBytes 严格一致，签名一致性依赖于此）。
+func (t *RouteTable) CanonicalBytes() []byte { return t.canon() }
 
-// Sign 用 K_rx 计算路由表签名并写入 Signature 字段（与 gateway-core 侧同法）。
-// 生产路径上路由表由 gateway-core 签发；本函数供测试与本地演练构造**合法**路由表使用。
-func Sign(key []byte, t *RouteTable) {
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write(t.canon())
-	t.Signature = mac.Sum(nil)
+// Verifier 表签名校验接缝（P0-4 §4.7 分层：本包为纯逻辑，**不 import 密码/hostcall**）。
+//
+// 插件注入经 cryptop sidecar（`/v1/hmac` 出 MAC + 常量时间比较，密钥字节恒驻 sidecar）的实现；
+// 单测注入**同步**实现，令 CPS 调用同步完成（同 cryptoseam_test.go 手法）。
+type Verifier interface {
+	// VerifySym 校验 canon 字节 data 的对称 MAC sig（keyRef = K_rx 句柄，§6.3 命名）。
+	// cb(ok, err)：err 非空 = 校验不可用（fail-closed，调用方须拒绝该表）。
+	VerifySym(keyRef string, data, sig []byte, cb func(ok bool, err error))
 }
 
 // Options 缓存行为选项（不设 = 保持既有默认语义）。
@@ -107,41 +104,51 @@ type Options struct {
 // Cache 内存路由缓存（读本地缓存、不写所有权状态；写操作仅由拉取/更新触发）。
 type Cache struct {
 	mu       sync.RWMutex
-	key      []byte
+	verifier Verifier
+	keyRef   string
 	table    *RouteTable // 当前生效表（最高已验签版本）
 	maxStale time.Duration
 	now      func() time.Time
 }
 
-// New 构造缓存并注入验签密钥 K_rx（HMAC 对称），默认永不过期。
-func New(key []byte) *Cache {
-	return NewWithOptions(key, Options{})
+// New 构造缓存并注入验签接缝 verifier 与 K_rx 句柄 keyRef（§4.7），默认永不过期。
+func New(verifier Verifier, keyRef string) *Cache {
+	return NewWithOptions(verifier, keyRef, Options{})
 }
 
 // NewWithOptions 构造缓存（带过期阈值/时间源）。
-func NewWithOptions(key []byte, opt Options) *Cache {
+func NewWithOptions(verifier Verifier, keyRef string, opt Options) *Cache {
 	now := opt.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &Cache{key: key, maxStale: opt.MaxStale, now: now}
+	return &Cache{verifier: verifier, keyRef: keyRef, maxStale: opt.MaxStale, now: now}
 }
 
-// Update 用签名路由表更新缓存。规则：
-//   - 签名无效 → 拒绝（返回 false）；
+// Update 用签名路由表更新缓存（CPS 交付：签名校验经 §4.7 注入的 verifier，proxy-wasm 无阻塞 HTTP）。
+// 规则：
+//   - 签名无效 / 校验不可用 → 拒绝（cb(false)）；
 //   - 版本 < 当前缓存 → 拒绝（防回滚）；
-//   - 否则替换为更高版本。
-func (c *Cache) Update(t *RouteTable) bool {
-	if t == nil || !Verify(c.key, t) {
-		return false
+//   - 否则替换为更高（或同）版本。
+func (c *Cache) Update(t *RouteTable, cb func(accepted bool)) {
+	if t == nil || c.verifier == nil {
+		cb(false)
+		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.table != nil && t.Version < c.table.Version {
-		return false
-	}
-	c.table = t
-	return true
+	c.verifier.VerifySym(c.keyRef, t.canon(), t.Signature, func(ok bool, err error) {
+		if err != nil || !ok {
+			cb(false)
+			return
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.table != nil && t.Version < c.table.Version {
+			cb(false)
+			return
+		}
+		c.table = t
+		cb(true)
+	})
 }
 
 // Lookup 查询 tenant+model 的默认路由；未命中或缓存为空返回 nil。

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"testing"
 	"time"
 
@@ -12,20 +14,51 @@ import (
 
 func routeKey() []byte { return []byte("0123456789abcdef0123456789abcdef") }
 
+// testTableVerifier 同步 HMAC-SHA256 验签接缝（单测专用；crypto/* 仅测试允许）。
+// 生产路径由插件注入经 cryptop sidecar 的 sidecarTableVerifier（§4.7），语义等价。
+type testTableVerifier struct{ key []byte }
+
+func (v testTableVerifier) VerifySym(_ string, data, sig []byte, cb func(ok bool, err error)) {
+	m := hmac.New(sha256.New, v.key)
+	_, _ = m.Write(data)
+	cb(hmac.Equal(sig, m.Sum(nil)), nil)
+}
+
+// signTableForTest / newRouteCacheForTest / updateRouteCacheSync 单测接缝辅助。
+func signTableForTest(key []byte, t *routecache.RouteTable) {
+	m := hmac.New(sha256.New, key)
+	_, _ = m.Write(t.CanonicalBytes())
+	t.Signature = m.Sum(nil)
+}
+
+func newRouteCacheForTest(key []byte) *routecache.Cache {
+	return routecache.New(testTableVerifier{key: key}, "")
+}
+
+func newRouteCacheForTestOpts(key []byte, opt routecache.Options) *routecache.Cache {
+	return routecache.NewWithOptions(testTableVerifier{key: key}, "", opt)
+}
+
+func updateRouteCacheSync(c *routecache.Cache, t *routecache.RouteTable) bool {
+	var ok bool
+	c.Update(t, func(a bool) { ok = a })
+	return ok
+}
+
 // signedTable 构造已签名的默认路由表（tenant-a/qwen-plus → cmaas）。
 func signedTable(version int, updatedAt int64) *routecache.RouteTable {
 	t := &routecache.RouteTable{Version: version, UpdatedAt: updatedAt, Routes: []routecache.TableRoute{
 		{Tenant: "tenant-a", Model: "qwen-plus", DefaultEngine: "cmaas", Target: "https://cmaas.local"},
 	}}
-	routecache.Sign(routeKey(), t)
+	signTableForTest(routeKey(), t)
 	return t
 }
 
 // TestDecideRouteL1Prescription 处方有效且带 preferred_engine → L1，不降级、不 fail-closed。
 func TestDecideRouteL1Prescription(t *testing.T) {
 	now := time.Unix(1725500000, 0)
-	c := routecache.New(routeKey())
-	c.Update(signedTable(1, now.Unix()))
+	c := newRouteCacheForTest(routeKey())
+	updateRouteCacheSync(c, signedTable(1, now.Unix()))
 
 	signer, err := rxroute.NewSigner(routeKey())
 	if err != nil {
@@ -53,8 +86,8 @@ func TestDecideRouteL1Prescription(t *testing.T) {
 // TestDecideRouteL2Degraded 无处方（或处方无效）→ 降级 L2，且不 fail-closed。
 func TestDecideRouteL2Degraded(t *testing.T) {
 	now := time.Unix(1725500000, 0)
-	c := routecache.New(routeKey())
-	c.Update(signedTable(1, now.Unix()))
+	c := newRouteCacheForTest(routeKey())
+	updateRouteCacheSync(c, signedTable(1, now.Unix()))
 
 	// 无处方
 	d, _, failReason := decideRoute(c, routeKey(), "tenant-a", "qwen-plus", "", now)
@@ -78,7 +111,7 @@ func TestDecideRouteL2Degraded(t *testing.T) {
 // TestDecideRouteFailClosed 无处方且缓存未命中 → 密态 fail-closed（§6：密态语义不可降级）。
 func TestDecideRouteFailClosed(t *testing.T) {
 	now := time.Unix(1725500000, 0)
-	c := routecache.New(routeKey()) // 空缓存
+	c := newRouteCacheForTest(routeKey()) // 空缓存
 
 	d, _, failReason := decideRoute(c, routeKey(), "tenant-a", "qwen-plus", "", now)
 	if failReason == "" {
@@ -92,11 +125,11 @@ func TestDecideRouteFailClosed(t *testing.T) {
 // TestDecideRouteStaleFailClosed 缓存超 max_stale → 按未命中处理并 fail-closed（不静默用陈旧路由）。
 func TestDecideRouteStaleFailClosed(t *testing.T) {
 	base := time.Unix(1725500000, 0)
-	c := routecache.NewWithOptions(routeKey(), routecache.Options{
+	c := newRouteCacheForTestOpts(routeKey(), routecache.Options{
 		MaxStale: 60 * time.Second,
 		Now:      func() time.Time { return base.Add(61 * time.Second) },
 	})
-	c.Update(signedTable(1, base.Unix()))
+	updateRouteCacheSync(c, signedTable(1, base.Unix()))
 
 	d, _, failReason := decideRoute(c, routeKey(), "tenant-a", "qwen-plus", "", base.Add(61*time.Second))
 	if failReason == "" || !d.Stale {

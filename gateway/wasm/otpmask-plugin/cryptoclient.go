@@ -14,6 +14,7 @@ package main
 // 的"业务调用点全量接线"子任务；本文件先建立**唯一 HTTP 面**的适配缝。
 
 import (
+	"encoding/binary"
 	"sync"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 
 	"security-ai-gateway/gateway/wasm/otpmask-plugin/cryptoclient"
+	"security-ai-gateway/gateway/wasm/otpmask-plugin/routeengine"
 	"security-ai-gateway/protocol/go"
 )
 
@@ -52,6 +54,8 @@ const cryptoCircuitCooldownR4 = 30 * time.Second
 // capabilities 未成功载入前 `cryptoReady=false`，所有密码调用即拒绝（C-4，不降级），
 // 效果等价于启动拒（不下沉任何明文/密文）。
 func initCryptoRuntime(config PluginConfig, log logs.Log) {
+	// §4.7：向 routeengine 注入随机源接缝（经 sidecar `/v1/rand`；sidecar 未就绪 → 确定性主备回退）。
+	routeengine.SetRandSource(routeRand)
 	if config.CryptoService == "" {
 		CryptoClient = nil
 		cryptoReady = false
@@ -190,4 +194,95 @@ func newPluginCryptoClient(fqdn string, port int64, timeoutMs uint32, maskVersio
 		pluginCryptoMetrics{},
 		cryptoclient.Config{TimeoutMS: timeoutMs, MaskVersion: maskVersion},
 	)
+}
+
+// ---- 静态 MAC 密钥 KeyRef（§6.3 命名规范 <scope>/<purpose>/v<n>；sidecar 经 crypto_static_keys 登记）----
+const (
+	// keyRefJWT 门户 JWT（HS256）密钥句柄；配置 jwt_secret_ref 可覆盖。
+	keyRefJWT = "otpmask/jwt/v1"
+	// keyRefRouteVerify 路由表/限流表验签 K_rx 句柄（与 gateway-core 同一密钥族）；配置 route_verify_key_ref 可覆盖。
+	keyRefRouteVerify = "otpmask/route-verify/v1"
+)
+
+// jwtVerifyKeyRef 取 JWT 验签密钥句柄（配置优先，缺省 §6.3 约定名）。
+func jwtVerifyKeyRef(config PluginConfig) string {
+	if config.JWTSecretRef != "" {
+		return config.JWTSecretRef
+	}
+	return keyRefJWT
+}
+
+// routeVerifyKeyRef 取路由表/限流表验签密钥句柄（配置优先，缺省 §6.3 约定名）。
+func routeVerifyKeyRef(config PluginConfig) string {
+	if config.RouteVerifyKeyRef != "" {
+		return config.RouteVerifyKeyRef
+	}
+	return keyRefRouteVerify
+}
+
+// symmetricVerifyMAC 经 cryptop sidecar 校验**对称 MAC**（CPS，§5.4.5）：
+// 调 `/v1/hmac` 由 sidecar 以 KeyRef 指定的密钥重算 MAC，再在插件侧做**常量时间比较**
+// （`macConstEqual` 为纯比较，非密码运算，§4.3.3）——密钥字节恒驻 sidecar（C-5），
+// sidecar 不可用一律 fail-closed（C-4，无本地回退）。
+//
+// 说明：sidecar `/v1/verify` 的 `key_ref` 分支解为 profile 签名算法（intl=Ed25519 / sm=SM2），
+// **不能**校验 HMAC（`cryptop.Provider.Verify` 为签名验签）；故对称 MAC 校验经 `/v1/hmac` +
+// 常量时间比较落地，与既有 `verifyResponseAsync`（main.go）同一手法。
+func symmetricVerifyMAC(keyRef string, data, sig []byte, cb func(ok bool, err error)) {
+	if keyRef == "" || !cryptoUsable() {
+		cb(false, errCryptoUnavailable)
+		return
+	}
+	CryptoClient.HMAC(cryptoclient.KeyRef(keyRef), data, func(mac []byte, err error) {
+		if err != nil {
+			cb(false, err)
+			return
+		}
+		cb(macConstEqual(mac, sig), nil)
+	})
+}
+
+// sidecarTableVerifier 实现 routecache.Verifier / ratelimitcache.Verifier：
+// 经 cryptop sidecar 校验表签名（K_rx，§5.4.5；插件侧零密码、密钥字节恒驻 sidecar）。
+type sidecarTableVerifier struct{}
+
+func (sidecarTableVerifier) VerifySym(keyRef string, data, sig []byte, cb func(ok bool, err error)) {
+	symmetricVerifyMAC(keyRef, data, sig, cb)
+}
+
+// ---- routeengine 随机源接缝（§4.7：routeengine 不 import 密码；此处以其注入接缝接 cryptop sidecar）----
+
+// routeRandRefillLen 每次向 sidecar `/v1/rand` 充填的字节数（B-4.6-2；= 32 个 float64，≤ R-8 上限 4096）。
+const routeRandRefillLen = 256
+
+// routeRandSource 实现 routeengine.RandSource：以 cryptop sidecar `/v1/rand` 异步充填本地缓冲；
+// 缓冲暂空时返回 ok=false（routeengine 按确定性主备回退，不阻塞请求路径、不做本地密码运算）。
+type routeRandSource struct {
+	buf []byte
+}
+
+// routeRand 进程级随机源（wasm 单线程：请求期读写同一实例）。
+var routeRand = &routeRandSource{}
+
+func (s *routeRandSource) Float64() (float64, bool) {
+	if len(s.buf) < 8 {
+		s.refill()
+		return 0, false
+	}
+	n := binary.BigEndian.Uint64(s.buf[:8])
+	s.buf = s.buf[8:]
+	return float64(n>>11) / (1 << 53), true
+}
+
+// refill 异步充填缓冲（best-effort：sidecar 未就绪/失败静默；未取到随机数时由 routeengine 确定性回退）。
+func (s *routeRandSource) refill() {
+	if !cryptoUsable() {
+		return
+	}
+	CryptoClient.Rand(routeRandRefillLen, func(b []byte, err error) {
+		if err != nil {
+			return
+		}
+		s.buf = append(s.buf, b...)
+	})
 }

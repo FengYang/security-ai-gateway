@@ -40,7 +40,7 @@ func ensureRouteFetchLoop() {
 
 // fetchRouteTableOnce 拉取一次路由表并写入运行时缓存（tick 触发；同时覆盖冷启动场景）。
 func fetchRouteTableOnce() {
-	key, service, port, ok := routeRuntime.fetchParams()
+	_, service, port, ok := routeRuntime.fetchParams()
 	if !ok {
 		return
 	}
@@ -65,19 +65,20 @@ func fetchRouteTableOnce() {
 				proxywasm.LogWarnf("otpmask-plugin: 解析路由表失败: %v", err)
 				return
 			}
-			if routecache.Verify(key, rt) {
-				// Update 内部再做一次验签 + 防回滚判定。
-				if routeRuntime.cache != nil && routeRuntime.cache.Update(rt) {
+			// §5.4.5：表签名校验经 cryptop sidecar（CPS，唯一 HTTP 面）→ 通过后再入缓存。
+			if routeRuntime.cache == nil {
+				metricRouteFetchReject.incr()
+				return
+			}
+			routeRuntime.cache.Update(rt, func(accepted bool) {
+				if accepted {
 					metricRouteFetchOK.incr()
 					proxywasm.LogInfof("otpmask-plugin: 路由表验签通过并已入缓存 version=%d routes=%d", rt.Version, len(rt.Routes))
-				} else {
-					metricRouteFetchReject.incr()
-					proxywasm.LogWarnf("otpmask-plugin: 路由表未入缓存（重复/回滚版本，或路由未启用）version=%d", rt.Version)
+					return
 				}
-			} else {
 				metricRouteFetchReject.incr()
-				proxywasm.LogWarnf("otpmask-plugin: 路由表验签失败，拒绝")
-			}
+				proxywasm.LogWarnf("otpmask-plugin: 路由表未入缓存（验签失败，或重复/回滚版本）version=%d", rt.Version)
+			})
 		})
 	if err != nil {
 		proxywasm.LogWarnf("otpmask-plugin: 触发路由拉取失败: %v", err)

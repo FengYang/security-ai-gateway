@@ -49,8 +49,6 @@ type Config struct {
 
 const (
 	defaultCallTimeoutMS = 50
-	// 掩码 seed 派生 info（§5.3.2）：两端一致。
-	recomputeSeedInfo = "otpmask/recompute-seed/v1"
 	// 会话 KDF info（§4.3.8；与 tee-infer session.go 一致）。
 	sessionInfo = "otpmask/session/v1"
 	kdfInfoSig  = "otpmask/kdf/sig/v1"
@@ -130,7 +128,7 @@ func NewServer(p cryptop.Provider, cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("cryptopsvc: 登记静态密钥 %q 失败: %w", ref, err)
 		}
 	}
-	m.setProfileInfo(p)                             // #9
+	m.setProfileInfo(p)                                     // #9
 	m.setCompatMode("mask_bridge", cfg.MaskPRG == "bridge") // #15（R-21）
 	return s, nil
 }
@@ -202,7 +200,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // hdr 供 /v1/mask/stream 读取 X-OTPMask-MaskVersion（B-5.3-1）；批量时透传外层请求头。
 func (s *Server) dispatch(op string, raw []byte, hdr http.Header) (map[string]any, *apiError) {
 	start := time.Now()
-	s.m.incOp(op, string(s.p.Profile())) // #1
+	s.m.incOp(op, string(s.p.Profile()))                              // #1
 	defer func() { s.m.observeOp(op, time.Since(start).Seconds()) }() // #2
 
 	res, aerr := s.runOp(op, raw, hdr)
@@ -216,7 +214,9 @@ func (s *Server) dispatch(op string, raw []byte, hdr http.Header) (map[string]an
 func (s *Server) runOp(op string, raw []byte, hdr http.Header) (map[string]any, *apiError) {
 	switch op {
 	case "rand":
-		var req struct{ N int `json:"n"` }
+		var req struct {
+			N int `json:"n"`
+		}
 		if aerr := unmarshal(raw, &req); aerr != nil {
 			return nil, aerr
 		}
@@ -230,7 +230,9 @@ func (s *Server) runOp(op string, raw []byte, hdr http.Header) (map[string]any, 
 		return map[string]any{"bytes": b64(b)}, nil
 
 	case "hash":
-		var req struct{ Data string `json:"data"` }
+		var req struct {
+			Data string `json:"data"`
+		}
 		if aerr := unmarshal(raw, &req); aerr != nil {
 			return nil, aerr
 		}
@@ -450,9 +452,13 @@ func (s *Server) runVerify(raw []byte) (map[string]any, *apiError) {
 }
 
 // runMask /v1/mask/stream（§4.3.7/§5.3.2）：PRG 由 mask_prg + X-OTPMask-MaskVersion 选择。
+//
+// v1.9（R4·方案 A）：入参由 `key_ref` 改为 `seed`（base64）——掩码 seed 须与 tee-infer **逐请求一致**
+// （tee-infer `recompute.go` 亦按同值产流），不可能是一枚长期 KeyRef；故由调用方（插件）传入本次
+// 掩码流的 seed 字节，sidecar 仅做 PRG 求值（插件仍零密码、不做 PRG），模算术留在插件（§5.4.5）。
 func (s *Server) runMask(raw []byte, hdr http.Header) (map[string]any, *apiError) {
 	var req struct {
-		KeyRef  string `json:"key_ref"`
+		Seed    string `json:"seed"`
 		Domain  string `json:"domain"`
 		Count   int    `json:"count"`
 		Modulus uint64 `json:"modulus"`
@@ -466,9 +472,12 @@ func (s *Server) runMask(raw []byte, hdr http.Header) (map[string]any, *apiError
 	if req.Modulus < 2 {
 		return nil, &apiError{http.StatusBadRequest, "bad_request", "modulus 须 ≥ 2"}
 	}
-	key, err := s.lookupKey(req.KeyRef)
-	if err != nil {
-		return nil, toAPIError(err)
+	seed, aerr := decB64(req.Seed)
+	if aerr != nil {
+		return nil, aerr
+	}
+	if len(seed) == 0 {
+		return nil, &apiError{http.StatusBadRequest, "bad_request", "seed 须非空（base64）"}
 	}
 	domain := []byte(req.Domain)
 
@@ -479,26 +488,26 @@ func (s *Server) runMask(raw []byte, hdr http.Header) (map[string]any, *apiError
 	}
 	useHMAC := s.cfg.MaskPRG == "hmac-sha256" || (s.cfg.MaskPRG == "bridge" && version == "hmac-sha256")
 
-	var st *mask.Stream
+	// seed 长度随 PRG 而非 profile：hmac 路径 ≥ MinSeedLen(32)；sm4 路径须 = SymmetricKeySize。
 	if useHMAC {
-		seed, err := s.p.KDF(key, nil, []byte(recomputeSeedInfo), 32) // seedLen=32（随 PRG 而非 profile）
-		if err != nil {
-			return nil, toAPIError(err)
+		if len(seed) < mask.MinSeedLen {
+			return nil, &apiError{http.StatusBadRequest, "key_size_mismatch",
+				fmt.Sprintf("seed 长度 %d 小于最小值 %d", len(seed), mask.MinSeedLen)}
 		}
+	} else if len(seed) != s.p.SymmetricKeySize() {
+		return nil, &apiError{http.StatusBadRequest, "key_size_mismatch",
+			fmt.Sprintf("seed 长度 %d != SymmetricKeySize %d", len(seed), s.p.SymmetricKeySize())}
+	}
+
+	var st *mask.Stream
+	var err error
+	if useHMAC {
 		st, err = mask.NewStreamDomain(seed, req.Modulus, domain)
-		if err != nil {
-			return nil, toAPIError(err)
-		}
 	} else {
-		seedLen := s.p.SymmetricKeySize()
-		seed, err := s.p.KDF(key, nil, []byte(recomputeSeedInfo), seedLen)
-		if err != nil {
-			return nil, toAPIError(err)
-		}
 		st, err = mask.NewStreamWithProvider(s.p, seed, domain, req.Modulus)
-		if err != nil {
-			return nil, toAPIError(err)
-		}
+	}
+	if err != nil {
+		return nil, toAPIError(err)
 	}
 	defer st.Zeroize() // B-5.3-2：掩码值/种子用完即弃，不跨请求复用
 

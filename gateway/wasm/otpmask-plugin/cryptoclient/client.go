@@ -59,21 +59,21 @@ const HeaderMaskVersion = "X-OTPMask-MaskVersion"
 
 // 掩码算法标识（客户端声明；§5.3.2 单键三值）。
 const (
-	MaskPRGHMAC = "hmac-sha256"
-	MaskPRGSM4  = "sm4"
+	MaskPRGHMAC   = "hmac-sha256"
+	MaskPRGSM4    = "sm4"
 	MaskPRGBridge = "bridge"
 )
 
 // §4.4 错误码。
 const (
-	CodeBadRequest     = "bad_request"
-	CodeUnknownKeyRef  = "unknown_key_ref"
+	CodeBadRequest      = "bad_request"
+	CodeUnknownKeyRef   = "unknown_key_ref"
 	CodeKeySizeMismatch = "key_size_mismatch"
-	CodeDecrypt        = "decrypt"
-	CodeVerifyFailed   = "verify_failed"
-	CodeNotImplemented = "not_implemented"
-	CodeLimitExceeded  = "limit_exceeded"
-	CodeInternal       = "internal"
+	CodeDecrypt         = "decrypt"
+	CodeVerifyFailed    = "verify_failed"
+	CodeNotImplemented  = "not_implemented"
+	CodeLimitExceeded   = "limit_exceeded"
+	CodeInternal        = "internal"
 )
 
 // KeyRef 不透明密钥句柄（C-5：插件只见句柄，不见字节）。
@@ -124,9 +124,9 @@ type Transport interface {
 
 // Metrics 插件侧指标接收器（nil-safe）。对应 §10.1 #13/#14/#5。
 type Metrics interface {
-	Call(op string)          // #13 otpmask_crypto_call_total{op}
-	FailClosed(op string)    // #14 otpmask_crypto_failclosed_total{op}
-	CircuitOpen(open bool)   // #5 cryptop_circuit_open（0/1）
+	Call(op string)        // #13 otpmask_crypto_call_total{op}
+	FailClosed(op string)  // #14 otpmask_crypto_failclosed_total{op}
+	CircuitOpen(open bool) // #5 cryptop_circuit_open（0/1）
 }
 
 // Config 客户端构造参数。
@@ -264,7 +264,9 @@ func (c *Client) Rand(n int, cb func(b []byte, err error)) {
 			cb(nil, err)
 			return
 		}
-		var r struct{ Bytes string `json:"bytes"` }
+		var r struct {
+			Bytes string `json:"bytes"`
+		}
 		if e := c.decode(OpRand, body, &r); e != nil {
 			cb(nil, e)
 			return
@@ -286,7 +288,9 @@ func (c *Client) Hash(data []byte, cb func(digest []byte, err error)) {
 			cb(nil, err)
 			return
 		}
-		var r struct{ Digest string `json:"digest"` }
+		var r struct {
+			Digest string `json:"digest"`
+		}
 		if e := c.decode(OpHash, body, &r); e != nil {
 			cb(nil, e)
 			return
@@ -308,7 +312,9 @@ func (c *Client) HMAC(ref KeyRef, data []byte, cb func(mac []byte, err error)) {
 			cb(nil, err)
 			return
 		}
-		var r struct{ MAC string `json:"mac"` }
+		var r struct {
+			MAC string `json:"mac"`
+		}
 		if e := c.decode(OpHMAC, body, &r); e != nil {
 			cb(nil, e)
 			return
@@ -366,7 +372,9 @@ func (c *Client) Open(ref KeyRef, aad, nonce, ct []byte, cb func(pt []byte, err 
 			cb(nil, err)
 			return
 		}
-		var r struct{ Plaintext string `json:"plaintext"` }
+		var r struct {
+			Plaintext string `json:"plaintext"`
+		}
 		if e := c.decode(OpOpen, body, &r); e != nil {
 			cb(nil, e)
 			return
@@ -396,7 +404,9 @@ func (c *Client) Verify(ref *KeyRef, pub, data, sig []byte, alg string, cb func(
 			cb(false, err)
 			return
 		}
-		var r struct{ OK bool `json:"ok"` }
+		var r struct {
+			OK bool `json:"ok"`
+		}
 		if e := c.decode(OpVerify, body, &r); e != nil {
 			cb(false, e)
 			return
@@ -424,7 +434,9 @@ func (c *Client) KDF(ref KeyRef, salt, info []byte, outLen int, alias string, cb
 			cb("", err)
 			return
 		}
-		var r struct{ KeyRef string `json:"key_ref"` }
+		var r struct {
+			KeyRef string `json:"key_ref"`
+		}
 		if e := c.decode(OpKDF, body, &r); e != nil {
 			cb("", e)
 			return
@@ -439,9 +451,11 @@ func (c *Client) KDF(ref KeyRef, salt, info []byte, outLen int, alias string, cb
 }
 
 // MaskStream /v1/mask/stream（§4.3.7）：取 count 个 [0,modulus) 掩码元素。
+// v1.9（R4·方案 A）：入参由 `key_ref` 改为 `seed`（base64）——seed 须与 tee-infer 逐请求一致，
+// 由调用方传入本次掩码流的 seed 字节；sidecar 仅做 PRG 求值，模算术留在插件。
 // 掩码版本由构造期 Config.MaskVersion 经 X-OTPMask-MaskVersion 头下发（B-5.3-1）。
-func (c *Client) MaskStream(ref KeyRef, domain []byte, count int, modulus uint64, cb func(vals []uint64, err error)) {
-	req := map[string]any{"key_ref": string(ref), "domain": string(domain), "count": count, "modulus": modulus}
+func (c *Client) MaskStream(seed, domain []byte, count int, modulus uint64, cb func(vals []uint64, err error)) {
+	req := map[string]any{"seed": b64(seed), "domain": string(domain), "count": count, "modulus": modulus}
 	var hdrs [][2]string
 	if c.maskVer != "" {
 		hdrs = [][2]string{{HeaderMaskVersion, c.maskVer}}
@@ -507,9 +521,9 @@ type Op struct {
 
 // OpResult 批处理单条结果；Error 非空表示该 op 失败（R-6 per-op 隔离）。
 type OpResult struct {
-	ID      string
-	Fields  map[string]any
-	Error   *Error
+	ID     string
+	Fields map[string]any
+	Error  *Error
 }
 
 // Batch /v1/batch（§4.3.9）：多 op 合并；**per-op 错误隔离**（R-6）——单 op 失败不影响其它。

@@ -30,7 +30,6 @@ import (
 
 	"security-ai-gateway/gateway/wasm/otpmask-plugin/cryptoclient"
 	"security-ai-gateway/protocol/go"
-	"security-ai-gateway/protocol/go/cryptoops"
 )
 
 func main() {}
@@ -112,16 +111,16 @@ type PluginConfig struct {
 
 	// ---- P0-4 §12.3：cryptop sidecar 接线（插件零密码，全部密码经此唯一 HTTP 面）----
 	// 必填：未配置 crypto_service 时插件无任何本地密码实现，密码路径一律 fail-closed（C-4/R-11）。
-	CryptoService              string `json:"crypto_service"`       // sidecar cluster FQDN
-	CryptoServicePort          int64  `json:"crypto_service_port"` // sidecar 端口
-	CryptoProfile              string `json:"crypto_profile"`      // intl | sm-software | sm-module（R-17 须与 sidecar 一致）
-	MaskPRG                    string `json:"mask_prg"`            // hmac-sha256 | sm4 | bridge（R-21）
-	SigKeyRef                  string `json:"sig_key_ref"`         // 协议签名密钥 KeyRef（替代 sig_key 明文）
-	JWTSecretRef               string `json:"jwt_secret_ref"`      // 门户 JWT 密钥 KeyRef（替代 jwt_secret 明文）
-	RouteVerifyKeyRef          string `json:"route_verify_key_ref"`
-	CryptoCallTimeoutMS        int64  `json:"crypto_call_timeout_ms"`      // R-3（缺省 50）
-	CryptoCircuitThreshold     int64  `json:"crypto_circuit_threshold"`    // R-4（缺省 5）
-	CryptoCircuitCooldownMS    int64  `json:"crypto_circuit_cooldown_ms"`  // R-4（缺省 30000）
+	CryptoService           string `json:"crypto_service"`      // sidecar cluster FQDN
+	CryptoServicePort       int64  `json:"crypto_service_port"` // sidecar 端口
+	CryptoProfile           string `json:"crypto_profile"`      // intl | sm-software | sm-module（R-17 须与 sidecar 一致）
+	MaskPRG                 string `json:"mask_prg"`            // hmac-sha256 | sm4 | bridge（R-21）
+	SigKeyRef               string `json:"sig_key_ref"`         // 协议签名密钥 KeyRef（替代 sig_key 明文）
+	JWTSecretRef            string `json:"jwt_secret_ref"`      // 门户 JWT 密钥 KeyRef（替代 jwt_secret 明文）
+	RouteVerifyKeyRef       string `json:"route_verify_key_ref"`
+	CryptoCallTimeoutMS     int64  `json:"crypto_call_timeout_ms"`     // R-3（缺省 50）
+	CryptoCircuitThreshold  int64  `json:"crypto_circuit_threshold"`   // R-4（缺省 5）
+	CryptoCircuitCooldownMS int64  `json:"crypto_circuit_cooldown_ms"` // R-4（缺省 30000）
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -279,15 +278,72 @@ func decodeSigKeyHex(hexStr string) []byte {
 	return k
 }
 
-// requestK_sig 请求签名密钥：quote 模式用会话 K_sig，token 模式用静态注入。
-func requestK_sig(config PluginConfig) []byte {
+// requestK_sigRef 请求签名密钥句柄（P0-4 R-11：插件零密码，密钥字节恒驻 sidecar）：
+// quote 模式用会话 SigRef，token 模式用静态 KeyRef（crypto_static_keys 注册）。
+func requestK_sigRef(config PluginConfig) cryptoclient.KeyRef {
 	if config.AttestMode == "quote" {
-		if Session.valid() {
-			return Session.K_sig
-		}
-		return nil // 无有效会话 → 不签名（TEE 将拒绝，fail-closed）
+		return Session.sigRefValid()
 	}
-	return config.sigKey()
+	return cryptoclient.KeyRef(config.SigKeyRef)
+}
+
+// signRequestAsync 以南向协议请求签名（§5.4.5 组④，经 sidecar /v1/hmac）。
+// 无可用密钥句柄/密码面未就绪 → 不签名（cb(false)）；调用方沿用既有行为继续，
+// 由 TEE 侧对缺失签名 fail-closed（不在插件内降级运算，C-4/C-5）。
+func signRequestAsync(config PluginConfig, req *protocol.InferenceRequest, cb func(ok bool)) {
+	ref := requestK_sigRef(config)
+	if ref == "" || !cryptoUsable() {
+		cb(false)
+		return
+	}
+	// 待签消息 framing 与 Go 服务侧 cryptoops.SignRequest 逐字节一致（protocol.SignMessageInput）。
+	data := protocol.SignMessageInput(req.RequestID, req.TimestampNS, req.Nonce, protocol.RequestSignPayload(req))
+	CryptoClient.HMAC(ref, data, func(mac []byte, err error) {
+		if err != nil {
+			cb(false)
+			return
+		}
+		req.Signature = mac
+		cb(true)
+	})
+}
+
+// verifyResponseAsync 校验南向协议响应签名（§5.4.5 组④）。
+//
+// 现役 cryptoops.VerifyResponse 为 HMAC-SHA256（常量时间比较）；而 sidecar /v1/verify 的对称
+// 分支在 intl profile 下解为 Ed25519 验签（gateway/cryptop/intl.go），**不能**验证 HMAC —— 故本
+// 处按 "重算 HMAC + 常量时间比较" 落地（等价于 VerifyResponse，且密钥不出 sidecar）。
+func verifyResponseAsync(config PluginConfig, resp *protocol.InferenceResponse, cb func(ok bool)) {
+	ref := requestK_sigRef(config)
+	if ref == "" {
+		cb(true) // 无签名密钥 → 不校验（与旧行为一致：kSig==nil 时跳过）
+		return
+	}
+	if !cryptoUsable() {
+		cb(false)
+		return
+	}
+	data := protocol.SignMessageInput(resp.RequestID, resp.TimestampNS, nil, protocol.ResponseSignPayload(resp))
+	CryptoClient.HMAC(ref, data, func(mac []byte, err error) {
+		if err != nil {
+			cb(false)
+			return
+		}
+		cb(macConstEqual(mac, resp.Signature))
+	})
+}
+
+// macConstEqual 常量时间比较两个 MAC（长度不等直接 false）。
+// 不使用 crypto/subtle（R-11 禁 crypto/* 导入，插件零密码）。
+func macConstEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var v byte
+	for i := range a {
+		v |= a[i] ^ b[i]
+	}
+	return v == 0
 }
 
 // KeyStore 全局密钥存储（插件级共享，跨请求）。
@@ -307,6 +363,13 @@ const (
 	ctxKeyRouteEntry    = "otpmask-route-entry"
 	ctxKeyRouteStart    = "otpmask-route-start-ns" // 路由决策时间戳（int64 纳秒），用于延迟观测
 )
+
+// ctxKeyStreamPaused 响应流已接管标记（§5.4.6.2）：header 阶段 NeedPauseStreamingResponse 后置位，
+// body 阶段据此以 InjectEncodedDataToFilterChain 主动注流（而非依赖回调返回值透传）。
+const ctxKeyStreamPaused = "otpmask-stream-paused"
+
+// denyStreamBody 流式路径 fail-closed 的整流终止体（§5.4.6.2-⑦；不泄露任何可疑明文）。
+var denyStreamBody = []byte("otpmask: secure inference stream unavailable")
 
 // respStatusCached 取响应状态码：优先头回调缓存；缺失时回退 header 直读
 // （缓存缺失 = 非本插件上下文路径，如预判阶段）。
@@ -332,27 +395,57 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log logs
 	} else {
 		requestWantsSSE = false
 	}
-	if config.JWTSecretHex != "" {
-		secret, err := hex.DecodeString(config.JWTSecretHex)
-		if err != nil || len(secret) != 32 {
-			return failClosed(log, "jwt_secret 配置错误（须 32 字节 hex）")
-		}
-		tok := bearerToken()
-		if tok == "" {
-			if config.RequireAuth {
-				return authReject(log, "缺少 Bearer token")
-			}
-		} else if claims, err := verifyJWT(secret, tok); err != nil {
-			if config.RequireAuth {
-				return authReject(log, fmt.Sprintf("token 无效: %v", err))
-			}
-			log.Warnf("otpmask-plugin: JWT 校验失败（非强制）: %v", err)
-		} else if claims.Tenant != "" {
-			// 有效 JWT：以 tenant claim 覆盖客户端自声明（防租户伪造）
-			ctx.SetContext(ctxKeyTenantID, claims.Tenant)
-			_ = proxywasm.ReplaceHttpRequestHeader("X-Tenant-ID", claims.Tenant)
-		}
+	if config.JWTSecretHex == "" {
+		return continueRequestHeaders(ctx, config, log)
 	}
+	secret, err := hex.DecodeString(config.JWTSecretHex)
+	if err != nil || len(secret) != 32 {
+		return failClosed(log, "jwt_secret 配置错误（须 32 字节 hex）")
+	}
+	tok := bearerToken()
+	if tok == "" {
+		if config.RequireAuth {
+			return authReject(log, "缺少 Bearer token")
+		}
+		return continueRequestHeaders(ctx, config, log)
+	}
+	// C-6：HS256 验签经 cryptop sidecar（CPS，§5.4.5；密钥字节恒驻 sidecar）。
+	// proxy-wasm 无阻塞 HTTP → 先持住请求头（ActionPause），验签回调内放行（ResumeHttpRequest）。
+	act := types.HeaderContinue
+	syncDone := false
+	fired := false
+	verifyJWT(jwtVerifyKeyRef(config), tok, func(claims *jwtClaims, verr error) {
+		fired = true
+		switch {
+		case verr != nil && config.RequireAuth:
+			act = authReject(log, fmt.Sprintf("token 无效: %v", verr))
+		case verr != nil:
+			log.Warnf("otpmask-plugin: JWT 校验失败（非强制）: %v", verr)
+			act = continueRequestHeaders(ctx, config, log)
+		default:
+			if claims.Tenant != "" {
+				// 有效 JWT：以 tenant claim 覆盖客户端自声明（防租户伪造）
+				ctx.SetContext(ctxKeyTenantID, claims.Tenant)
+				_ = proxywasm.ReplaceHttpRequestHeader("X-Tenant-ID", claims.Tenant)
+			}
+			act = continueRequestHeaders(ctx, config, log)
+		}
+		// 异步路径（syncDone=true 时回调才可能在 onHttpRequestHeaders 返回后触发）：
+		// 请求头已被 ActionPause 持住，放行（HeaderContinue 情形）须显式 Resume 收尾。
+		if syncDone && act == types.HeaderContinue {
+			_ = proxywasm.ResumeHttpRequest()
+		}
+	})
+	syncDone = true
+	if fired {
+		return act // 同步完成（单测 in-process seam）：无需持住/恢复
+	}
+	return types.ActionPause
+}
+
+// continueRequestHeaders 请求头阶段收尾：租户头覆盖 → §6 推拉结合路由决策 → 请求体判定。
+// 未启用 JWT 时直接调用（行为与接线前一致）；启用 JWT 时在验签回调内调用。
+func continueRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log logs.Log) types.Action {
 	if t := tenantHeaderValue(ctx); t != "" {
 		_ = proxywasm.ReplaceHttpRequestHeader("X-Tenant-ID", t)
 	}
@@ -411,6 +504,14 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig, log log
 	if st == "200" && (requestWantsSSE || (config.AttestMode == "quote" && !pendingVectorsPlain)) {
 		_ = proxywasm.ReplaceHttpResponseHeader("content-type", "text/event-stream")
 	}
+	// §5.4.6.2：200 响应解密/验签经 cryptop sidecar 均为异步（CPS），而 Envoy 流式回调不可阻塞 →
+	// 暂停响应流，由 onStreamingResponseBody 以 InjectEncodedDataToFilterChain 主动注流，
+	// 末尾以 endStream 或 ResumeHttpResponse 收束。
+	// v1.9（掩码下沉）：掩码解密亦经 sidecar（§5.4.5），故**向量明文 demo 同样需暂停**——所有 200 统一暂停。
+	if st == "200" {
+		ctx.NeedPauseStreamingResponse()
+		ctx.SetContext(ctxKeyStreamPaused, true)
+	}
 	return types.HeaderContinue
 }
 
@@ -430,33 +531,43 @@ func onRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, lo
 // 注：本地签发密钥与 TEE 不共享，仅用于向量输入兼容场景（M2/M3 回归）。
 func handleVectorsRequest(ctx wrapper.HttpContext, config PluginConfig, vectors [][]uint64, log logs.Log) types.Action {
 	pendingVectorsPlain = true
-	seed, nonceHex, err := KeyStore.Issue()
-	if err != nil {
-		return failClosed(log, fmt.Sprintf("签发密钥失败: %v", err))
-	}
-	defer wipe(seed)
-	// P1b 待办3：登记本请求在 KeyStore 的密钥 key，供 onStreamDone 异常中断时兜底删除。
-	getRespStream(ctx).keys = append(getRespStream(ctx).keys, nonceHex)
+	// §5.4.5 / B-4.6-2：seed/nonce 经 cryptop sidecar `/v1/rand`（CPS）——请求体阶段持住请求，
+	// 回调内完成加密与请求体替换后放行。
+	KeyStore.Issue(func(seed []byte, nonceHex string, err error) {
+		if err != nil {
+			failClosed(log, fmt.Sprintf("签发密钥失败: %v", err))
+			return
+		}
+		// P1b 待办3：登记本请求在 KeyStore 的密钥 key，供 onStreamDone 异常中断时兜底删除。
+		getRespStream(ctx).keys = append(getRespStream(ctx).keys, nonceHex)
 
-	cipherVecs, err := maskVectors(seed, config.MaskModulus, vectors)
-	if err != nil {
-		return failClosed(log, fmt.Sprintf("加密失败: %v", err))
-	}
-	cipherBody, err := encodeCipherRequest(&cipherRequest{
-		CipherVectors: cipherVecs,
-		Nonce:         nonceHex,
-		Model:         config.Model,
+		// §5.4.5：掩码流经 cryptop sidecar `/v1/mask/stream`（CPS）——全部向量取流完毕后清零 seed。
+		maskVectors(seed, config.MaskModulus, vectors, func(cipherVecs [][]uint64, merr error) {
+			defer wipe(seed)
+			if merr != nil {
+				failClosed(log, fmt.Sprintf("加密失败: %v", merr))
+				return
+			}
+			cipherBody, err := encodeCipherRequest(&cipherRequest{
+				CipherVectors: cipherVecs,
+				Nonce:         nonceHex,
+				Model:         config.Model,
+			})
+			if err != nil {
+				failClosed(log, fmt.Sprintf("密文编码失败: %v", err))
+				return
+			}
+			if err := proxywasm.ReplaceHttpRequestBody(cipherBody); err != nil {
+				failClosed(log, fmt.Sprintf("替换请求体失败: %v", err))
+				return
+			}
+			_ = proxywasm.ReplaceHttpRequestHeader("content-type", "application/json")
+			log.Infof("otpmask-plugin: 向量请求加密完成 vectors=%d dim=%d nonce=%s",
+				len(vectors), len(vectors[0]), nonceHex[:8])
+			_ = proxywasm.ResumeHttpRequest()
+		})
 	})
-	if err != nil {
-		return failClosed(log, fmt.Sprintf("密文编码失败: %v", err))
-	}
-	if err := proxywasm.ReplaceHttpRequestBody(cipherBody); err != nil {
-		return failClosed(log, fmt.Sprintf("替换请求体失败: %v", err))
-	}
-	_ = proxywasm.ReplaceHttpRequestHeader("content-type", "application/json")
-	log.Infof("otpmask-plugin: 向量请求加密完成 vectors=%d dim=%d nonce=%s",
-		len(vectors), len(vectors[0]), nonceHex[:8])
-	return types.HeaderContinue
+	return types.ActionPause
 }
 
 // failClosed TEE 链路不可用时的默认拒绝响应（fail-closed，不降级明文）。
@@ -507,9 +618,9 @@ func handleTextRequest(ctx wrapper.HttpContext, config PluginConfig, req *textRe
 	if config.AttestMode == "quote" {
 		if !Session.valid() {
 			doAttestHandshake(config, log,
-				func(id string, ksig, kenc []byte) {
-					// 握手完成 → 落存会话（K_sig + K_enc）→ 走 TEE 签发流程
-					Session.set(id, ksig, kenc)
+				func(id string, sigRef, encRef, c2sRef, s2cRef cryptoclient.KeyRef) {
+					// 握手完成 → 落存会话（4 KeyRef，密钥字节恒驻 sidecar，C-5）→ 走 TEE 签发流程
+					Session.set(id, sigRef, encRef, c2sRef, s2cRef)
 					proceedKeyIssue(ctx, config, req, requestID, log)
 				},
 				func(msg string) {
@@ -547,41 +658,48 @@ func proceedKeyIssue(ctx wrapper.HttpContext, config PluginConfig, req *textRequ
 	if t := tenantHeaderValue(ctx); t != "" {
 		attestHeaders = append(attestHeaders, [2]string{"X-Tenant-ID", t})
 	}
-	postBody := keyBody
-	if config.AttestMode == "quote" {
-		sealed, err := Session.sealPayload(protocol.EndpointKeyIssue, keyBody)
-		if err != nil {
-			return failClosed(log, "key/issue 请求加密失败: "+err.Error())
-		}
-		postBody = sealed
-	}
-	err := keyClient.Post("/key/issue", attestHeaders, postBody,
-		func(statusCode int, _ http.Header, body []byte) {
-			if statusCode == http.StatusUnauthorized && config.AttestMode == "quote" {
-				// 会话失效（服务端 TTL/重启）→ 清除本地会话（下次请求重握手），本请求 fail-closed
-				Session.clear()
-				failClosed(log, fmt.Sprintf("TEE 密钥签发失败 %d（会话失效，已触发重握手）", statusCode))
-				return
-			}
-			if statusCode != 200 {
-				failClosed(log, fmt.Sprintf("TEE 密钥签发失败 %d", statusCode))
-				return
-			}
-			if config.AttestMode == "quote" {
-				pt, err := Session.openPayload(protocol.EndpointKeyIssue, body)
-				if err != nil {
-					// 信封解不开 = 会话密钥不同步（服务端重启等）→ 清会话，fail-closed
+	doPost := func(payload []byte) {
+		err := keyClient.Post("/key/issue", attestHeaders, payload,
+			func(statusCode int, _ http.Header, body []byte) {
+				if statusCode == http.StatusUnauthorized && config.AttestMode == "quote" {
+					// 会话失效（服务端 TTL/重启）→ 清除本地会话（下次请求重握手），本请求 fail-closed
 					Session.clear()
-					failClosed(log, "key/issue 响应解密失败: "+err.Error())
+					failClosed(log, fmt.Sprintf("TEE 密钥签发失败 %d（会话失效，已触发重握手）", statusCode))
 					return
 				}
-				body = pt
-			}
-			parseKeyIssueResponse(ctx, config, req, requestID, body, log)
-		}, 5000)
-	if err != nil {
-		return failClosed(log, fmt.Sprintf("调用 TEE 密钥服务失败: %v", err))
+				if statusCode != 200 {
+					failClosed(log, fmt.Sprintf("TEE 密钥签发失败 %d", statusCode))
+					return
+				}
+				if config.AttestMode == "quote" {
+					Session.openPayload(protocol.EndpointKeyIssue, body, func(pt []byte, oerr error) {
+						if oerr != nil {
+							// 信封解不开 = 会话密钥不同步（服务端重启等）→ 清会话，fail-closed
+							Session.clear()
+							failClosed(log, "key/issue 响应解密失败: "+oerr.Error())
+							return
+						}
+						parseKeyIssueResponse(ctx, config, req, requestID, pt, log)
+					})
+					return
+				}
+				parseKeyIssueResponse(ctx, config, req, requestID, body, log)
+			}, 5000)
+		if err != nil {
+			failClosed(log, fmt.Sprintf("调用 TEE 密钥服务失败: %v", err))
+		}
 	}
+	if config.AttestMode == "quote" {
+		Session.sealPayload(protocol.EndpointKeyIssue, keyBody, func(sealed []byte, serr error) {
+			if serr != nil {
+				failClosed(log, "key/issue 请求加密失败: "+serr.Error())
+				return
+			}
+			doPost(sealed)
+		})
+		return types.ActionPause
+	}
+	doPost(keyBody)
 	return types.ActionPause
 }
 
@@ -645,75 +763,74 @@ func finishTextFlow(ctx wrapper.HttpContext, config PluginConfig, req *textReque
 		[][2]string{{"Content-Type", "application/json"}},
 		embedBody,
 		func(statusCode int, _ http.Header, respBody []byte) {
-			defer wipe(seed)
 			if statusCode != 200 {
+				wipe(seed)
 				failClosed(log, fmt.Sprintf("embedding-service 返回 %d", statusCode))
 				return
 			}
 			er, err := parseEmbedResponse(respBody)
 			if err != nil {
+				wipe(seed)
 				failClosed(log, fmt.Sprintf("%v", err))
 				return
 			}
-			cipherVecs, err := maskVectors(seed, config.MaskModulus, er.Vectors)
-			if err != nil {
-				failClosed(log, fmt.Sprintf("加密失败: %v", err))
-				return
-			}
-			nonce, _ := hex.DecodeString(nonceHex)
-			infReq := &protocol.InferenceRequest{
-				RequestID:     requestID,
-				TimestampNS:   time.Now().UnixNano(),
-				Model:         config.Model,
-				MaxNewTokens:  32,
-				Nonce:         nonce,
-				CipherVectors: toProtocolVectors(cipherVecs),
-			}
-			// M9-4：附加 guardrail 密文文本（域分离掩码流，TEE 内解密检测）
-			if ct, err := maskText(seed, payload); err != nil {
-				failClosed(log, fmt.Sprintf("加密 guardrail 文本失败: %v", err))
-				return
-			} else {
-				infReq.CipherText = ct
-			}
-			if kSig := requestK_sig(config); kSig != nil {
-				cryptoops.SignRequest(kSig, infReq)
-			}
-			encBody, err := protocol.EncodeRequest(infReq)
-			if err != nil {
-				failClosed(log, fmt.Sprintf("编码协议请求失败: %v", err))
-				return
-			}
-			// P0-1 非流式重试（§6.5）：启用且已选出端点时改走插件自持派发（含换端点重发）；
-			// 未启用/未选端点 → 既有路径（请求体交 Envoy 直发），行为零变化。
-			if e, ep, ok := dispatchTargetOf(ctx); ok {
-				dispatchInfer(ctx, config, e, ep, encBody, log)
-				return
-			}
-			// P1b：quote 模式下南向协议请求整体入 K_enc 信封（段①，AAD 绑定 /v1/infer）
-			if config.AttestMode == "quote" {
-				sealed, err := Session.sealPayload(protocol.EndpointInfer, encBody)
-				if err != nil {
-					failClosed(log, "推理请求加密失败: "+err.Error())
+			// §5.4.5：向量掩码流经 cryptop sidecar（CPS）→ guardrail 文本掩码流（CPS）→ 清零 seed。
+			maskVectors(seed, config.MaskModulus, er.Vectors, func(cipherVecs [][]uint64, merr error) {
+				if merr != nil {
+					wipe(seed)
+					failClosed(log, fmt.Sprintf("加密失败: %v", merr))
 					return
 				}
-				encBody = sealed
-			}
-			if err := proxywasm.ReplaceHttpRequestBody(encBody); err != nil {
-				failClosed(log, fmt.Sprintf("替换请求体失败: %v", err))
-				return
-			}
-			_ = proxywasm.ReplaceHttpRequestHeader("content-type", "application/octet-stream")
-			// P1b 修复：quote 模式推理请求须携带 X-Session-ID（此前缺失，
-			// 服务端无法按会话校验信封通道，真实链路会 fail-closed 拒绝）
-			if config.AttestMode == "quote" {
-				_ = proxywasm.ReplaceHttpRequestHeader("X-Session-ID", Session.SessionID)
-			}
-			log.Infof("otpmask-plugin: 南向协议请求构造完成 text=%d chars tokens=%d dim=%d req=%s",
-				len(payload), len(er.Tokens), len(er.Vectors[0]), requestID[:8])
-			if err := proxywasm.ResumeHttpRequest(); err != nil {
-				log.Errorf("otpmask-plugin: ResumeHttpRequest 失败: %v", err)
-			}
+				nonce, _ := hex.DecodeString(nonceHex)
+				infReq := &protocol.InferenceRequest{
+					RequestID:     requestID,
+					TimestampNS:   time.Now().UnixNano(),
+					Model:         config.Model,
+					MaxNewTokens:  32,
+					Nonce:         nonce,
+					CipherVectors: toProtocolVectors(cipherVecs),
+				}
+				// M9-4：附加 guardrail 密文文本（域分离掩码流，TEE 内解密检测）
+				maskText(seed, payload, func(ct []byte, terr error) {
+					wipe(seed) // seed 用毕（向量与文本两路掩码流均已取）
+					if terr != nil {
+						failClosed(log, fmt.Sprintf("加密 guardrail 文本失败: %v", terr))
+						return
+					}
+					infReq.CipherText = ct
+					signRequestAsync(config, infReq, func(_ bool) {
+						encBody, err := protocol.EncodeRequest(infReq)
+						if err != nil {
+							failClosed(log, fmt.Sprintf("编码协议请求失败: %v", err))
+							return
+						}
+						// P0-1 非流式重试（§6.5）：启用且已选出端点时改走插件自持派发（含换端点重发）；
+						// 未启用/未选端点 → 既有路径（请求体交 Envoy 直发），行为零变化。
+						if e, ep, ok := dispatchTargetOf(ctx); ok {
+							dispatchInfer(ctx, config, e, ep, encBody, log)
+							return
+						}
+						logDone := func() {
+							log.Infof("otpmask-plugin: 南向协议请求构造完成 text=%d chars tokens=%d dim=%d req=%s",
+								len(payload), len(er.Tokens), len(er.Vectors[0]), requestID[:8])
+						}
+						// P1b：quote 模式下南向协议请求整体入 K_enc 信封（段①，AAD 绑定 /v1/infer）
+						if config.AttestMode == "quote" {
+							Session.sealPayload(protocol.EndpointInfer, encBody, func(sealed []byte, serr error) {
+								if serr != nil {
+									failClosed(log, "推理请求加密失败: "+serr.Error())
+									return
+								}
+								logDone()
+								finishEncryptedRequestBody(ctx, config, sealed, log)
+							})
+							return
+						}
+						logDone()
+						finishEncryptedRequestBody(ctx, config, encBody, log)
+					})
+				})
+			})
 		}, 5000)
 	if err != nil {
 		log.Errorf("otpmask-plugin: 调用 embedding-service 失败: %v", err)
@@ -727,13 +844,14 @@ func finishTextFlow(ctx wrapper.HttpContext, config PluginConfig, req *textReque
 // 请求为段① K_enc 信封 + X-Session-ID，响应为 SSE 信封流（onResponseBody 解密重组）。
 func finishTextDirect(ctx wrapper.HttpContext, config PluginConfig, req *textRequest,
 	requestID string, seed []byte, nonceHex string, log logs.Log) {
-	defer wipe(seed)
 	if config.AttestMode != "quote" {
+		wipe(seed)
 		failClosed(log, "text 载荷引擎（tee_gpu/cmaas）须 quote 证明会话（token 模式不支持）")
 		return
 	}
 	messages, err := marshalMessages(req)
 	if err != nil {
+		wipe(seed)
 		failClosed(log, err.Error())
 		return
 	}
@@ -754,42 +872,62 @@ func finishTextDirect(ctx wrapper.HttpContext, config PluginConfig, req *textReq
 		Stream:       stream,
 	}
 	// M9-4：guardrail 密文文本（域分离掩码流，TEE 内解密检测；C-MaaS 无内容安全，本层补位）
-	if ct, err := maskText(seed, req.Text); err != nil {
-		failClosed(log, fmt.Sprintf("加密 guardrail 文本失败: %v", err))
-		return
-	} else {
-		infReq.CipherText = ct
-	}
-	if kSig := requestK_sig(config); kSig != nil {
-		cryptoops.SignRequest(kSig, infReq)
-	}
-	encBody, err := protocol.EncodeRequest(infReq)
-	if err != nil {
-		failClosed(log, fmt.Sprintf("编码协议请求失败: %v", err))
-		return
-	}
-	// P0-1 非流式重试（§6.5）：仅整包响应（stream=false）走插件自持派发（可换端点重发）；
-	// 流式不做重发（SDK SendHttpResponse 无流式变体，见 routedispatch.go 文件头偏差声明）。
-	if !stream {
-		if e, ep, ok := dispatchTargetOf(ctx); ok {
-			dispatchInfer(ctx, config, e, ep, encBody, log)
+	// §5.4.5：掩码流经 cryptop sidecar `/v1/mask/stream`（CPS）。
+	maskText(seed, req.Text, func(ct []byte, merr error) {
+		wipe(seed) // seed 用毕（文本掩码流已取）
+		if merr != nil {
+			failClosed(log, fmt.Sprintf("加密 guardrail 文本失败: %v", merr))
 			return
 		}
-	}
-	// P1b：quote 模式下南向协议请求整体入 K_enc 信封（段①，AAD 绑定 /v1/infer）
-	sealed, err := Session.sealPayload(protocol.EndpointInfer, encBody)
-	if err != nil {
-		failClosed(log, "推理请求加密失败: "+err.Error())
-		return
-	}
-	if err := proxywasm.ReplaceHttpRequestBody(sealed); err != nil {
+		infReq.CipherText = ct
+		// §5.4.6.1：签名经 cryptop sidecar（/v1/hmac）为异步 → 编码/信封/替换请求体全部挪入回调链。
+		signRequestAsync(config, infReq, func(_ bool) {
+			encBody, err := protocol.EncodeRequest(infReq)
+			if err != nil {
+				failClosed(log, fmt.Sprintf("编码协议请求失败: %v", err))
+				return
+			}
+			// P0-1 非流式重试（§6.5）：仅整包响应（stream=false）走插件自持派发（可换端点重发）；
+			// 流式不做重发（SDK SendHttpResponse 无流式变体，见 routedispatch.go 文件头偏差声明）。
+			if !stream {
+				if e, ep, ok := dispatchTargetOf(ctx); ok {
+					dispatchInfer(ctx, config, e, ep, encBody, log)
+					return
+				}
+			}
+			logDone := func() {
+				log.Infof("otpmask-plugin: text 载荷协议请求构造完成 engine=%s stream=%v req=%s",
+					req.EngineType, stream, requestID[:8])
+			}
+			// P1b：quote 模式下南向协议请求整体入 K_enc 信封（段①，AAD 绑定 /v1/infer）
+			if config.AttestMode == "quote" {
+				Session.sealPayload(protocol.EndpointInfer, encBody, func(sealed []byte, serr error) {
+					if serr != nil {
+						failClosed(log, "推理请求加密失败: "+serr.Error())
+						return
+					}
+					logDone()
+					finishEncryptedRequestBody(ctx, config, sealed, log)
+				})
+				return
+			}
+			logDone()
+			finishEncryptedRequestBody(ctx, config, encBody, log)
+		})
+	})
+}
+
+// finishEncryptedRequestBody 请求体替换收尾（quote 密文信封 / token 明文协议共用）：
+// 替换 body → 协议请求标 octet-stream（quote 另带 X-Session-ID）→ ResumeHttpRequest 放行被持住的请求头。
+func finishEncryptedRequestBody(ctx wrapper.HttpContext, config PluginConfig, payload []byte, log logs.Log) {
+	if err := proxywasm.ReplaceHttpRequestBody(payload); err != nil {
 		failClosed(log, fmt.Sprintf("替换请求体失败: %v", err))
 		return
 	}
 	_ = proxywasm.ReplaceHttpRequestHeader("content-type", "application/octet-stream")
-	_ = proxywasm.ReplaceHttpRequestHeader("X-Session-ID", Session.SessionID)
-	log.Infof("otpmask-plugin: text 载荷协议请求构造完成 engine=%s stream=%v req=%s",
-		req.EngineType, stream, requestID[:8])
+	if config.AttestMode == "quote" {
+		_ = proxywasm.ReplaceHttpRequestHeader("X-Session-ID", Session.SessionID)
+	}
 	if err := proxywasm.ResumeHttpRequest(); err != nil {
 		log.Errorf("otpmask-plugin: ResumeHttpRequest 失败: %v", err)
 	}
@@ -798,11 +936,15 @@ func finishTextDirect(ctx wrapper.HttpContext, config PluginConfig, req *textReq
 // respStreamState 请求级响应流式处理状态（跨帧保存于 ctx）。
 // dec 非 nil 表示已判定为 SSE 信封流（增量解密）；否则按整包路径累积到 endOfStream。
 type respStreamState struct {
-	dec       *SSEStreamDecoder // 增量解密状态机（SSE 路径）
-	buf       []byte            // 整包路径累积缓冲（JSON/协议/quote 单信封）
-	first     bool              // 已见首个非空帧（路径判定仅一次）
-	closed    bool              // 整流拒绝后闭锁，不再外发任何字节
-	cfCounted bool              // OG-16：content_filter 终止已边沿计数（每流至多一次）
+	dec    *SSEStreamDecoder // 增量解密状态机（SSE 路径）
+	buf    []byte            // 整包路径累积缓冲（JSON/协议/quote 单信封）
+	first  bool              // 已见首个非空帧（路径判定仅一次）
+	closed bool              // 整流拒绝后闭锁，不再外发任何字节
+	// §5.4.6.2 CPS：单飞互斥与暂停-恢复。
+	busy       bool   // 有 /v1/* 异步调用在飞（其间到达的 chunk 只入 rawPending）
+	lastSeen   bool   // 上游已见 endOfStream（流末收束依据）
+	rawPending []byte // 待喂入 dec 的原始密文帧（busy 期间累积）
+	cfCounted  bool   // OG-16：content_filter 终止已边沿计数（每流至多一次）
 	// B1：强标标识已注入（每流至多一次；上游 SawLabel 时不注入——单一注入点规则兜底）。
 	labelInjected bool
 	keys          []string // 本请求在 KeyStore 登记的密钥 key（onStreamDone 兜底删除）
@@ -855,70 +997,121 @@ func maybeInjectContentLabel(st *respStreamState, config PluginConfig, out []byt
 	return append(buildLabelSSELine(config.ContentLabelText, labelPositionHead, pendingRequestID, config.Model), out...)
 }
 
-// onStreamingResponseBody 响应侧流式解密外发（P1b，取代整包 onResponseBody）：
+// onStreamingResponseBody 响应侧流式解密外发（P1b；§5.4.6.2 CPS 改造）。
 //
-//	SSE 信封流（quote 200）：SSEStreamDecoder 逐帧增量解密，逐片外发，规避 §4.2 响应整体缓冲限制；
-//	                        任一分片解密失败/乱序/重放 → 整流拒绝（闭锁透传，HTTP 表现为流中断）。
-//	整包路径（mock JSON/协议/quote 单信封）：缓冲到 endOfStream 一次性处理，与既有 onResponseBody 等价；
-//	                        处理失败 → 返回 nil（fail-closed，不外发可疑明文）。
-//	非 200 错误体：透传。
+//	暂停接管路径（200）：解密/验签经 cryptop sidecar 异步 ⇒ 以
+//	  InjectEncodedDataToFilterChain 主动注流（返回值 []byte{} = 不自动转发原 chunk）；
+//	  SSE 信封流逐帧增量解密（帧边界仍同步判定，§5.4.6.3），单信封整包异步解密；
+//	  单飞互斥（busy 期间到达 chunk 仅入 rawPending）；流末 endStream/Resume 收束；fail-closed 截断。
+//	透传路径（非 200）：无异步密码需求，缓冲后原样返回（逐片替换 = 等价透传）。
 func onStreamingResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk []byte, isLastChunk bool, log logs.Log) []byte {
 	st := getRespStream(ctx)
 	if st.closed {
 		return nil
 	}
-	// 路径判定：首个非空帧决定增量 vs 整包
-	if !st.first && len(chunk) > 0 {
+	if _, paused := ctx.GetContext(ctxKeyStreamPaused).(bool); paused {
+		st.rawPending = append(st.rawPending, chunk...)
+		if isLastChunk {
+			st.lastSeen = true
+		}
+		if !st.busy {
+			driveStream(ctx, config, st, log)
+		}
+		return []byte{}
+	}
+	// 非暂停（仅非 200 错误体）：同步缓冲，流末原样透传（无异步密码需求）。
+	// §5.4.6.2/v1.9：200 响应一律走暂停接管路径（解密经 sidecar 异步），本分支不涉及解密。
+	st.buf = append(st.buf, chunk...)
+	if !isLastChunk {
+		return nil
+	}
+	body := st.buf
+	st.buf = nil
+	return body
+}
+
+// driveStream 暂停接管路径的流式泵（§5.4.6.2-③④⑤）：单飞——同一时刻至多一个 dec.Feed / sidecar
+// 调用在飞；回调返回后若又累积了新帧则续泵（保 SSE 帧序）；流末收束。
+func driveStream(ctx wrapper.HttpContext, config PluginConfig, st *respStreamState, log logs.Log) {
+	st.busy = true
+	// 路径判定：首个非空帧决定增量（SSE 信封流）vs 整包（单信封/协议）
+	if !st.first && len(st.rawPending) > 0 {
 		st.first = true
-		if looksLikeSSEEnvelope(ctx, config, chunk) {
+		if looksLikeSSEEnvelope(ctx, config, st.rawPending) {
 			st.dec = NewSSEStreamDecoder(pendingRequestID, config.Model)
-			out, err := st.dec.Feed(chunk, isLastChunk)
-			if err != nil {
-				st.closed = true
-				st.dec = nil
-				metricDecryptError.incr() // W-1：解密失败计数
-				log.Errorf("otpmask-plugin: SSE 流解密失败（整流拒绝）: %v", err)
-				return nil
-			}
-			noteContentFilter(st) // OG-16：content_filter 审核终止边沿计数
-			return maybeInjectContentLabel(st, config, out)
 		}
 	}
 	if st.dec != nil {
-		out, err := st.dec.Feed(chunk, isLastChunk)
-		if err != nil {
-			st.closed = true
-			st.dec = nil
-			// 会话密钥不同步（服务端重启等）→ 清会话触发重握手（与单响应分支一致）
-			Session.clear()
-			metricDecryptError.incr() // W-1：解密失败计数
-			log.Errorf("otpmask-plugin: SSE 流解密失败（整流拒绝）: %v", err)
-			return nil
+		feed := st.rawPending
+		st.rawPending = nil
+		st.dec.Feed(feed, st.lastSeen, func(out []byte, err error) {
+			st.busy = false
+			if err != nil {
+				st.closed = true
+				st.dec = nil
+				// 会话密钥不同步（服务端重启等）→ 清会话触发重握手（与单响应分支一致）
+				Session.clear()
+				metricDecryptError.incr() // W-1：解密失败计数
+				log.Errorf("otpmask-plugin: SSE 流解密失败（整流拒绝）: %v", err)
+				failClosedStream(ctx, log)
+				return
+			}
+			noteContentFilter(st) // OG-16：content_filter 审核终止边沿计数
+			out = maybeInjectContentLabel(st, config, out)
+			injectStream(ctx, st, out)
+			if !st.closed && len(st.rawPending) > 0 {
+				driveStream(ctx, config, st, log)
+			}
+		})
+		return
+	}
+	// 整包路径：累积到流末一次性异步处理
+	if !st.lastSeen {
+		st.busy = false
+		return
+	}
+	body := st.rawPending
+	st.rawPending = nil
+	processOutputBodyAsync(ctx, config, body, log, func(out []byte, passthrough, ok bool) {
+		st.busy = false
+		if !ok {
+			metricDecryptError.incr() // W-1：解密/流校验失败（整包 fail-closed）
+			failClosedStream(ctx, log)
+			return
 		}
-		noteContentFilter(st) // OG-16：content_filter 审核终止边沿计数
-		return maybeInjectContentLabel(st, config, out)
+		if !passthrough {
+			log.Infof("otpmask-plugin: 响应解密完成 bytes=%d req=%s", len(out), shortReqID(pendingRequestID))
+		}
+		injectStream(ctx, st, out)
+	})
+}
+
+// injectStream 主动注入解密后的下游字节并收束（§5.4.6.2-④⑥）：
+// out 非空 → InjectEncodedDataToFilterChain（endStream 取流末）；out 空且已流末 → ResumeHttpResponse。
+func injectStream(ctx wrapper.HttpContext, st *respStreamState, out []byte) {
+	if len(out) > 0 {
+		_ = proxywasm.InjectEncodedDataToFilterChain(out, st.lastSeen)
+		return
 	}
-	// 整包路径：累积
-	st.buf = append(st.buf, chunk...)
-	if !isLastChunk {
-		return nil // 未收全，不外发
+	if st.lastSeen {
+		_ = proxywasm.ResumeHttpResponse()
 	}
-	plain, passthrough := processOutputBody(ctx, config, st.buf, log)
-	st.buf = nil
-	if passthrough {
-		return plain // 非 200/透传：原样返回（SDK 逐片替换 = 等价透传）
+}
+
+// failClosedStream 流式路径 fail-closed 整流终止（§5.4.6.2-⑦）：注入拒答体并结束流，
+// 绝不回退插件内解密（C-4/R-11）。
+func failClosedStream(ctx wrapper.HttpContext, log logs.Log) {
+	metricFailClosed.incr()
+	log.Errorf("otpmask-plugin: 响应流 fail-closed 截断（不外发可疑明文）")
+	_ = proxywasm.InjectEncodedDataToFilterChain(denyStreamBody, true)
+}
+
+// shortReqID 请求 ID 日志安全截断（可能短于 8）。
+func shortReqID(s string) string {
+	if len(s) > 8 {
+		return s[:8]
 	}
-	if plain == nil {
-		metricDecryptError.incr() // W-1：解密/流校验失败（整包 fail-closed）
-		return nil                // fail-closed：不外发可疑明文
-	}
-	// 向量请求（handleVectorsRequest）不设置 pendingRequestID，须防御性截断
-	rid := pendingRequestID
-	if len(rid) > 8 {
-		rid = rid[:8]
-	}
-	log.Infof("otpmask-plugin: 响应解密完成 bytes=%d req=%s", len(plain), rid)
-	return plain
+	return s
 }
 
 // onStreamDone 流完成回调（P1b 待办3）。SDK 在 HTTP 流完全结束（成功或异常截断/reset）
@@ -936,86 +1129,109 @@ func cleanupRespKeys(st *respStreamState) {
 	st.keys = nil
 }
 
-// processOutputBody 整包响应处理（与既有 onResponseBody 分流等价）。
-// 返回 (输出字节, passthrough)。passthrough=true 表示非 200/错误体原样透传；
-// false 且输出为 nil 表示 fail-closed（不外发）。
-func processOutputBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, log logs.Log) ([]byte, bool) {
+// processOutputBodyAsync 整包响应异步处理（§5.4.6.2 CPS）：cb(out, passthrough, ok)。
+// passthrough=true 表示非 200/错误体原样透传；ok=false 表示 fail-closed（不外发）。
+func processOutputBodyAsync(ctx wrapper.HttpContext, config PluginConfig, body []byte, log logs.Log,
+	cb func(out []byte, passthrough, ok bool)) {
 	if status := respStatusCached(ctx); status != "" && status != "200" {
-		// 非 200 错误体原样透传
-		return body, true
+		cb(body, true, true) // 非 200 错误体原样透传
+		return
 	}
 	if config.AttestMode == "quote" && !pendingVectorsPlain {
-		// quote 单信封：信封解密 → 南向协议响应（走既有验签/解密）。
+		// quote 单信封：信封解密（经 sidecar /v1/open，异步）→ 南向协议响应（走既有验签/解密）。
 		// 明文响应拒绝（fail-closed，防降级攻击）；向量明文直通请求（演示链兼容）除外。
-		pt, err := Session.openPayload(protocol.EndpointInfer, body)
-		if err != nil {
-			Session.clear()
-			log.Errorf("otpmask-plugin: fail-closed 拒绝响应: 推理响应解密失败（疑似降级攻击）: %v", err)
-			return nil, false
-		}
-		body = pt
+		Session.openPayload(protocol.EndpointInfer, body, func(pt []byte, oerr error) {
+			if oerr != nil {
+				Session.clear()
+				log.Errorf("otpmask-plugin: fail-closed 拒绝响应: 推理响应解密失败（疑似降级攻击）: %v", oerr)
+				cb(nil, false, false)
+				return
+			}
+			continueOutputBody(ctx, config, pt, log, cb)
+		})
+		return
 	}
+	continueOutputBody(ctx, config, body, log, cb)
+}
+
+// continueOutputBody 协议响应验签 + 解密的异步续段（经 sidecar /v1/hmac 复算签名做常量时间比较）。
+func continueOutputBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, log logs.Log,
+	cb func(out []byte, passthrough, ok bool)) {
 	resp, err := protocol.DecodeResponse(body)
 	if err != nil {
 		// 回退：尝试 mock JSON 密文响应（段①，M2/M3 协议）。
 		// 与南向协议互斥：南向协议是非 UTF-8 二进制，mock JSON 必然含 cipher_output+nonce。
-		if plain, mockErr := handleMockCipherResponse(config, body, log); mockErr == nil {
-			// handleMockCipherResponse 已按 requestWantsSSE 返回 SSE 或 JSON 明文
-			return plain, false
+		handleMockCipherResponse(config, body, log, func(plain []byte, mockErr error) {
+			if mockErr == nil {
+				// handleMockCipherResponse 已按 requestWantsSSE 返回 SSE 或 JSON 明文
+				cb(plain, false, true)
+				return
+			}
+			log.Warnf("otpmask-plugin: 非协议/非 mock 响应，透传错误体: %v", err)
+			cb(body, true, true)
+		})
+		return
+	}
+	verifyResponseAsync(config, resp, func(sigOK bool) {
+		if !sigOK {
+			log.Errorf("otpmask-plugin: 响应签名无效 req=%s", shortReqID(resp.RequestID))
+			cb(nil, false, false)
+			return
 		}
-		log.Warnf("otpmask-plugin: 非协议/非 mock 响应，透传错误体: %v", err)
-		return body, true
-	}
-	if kSig := requestK_sig(config); kSig != nil && !cryptoops.VerifyResponse(kSig, resp) {
-		log.Errorf("otpmask-plugin: 响应签名无效 req=%s", resp.RequestID[:8])
-		return nil, false
-	}
-
-	// 按 requestID 回溯请求密钥
-	seed, ok := KeyStore.Lookup(resp.RequestID)
-	if !ok {
-		log.Errorf("otpmask-plugin: 无法回溯 req=%s（密钥已过期或被篡改）", resp.RequestID[:8])
-		return nil, false
-	}
-	defer KeyStore.Delete(resp.RequestID)
-	defer wipe(seed)
-
-	plain, err := unmaskVector(seed, config.MaskModulus, resp.CipherOutput.Data)
-	if err != nil {
-		log.Errorf("otpmask-plugin: 解密失败: %v", err)
-		return nil, false
-	}
-	// G1：解密出多 token ID 序列，组装 SSE 流式响应（token-by-token + [DONE]）
-	return buildSSE(plain), false
+		// 按 requestID 回溯请求密钥
+		seed, ok := KeyStore.Lookup(resp.RequestID)
+		if !ok {
+			log.Errorf("otpmask-plugin: 无法回溯 req=%s（密钥已过期或被篡改）", shortReqID(resp.RequestID))
+			cb(nil, false, false)
+			return
+		}
+		defer KeyStore.Delete(resp.RequestID)
+		unmaskVector(seed, config.MaskModulus, resp.CipherOutput.Data, func(plain []uint64, derr error) {
+			wipe(seed)
+			if derr != nil {
+				log.Errorf("otpmask-plugin: 解密失败: %v", derr)
+				cb(nil, false, false)
+				return
+			}
+			// G1：解密出多 token ID 序列，组装 SSE 流式响应（token-by-token + [DONE]）
+			cb(buildSSE(plain), false, true)
+		})
+	})
 }
 
 // handleMockCipherResponse 处理 mock JSON 密文响应（段①，M2/M3 协议）：
 // {"cipher_output":[...],"nonce":hex} → 按 nonce 回溯 seed → 解密 → 明文 {"output":[...]}。
-func handleMockCipherResponse(config PluginConfig, body []byte, log logs.Log) ([]byte, error) {
+// CPS：掩码流经 cryptop sidecar（§5.4.5），解密结果经 cb 交付。
+func handleMockCipherResponse(config PluginConfig, body []byte, log logs.Log, cb func(plain []byte, err error)) {
 	cr, err := parseCipherResponse(body)
 	if err != nil {
-		return nil, err
+		cb(nil, err)
+		return
 	}
 	seed, ok := KeyStore.Lookup(cr.Nonce)
 	if !ok {
-		return nil, fmt.Errorf("otpmask: mock 响应无对应请求密钥 nonce=%s", cr.Nonce[:8])
+		cb(nil, fmt.Errorf("otpmask: mock 响应无对应请求密钥 nonce=%s", cr.Nonce[:8]))
+		return
 	}
 	defer KeyStore.Delete(cr.Nonce)
-	defer wipe(seed)
-	plain, err := unmaskVector(seed, config.MaskModulus, cr.CipherOutput)
-	if err != nil {
-		return nil, fmt.Errorf("otpmask: mock 响应解密失败: %w", err)
-	}
-	plainBody, err := encodePlainResponse(plain, nil, "")
-	if err != nil {
-		return nil, err
-	}
-	// B1：客户端 Accept: text/event-stream → 以 OpenAI SSE 形式回传多 token 解密明文
-	if requestWantsSSE {
-		plainBody = buildSSE(plain)
-	}
-	log.Infof("otpmask-plugin: mock 密文响应解密完成 tokens=%d nonce=%s sse=%v", len(plain), cr.Nonce[:8], requestWantsSSE)
-	return plainBody, nil
+	unmaskVector(seed, config.MaskModulus, cr.CipherOutput, func(plain []uint64, derr error) {
+		wipe(seed)
+		if derr != nil {
+			cb(nil, fmt.Errorf("otpmask: mock 响应解密失败: %w", derr))
+			return
+		}
+		plainBody, err := encodePlainResponse(plain, nil, "")
+		if err != nil {
+			cb(nil, err)
+			return
+		}
+		// B1：客户端 Accept: text/event-stream → 以 OpenAI SSE 形式回传多 token 解密明文
+		if requestWantsSSE {
+			plainBody = buildSSE(plain)
+		}
+		log.Infof("otpmask-plugin: mock 密文响应解密完成 tokens=%d nonce=%s sse=%v", len(plain), cr.Nonce[:8], requestWantsSSE)
+		cb(plainBody, nil)
+	})
 }
 
 // buildSSE 组装 SSE 流式响应：每 token 一行 data + [DONE] 结束标记。

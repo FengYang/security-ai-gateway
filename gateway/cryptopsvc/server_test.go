@@ -251,7 +251,8 @@ func TestKDFDeriveAndUse(t *testing.T) {
 
 func TestMaskStreamDeterministic(t *testing.T) {
 	_, ts, _ := newTestServer(t, cryptop.ProfileIntl)
-	body := map[string]any{"key_ref": "static/aead", "domain": "otpmask/guardrail-text/v1", "count": 32, "modulus": 1 << 32}
+	seed := bytes.Repeat([]byte{0x01}, 32) // v1.9：hmac 路径 seed ≥ MinSeedLen(32)，由调用方传入
+	body := map[string]any{"seed": b64(seed), "domain": "otpmask/guardrail-text/v1", "count": 32, "modulus": 1 << 32}
 	code, out1 := postJSON(t, ts, "/v1/mask/stream", body, nil)
 	if code != 200 {
 		t.Fatalf("mask 失败: %d %+v", code, out1)
@@ -267,7 +268,7 @@ func TestMaskStreamDeterministic(t *testing.T) {
 	v2 := out2["values"].([]any)
 	for i := range v1 {
 		if v1[i] != v2[i] {
-			t.Fatalf("掩码流不确定：元素 %d 不同（同 key_ref+domain+modulus 应逐字节一致）", i)
+			t.Fatalf("掩码流不确定：元素 %d 不同（同 seed+domain+modulus 应逐字节一致）", i)
 		}
 		for _, x := range []any{v1[i]} {
 			if uint64(x.(float64)) >= uint64(1)<<32 {
@@ -276,14 +277,24 @@ func TestMaskStreamDeterministic(t *testing.T) {
 		}
 	}
 	// count 超限
-	code, out := postJSON(t, ts, "/v1/mask/stream", map[string]any{"key_ref": "static/aead", "count": maxMaskCount + 1, "modulus": 4}, nil)
+	code, out := postJSON(t, ts, "/v1/mask/stream", map[string]any{"seed": b64(seed), "count": maxMaskCount + 1, "modulus": 4}, nil)
 	if code != 413 || errCode(t, out) != "limit_exceeded" {
 		t.Fatalf("mask count 超限应 413，得 %d %+v", code, out)
 	}
 	// modulus < 2
-	code, out = postJSON(t, ts, "/v1/mask/stream", map[string]any{"key_ref": "static/aead", "count": 1, "modulus": 1}, nil)
+	code, out = postJSON(t, ts, "/v1/mask/stream", map[string]any{"seed": b64(seed), "count": 1, "modulus": 1}, nil)
 	if code != 400 || errCode(t, out) != "bad_request" {
 		t.Fatalf("modulus<2 应 400，得 %d %+v", code, out)
+	}
+	// seed 缺失/空（v1.9：seed 为必填）
+	code, out = postJSON(t, ts, "/v1/mask/stream", map[string]any{"count": 1, "modulus": 4}, nil)
+	if code != 400 || errCode(t, out) != "bad_request" {
+		t.Fatalf("空 seed 应 400 bad_request，得 %d %+v", code, out)
+	}
+	// seed 长度不足（hmac 路径 < MinSeedLen）
+	code, out = postJSON(t, ts, "/v1/mask/stream", map[string]any{"seed": b64(bytes.Repeat([]byte{0x02}, 16)), "count": 1, "modulus": 4}, nil)
+	if code != 400 || errCode(t, out) != "key_size_mismatch" {
+		t.Fatalf("短 seed 应 400 key_size_mismatch，得 %d %+v", code, out)
 	}
 }
 
@@ -436,20 +447,27 @@ func TestMaskBridgeSM(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 
-	body := map[string]any{"key_ref": "static/aead", "domain": "d", "count": 8, "modulus": 1 << 16}
+	// v1.9：seed 由调用方传入，长度随 PRG（hmac≥32 / sm4=秘钥长度 16）。
+	bodyHMAC := map[string]any{"seed": b64(bytes.Repeat([]byte{0x22}, 32)), "domain": "d", "count": 8, "modulus": 1 << 16}
 	// hmac 格（bridge + 请求头 hmac-sha256）
-	code, outHMAC := postJSON(t, ts, "/v1/mask/stream", body, map[string]string{"X-OTPMask-MaskVersion": "hmac-sha256"})
+	code, outHMAC := postJSON(t, ts, "/v1/mask/stream", bodyHMAC, map[string]string{"X-OTPMask-MaskVersion": "hmac-sha256"})
 	if code != 200 {
 		t.Fatalf("bridge hmac 格失败: %d %+v", code, outHMAC)
 	}
 	// sm4 格（bridge + 缺省）
-	code, outSM4 := postJSON(t, ts, "/v1/mask/stream", body, nil)
+	bodySM4 := map[string]any{"seed": b64(bytes.Repeat([]byte{0x33}, p.SymmetricKeySize())), "domain": "d", "count": 8, "modulus": 1 << 16}
+	code, outSM4 := postJSON(t, ts, "/v1/mask/stream", bodySM4, nil)
 	if code != 200 {
 		t.Fatalf("bridge sm4 格失败: %d %+v", code, outSM4)
 	}
-	// 两格应不同（T-5.3-5：SM4 与 HMAC 版不互操作）
+	// 两格流不同（T-5.3-5：SM4 与 HMAC 版 PRG 不同源，不互操作）
 	if equalValues(outHMAC["values"].([]any), outSM4["values"].([]any)) {
 		t.Fatal("bridge 的两 PRG 格流不应相同")
+	}
+	// sm4 格 seed 长度须 = SymmetricKeySize（16）；32B 传入应 key_size_mismatch
+	code, outBad := postJSON(t, ts, "/v1/mask/stream", map[string]any{"seed": b64(bytes.Repeat([]byte{0x33}, 32)), "domain": "d", "count": 8, "modulus": 1 << 16}, nil)
+	if code != 400 || errCode(t, outBad) != "key_size_mismatch" {
+		t.Fatalf("sm4 格 32B seed 应 400 key_size_mismatch，得 %d %+v", code, outBad)
 	}
 	// #15 compat_mode 已置 1
 	raw := renderMetrics(t, s)
@@ -464,7 +482,7 @@ func TestMetricsProducers(t *testing.T) {
 	s, ts, _ := newTestServer(t, cryptop.ProfileIntl)
 	postJSON(t, ts, "/v1/hash", map[string]any{"data": b64([]byte("x"))}, nil)
 	postJSON(t, ts, "/v1/hmac", map[string]any{"key_ref": "missing", "data": b64([]byte("x"))}, nil)
-	postJSON(t, ts, "/v1/mask/stream", map[string]any{"key_ref": "static/aead", "count": 5, "modulus": 1 << 8}, nil)
+	postJSON(t, ts, "/v1/mask/stream", map[string]any{"seed": b64(bytes.Repeat([]byte{0x04}, 32)), "count": 5, "modulus": 1 << 8}, nil)
 
 	raw := renderMetrics(t, s)
 	for _, want := range []string{

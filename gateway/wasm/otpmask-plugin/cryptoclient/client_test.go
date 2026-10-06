@@ -1,6 +1,8 @@
 package cryptoclient
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -277,7 +279,8 @@ func TestMaskStreamSendsVersionHeader(t *testing.T) {
 	m := &mockTransport{resp: `{"values":[1,2,3]}`}
 	c, _ := newClient(m, Config{MaskVersion: MaskPRGSM4})
 	var vals []uint64
-	c.MaskStream("session/x/enc", []byte("otpmask/guardrail-text/v1"), 3, 1<<32, func(v []uint64, err error) {
+	seed := bytes.Repeat([]byte{7}, 32)
+	c.MaskStream(seed, []byte("otpmask/guardrail-text/v1"), 3, 1<<32, func(v []uint64, err error) {
 		vals, _ = v, err
 	})
 	if len(vals) != 3 || vals[2] != 3 {
@@ -297,6 +300,13 @@ func TestMaskStreamSendsVersionHeader(t *testing.T) {
 	_ = json.Unmarshal(call.body, &body)
 	if body["domain"] != "otpmask/guardrail-text/v1" { // domain 为纯文本（非 base64）
 		t.Fatalf("domain 字段错: %v", body["domain"])
+	}
+	// v1.9（R4·方案 A）：入参由 key_ref 改为 seed（base64）。
+	if body["seed"] != base64.StdEncoding.EncodeToString(seed) {
+		t.Fatalf("seed 字段错（应 base64）: %v", body["seed"])
+	}
+	if _, hasRef := body["key_ref"]; hasRef {
+		t.Fatalf("不应再传 key_ref 字段: %v", body)
 	}
 }
 

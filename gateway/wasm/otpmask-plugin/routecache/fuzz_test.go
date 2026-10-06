@@ -57,10 +57,10 @@ func FuzzUpdate_SignatureRejectsBadInput(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, sig []byte) {
-		c := New(key)
+		c := newTestCache(key)
 		tbl := *base // 拷贝
 		tbl.Signature = sig
-		if c.Update(&tbl) {
+		if updateSync(c, &tbl) {
 			t.Fatalf("随机签名应被拒绝，但 Update 返回 true。sig=%x", sig)
 		}
 		if c.Version() != 0 {
@@ -108,15 +108,15 @@ func FuzzUpdate_RoundTripStable(f *testing.F) {
 			return
 		}
 
-		c := New(key)
-		Sign(key, tbl)
+		c := newTestCache(key)
+		sign(key, tbl)
 
 		// 不变量 1：自己签名的表必然能通过 Verify
-		if !Verify(key, tbl) {
+		if !verifySync(testVerifier{key: key}, tbl) {
 			t.Fatal("自签名的表 Verify 应返回 true")
 		}
 		// 不变量 2：Update 应成功接受
-		if !c.Update(tbl) {
+		if !updateSync(c, tbl) {
 			t.Fatal("自签名的表 Update 应返回 true")
 		}
 		// 不变量 3：版本号正确
@@ -200,10 +200,10 @@ func FuzzLookup_NoPanic(f *testing.F) {
 	key := testKey()
 
 	f.Fuzz(func(t *testing.T, tenant, model string) {
-		c := New(key)
+		c := newTestCache(key)
 		base := validTable(1)
-		Sign(key, base)
-		c.Update(base)
+		sign(key, base)
+		updateSync(c, base)
 
 		// 不变量：Lookup 不 panic；返回值要么 nil，要么非 nil 且字段有效
 		r := c.Lookup(tenant, model)

@@ -1,9 +1,31 @@
 package routeengine
 
 import (
+	crand "crypto/rand"
+	"encoding/binary"
 	"math"
+	"os"
 	"testing"
 )
+
+// TestMain 为全部用例注入同步随机源（P0-4 §4.7：routeengine 不再自带密码随机源，
+// 由插件注入经 cryptop sidecar `/v1/rand` 的实现；单测注入同步实现，语义等价）。
+func TestMain(m *testing.M) {
+	SetRandSource(syncRand{})
+	os.Exit(m.Run())
+}
+
+// syncRand 同步随机源（单测专用；crypto/* 仅测试允许）。
+type syncRand struct{}
+
+func (syncRand) Float64() (float64, bool) {
+	var b [8]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		return 0, false
+	}
+	n := binary.BigEndian.Uint64(b[:])
+	return float64(n>>11) / (1 << 53), true
+}
 
 // floatEqual 浮点比较（绝对误差 < 1e-9）。
 func floatEqual(a, b float64) bool {
@@ -368,12 +390,16 @@ func TestEndpointIsUsable(t *testing.T) {
 	}
 }
 
-// 随机数生成：[0,1) 范围内
+// 随机源：[0,1) 范围内
 func TestRandomFloat64Range(t *testing.T) {
+	SetRandSource(syncRand{})
 	for i := 0; i < 1000; i++ {
-		r := randomFloat64()
+		r, ok := randFloat64()
+		if !ok {
+			t.Fatal("注入随机源后 randFloat64 应可用")
+		}
 		if r < 0 || r >= 1.0 {
-			t.Fatalf("randomFloat64 应在 [0,1) 范围内，got %f", r)
+			t.Fatalf("randFloat64 应在 [0,1) 范围内，got %f", r)
 		}
 	}
 }

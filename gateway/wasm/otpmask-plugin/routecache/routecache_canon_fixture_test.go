@@ -37,7 +37,7 @@ func TestCanonFixtureFromExternalSigner(t *testing.T) {
 		Signature: sig,
 	}
 	t.Logf("本包 canon = %s", string(rt.canon()))
-	if !Verify(key, rt) {
+	if !verifySync(testVerifier{key: key}, rt) {
 		t.Fatalf("外部签名与本包 canon 不匹配（外部签发端需与本包 canon 逐字节一致）\n本包 canon = %s", string(rt.canon()))
 	}
 }

@@ -59,28 +59,32 @@ func TestSSELineLabelPassthrough(t *testing.T) {
 
 // TestSSEDecoderSawLabel SawLabel 语义：任一上游帧带 label meta → true（去重注入依据）。
 func TestSSEDecoderSawLabel(t *testing.T) {
-	_, kenc := newSessionForTest(t)
+	newSessionForTest(t)
 	// ① 上游带 head 标识（tee-infer 注入点形态：head 帧 + 内容帧 + tail meta 终止帧）
-	body := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+	body := buildSSEStream(t, []streamChunk{
 		{Seq: 1, Delta: "内容由人工智能生成", Label: &chunkLabel{Std: "GB45438-2025", Position: labelPositionHead}},
 		{Seq: 2, Delta: "正文"},
 		{Seq: 3, Finish: "stop", Label: &chunkLabel{Std: "GB45438-2025", Position: labelPositionTail}},
 	}, []uint64{1, 2, 3})
 	dec := NewSSEStreamDecoder("req1", "mock")
-	if _, err := dec.Feed(body, true); err != nil {
-		t.Fatal(err)
+	var derr error
+	dec.Feed(body, true, func(_ []byte, err error) { derr = err })
+	if derr != nil {
+		t.Fatal(derr)
 	}
 	if !dec.SawLabel() {
 		t.Fatal("上游带 label meta 时 SawLabel 应为 true")
 	}
 	// ② 上游无标识（旧版 tee-infer / label off）——计数器须续用（全局反重放窗口）
-	body2 := buildSSEStream(t, kenc, Session.SessionID, []streamChunk{
+	body2 := buildSSEStream(t, []streamChunk{
 		{Seq: 1, Delta: "正文"},
 		{Seq: 2, Finish: "stop"},
 	}, []uint64{4, 5})
 	dec2 := NewSSEStreamDecoder("req1", "mock")
-	if _, err := dec2.Feed(body2, true); err != nil {
-		t.Fatal(err)
+	var derr2 error
+	dec2.Feed(body2, true, func(_ []byte, err error) { derr2 = err })
+	if derr2 != nil {
+		t.Fatal(derr2)
 	}
 	if dec2.SawLabel() {
 		t.Fatal("上游无 label meta 时 SawLabel 应为 false")

@@ -65,7 +65,7 @@ func initRateLimitRuntime(config PluginConfig, log logs.Log) {
 		return
 	}
 	rateLimitRuntime.key = key
-	rateLimitRuntime.cache = ratelimitcache.New(key)
+	rateLimitRuntime.cache = ratelimitcache.New(sidecarTableVerifier{}, routeVerifyKeyRef(config))
 	rateLimitRuntime.service = config.GatewayCoreService
 	// 通道令牌优先级：运行态（凭据端点拉取，C 项）> 静态 config（兼容写法）。
 	// 冷启动时序不确定（凭据回调可能先于本函数），故此处也读一次运行态。
@@ -98,7 +98,7 @@ func ensureRateLimitFetchLoop() {
 // fetchRateLimitOnce 拉取一次限流表（tick 触发，同时覆盖冷启动）。
 // 失败路径一律**保留旧表**；若本地无任何已验签表（从未拉到）→ 计数 degraded（告警源）。
 func fetchRateLimitOnce() {
-	key, service, port, ok := rateLimitRuntime.fetchParams()
+	_, service, port, ok := rateLimitRuntime.fetchParams()
 	if !ok {
 		return
 	}
@@ -128,10 +128,6 @@ func fetchRateLimitOnce() {
 				reject("解析限流表失败: %v（保留旧表）", err)
 				return
 			}
-			if !ratelimitcache.Verify(key, &tbl) {
-				reject("限流表验签失败，拒绝（保留旧表）")
-				return
-			}
 			// 版本判定：同版本 = 设计内常态（无变更，不计数不告警）；回退 = 异常（拒绝并计数）。
 			if cur := rateLimitRuntime.cache.Version(); tbl.Version == cur {
 				return
@@ -139,13 +135,16 @@ func fetchRateLimitOnce() {
 				reject("限流表版本回退 version=%d < 当前 %d，拒绝（保留旧表）", tbl.Version, cur)
 				return
 			}
-			if !rateLimitRuntime.cache.Update(&tbl) {
-				reject("限流表未入缓存（版本未递增/回退）version=%d（保留旧表）", tbl.Version)
-				return
-			}
-			metricRateLimitFetchOK.incr()
-			proxywasm.LogInfof("otpmask-plugin: 限流表验签通过并已入缓存 version=%d rules=%d",
-				tbl.Version, len(tbl.Rules))
+			// §5.4.5：表签名校验经 cryptop sidecar（CPS，唯一 HTTP 面）→ 通过后入缓存。
+			rateLimitRuntime.cache.Update(&tbl, func(accepted bool) {
+				if !accepted {
+					reject("限流表未入缓存（验签失败/版本未递增）version=%d（保留旧表）", tbl.Version)
+					return
+				}
+				metricRateLimitFetchOK.incr()
+				proxywasm.LogInfof("otpmask-plugin: 限流表验签通过并已入缓存 version=%d rules=%d",
+					tbl.Version, len(tbl.Rules))
+			})
 		})
 	if err != nil {
 		reject("触发限流表拉取失败: %v", err)

@@ -125,80 +125,32 @@ type sseStreamDecryptor struct {
 }
 
 // decryptSSEChunk 解密单个 SSE 分片：外层信封（K_enc + 反重放窗口）→ 内层 seq 严格递增。
-func (d *sseStreamDecryptor) decryptSSEChunk(dataLine string) (*streamChunk, error) {
+//
+// CPS（proxy-wasm 无阻塞 HTTP，§4.7）：解密经 cryptop sidecar（Session.openPayload），
+// 结果经 cb 交付。
+func (d *sseStreamDecryptor) decryptSSEChunk(dataLine string, cb func(*streamChunk, error)) {
 	wire, err := hex.DecodeString(strings.TrimSpace(dataLine))
 	if err != nil {
-		return nil, fmt.Errorf("envelope: SSE 分片非 hex: %w", err)
+		cb(nil, fmt.Errorf("envelope: SSE 分片非 hex: %w", err))
+		return
 	}
-	pt, err := Session.openPayload(protocol.EndpointInfer, wire)
-	if err != nil {
-		return nil, fmt.Errorf("envelope: SSE 分片解密失败: %w", err)
-	}
-	var chunk streamChunk
-	if err := json.Unmarshal(pt, &chunk); err != nil {
-		return nil, fmt.Errorf("envelope: SSE 分片 JSON 无效: %w", err)
-	}
-	if err := protocol.CheckStreamSequence(d.lastSeq, chunk.Seq); err != nil {
-		return nil, err
-	}
-	d.lastSeq = chunk.Seq
-	return &chunk, nil
-}
-
-// writeSSEChunk 将单个解密分片编译为标准 OpenAI SSE data 行。
-// 正常块：choices[].delta.content = delta；finish=="stop"/"content_filter" 块：
-// delta 置空 + 对应 finish_reason（content_filter 块同时透传 guard 注解，OG-16）。
-func writeSSEChunk(sb *strings.Builder, reqID, model string, chunk *streamChunk) error {
-	line, err := sseLine(reqID, model, chunk)
-	if err != nil {
-		return err
-	}
-	sb.Write(line)
-	return nil
-}
-
-// decryptSSEBody 解密整段 tee-infer SSE 响应体，重组为客户端标准 OpenAI SSE。
-// 任一分片解密失败/序号乱序/重放 → 整流拒绝（fail-closed，不输出半截明文）。
-func decryptSSEBody(body []byte, reqID, model string) ([]byte, error) {
-	dec := &sseStreamDecryptor{}
-	var sb strings.Builder
-	sawAny := false
-	for _, line := range strings.Split(string(body), "\n") {
-		line = strings.TrimRight(line, "\r")
-		data, ok := strings.CutPrefix(line, "data:")
-		if !ok {
-			continue // 空行/注释行（SSE 帧分隔），忽略
+	Session.openPayload(protocol.EndpointInfer, wire, func(pt []byte, oerr error) {
+		if oerr != nil {
+			cb(nil, fmt.Errorf("envelope: SSE 分片解密失败: %w", oerr))
+			return
 		}
-		if strings.TrimSpace(data) == "[DONE]" {
-			continue // tee 侧流结束标记（P2 服务端发送；解密侧由 finish 判定）
+		var chunk streamChunk
+		if err := json.Unmarshal(pt, &chunk); err != nil {
+			cb(nil, fmt.Errorf("envelope: SSE 分片 JSON 无效: %w", err))
+			return
 		}
-		chunk, err := dec.decryptSSEChunk(data)
-		if err != nil {
-			return nil, err
+		if err := protocol.CheckStreamSequence(d.lastSeq, chunk.Seq); err != nil {
+			cb(nil, err)
+			return
 		}
-		sawAny = true
-		if err := writeSSEChunk(&sb, reqID, model, chunk); err != nil {
-			return nil, err
-		}
-		if chunk.Finish != "" {
-			// finish="stop" 为正常终止；finish="content_filter"（OG-16）为内容安全审核终止：
-			// 违规片段不在密文流内，插件以 finish_reason=content_filter + [DONE] 正常收尾，
-			// 客户端可解析、可提示（安全语义不变：不伪装 stop、不下发违规内容）。
-			// 其他值（如 "error"/"filter"）为异常终止，一律 fail-closed（防客户端误判成功）。
-			switch chunk.Finish {
-			case "stop", "content_filter":
-			default:
-				return nil, fmt.Errorf("envelope: SSE 流异常终止（finish=%q）", chunk.Finish)
-			}
-			sb.WriteString("data: [DONE]\n\n")
-			return []byte(sb.String()), nil
-		}
-	}
-	if !sawAny {
-		return nil, errors.New("envelope: SSE 流无有效加密分片")
-	}
-	// 无 finish 标记即截断的流：拒绝（fail-closed，防截断攻击导致静默丢尾）
-	return nil, errors.New("envelope: SSE 流未正常终止（缺 finish 分片）")
+		d.lastSeq = chunk.Seq
+		cb(&chunk, nil)
+	})
 }
 
 // isSSEBody 响应体是否为 tee-infer 加密 SSE 流（按 data: 行首判定）。
@@ -250,32 +202,43 @@ func (d *SSEStreamDecoder) SawLabel() bool {
 	return d.labelSeen
 }
 
-// Feed 喂入一个响应 body 分帧（后续末尾帧的 isLastChunk=true），返回本帧拼合后
-// 可外发的明文字节。返回非 nil err 表示整流拒绝，此后任何 Feed 均返回该 err。
-func (d *SSEStreamDecoder) Feed(chunk []byte, isLastChunk bool) ([]byte, error) {
+// Feed 喂入一个响应 body 分帧（后续末尾帧的 isLastChunk=true），经 cb 交付本帧拼合后
+// 可外发的明文字节。cb 收到非 nil err 表示整流拒绝，此后任何 Feed 均返回该 err。
+//
+// CPS：每个 data: 行需经 cryptop sidecar 解密（异步），故循环改写为 drain 递归。
+func (d *SSEStreamDecoder) Feed(chunk []byte, isLastChunk bool, cb func(out []byte, err error)) {
 	if d.err != nil {
-		return nil, d.err
+		cb(nil, d.err)
+		return
 	}
 	d.pending = append(d.pending, chunk...)
-	var out []byte
-	for {
-		idx := bytes.IndexByte(d.pending, '\n')
-		if idx < 0 {
-			break // 无完整行，等下一帧
-		}
-		line := strings.TrimRight(string(d.pending[:idx]), "\r")
-		d.pending = d.pending[idx+1:]
-		dataLine, ok := strings.CutPrefix(line, "data:")
-		if !ok {
-			continue // 注释/空行，忽略
-		}
-		if strings.TrimSpace(dataLine) == "[DONE]" {
-			continue // tee 侧流结束标记，解密收尾由 finish 分片判定
-		}
-		sc, err := d.dec.decryptSSEChunk(dataLine)
+	d.drain(nil, isLastChunk, cb)
+}
+
+// drain 从 pending 逐行消费：非 data:/[DONE] 行忽略；data: 行经 CPS 解密后编译为
+// 客户端 SSE 行并追加到 out。pending 无完整行时进入 finish 收尾判定。
+func (d *SSEStreamDecoder) drain(out []byte, isLastChunk bool, cb func(out []byte, err error)) {
+	idx := bytes.IndexByte(d.pending, '\n')
+	if idx < 0 {
+		d.finish(out, isLastChunk, cb)
+		return
+	}
+	line := strings.TrimRight(string(d.pending[:idx]), "\r")
+	d.pending = d.pending[idx+1:]
+	dataLine, ok := strings.CutPrefix(line, "data:")
+	if !ok {
+		d.drain(out, isLastChunk, cb)
+		return
+	}
+	if strings.TrimSpace(dataLine) == "[DONE]" {
+		d.drain(out, isLastChunk, cb)
+		return
+	}
+	d.dec.decryptSSEChunk(dataLine, func(sc *streamChunk, err error) {
 		if err != nil {
 			d.err = err
-			return nil, err
+			cb(nil, err)
+			return
 		}
 		d.first = true
 		if sc.Label != nil {
@@ -284,7 +247,8 @@ func (d *SSEStreamDecoder) Feed(chunk []byte, isLastChunk bool) ([]byte, error) 
 		bs, err := sseLine(d.reqID, d.model, sc)
 		if err != nil {
 			d.err = err
-			return nil, err
+			cb(nil, err)
+			return
 		}
 		out = append(out, bs...)
 		if sc.Finish != "" {
@@ -292,29 +256,41 @@ func (d *SSEStreamDecoder) Feed(chunk []byte, isLastChunk bool) ([]byte, error) 
 			// 其他值（error/未知码）整流拒绝。
 			if sc.Finish != "stop" && sc.Finish != "content_filter" {
 				d.err = fmt.Errorf("envelope: SSE 流异常终止（finish=%q）", sc.Finish)
-				return nil, d.err
+				cb(nil, d.err)
+				return
 			}
 			if sc.Finish == "content_filter" {
 				d.contentFilter = true
 			}
 			out = append(out, "data: [DONE]\n\n"...)
 			d.done = true
-			return out, nil
+			cb(out, nil)
+			return
 		}
-	}
-	// 流结束（isLastChunk）时强制收尾校验
+		d.drain(out, isLastChunk, cb)
+	})
+}
+
+// finish pending 无完整行时的收尾：isLastChunk 强制校验（非空流/无残留/已正常终止）。
+func (d *SSEStreamDecoder) finish(out []byte, isLastChunk bool, cb func(out []byte, err error)) {
 	if isLastChunk {
 		if !d.first {
-			return nil, errors.New("envelope: SSE 流无有效加密分片")
+			d.err = errors.New("envelope: SSE 流无有效加密分片")
+			cb(nil, d.err)
+			return
 		}
 		if len(d.pending) != 0 {
-			return nil, errors.New("envelope: SSE 流被截断（残留未完成帧）")
+			d.err = errors.New("envelope: SSE 流被截断（残留未完成帧）")
+			cb(nil, d.err)
+			return
 		}
-		if d.done == false {
-			return nil, errors.New("envelope: SSE 流未正常终止（缺 finish 分片）")
+		if !d.done {
+			d.err = errors.New("envelope: SSE 流未正常终止（缺 finish 分片）")
+			cb(nil, d.err)
+			return
 		}
 	}
-	return out, d.err
+	cb(out, nil)
 }
 
 // sseLine 将单个解密分片编译为标准 OpenAI SSE data 行（含行尾 \n\n）。
