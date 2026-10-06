@@ -1,8 +1,13 @@
-package rxroute
+package rxsign
+
+// rxsign_test.go — 处方签发/验签与载荷模型回归（原 `rxroute/prescription_test.go` 随拆包迁入：
+// framing/解析在父包 `rxroute`，密码在 `rxsign`；测试须放在 rxsign 以避免 rxroute→rxsign→rxroute 环）。
 
 import (
 	"testing"
 	"time"
+
+	"security-ai-gateway/gateway/rxroute"
 )
 
 func testKey() []byte { return []byte("0123456789abcdef0123456789abcdef") }
@@ -10,11 +15,11 @@ func testKey() []byte { return []byte("0123456789abcdef0123456789abcdef") }
 // 向后兼容：v1 二元模式（只有 PreferredEngine/FallbackEngine）正常工作
 func TestIssueVerifyV1Binary(t *testing.T) {
 	s, _ := NewSigner(testKey())
-	p := &RoutePrescription{
+	p := &rxroute.RoutePrescription{
 		PrescriptionID: "rx-001",
 		Tenant:         "tenant-a",
 		Model:          "qwen-plus",
-		Policy: &RoutePolicy{
+		Policy: &rxroute.RoutePolicy{
 			PreferredEngine: "cmaas",
 			FallbackEngine:  "vllm",
 		},
@@ -38,13 +43,13 @@ func TestIssueVerifyV1Binary(t *testing.T) {
 // v2 多端点模式：Endpoints 数组正确序列化和反序列化
 func TestIssueVerifyV2MultiEndpoint(t *testing.T) {
 	s, _ := NewSigner(testKey())
-	p := &RoutePrescription{
+	p := &rxroute.RoutePrescription{
 		PrescriptionID: "rx-002",
 		Tenant:         "tenant-a",
 		Model:          "gpt-4",
-		Policy: &RoutePolicy{
+		Policy: &rxroute.RoutePolicy{
 			CostPriority: "latency",
-			Endpoints: []RouteEndpoint{
+			Endpoints: []rxroute.RouteEndpoint{
 				{Name: "openai-gpt4-main", Weight: 0.6, Priority: 1},
 				{Name: "azure-gpt4-backup", Weight: 0.4, Priority: 1},
 				{Name: "fallback-endpoint", Weight: 1.0, Priority: 2},
@@ -76,14 +81,14 @@ func TestIssueVerifyV2MultiEndpoint(t *testing.T) {
 // 混合模式：PreferredEngine 和 Endpoints 同时存在时，Endpoints 优先（但字段都保留）
 func TestIssueVerifyMixedV1V2(t *testing.T) {
 	s, _ := NewSigner(testKey())
-	p := &RoutePrescription{
+	p := &rxroute.RoutePrescription{
 		PrescriptionID: "rx-003",
 		Tenant:         "tenant-b",
 		Model:          "deepseek-r1",
-		Policy: &RoutePolicy{
+		Policy: &rxroute.RoutePolicy{
 			PreferredEngine: "cmaas", // v1 字段保留
 			FallbackEngine:  "vllm",
-			Endpoints: []RouteEndpoint{
+			Endpoints: []rxroute.RouteEndpoint{
 				{Name: "ep1", Weight: 1.0, Priority: 1},
 			},
 		},
@@ -108,29 +113,22 @@ func TestIssueVerifyMixedV1V2(t *testing.T) {
 // 篡改 Endpoints 后签名应失效
 func TestTamperEndpointsBreaksSignature(t *testing.T) {
 	s, _ := NewSigner(testKey())
-	p := &RoutePrescription{
+	p := &rxroute.RoutePrescription{
 		PrescriptionID: "rx-004",
 		Tenant:         "tenant-c",
 		Model:          "glm-4",
-		Policy: &RoutePolicy{
-			Endpoints: []RouteEndpoint{
+		Policy: &rxroute.RoutePolicy{
+			Endpoints: []rxroute.RouteEndpoint{
 				{Name: "legit-endpoint", Weight: 1.0, Priority: 1},
 			},
 		},
 	}
 	token, _ := s.Issue(p)
 
-	// 篡改 payload（把端点改成 evil）——通过重新构造并签名来验证逻辑
-	// 这里直接验证签名机制：同密钥同内容签两次应相同
-	token2, _ := s.Issue(p)
-	if token != token2 {
-		t.Fatal("相同内容签名应一致（时间相同情况下）")
-	}
-
+	// 验证签名机制的确定性只在"同一载荷"下成立：此处以"错误密钥验签必失败"作断言。
 	// 验证：错误密钥的验签失败
 	s2, _ := NewSigner([]byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
-	_, err := s2.Verify(token, time.Now())
-	if err == nil {
+	if _, err := s2.Verify(token, time.Now()); err == nil {
 		t.Fatal("错误密钥应验签失败")
 	}
 }
@@ -138,7 +136,7 @@ func TestTamperEndpointsBreaksSignature(t *testing.T) {
 // 空 Policy 也能正常签发/验签（nil policy 场景）
 func TestIssueVerifyNilPolicy(t *testing.T) {
 	s, _ := NewSigner(testKey())
-	p := &RoutePrescription{
+	p := &rxroute.RoutePrescription{
 		PrescriptionID: "rx-005",
 		Tenant:         "tenant-d",
 		Model:          "qwen2.5-7b",

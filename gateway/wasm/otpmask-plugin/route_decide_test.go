@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"security-ai-gateway/gateway/rxroute"
+	"security-ai-gateway/gateway/rxroute/rxsign"
 	"security-ai-gateway/gateway/wasm/otpmask-plugin/routecache"
 )
 
@@ -60,7 +61,7 @@ func TestDecideRouteL1Prescription(t *testing.T) {
 	c := newRouteCacheForTest(routeKey())
 	updateRouteCacheSync(c, signedTable(1, now.Unix()))
 
-	signer, err := rxroute.NewSigner(routeKey())
+	signer, err := rxsign.NewSigner(routeKey())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,9 +72,14 @@ func TestDecideRouteL1Prescription(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, rxErr, failReason := decideRoute(c, routeKey(), "tenant-a", "qwen-plus", tok, now)
+	// 验签（生产路径由 verifyPrescriptionAsync 经 sidecar 完成；此处直接调 rxsign，语义等价）。
+	p, err := rxsign.VerifyWith(routeKey(), tok, now)
+	if err != nil {
+		t.Fatalf("处方应验签通过：%v", err)
+	}
+	d, rxErr, failReason := decideRoute(c, "tenant-a", "qwen-plus", p.Policy.PreferredEngine, nil, now)
 	if rxErr != nil {
-		t.Fatalf("处方应验签通过：%v", rxErr)
+		t.Fatalf("不应有验签错误：%v", rxErr)
 	}
 	if failReason != "" {
 		t.Fatalf("不应 fail-closed：%s", failReason)
@@ -90,7 +96,7 @@ func TestDecideRouteL2Degraded(t *testing.T) {
 	updateRouteCacheSync(c, signedTable(1, now.Unix()))
 
 	// 无处方
-	d, _, failReason := decideRoute(c, routeKey(), "tenant-a", "qwen-plus", "", now)
+	d, _, failReason := decideRoute(c, "tenant-a", "qwen-plus", "", nil, now)
 	if failReason != "" {
 		t.Fatalf("L2 命中不应 fail-closed：%s", failReason)
 	}
@@ -99,9 +105,13 @@ func TestDecideRouteL2Degraded(t *testing.T) {
 	}
 
 	// 处方签名无效 → 同样降级 L2（处方问题不直接拒绝）
-	d2, rxErr, failReason2 := decideRoute(c, routeKey(), "tenant-a", "qwen-plus", "a.b.c", now)
-	if rxErr == nil {
+	_, verr := rxsign.VerifyWith(routeKey(), "a.b.c", now)
+	if verr == nil {
 		t.Fatal("伪造处方应验签失败")
+	}
+	d2, rxErr, failReason2 := decideRoute(c, "tenant-a", "qwen-plus", "", verr, now)
+	if rxErr == nil {
+		t.Fatal("处方无效应传回 rxErr（供日志）")
 	}
 	if failReason2 != "" || d2.Source != routecache.SourceCache {
 		t.Fatalf("处方无效应降级 L2 而非 fail-closed，got %+v reason=%s", d2, failReason2)
@@ -113,7 +123,7 @@ func TestDecideRouteFailClosed(t *testing.T) {
 	now := time.Unix(1725500000, 0)
 	c := newRouteCacheForTest(routeKey()) // 空缓存
 
-	d, _, failReason := decideRoute(c, routeKey(), "tenant-a", "qwen-plus", "", now)
+	d, _, failReason := decideRoute(c, "tenant-a", "qwen-plus", "", nil, now)
 	if failReason == "" {
 		t.Fatal("无路由必须 fail-closed")
 	}
@@ -131,7 +141,7 @@ func TestDecideRouteStaleFailClosed(t *testing.T) {
 	})
 	updateRouteCacheSync(c, signedTable(1, base.Unix()))
 
-	d, _, failReason := decideRoute(c, routeKey(), "tenant-a", "qwen-plus", "", base.Add(61*time.Second))
+	d, _, failReason := decideRoute(c, "tenant-a", "qwen-plus", "", nil, base.Add(61*time.Second))
 	if failReason == "" || !d.Stale {
 		t.Fatalf("超 max_stale 应 fail-closed 且标记 Stale，got %+v reason=%q", d, failReason)
 	}

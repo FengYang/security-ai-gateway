@@ -4,7 +4,8 @@ package main
 //
 // 阶梯：
 //
-//	L1 处方（请求头 X-Otp-Route，经共享包 rxroute 验签）→ 采用其 preferred_engine；
+//	L1 处方（请求头 X-Otp-Route，解析经共享包 rxroute（零密码）、**验签经 cryptop sidecar**
+//	   `/v1/hmac`（CPS：请求头阶段暂停 → 回调内决策 → Resume，§5.4.6 同源机制））→ 采用其 preferred_engine；
 //	L2 默认路由表缓存（routecache，防回滚/防篡改；由周期 tick 任务拉取填充）→ 采用
 //	   default_engine/target（**降级**）；
 //	无命中 → 密态 fail-closed（503，不静默直连）。
@@ -28,6 +29,7 @@ package main
 
 import (
 	"encoding/hex"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -115,21 +117,11 @@ func initRouteRuntime(config PluginConfig, log logs.Log) {
 func routeEnabled() bool { return routeRuntime.cache != nil }
 
 // decideRoute 纯逻辑决策（无 hostcall，可单测）：
-// 处方验签（rxToken）→ 缓存 → 产出决策；需要 fail-closed 时返回非空原因。
+// **已验签**的处方引擎（rxEngine）→ 缓存 → 产出决策；需要 fail-closed 时返回非空原因。
 //
-// 设计取向（§6）：处方问题（缺失/签名无效/过期）**不直接拒绝请求**，而是降级到 L2；
-// 只有 L1/L2 都拿不到路由时才 fail-closed（密态语义不可降级）。
-func decideRoute(cache *routecache.Cache, key []byte, tenant, model, rxToken string, now time.Time) (routecache.Decision, error, string) {
-	rxEngine := ""
-	var rxErr error
-	if rxToken != "" {
-		p, err := rxroute.VerifyWith(key, rxToken, now)
-		if err != nil {
-			rxErr = err
-		} else if p.Policy != nil {
-			rxEngine = p.Policy.PreferredEngine
-		}
-	}
+// 处方**验签**由调用方（applyRouteDecision，经 sidecar）完成后把 preferred_engine 传入；
+// rxErr 仅用于日志（处方问题一律**降级 L2**，不直接拒绝请求，§6）。
+func decideRoute(cache *routecache.Cache, tenant, model, rxEngine string, rxErr error, now time.Time) (routecache.Decision, error, string) {
 	d := cache.Decide(tenant, model, rxEngine)
 	if d.Source != routecache.SourceNone {
 		return d, rxErr, ""
@@ -141,25 +133,80 @@ func decideRoute(cache *routecache.Cache, key []byte, tenant, model, rxToken str
 }
 
 // applyRouteDecision 读请求维度 → 决策 → 写路由头或 fail-closed（只读缓存，不发起拉取）。
-// P0-1 新增：如果路由表配置了多端点（Endpoints 非空），则在决策引擎之后再做一次端点选择，
-// 结果写入 X-Otp-Endpoint 头。未配置 Endpoints = 行为与接线前完全一致（向后兼容）。
+//
+// **阶段约束（P0-4 B4-e）**：处方（L1）验签经 cryptop sidecar（CPS，§5.4.6 同源机制）⇒ 须在
+// **请求头阶段**暂停（`ActionPause`），于验签回调内完成决策后 `ResumeHttpRequest` 放行。
+// **无 `X-Otp-Route` 处方时不暂停**，与接线前行为完全一致。
 func applyRouteDecision(ctx wrapper.HttpContext, config PluginConfig, log logs.Log) types.Action {
 	if !routeEnabled() {
 		return types.HeaderContinue // 未启用路由：与接线前行为一致
 	}
 	tenant := tenantHeaderValue(ctx)
 	model := requestModelHeader(config)
-	d, rxErr, failReason := decideRoute(routeRuntime.cache, routeRuntime.key, tenant, model, reqHeader(hdrOtpRoute), time.Now())
+	rxToken := reqHeader(hdrOtpRoute)
+	if rxToken == "" {
+		// 无处方：同步走 L2/降级（不暂停，零行为变化）
+		_ = finishRouteDecision(ctx, log, tenant, model, "", nil)
+		return types.HeaderContinue
+	}
+	// 有处方：异步验签（CPS）→ 回调内决策并放行
+	verifyPrescriptionAsync(config, rxToken, time.Now(), func(p *rxroute.RoutePrescription, verr error) {
+		engine := ""
+		if p != nil && p.Policy != nil {
+			engine = p.Policy.PreferredEngine
+		}
+		if finishRouteDecision(ctx, log, tenant, model, engine, verr) {
+			_ = proxywasm.ResumeHttpRequest()
+		}
+	})
+	return types.ActionPause
+}
+
+// verifyPrescriptionAsync 经 cryptop sidecar 校验处方（CPS，§5.4.4 组⑫）：
+// 解析（`rxroute`，**零密码**）→ `/v1/hmac` 由 sidecar 复算 MAC → 插件侧常量时间比较 → 时效校验。
+//
+// sidecar 不可用 / 签名无效 / 超时窗 → 回调带 err（调用方**降级 L2**，不因处方问题拒绝请求，§6）。
+func verifyPrescriptionAsync(config PluginConfig, rxToken string, now time.Time, cb func(*rxroute.RoutePrescription, error)) {
+	p, input, sig, err := rxroute.ParseToken(rxToken)
+	if err != nil {
+		cb(nil, err)
+		return
+	}
+	symmetricVerifyMAC(routeVerifyKeyRef(config), []byte(input), sig, func(ok bool, verr error) {
+		if verr != nil {
+			cb(nil, verr)
+			return
+		}
+		if !ok {
+			cb(nil, errors.New("route: 处方签名无效"))
+			return
+		}
+		if verr := rxroute.Validate(p, now); verr != nil {
+			cb(nil, verr)
+			return
+		}
+		cb(p, nil)
+	})
+}
+
+// finishRouteDecision 决策 + 写路由头；返回 false 表示**已 fail-closed**（本地 503 已发送，
+// 调用方不得再 `ResumeHttpRequest`）。
+//
+// P0-1：路由表配置了多端点（Endpoints 非空）时，在决策引擎之后再做一次端点选择，结果写入
+// X-Otp-Endpoint 头。未配置 Endpoints = 行为与接线前完全一致（向后兼容）。
+func finishRouteDecision(ctx wrapper.HttpContext, log logs.Log, tenant, model, rxEngine string, rxErr error) bool {
 	if rxErr != nil {
 		log.Warnf("otpmask-plugin: 处方校验失败，降级 L2: %v", rxErr)
 	}
+	d, _, failReason := decideRoute(routeRuntime.cache, tenant, model, rxEngine, rxErr, time.Now())
 	switch d.Source {
 	case routecache.SourceCache:
 		metricRouteDegraded.incr() // §6：降级事件可观测
 		log.Warnf("otpmask-plugin: 路由降级 L2（处方缺失/失效）tenant=%q model=%q engine=%q", tenant, model, d.Engine)
 	case routecache.SourceNone:
 		// 缓存未命中即 fail-closed（拉取由周期 tick 任务承担，见 routefetch.go）。
-		return failClosed(log, failReason)
+		failClosed(log, failReason)
+		return false
 	}
 	if d.Engine != "" {
 		_ = proxywasm.ReplaceHttpRequestHeader(hdrOtpEngine, d.Engine)
@@ -197,8 +244,7 @@ func applyRouteDecision(ctx wrapper.HttpContext, config PluginConfig, log logs.L
 			}
 		}
 	}
-
-	return types.HeaderContinue
+	return true
 }
 
 // ============================================================
