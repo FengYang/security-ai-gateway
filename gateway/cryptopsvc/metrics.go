@@ -168,7 +168,7 @@ func (m *metrics) render(w io.Writer) {
 		}
 	}
 	writeCounter(w, "cryptop_errors_total", "密码运算错误计数（按 op 与 §4.4 错误码）", m.errors, []string{"op", "code"})
-	writeGaugeInt(w, "cryptop_call_timeout_total", "R-3 单次调用超时计数（sidecar 中间件）", m.timeouts)
+	writeCounterInt(w, "cryptop_call_timeout_total", "R-3 单次调用超时计数（sidecar 中间件）", m.timeouts)
 	writeGaugeMap(w, "cryptop_key_refs", "活跃 KeyRef 数（按 scope；内存泄漏观测）", m.keyRefs, []string{"scope"})
 	writeCounter(w, "cryptop_key_rotations_total", "密钥轮换计数（按 scope；tenant_master 由 tee 发射）", m.rotations, []string{"scope"})
 	writeCounter(w, "cryptop_key_destroy_total", "密钥销毁计数（按 scope；tenant_master 由 tee 发射）", m.destroys, []string{"scope"})
@@ -176,7 +176,7 @@ func (m *metrics) render(w io.Writer) {
 	fmt.Fprintf(w, "# HELP cryptop_profile_info 当前 profile 合规标注（gauge=1，P4 如实标注）\n# TYPE cryptop_profile_info gauge\n")
 	fmt.Fprintf(w, "cryptop_profile_info{profile=%q,meets_mpy=%q,compliance_note=%q} 1\n",
 		m.profile, boolStr(m.meetsMPY), m.complianceNote)
-	writeGaugeInt(w, "cryptop_mask_stream_values_total", "/v1/mask/stream 累计下发掩码元素数（容量观测）", m.maskVals)
+	writeCounterInt(w, "cryptop_mask_stream_values_total", "/v1/mask/stream 累计下发掩码元素数（容量观测）", m.maskVals)
 	writeGaugeMap(w, "cryptop_compat_mode", "兼容/桥接模式开启标志（feature=mask_bridge；1=on/0=off）", m.compat, []string{"feature"})
 }
 
@@ -238,6 +238,12 @@ func writeGaugeMap(w io.Writer, name, help string, data map[string]int64, labels
 // writeGaugeInt 输出无标签 gauge（恒输出，供门禁判"已注册"）。
 func writeGaugeInt(w io.Writer, name, help string, v int64) {
 	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n", name, help, name)
+	fmt.Fprintf(w, "%s %d\n", name, v)
+}
+
+// writeCounterInt 输出无标签 counter（恒输出，供门禁判"已注册"）。
+func writeCounterInt(w io.Writer, name, help string, v int64) {
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
 	fmt.Fprintf(w, "%s %d\n", name, v)
 }
 

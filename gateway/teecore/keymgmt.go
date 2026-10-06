@@ -11,7 +11,6 @@
 package teecore
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"sync"
@@ -106,8 +105,8 @@ func (km *KeyManager) rotateLocked() error {
 		km.masterGen = time.Now()
 		return nil
 	}
-	mk := make([]byte, 32)
-	if _, err := rand.Read(mk); err != nil {
+	mk, err := cryptoProvider.Rand(32)
+	if err != nil {
 		return fmt.Errorf("teecore: 生成主密钥失败: %w", err)
 	}
 	km.masterKey = mk
@@ -150,8 +149,8 @@ func (km *KeyManager) rotateLoop() {
 // Issue 派生并签发请求密钥。
 // 返回请求密钥（即掩码 seed）与关联 nonce（hex）。
 func (km *KeyManager) Issue(requestID, model string) (seed []byte, nonceHex string, err error) {
-	nonce := make([]byte, 16)
-	if _, err = rand.Read(nonce); err != nil {
+	nonce, err := cryptoProvider.Rand(16)
+	if err != nil {
 		return nil, "", fmt.Errorf("teecore: 生成 nonce 失败: %w", err)
 	}
 	nonceHex = hexEncode(nonce)
