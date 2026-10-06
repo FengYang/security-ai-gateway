@@ -1,4 +1,4 @@
-﻿# check-metrics-green.ps1 - 指标"全绿"可执行判定（Phase 1 门禁 #9）
+# check-metrics-green.ps1 - 指标"全绿"可执行判定（Phase 1 门禁 #9）
 #
 # 定位：把 GA 总览 §6 门禁 #9 的"Prometheus 指标全绿"从**人工判断**变成**可执行门禁**。
 #
@@ -28,6 +28,7 @@ param(
     [string]$Admin = 'http://127.0.0.1:19095',
     [string]$Core = 'http://127.0.0.1:8085',
     [string]$CoreToken = '',
+    [string]$Cryptop = 'http://127.0.0.1:19097',
     [string]$Container = 'higress-chain-control-plane',
     [string]$Manifest = '',
     [int]$TimeoutSec = 15,
@@ -35,6 +36,7 @@ param(
     [switch]$SkipAdmin,
     [switch]$SkipCore,
     [switch]$SkipPlugin,
+    [switch]$SkipCryptop,
     # 门禁模式（verify-all 用）：全部来源必须可达，任一个不可达即 FAIL（避免"空跑通过"）
     [switch]$RequireAllSources
 )
@@ -98,6 +100,13 @@ if (-not $SkipPlugin) {
     if (-not $pluginUp) { Write-Host "  [SKIP] 数据面 stats 不可达（容器 $Container :15000）" -ForegroundColor DarkYellow }
 } else { Write-Host '  [SKIP] 按参数跳过数据面插件' -ForegroundColor DarkYellow }
 
+$cryptopBody = ''; $cryptopUp = $false
+if (-not $SkipCryptop) {
+    $r = Get-HttpBody "$Cryptop/metrics" @()
+    $cryptopUp = $r.ok
+    if ($cryptopUp) { $cryptopBody = $r.body } else { Write-Host "  [SKIP] cryptop sidecar 不可达（$Cryptop/metrics）：$($r.body)" -ForegroundColor DarkYellow }
+} else { Write-Host '  [SKIP] 按参数跳过 cryptop sidecar' -ForegroundColor DarkYellow }
+
 # ---------- 逐条断言 ----------
 foreach ($line in [System.IO.File]::ReadAllLines($Manifest)) {
     $t = $line.Trim()
@@ -113,6 +122,7 @@ foreach ($line in [System.IO.File]::ReadAllLines($Manifest)) {
         'admin'  { $body = $adminBody;  $up = $adminUp;  $srcName = '管理面 /metrics' }
         'core'   { $body = $coreBody;   $up = $coreUp;   $srcName = '控制面 /metrics' }
         'plugin' { $body = $pluginBody; $up = $pluginUp; $srcName = '数据面 Envoy stats' }
+        'cryptop' { $body = $cryptopBody; $up = $cryptopUp; $srcName = 'cryptop sidecar /metrics' }
         default  { Record $src $metric $kind 'FAIL' "未知来源: $src"; continue }
     }
 

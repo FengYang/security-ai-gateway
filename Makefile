@@ -46,10 +46,16 @@ fuzz-quick:
 bench:
 	$(GO) test -bench=. -benchmem -run=^$$ ./cipher/paillier/ ./secagg/shares/
 
-# bench-s2 —— §8.3 国密 S2 基准（T-8.1 微基准 + T-8.2/T-8.3 sidecar 基准）。
+# bench-s2 —— §8.3 国密 S2 基准（T-8.1 微基准 + T-8.2/T-8.3 硬断言）。
+# 分两段：
+#   1. 微基准（Benchmark*，不计 pass/fail，仅输出性能数据）
+#   2. 硬断言（T-8.2 P99 延迟、T-8.3 batch vs sequential 加速比，不通过即失败）
 .PHONY: bench-s2
 bench-s2:
+	@echo "===== [1/2] S2 微基准 ====="
 	$(GO) test -bench=. -benchmem -run=^$$ ./gateway/cryptop/ ./gateway/cryptopsvc/
+	@echo "===== [2/2] S2 硬断言（T-8.2 / T-8.3） ====="
+	$(GO) test -run="TestSidecarSealLatencyP99|TestBatchVsSequential" -count=1 -v ./gateway/cryptopsvc/
 
 .PHONY: coverage
 coverage:
