@@ -69,7 +69,7 @@
 | P0-1 | 多模型智能路由 | **6.5-8.5 周（增量）** | P0 | ✅ W5 测试完成 + 部署运维文档交付（开发/测试/文档全链路完成，待整体上线验收） | 待分配 | [P0--多模型智能路由.md](./P0/GA-AI网关能力补齐方案--P0--多模型智能路由.md) | Wasm 自研（非 ai-proxy 扩展）；主备+权重+EWMA失败率+熔断+重试预算+三级降级+主动健康检查；2 FTE 并行；W3 收口与 3 项偏差见 §3.2「W3 收口说明」；W4 全部完成（灰度/API/凭证/可观测/计费接口）；W5 测试全通过 + 部署运维文档交付 |
 | P0-2 | 语义缓存（分两期） | 5-7 周 | P0 | 📝 详细设计 v1.5（第 5 轮评审已修复，按附录 F.5 达"可直接编码"，待编码指令） | 待分配 | [P0--语义缓存.md](./P0/GA-AI网关能力补齐方案--P0--语义缓存.md) | 一期精确缓存 + 二期语义缓存；详设 v1.5 覆盖 §3.3 全部 11 项子任务、逐项 L3（含流式分段缓存/维度化 TTL/可缓存性判定/请求合并/灰度控制器）；**第 3 轮补"机制接线"**（§7.2 读时快审唯一实现 + 语义命中经 finishHit、§7.3 抖动全路径同分布采样）；**第 4 轮补"注入侧接线 + 指标契约"**（抖动三段闭合、`lookups_total{kind,result}` 契约重定义）；**第 5 轮（空白视角重审）修 3 P0**（**S-1/D-6** 形态 B 区分 B-共享/B-退化、**A-1/D-7** 负向命中回放接线、**A-2/D-3** single-flight 失败收敛 N+1→N）+ 补 §5.3.1 RedisBackend 接口/命令级伪代码（T4 由 L2+ 升 L3）+ 流式写入分片采集 + 指纹预筛限 strict 场景 + 附录 J 记 20 项订正/8 项拒绝；主方案 §4.2 已同步回写（v5.5） |
 | P0-3 | Token 计费体系完善 | 6-8 周 | P0 | 📝 详细设计 v1.4（已过 4 轮评审、第 4 轮修复全部落地，达 L3，**待用户编码指令**） | 待分配 | [P0--Token计费体系完善.md](./P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md) | 套餐+账单+用量API；详设 v1.4 覆盖 §3.4 全部任务、逐项 L3（见 §3.4 任务分解）；**第 3 轮**分离对账门禁/冻结判据 + retry 双路归因；**第 4 轮**阶梯入/出分轴（保可加性）+ pull 净量口径 + 生产者表回填 + A-28 口径传播 |
-| P0-4 | 国密 S2 核心路径下沉 | 7-9 周 | P0 | 🟡 编码中（详设 v1.6 已 L3 放行；库层基础已落：`cryptop.Keystream` 原语 / `cipher/mask` PRG 可插拔 / 信封 suite 感知 `DeriveSubkey`+`SuiteSM4GCM` / **§5.4.5 拆包 `protocol/go`↔`cryptoops`** / **cryptop sidecar 13 端点服务 `gateway/cryptopsvc`**；插件 CryptoClient/审计链/接线联调待续；进展见 §3.5） | 待分配 | [P0--国密S2核心路径下沉.md](./P0/GA-AI网关能力补齐方案--P0--国密S2核心路径下沉.md) | Wasm密码运算下沉+双读兼容 |
+| P0-4 | 国密 S2 核心路径下沉 | 7-9 周 | P0 | 🟡 编码收口（详设 v1.20 迭代；库层 + cryptop sidecar 13 端点 + 插件零密码（B1，`wasm-guard` 三门禁全绿）+ 服务侧信封/审计/全量接线（B2-B4）+ 双读兼容 + profile 切换工具（B5）+ 密钥分级/国密 TLS/基准/切换演练/集成回归（B6#9-10/12-14）全部完成；**唯一留场项 = E2E-05 真实部署环境端到端**，其余全绿；进展见 §3.5） | 待分配 | [P0--国密S2核心路径下沉.md](./P0/GA-AI网关能力补齐方案--P0--国密S2核心路径下沉.md) | Wasm密码运算下沉+双读兼容 |
 | P0-5 | TEE 威胁模型初稿 | 1-2 周 | P0（轻量并行） | ✅ 三份交付物已成稿；**威胁模型 v0.7 + 安全白皮书大纲 v1.1 + 侧信道风险披露说明 v1.1 均已过第 1 轮多角色评审 + 第 2 轮元评审（A-）** | 待分配 | [P0--TEE威胁模型.md](./P0/GA-AI网关能力补齐方案--P0--TEE威胁模型.md)｜[白皮书大纲](./P0/GA-AI网关能力补齐方案--P0--安全白皮书大纲.md)｜[侧信道披露](./P0/GA-AI网关能力补齐方案--P0--侧信道风险披露说明.md) | 三份独立交付物（威胁模型本体 **v0.7** + 白皮书大纲 **v1.1** + 侧信道披露），均达发布级；完整白皮书 P1 M5；威胁模型含 **STRIDE 39 条 + 供应链 6 条 = 45 条** + LLM 特有 5 条（单列）/4 攻击树/12 GAP（**GAP-01/05 已闭环**）；见 §3.6 |
 
 > **P0 总工作量**：约 24-33 人周 ≈ 6-8 人月（含并行）
@@ -275,20 +275,20 @@
 
 | 子任务 | 工作量 | 状态 | 负责人 | 依赖 | 起止周 |
 |---|---|---|---|---|---|
-| 详细设计文档输出 | 3 天 | ✅ 完成（**v1.11**：v1.6 第 8 轮收尾复核 A−·L3 放行 → 编码期发现 R8-P1-1 / R8-P2-2 / R4 均经用户裁决回写；B2/B3 落地后同步 v1.10/v1.11） | 待分配 | — | W0-W1 |
-| 密码下沉 PoC：otpmask → cryptop 后端 | 5 天 | 🟡 基本完成（**B1**：库层 + **插件侧加密后端全线接入**——`jwt.go`/`keystore.go` CPS 化、路由/限流 HMAC 经 `/v1/hmac`+常量时间比较、`routeengine` 随机源经 `/v1/rand`、`crypto.go` 掩码经 `/v1/mask/stream`；遗留 = `route.go:126` 处方验签经 `gateway/rxroute` 仍链入 `crypto/hmac`，`make wasm-guard` 断言①b 暂红，待 B4） | 待分配 | 详细设计 | W1-W2 |
-| 信封加密国密化接线 + 联调 | 4 天 | 🟡 服务侧已落（**B2**：tee-infer `session.go` 出口改 `SealEnvelopeWithSuite(cryptoSuite())`、入口按 wire suite 双读；**进程级 Provider 装配** `-crypto-profile`/`-mask-prg`=§12.3；R-2/R-14/R-21 启动校验）；**插件侧 seal/open 接线与端到端联调待续（属 B4/①+②+③ 单元）** | 待分配 | PoC 通过 | W2-W3 |
+| 详细设计文档输出 | 3 天 | ✅ 完成（**v1.20**：v1.6 L3 放行 → 编码期 14 次版本迭代：v1.7 信封 KDF 裁决 / v1.8 流式 CPS / v1.9 掩码下沉 R4·A / v1.10 服务侧 B2 / v1.11 审计双验 B3 / v1.12 B4 全量接线 + rxroute 拆包 / v1.13 计费双读 / v1.14 profile 切换工具 / v1.15 密封双读 / v1.16 密钥分级 / v1.17 国密 TLS / v1.18 性能基准 / v1.19 切换演练 / v1.20 集成回归） | 待分配 | — | W0-W1 |
+| 密码下沉 PoC：otpmask → cryptop 后端 | 5 天 | ✅ 完成（**B1**：库层 + 插件侧全线接入——jwt/keystore CPS 化、路由/限流 HMAC 经 `/v1/hmac`+常量时间比较、routeengine 随机源经 `/v1/rand`、crypto.go 掩码经 `/v1/mask/stream`；B4-e `rxroute` 拆包后 `make wasm-guard` 断言①a/①b/② **三门禁全绿**） | 待分配 | 详细设计 | W1-W2 |
+| 信封加密国密化接线 + 联调 | 4 天 | ✅ 完成（**B2** 服务侧：tee-infer `session.go` 出口 `SealEnvelopeWithSuite(cryptoSuite())`、入口 wire suite 双读、进程级 Provider 装配 `-crypto-profile`/`-mask-prg` + R-2/R-14/R-21 启动校验；**B4** 插件侧 seal/open/签名 全量 CPS 接线 + 流式批量解密；**全仓 go test 绿**） | 待分配 | PoC 通过 | W2-W3 |
 | 审计日志国密签名接线 + 验证 | 2 天 | ✅ 完成（**B3**：三条链 `hash_alg` 版本化（证据字段，不进 hash）+ 与 profile 解耦的分派；tee-infer 写入端打标；`audit-verify` 双验（SHA-256+SM3）；TST 锚对齐 `sm3`。**intl 逐字节零行为变更**；T-5.2-1..6 绿） | 待分配 | PoC 通过 | W3 |
-| 业务调用点全量接线（所有密码使用点） | 6 天 | 🟡 进行中（**插件侧 B1**：jwt/keystore/routecache/ratelimitcache/routeengine/mask 已接；**服务侧 B2**：tee-infer `session/tsa/enclave/enclave_tdx/recompute` 组①③⑥⑦+组⑨ 已接；**服务侧 B3**：三条审计链组⑤+审计双验已接；**余 B4**：掩码 PRG 选择、admin/auth/mcpsec/teecore/`rxroute` 等业务调用点、计费链签名〔组⑬〕） | 待分配 | 信封+审计完成 | W3-W4 |
-| 密码后端服务：本地 sidecar + 连接池优化 | 5 天 | 🟡 进行中（**13 端点服务已落** `gateway/cryptopsvc`；**v1.9 按 R4·方案 A 更新 `/v1/mask/stream` 入参 `key_ref`→`seed`（base64）**，PRG 选择与 seed 长度校验保留；连接池优化待续） | 待分配 | PoC 通过 | W2-W3 |
-| 双读兼容：intl ↔ sm-software 互读逻辑 | 4 天 | 🔲（信封 suite 字节双读已在库层落地；**存储密封 suite 前缀 + 跨 profile 双读**归 B5） | 待分配 | 调用点接线 50% | W4 |
-| profile 切换工具 + 回滚验证 | 3 天 | 🔲 | 待分配 | 双读完成 | W4-W5 |
-| 密钥管理分级体系：三级密钥 + 轮换 + 销毁 | 4 天 | 🔲 | 待分配 | 密码后端完成 | W3-W4 |
-| 国密 TLS 前置方案集成验证 | 2 天 | 🔲 | 待分配 | 前置网关就绪 | W5 |
-| 静态扫描验证 Wasm 内无密码运算代码 | 1 天 | ✅ 完成（**`make wasm-guard` 三门禁全绿**：**①a** 插件源码 direct import 零密码 ✅ / **①b** 闭包内本仓包零密码 ✅〔v1.12 拆包后原唯一命中项 `security-ai-gateway/gateway/rxroute` 已消除〕/ **②** `protocol/go` framing 零密码 ✅）；另 `wasm-objdump` 符号检查（门禁 2）待 wasm 产物接线完成后执行 | 待分配 | 下沉完成 | W5 |
-| 基准测试：intl vs sm-software 性能对比 | 2 天 | 🔲 | 待分配 | 双读完成 | W5 |
-| 国密切换演练：测试环境完整演练 + 报告 | 3 天 | 🔲 | 待分配 | 全部功能完成 | W6 |
-| 集成测试 + 回归测试 | 5 天 | 🔲 | 待分配 | 全部完成 | W5-W6 |
+| 业务调用点全量接线（所有密码使用点） | 6 天 | ✅ 完成（**B4-a~e 逐项提交**：B4-a 掩码 PRG 选择 / B4-b admin / B4-c gateway-core / B4-d auth/mcpsec/teecore/计费 Webhook / **B4-e rxroute 拆包 + 插件请求头阶段 CPS** ⇒ `wasm-guard` 三门禁全绿；B4 后全仓 `go build`/`vet`/`test` 绿） | 待分配 | 信封+审计完成 | W3-W4 |
+| 密码后端服务：本地 sidecar + 可执行入口 | 5 天 | ✅ 完成（**13 端点服务** `gateway/cryptopsvc` + 独立可执行入口 `cmd/cryptopsvc`；12 项单测绿；metrics 9 项；静态密钥 env 注入；启动期 6 项校验 fail-closed；CallTimeout 中间件 50ms；批处理 64 ops 隔离） | 待分配 | PoC 通过 | W2-W3 |
+| 双读兼容：intl ↔ sm-software 互读逻辑 | 4 天 | ✅ 完成（**B5-a/b/c 三件**：B5-a 存储密封双读（suite 前缀 + AEAD 认证判别 + 历史密钥环）/ **B5-b** 计费链算法标识 + 双读 / **B5-c** profile 切换端点 + 两脚本 + 两 make；intl↔sm 双向可读；未知算法 fail-closed） | 待分配 | 调用点接线 50% | W4 |
+| profile 切换工具 + 回滚验证 | 3 天 | ✅ 完成（**B5-c**：`POST /v1/adminext/cryptop/profile` 管理端点 + `cryptop-switch-profile.sh` + `cryptop-verify-consistency.sh` + 2 个 Makefile 目标；编排受理模式；sidecar 一致性校验；审计 + #12 指标；脚本退出码 0/2/3/4/5/6；12 项单测 + 4 项脚本测试全绿） | 待分配 | 双读完成 | W4-W5 |
+| 密钥管理分级体系：三级密钥 + 轮换 + 销毁 | 4 天 | ✅ 完成（**B6 #9**：teecore 三级密钥体系 + 派生链 + 轮换接口 + 内存零化 + 审计事件；`keymgmt_test.go` 全绿） | 待分配 | 密码后端完成 | W3-W4 |
+| 国密 TLS 前置方案集成验证 | 2 天 | ✅ 完成（**B6 #10**：`deploy/tlcp/certgen` SM2 双证书生成工具 + nginx-tlcp 配置样例 + `verify.sh` 三断言验证脚本；certgen 3 用例 + 脚本 2 用例全绿；Tongsuo 为唯一外部依赖） | 待分配 | 前置网关就绪 | W5 |
+| 静态扫描验证 Wasm 内无密码运算代码 | 1 天 | ✅ 完成（**`make wasm-guard` 三门禁全绿**：**①a** 插件源码 direct import 零密码 ✅ / **①b** 闭包内本仓包零密码 ✅ / **②** `protocol/go` framing 零密码 ✅；`wasm-objdump` 符号检查（门禁 2）随 wasm 产物接线完成后执行） | 待分配 | 下沉完成 | W5 |
+| 基准测试：intl vs sm-software 性能对比 | 2 天 | ✅ 完成（**B6 #12**：`cryptop/bench_test.go` + `cryptopsvc/bench_test.go` + `Makefile bench-s2`；自适应组计时修正 Windows 单调钟粒度；T-8.1 矩阵 {intl,sm}×{Seal/Open/Hash/HMAC/Sign/Verify/KDF}×{1KB,64KB}；T-8.2 sidecar P99≤10ms 断言；T-8.3 batch vs sequential 4.5–5.1× 断言；交付 PERF-S2-1 报告） | 待分配 | 双读完成 | W5 |
+| 国密切换演练：测试环境完整演练 + 报告 | 3 天 | ✅ 完成（**B6 #13**：`scripts/cryptop-drill.sh` 八步编排 + 报告模板（6 段 JSON）；前置检查 + 基线快照 + 三段式切换（服务端→插件→收桥）+ 功能/双读/性能钩子 + 回滚 + 报告产出；失败 block 语义；4 项脚本测试全绿（有状态 mock 全链路）；默认产物 `deploy/drill-runs/`（.gitignore）） | 待分配 | 全部功能完成 | W6 |
+| 集成测试 + 回归测试 | 5 天 | ✅ 完成（**B6 #14**：真实进程级矩阵——INT-1 密码服务链（双档）/ INT-2 sidecar 插件全原语 / INT-3 tee→admin 跨服务三链双验 / INT-4 两阶段切换五步（含 restart 409+滚动+一致性+回滚）/ INT-5 密封双读+计费双读（双向）/ E2E-06 sidecar 停机 fail-closed；全量 e2e 8 顶层测试 130.7s 全绿；**E2E-05 真实部署环境端到端留部署环境执行**） | 待分配 | 全部完成 | W5-W6 |
 
 > **实施批次与进展（2026-10-06）**——编码期改用**批次实施**（依据《GA-AI网关能力补齐方案--P0--国密S2核心路径下沉-开发实现情况评审报告.md》§六 B1–B6），**本表用于对齐"子任务 ↔ 批次"**；§3.5 下文原"①–⑥ 顺序"叙述保留作历史参考，其口径以本批次表为准。
 >
