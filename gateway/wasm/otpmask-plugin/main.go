@@ -74,6 +74,15 @@ type PluginConfig struct {
 	// §6 降级接线：默认路由表缓存的最老可接受时长（秒）。缺省 300；显式负数 = 永不过期
 	// （对应设计 §6 原文"接受旧版本继续用"，可用性优先）。
 	MaxStaleSeconds int64 `json:"max_stale_seconds"`
+	// P1-6 路由表内存上限（字节）：超过上限的更新被拒绝（保留旧表，防 DoS）。
+	// 缺省 1048576（1 MB，约 5K 路由 × 10 端点规模）；0 = 不限制。
+	RouteTableMaxSizeBytes int64 `json:"route_table_max_size_bytes"`
+	// P1-2 处方头防重放（JTI 一次性消费）。
+	// **默认 false = 行为与接线前完全一致**（仅时效校验，不做一次性消费校验）。
+	// 显式 true = 启用防重放（安全增强，建议生产环境开启）。
+	ReplayGuardEnabled bool `json:"replay_guard_enabled"`
+	// P1-2 防重放守卫容量（最大记录 JTI 数量）。缺省 10000（30s × 333 QPS）。
+	ReplayGuardCapacity int64 `json:"replay_guard_capacity"`
 	// 默认路由表拉取周期（秒，设计 §3.3 poll_interval）。缺省 60；最小按 100ms tick 粒度换算。
 	PollIntervalSeconds int64 `json:"poll_interval"`
 	// P0-1 非流式重试（§6.5）：启用后已加密的南向协议请求由插件自持出站派发
@@ -146,6 +155,9 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.GatewayCorePort = json.Get("gateway_core_port").Int()
 	config.RouteVerifyKeyHex = json.Get("route_verify_key").String()
 	config.MaxStaleSeconds = json.Get("max_stale_seconds").Int()
+	config.RouteTableMaxSizeBytes = json.Get("route_table_max_size_bytes").Int()
+	config.ReplayGuardEnabled = json.Get("replay_guard_enabled").Bool()
+	config.ReplayGuardCapacity = json.Get("replay_guard_capacity").Int()
 	config.PollIntervalSeconds = json.Get("poll_interval").Int()
 	config.RouteDispatchEnabled = json.Get("route_dispatch_enabled").Bool()
 	config.CredentialEnabled = json.Get("credential_enabled").Bool()
@@ -219,6 +231,14 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	// §6 降级接线：缺省 max_stale=300s；显式负数 = 永不过期（对应设计 §6 原文"接受旧版本"）。
 	if config.MaxStaleSeconds == 0 {
 		config.MaxStaleSeconds = 300
+	}
+	// P1-6 路由表内存上限：缺省 1 MB（约 5K 路由 × 10 端点）；显式 0 = 不限制。
+	if config.RouteTableMaxSizeBytes == 0 {
+		config.RouteTableMaxSizeBytes = 1 * 1024 * 1024 // 1 MB
+	}
+	// P1-2 防重放守卫容量：缺省 10000（30s × 333 QPS）。
+	if config.ReplayGuardCapacity == 0 {
+		config.ReplayGuardCapacity = 10000
 	}
 	// 拉取周期缺省 60s（设计 §3.3 poll_interval）。
 	if config.PollIntervalSeconds <= 0 {

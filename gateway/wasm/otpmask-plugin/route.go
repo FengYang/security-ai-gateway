@@ -64,6 +64,16 @@ type routeRuntimeState struct {
 	port           int64
 	pollIntervalMs int64
 	token          string // gateway-core 拉取通道令牌（Authorization: Bearer；空 = 控制面未启用鉴权）
+	// P1-6：路由表更新被拒绝统计（可观测）
+	rejectCount       int64  // 累计拒绝次数
+	lastRejectReason  string // 最近一次拒绝原因
+	lastRejectVersion int    // 最近一次被拒版本号
+	// P1-2：处方头防重放守卫（JTI 消费记录）。nil = 未启用（与 P0 行为一致）。
+	// Wasm 单线程环境，无需加锁。
+	replayGuard *rxroute.ReplayGuard
+	replayEnabled bool
+	// P1-2：防重放统计（可观测）
+	replayRejectCount int64 // 累计重放拒绝次数
 }
 
 // routeRuntime 运行时单例（含周期拉取参数）。
@@ -97,11 +107,29 @@ func initRouteRuntime(config PluginConfig, log logs.Log) {
 	routeRuntime.key = key
 	routeRuntime.cache = routecache.NewWithOptions(sidecarTableVerifier{}, routeVerifyKeyRef(config), routecache.Options{
 		MaxStale: time.Duration(config.MaxStaleSeconds) * time.Second,
+		MaxSize:  int(config.RouteTableMaxSizeBytes),
+		OnReject: func(reason string, newVersion int) {
+			// P1-6：路由表更新被拒绝计数（可观测）
+			// Wasm 单线程环境，无需加锁
+			routeRuntime.rejectCount++
+			routeRuntime.lastRejectReason = reason
+			routeRuntime.lastRejectVersion = newVersion
+			log.Warnf("otpmask-plugin: 路由表更新被拒绝 reason=%s new_version=%d", reason, newVersion)
+		},
 	})
 	routeRuntime.service = config.GatewayCoreService
 	routeRuntime.port = config.GatewayCorePort
 	routeRuntime.pollIntervalMs = config.PollIntervalSeconds * 1000
 	routeRuntime.token = config.GatewayCoreToken
+	// P1-2：处方头防重放守卫（默认关闭 = 与 P0 行为一致）
+	routeRuntime.replayEnabled = config.ReplayGuardEnabled
+	if config.ReplayGuardEnabled {
+		routeRuntime.replayGuard = rxroute.NewReplayGuard(int(config.ReplayGuardCapacity), int64(rxroute.TimeSkew))
+		log.Infof("otpmask-plugin: 处方防重放已启用 capacity=%d window=%ds",
+			config.ReplayGuardCapacity, rxroute.TimeSkew)
+	} else {
+		routeRuntime.replayGuard = nil
+	}
 	// 注册周期拉取（幂等）：负责冷启动与后续刷新（请求路径不再发起拉取）。
 	ensureRouteFetchLoop()
 	// 注册运行时周期任务（幂等）：三级降级重评估 + 端点快照可观测（§6.9/§10）。
@@ -184,6 +212,17 @@ func verifyPrescriptionAsync(config PluginConfig, rxToken string, now time.Time,
 		if verr := rxroute.Validate(p, now); verr != nil {
 			cb(nil, verr)
 			return
+		}
+		// P1-2：处方头防重放（JTI 一次性消费）。
+		// 设计原则：与签名无效同级别处理 → 降级 L2（不直接 503），与 §6 一致。
+		// replayEnabled=false 或 replayGuard=nil 时跳过（与 P0 行为一致）。
+		if routeRuntime.replayEnabled && routeRuntime.replayGuard != nil && p.JTI != "" {
+			if !routeRuntime.replayGuard.Consume(p.JTI, now.Unix()) {
+				// 重放：记录指标 + 降级 L2
+				routeRuntime.replayRejectCount++
+				cb(nil, errors.New("route: 处方重放（JTI 已消费）"))
+				return
+			}
 		}
 		cb(p, nil)
 	})

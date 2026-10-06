@@ -77,6 +77,49 @@ func (t *RouteTable) canon() []byte {
 	return b
 }
 
+// EstimatedSize 估算路由表的内存占用（字节），用于大小限制校验。
+// 估算方法（保守高估，宁可算大也不算小，避免超限漏判）：
+//   - 固定开销：Version + UpdatedAt + Signature 实际字节 + slice 头（24字节）
+//   - 每条 TableRoute：Tenant+Model+DefaultEngine+FallbackEngine+Target+Strategy 字符串长度
+//     + Endpoints slice 头 + Canary 指针（8字节）
+//   - 每个 TableEndpoint：Name+URL 字符串长度 + Auth 两个字符串 + 结构体字段固定开销
+//   - 每个 Canary：TargetEndpoint 字符串 + AllowedTenants 各字符串 + 固定字段
+//
+// 注意：这是近似估算（±30%），用于防 DoS 的上限判断，不追求精确。
+func (t *RouteTable) EstimatedSize() int {
+	if t == nil {
+		return 0
+	}
+	// 固定开销：结构体 + Signature（实际字节数）+ Routes slice 头
+	size := 32 + len(t.Signature) + 24
+	// 每条路由
+	for i := range t.Routes {
+		r := &t.Routes[i]
+		// 字符串字段
+		size += len(r.Tenant) + len(r.Model) + len(r.DefaultEngine) + len(r.FallbackEngine) + len(r.Target) + len(r.Strategy)
+		// 结构体固定开销（估算）
+		size += 64
+		// Endpoints slice 头 + 每个端点
+		size += 24
+		for j := range r.Endpoints {
+			ep := &r.Endpoints[j]
+			size += len(ep.Name) + len(ep.URL) + len(ep.Auth.Type) + len(ep.Auth.SecretRef)
+			size += 40 // 结构体固定开销（Weight/Priority/Enabled + padding）
+		}
+		// Canary
+		if r.Canary != nil {
+			size += 8 // 指针本身
+			size += len(r.Canary.TargetEndpoint)
+			size += 56 // 固定字段（float/int/bool）
+			size += 24 // AllowedTenants slice 头
+			for _, tn := range r.Canary.AllowedTenants {
+				size += len(tn) + 16
+			}
+		}
+	}
+	return size
+}
+
 // CanonicalBytes 导出规范字节（= canon），供**外部签发端/跨模块测试**构造签名
 // （字段序与 gateway-core internal/route.CanonicalBytes 严格一致，签名一致性依赖于此）。
 func (t *RouteTable) CanonicalBytes() []byte { return t.canon() }
@@ -97,8 +140,16 @@ type Options struct {
 	// （Decide 按未命中处理，由调用方走密态 fail-closed，而不是静默使用陈旧路由）。
 	// MaxStale <= 0：永不过期，与设计 §6 原文"接受旧版本继续用（可用性优先）"一致。
 	MaxStale time.Duration
+	// MaxSize > 0：路由表内存估算上限（字节）。超过上限的更新会被拒绝（保留旧表）。
+	// 用于防止恶意/错误配置的超大路由表撑爆 Wasm 内存（防 DoS）。
+	// MaxSize <= 0：不限制（与 P0 行为一致）。
+	// 建议默认 1MB（约 5K 路由 × 10 端点规模）。
+	MaxSize int
 	// Now 时间源（默认 time.Now；测试可注入）。
 	Now func() time.Time
+	// OnReject 可选：更新被拒绝时的回调（用于指标/日志上报）。
+	// reason: 拒绝原因（"stale" / "replay" / "bad_signature" / "too_large"）。
+	OnReject func(reason string, newVersion int)
 }
 
 // Cache 内存路由缓存（读本地缓存、不写所有权状态；写操作仅由拉取/更新触发）。
@@ -108,7 +159,9 @@ type Cache struct {
 	keyRef   string
 	table    *RouteTable // 当前生效表（最高已验签版本）
 	maxStale time.Duration
+	maxSize  int         // 0 = 不限制
 	now      func() time.Time
+	onReject func(reason string, newVersion int)
 }
 
 // New 构造缓存并注入验签接缝 verifier 与 K_rx 句柄 keyRef（§4.7），默认永不过期。
@@ -116,33 +169,50 @@ func New(verifier Verifier, keyRef string) *Cache {
 	return NewWithOptions(verifier, keyRef, Options{})
 }
 
-// NewWithOptions 构造缓存（带过期阈值/时间源）。
+// NewWithOptions 构造缓存（带过期阈值/大小限制/时间源）。
 func NewWithOptions(verifier Verifier, keyRef string, opt Options) *Cache {
 	now := opt.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &Cache{verifier: verifier, keyRef: keyRef, maxStale: opt.MaxStale, now: now}
+	return &Cache{
+		verifier: verifier,
+		keyRef:   keyRef,
+		maxStale: opt.MaxStale,
+		maxSize:  opt.MaxSize,
+		now:      now,
+		onReject: opt.OnReject,
+	}
 }
 
 // Update 用签名路由表更新缓存（CPS 交付：签名校验经 §4.7 注入的 verifier，proxy-wasm 无阻塞 HTTP）。
-// 规则：
-//   - 签名无效 / 校验不可用 → 拒绝（cb(false)）；
-//   - 版本 < 当前缓存 → 拒绝（防回滚）；
-//   - 否则替换为更高（或同）版本。
+// 规则（按顺序，全部通过才接受）：
+//   1. 签名无效 / 校验不可用 → 拒绝（reason=bad_signature）；
+//   2. 版本 < 当前缓存 → 拒绝（防回滚，reason=replay）；
+//   3. 大小超过 MaxSize → 拒绝（防 DoS，reason=too_large）；
+//   4. 否则替换为更高（或同）版本。
 func (c *Cache) Update(t *RouteTable, cb func(accepted bool)) {
 	if t == nil || c.verifier == nil {
+		c.onRejectSafe("bad_signature", 0)
 		cb(false)
 		return
 	}
 	c.verifier.VerifySym(c.keyRef, t.canon(), t.Signature, func(ok bool, err error) {
 		if err != nil || !ok {
+			c.onRejectSafe("bad_signature", t.Version)
 			cb(false)
 			return
 		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if c.table != nil && t.Version < c.table.Version {
+			c.onRejectSafe("replay", t.Version)
+			cb(false)
+			return
+		}
+		// 大小限制检查（P1-6：防 DoS）
+		if c.maxSize > 0 && t.EstimatedSize() > c.maxSize {
+			c.onRejectSafe("too_large", t.Version)
 			cb(false)
 			return
 		}
@@ -175,6 +245,27 @@ func (c *Cache) Version() int {
 		return 0
 	}
 	return c.table.Version
+}
+
+// EstimatedSize 返回当前缓存表的估算内存占用（字节），0 = 未初始化。
+// 用于可观测性（metrics / 监控面板）。
+func (c *Cache) EstimatedSize() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.table == nil {
+		return 0
+	}
+	return c.table.EstimatedSize()
+}
+
+// MaxSize 返回配置的大小上限（0 = 不限制）。
+func (c *Cache) MaxSize() int { return c.maxSize }
+
+// onRejectSafe 安全调用 OnReject 回调（nil 保护）。
+func (c *Cache) onRejectSafe(reason string, newVersion int) {
+	if c.onReject != nil {
+		c.onReject(reason, newVersion)
+	}
 }
 
 // stale 判断当前缓存是否已超过 MaxStale（MaxStale<=0 = 永不过期）。
