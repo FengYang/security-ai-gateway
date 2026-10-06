@@ -55,8 +55,8 @@ func (s *sqliteLedgerStore) Append(tx Tx, entries []LedgerEntry) (int, LedgerHea
 	stmt, err := sqlTx.Prepare(`
 		INSERT OR IGNORE INTO billing_ledger
 		(tenant_id, model_key, day, tokens_in, tokens_out, requests, retry_toks,
-		 std_in, std_out, source, price_ver, event_key, prev_hash, entry_hash, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 std_in, std_out, source, price_ver, event_key, prev_hash, entry_hash, hash_alg, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return 0, LedgerHead{}, fmt.Errorf("billing: prepare insert: %w", err)
@@ -68,13 +68,21 @@ func (s *sqliteLedgerStore) Append(tx Tx, entries []LedgerEntry) (int, LedgerHea
 		curSeq++
 		e.Seq = curSeq
 		e.PrevHash = prevHash
-		e.EntryHash = ComputeEntryHash(e)
+		// B-5.4-1：写入端如实标注哈希算法（intl → ""（缺省 = SHA-256），sm-* → "sm3"）。
+		if e.HashAlg == "" {
+			e.HashAlg = hashAlgTag()
+		}
+		h, herr := ComputeEntryHash(e)
+		if herr != nil {
+			return added, LedgerHead{}, herr
+		}
+		e.EntryHash = h
 
 		res, err := stmt.Exec(
 			e.TenantID, e.ModelKey, e.Day,
 			e.TokensIn, e.TokensOut, e.Requests, e.RetryToks,
 			e.StdIn, e.StdOut, e.Source, e.PriceVer,
-			e.EventKey, e.PrevHash, e.EntryHash, e.CreatedAt,
+			e.EventKey, e.PrevHash, e.EntryHash, e.HashAlg, e.CreatedAt,
 		)
 		if err != nil {
 			return added, LedgerHead{}, fmt.Errorf("billing: insert ledger seq=%d: %w", curSeq, err)
@@ -115,7 +123,7 @@ func (s *sqliteLedgerStore) headFromTx(tx Tx) (LedgerHead, error) {
 // Range 按条件查询账本条目。
 func (s *sqliteLedgerStore) Range(q LedgerQuery) ([]LedgerEntry, error) {
 	query := `SELECT seq, tenant_id, model_key, day, tokens_in, tokens_out, requests,
-		retry_toks, std_in, std_out, source, price_ver, event_key, prev_hash, entry_hash, created_at
+		retry_toks, std_in, std_out, source, price_ver, event_key, prev_hash, entry_hash, created_at, hash_alg
 		FROM billing_ledger WHERE 1=1`
 	var args []interface{}
 
@@ -149,7 +157,7 @@ func (s *sqliteLedgerStore) Range(q LedgerQuery) ([]LedgerEntry, error) {
 		err := rows.Scan(&e.Seq, &e.TenantID, &e.ModelKey, &e.Day,
 			&e.TokensIn, &e.TokensOut, &e.Requests, &e.RetryToks,
 			&e.StdIn, &e.StdOut, &e.Source, &e.PriceVer,
-			&e.EventKey, &e.PrevHash, &e.EntryHash, &e.CreatedAt)
+			&e.EventKey, &e.PrevHash, &e.EntryHash, &e.CreatedAt, &e.HashAlg)
 		if err != nil {
 			return nil, fmt.Errorf("billing: scan ledger: %w", err)
 		}
@@ -161,7 +169,7 @@ func (s *sqliteLedgerStore) Range(q LedgerQuery) ([]LedgerEntry, error) {
 // Verify 全量校验哈希链完整性。返回首个断链的 seq（-1 = 完好）。
 func (s *sqliteLedgerStore) Verify() (int64, error) {
 	rows, err := s.db.Query(`SELECT seq, prev_hash, entry_hash, tenant_id, model_key, day, tokens_in, tokens_out,
-		requests, retry_toks, std_in, std_out, source, price_ver, event_key, created_at
+		requests, retry_toks, std_in, std_out, source, price_ver, event_key, created_at, hash_alg
 		FROM billing_ledger ORDER BY seq ASC`)
 	if err != nil {
 		return -1, fmt.Errorf("billing: verify query: %w", err)
@@ -174,7 +182,7 @@ func (s *sqliteLedgerStore) Verify() (int64, error) {
 		var e LedgerEntry
 		err := rows.Scan(&e.Seq, &e.PrevHash, &e.EntryHash, &e.TenantID, &e.ModelKey, &e.Day,
 			&e.TokensIn, &e.TokensOut, &e.Requests, &e.RetryToks,
-			&e.StdIn, &e.StdOut, &e.Source, &e.PriceVer, &e.EventKey, &e.CreatedAt)
+			&e.StdIn, &e.StdOut, &e.Source, &e.PriceVer, &e.EventKey, &e.CreatedAt, &e.HashAlg)
 		if err != nil {
 			return -1, fmt.Errorf("billing: verify scan: %w", err)
 		}
@@ -186,8 +194,11 @@ func (s *sqliteLedgerStore) Verify() (int64, error) {
 		if e.PrevHash != prevHash {
 			return int64(e.Seq), nil
 		}
-		// 本条哈希正确性
-		computed := ComputeEntryHash(e)
+		// 本条哈希正确性（按条目自述 hash_alg 分派复算 ⇒ 迁移后旧条目仍可验，B-5.4-1）
+		computed, herr := ComputeEntryHash(e)
+		if herr != nil {
+			return -1, fmt.Errorf("billing: 账本条目 seq=%d 哈希算法非法: %w", e.Seq, herr)
+		}
 		if computed != e.EntryHash {
 			return int64(e.Seq), nil
 		}

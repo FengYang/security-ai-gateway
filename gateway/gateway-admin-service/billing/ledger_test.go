@@ -153,8 +153,14 @@ func TestLedger_StdInStdOutInHash(t *testing.T) {
 	e2 := e1
 	e2.StdIn = 200 // 只改 std_in
 
-	h1 := ComputeEntryHash(e1)
-	h2 := ComputeEntryHash(e2)
+	h1, err := ComputeEntryHash(e1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2, err := ComputeEntryHash(e2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if h1 == h2 {
 		t.Errorf("std_in change does not affect hash (A-49 violated): h1=%s, h2=%s", h1, h2)
 	}
@@ -162,7 +168,10 @@ func TestLedger_StdInStdOutInHash(t *testing.T) {
 	// 同样验证 price_ver
 	e3 := e1
 	e3.PriceVer = "v2"
-	h3 := ComputeEntryHash(e3)
+	h3, err := ComputeEntryHash(e3)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if h1 == h3 {
 		t.Errorf("price_ver change does not affect hash: h1=%s, h3=%s", h1, h3)
 	}

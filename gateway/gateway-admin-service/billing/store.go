@@ -3,6 +3,7 @@ package billing
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 
 	_ "modernc.org/sqlite"
@@ -79,6 +80,7 @@ CREATE TABLE IF NOT EXISTS billing_ledger (
   event_key   TEXT    NOT NULL,
   prev_hash   TEXT    NOT NULL,
   entry_hash  TEXT    NOT NULL,
+  hash_alg    TEXT    NOT NULL DEFAULT '',
   created_at  INTEGER NOT NULL,
   UNIQUE(event_key)
 );
@@ -110,6 +112,16 @@ INSERT OR IGNORE INTO billing_ledger_head (id, seq, entry_hash, updated_at) VALU
 
 // ---------- SQLite Store 实现 ----------
 
+// ensureLedgerHashAlgColumn 为既有库补 `hash_alg` 列（P0-4 §5.4.3 B-5.4-1：持久化哈希须带算法标识）。
+// SQLite 无 `ADD COLUMN IF NOT EXISTS` ⇒ 幂等捕获 "duplicate column name"（新库由 DDL 建列，此处必报该错）。
+func ensureLedgerHashAlgColumn(db *sql.DB) error {
+	_, err := db.Exec(`ALTER TABLE billing_ledger ADD COLUMN hash_alg TEXT NOT NULL DEFAULT ''`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("billing: migrate ledger hash_alg: %w", err)
+	}
+	return nil
+}
+
 type sqliteStore struct {
 	db         *sql.DB
 	ledger     *sqliteLedgerStore
@@ -138,6 +150,11 @@ func OpenSQLiteStore(dsn string, wal bool) (Store, error) {
 	if _, err := db.Exec(ddlSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("billing: init schema: %w", err)
+	}
+	// 迁移：为既有库补 `hash_alg` 列（P0-4 §5.4.3 B-5.4-1）
+	if err := ensureLedgerHashAlgColumn(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 	// 初始化 plans/subscriptions 表
 	if err := ensurePlanSchema(db); err != nil {

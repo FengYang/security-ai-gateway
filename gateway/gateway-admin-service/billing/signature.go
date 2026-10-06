@@ -2,7 +2,6 @@ package billing
 
 import (
 	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"sort"
@@ -44,10 +43,22 @@ func canonicalBill(b *Bill) []byte {
 	return []byte(sb.String())
 }
 
+// signWith 生成签名（`hmac-sha256:` / `hmac-sm3:` 前缀自述算法，P0-4 §5.4.3 组⑬）。
 func signWith(key []byte, b *Bill) string {
-	mac := hmac.New(sha256.New, key)
-	mac.Write(canonicalBill(b))
-	return "hmac-sha256:" + hex.EncodeToString(mac.Sum(nil))
+	alg := hmacAlgTag()
+	mac := macByAlg(alg, key, canonicalBill(b))
+	return alg + ":" + hex.EncodeToString(mac)
+}
+
+// verifyWith 按**候选签名自身的前缀**分派复算（双读：旧 `hmac-sha256:` 账单在 sm 档仍可验；
+// 无前缀/未知前缀按 SHA-256，B-5.4-1 fail-safe）。
+func verifyWith(candidate string, key []byte, b *Bill) bool {
+	prefix, _, found := strings.Cut(candidate, ":")
+	if !found {
+		prefix = "" // 无前缀的历史数据 → 按 SHA-256 解析
+	}
+	mac := macByAlg(prefix, key, canonicalBill(b))
+	return hmac.Equal([]byte(prefix+":"+hex.EncodeToString(mac)), []byte(candidate))
 }
 
 func (s *billSigner) Sign(b *Bill) string {
@@ -59,12 +70,12 @@ func (s *billSigner) Verify(b *Bill) bool {
 		return false
 	}
 	// 当前密钥
-	if hmac.Equal([]byte(signWith(s.current, b)), []byte(b.Sig)) {
+	if verifyWith(b.Sig, s.current, b) {
 		return true
 	}
 	// 轮换期旧密钥（B-7.2-1）
 	for _, k := range s.old {
-		if hmac.Equal([]byte(signWith(k, b)), []byte(b.Sig)) {
+		if verifyWith(b.Sig, k, b) {
 			return true
 		}
 	}
