@@ -113,3 +113,18 @@ cryptop-verify:
 	@CRYPTOPSVC_URL="$(CRYPTOPSVC_URL)" \
 	CRYPTO_CONSISTENCY_TARGETS="$(CRYPTO_CONSISTENCY_TARGETS)" \
 	bash scripts/cryptop-verify-consistency.sh "$(TO)"
+
+# tlcp-certgen —— 生成 SM2 根 + TLCP 签名/加密双证书（§12.4；产物 deploy/tlcp/certs，
+# *.crt/*.key 已被 gitignore 不入库）。
+.PHONY: tlcp-certgen
+tlcp-certgen:
+	go run ./deploy/tlcp/certgen/ -out deploy/tlcp/certs
+
+# tlcp-verify —— T-12.4-1..3 断言 + 证据 JSON（§12.4；需 Tongsuo/网关在跑，
+# 退出码 7 = 本机无 Tongsuo 全 SKIP，1 = 断言失败）。
+#   make tlcp-verify [GATEWAY_HOST=...] [GATEWAY_PORT=...] [ENVELOPE_FILE=...]
+.PHONY: tlcp-verify
+tlcp-verify:
+	GATEWAY_HOST="$${GATEWAY_HOST:-127.0.0.1}" GATEWAY_PORT="$${GATEWAY_PORT:-443}" \
+	ENVELOPE_FILE="$${ENVELOPE_FILE:-}" TONGSUO_BIN="$${TONGSUO_BIN:-tongsuo}" \
+	bash deploy/tlcp/verify.sh
