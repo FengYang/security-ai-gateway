@@ -17,16 +17,14 @@
 package attestverify
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"sync"
+
+	"security-ai-gateway/gateway/cryptop"
 )
 
 // Proof 远程证明载荷（与 tee-infer AttestationProof JSON wire 兼容）。
@@ -142,30 +140,12 @@ func jsonUnmarshal(data []byte, v any) error {
 	return json.Unmarshal(data, v)
 }
 
-// verifyProofSignature 校验证明签名（ECDSA P-256，SHA-256）。
+// verifyProofSignature 校验证明签名（ECDSA P-256，SHA-256；契约见 INT-2：
+// SEC1 裸点 + 裸 r‖s 64B，验签统一收敛 cryptop.VerifyP256，与 tee 侧同实现）。
 func verifyProofSignature(p *Proof) error {
-	pub, err := parseP256Pub(p.SigningKey)
-	if err != nil {
-		return err
-	}
 	toSign := append(append([]byte(nil), p.ReportData...), p.SigningKey...)
-	h := sha256.Sum256(toSign)
-	if len(p.Signature) != 64 {
-		return errors.New("attestverify: 签名长度须为 64 字节")
-	}
-	r := new(big.Int).SetBytes(p.Signature[:32])
-	s := new(big.Int).SetBytes(p.Signature[32:])
-	if !ecdsa.Verify(pub, h[:], r, s) {
+	if err := cryptop.VerifyP256(p.SigningKey, toSign, p.Signature); err != nil {
 		return errors.New("attestverify: 证明签名无效")
 	}
 	return nil
-}
-
-// parseP256Pub 解析 P-256 公钥（未压缩 65 字节）。
-func parseP256Pub(raw []byte) (*ecdsa.PublicKey, error) {
-	x, y := elliptic.Unmarshal(elliptic.P256(), raw)
-	if x == nil {
-		return nil, errors.New("attestverify: signing_key 非 P-256 公钥")
-	}
-	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
 }
