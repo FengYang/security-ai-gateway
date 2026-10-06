@@ -160,3 +160,6 @@ gateway/tee-infer-service/testdata/guardrail-bench/corpus.jsonl
 
 # ===== OG-13 级联浸泡产物（本地产物，不入库；结论摘录进 B3 报告）=====
 og13-results/
+
+# ===== §13 国密切换演练报告与证据（本地产物，不入库；真实演练在部署环境跑出）=====
+deploy/drill-runs/

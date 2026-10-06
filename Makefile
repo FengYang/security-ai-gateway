@@ -133,3 +133,21 @@ tlcp-verify:
 	GATEWAY_HOST="$${GATEWAY_HOST:-127.0.0.1}" GATEWAY_PORT="$${GATEWAY_PORT:-443}" \
 	ENVELOPE_FILE="$${ENVELOPE_FILE:-}" TONGSUO_BIN="$${TONGSUO_BIN:-tongsuo}" \
 	bash deploy/tlcp/verify.sh
+
+# drill —— §13 国密切换演练（T-13.1 脚本化；§13.2 八步编排）。
+# 环境特定步骤经环境变量注入，缺省 SKIP：
+#   PLUGIN_PROBE_URL=<插件探活 URL> DRILL_FUNCTION_CMD=<功能回归命令> \
+#   DRILL_DUALREAD_CMD=<双读命令> DRILL_PERF_CMD=<基准命令>
+#   [START_PROFILE=intl] [DRILL_OUT=deploy/drill-runs]
+.PHONY: drill
+drill:
+	@: "$${ADMIN_TOKEN:?用法: make drill ADMIN_TOKEN=<admin token>}"
+	ADMIN="$${ADMIN:-http://127.0.0.1:8081}" \
+	CRYPTOPSVC_URL="$${CRYPTOPSVC_URL:-http://127.0.0.1:8082}" \
+	START_PROFILE="$${START_PROFILE:-intl}" \
+	PLUGIN_PROBE_URL="$${PLUGIN_PROBE_URL:-}" \
+	DRILL_FUNCTION_CMD="$${DRILL_FUNCTION_CMD:-}" \
+	DRILL_DUALREAD_CMD="$${DRILL_DUALREAD_CMD:-}" \
+	DRILL_PERF_CMD="$${DRILL_PERF_CMD:-}" \
+	DRILL_OUT="$${DRILL_OUT:-deploy/drill-runs}" \
+	bash scripts/cryptop-drill.sh
