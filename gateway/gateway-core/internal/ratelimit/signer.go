@@ -1,10 +1,28 @@
 package ratelimit
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
+	"crypto/subtle"
 	"fmt"
+	"os"
+
+	"security-ai-gateway/gateway/cryptop"
 )
+
+// cryptoProvider 限流表签名/验签所用 Provider（P0-4 §5.4.4 组⑫）：
+// profile 取自 `CRYPTO_PROFILE`（§12.3；默认 intl，与现役 HMAC-SHA256 逐字节等价）。
+var cryptoProvider = newCryptoProvider()
+
+func newCryptoProvider() cryptop.Provider {
+	profile := os.Getenv("CRYPTO_PROFILE")
+	if profile == "" {
+		profile = string(cryptop.ProfileIntl)
+	}
+	p, err := cryptop.New(cryptop.Profile(profile))
+	if err != nil {
+		panic("ratelimit: 初始化 cryptop provider 失败（CRYPTO_PROFILE=" + profile + "）: " + err.Error())
+	}
+	return p
+}
 
 // Signer 限流表签发/验签器（HMAC-SHA256 over CanonicalBytes）。
 //
@@ -30,9 +48,8 @@ func (s *Signer) SignTable(t *Table) error {
 	if err != nil {
 		return fmt.Errorf("ratelimit: 限流表编码失败: %w", err)
 	}
-	mac := hmac.New(sha256.New, s.key)
-	_, _ = mac.Write(canon)
-	t.Signature = mac.Sum(nil)
+	// MAC 经 cryptop（intl=HMAC-SHA256；sm=HMAC-SM3；§5.4.4 组⑫）。
+	t.Signature = cryptoProvider.HMAC(s.key, canon)
 	return nil
 }
 
@@ -42,7 +59,5 @@ func (s *Signer) VerifyTable(t *Table) bool {
 	if err != nil {
 		return false
 	}
-	mac := hmac.New(sha256.New, s.key)
-	_, _ = mac.Write(canon)
-	return hmac.Equal(t.Signature, mac.Sum(nil))
+	return subtle.ConstantTimeCompare(t.Signature, cryptoProvider.HMAC(s.key, canon)) == 1
 }

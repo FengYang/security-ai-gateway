@@ -1,11 +1,29 @@
 package route
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"os"
+
+	"security-ai-gateway/gateway/cryptop"
 )
+
+// cryptoProvider 路由表签名/验签所用 Provider（P0-4 §5.4.4 组⑫）：
+// profile 取自 `CRYPTO_PROFILE`（§12.3；默认 intl，与现役 HMAC-SHA256 逐字节等价）。
+var cryptoProvider = newCryptoProvider()
+
+func newCryptoProvider() cryptop.Provider {
+	profile := os.Getenv("CRYPTO_PROFILE")
+	if profile == "" {
+		profile = string(cryptop.ProfileIntl)
+	}
+	p, err := cryptop.New(cryptop.Profile(profile))
+	if err != nil {
+		panic("route: 初始化 cryptop provider 失败（CRYPTO_PROFILE=" + profile + "）: " + err.Error())
+	}
+	return p
+}
 
 // EndpointAuth 端点凭证配置（方案 §9.2）。
 // P0 支持 km:// / file:// / env:// 三种 secret_ref scheme。
@@ -80,9 +98,8 @@ func (s *Signer) SignTable(t *RouteTable) error {
 	if err != nil {
 		return fmt.Errorf("route: 路由表编码失败: %w", err)
 	}
-	mac := hmac.New(sha256.New, s.key)
-	_, _ = mac.Write(canon)
-	t.Signature = mac.Sum(nil)
+	// MAC 经 cryptop（intl=HMAC-SHA256；sm=HMAC-SM3；§5.4.4 组⑫）。
+	t.Signature = cryptoProvider.HMAC(s.key, canon)
 	return nil
 }
 
@@ -92,9 +109,7 @@ func (s *Signer) VerifyTable(t *RouteTable) bool {
 	if err != nil {
 		return false
 	}
-	mac := hmac.New(sha256.New, s.key)
-	_, _ = mac.Write(canon)
-	return hmac.Equal(t.Signature, mac.Sum(nil))
+	return subtle.ConstantTimeCompare(t.Signature, cryptoProvider.HMAC(s.key, canon)) == 1
 }
 
 // Lookup 在路由表中按 tenant+model 精确查找；未命中返回 nil。

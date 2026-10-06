@@ -62,7 +62,25 @@ type Event struct {
 var (
 	hashProvSHA256 = mustProv(cryptop.ProfileIntl)
 	hashProvSM3    = mustProv(cryptop.ProfileSMSW)
+	// profileProvider 本进程档 provider（`CRYPTO_PROFILE`，默认 intl）——仅用于**写入端打标**。
+	profileProvider = mustProv(cryptoProfile())
 )
+
+// cryptoProfile 取本进程 profile（P0-4 §12.3 `crypto_profile`；缺省 intl，与现役 SHA-256 等价）。
+func cryptoProfile() cryptop.Profile {
+	if p := os.Getenv("CRYPTO_PROFILE"); p != "" {
+		return cryptop.Profile(p)
+	}
+	return cryptop.ProfileIntl
+}
+
+// hashAlgTag 写入端 `hash_alg` 取值（intl → ""（缺省=SHA-256，R-13）；sm-* → "sm3"）。
+func hashAlgTag() string {
+	if profileProvider.Profile() == cryptop.ProfileIntl {
+		return ""
+	}
+	return "sm3"
+}
 
 func mustProv(p cryptop.Profile) cryptop.Provider {
 	prov, err := cryptop.New(p)
@@ -187,6 +205,10 @@ func (c *Chain) Append(e Event) (Event, error) {
 	e.Timestamp = time.Now().UnixNano()
 	if e.EventID == "" {
 		e.EventID = fmt.Sprintf("pol-%d-%d", e.Timestamp, len(c.events)+1)
+	}
+	// §5.2.2 写入端打标：按本进程 profile（intl → ""（缺省=SHA-256），sm-* → "sm3"）。
+	if e.HashAlg == "" {
+		e.HashAlg = hashAlgTag()
 	}
 	// R-12：算法非法即拒绝落链（不得把不可复算的事件写入 WORM）
 	if _, herr := e.hashWithErr(); herr != nil {
