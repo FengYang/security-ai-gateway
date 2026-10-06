@@ -112,11 +112,18 @@ func mustProv(p cryptop.Profile) cryptop.Provider {
 }
 
 // hashByAlg 按事件自述算法哈希（R-13 缺省 = SHA-256；R-12 未知值 → 错误，不静默回退）。
+// 双读：若实际使用的算法与当前进程主 profile 的默认算法不一致，记一次 cryptop_dualread_total{artifact=audit}。
 func hashByAlg(alg string, data []byte) ([]byte, error) {
 	switch alg {
 	case "":
+		if cryptoProvider.Profile() != cryptop.ProfileIntl {
+			metrics.incDualRead("audit")
+		}
 		return hashProvSHA256.Hash(data), nil
 	case "sm3":
+		if cryptoProvider.Profile() == cryptop.ProfileIntl {
+			metrics.incDualRead("audit")
+		}
 		return hashProvSM3.Hash(data), nil
 	default:
 		return nil, fmt.Errorf("audit: 未知 hash_alg %q（R-12：验证失败）", alg)

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"security-ai-gateway/gateway/cryptop"
 )
 
 // ---------- 账单签名（T7b，§7.2） ----------
@@ -52,13 +54,26 @@ func signWith(key []byte, b *Bill) string {
 
 // verifyWith 按**候选签名自身的前缀**分派复算（双读：旧 `hmac-sha256:` 账单在 sm 档仍可验；
 // 无前缀/未知前缀按 SHA-256，B-5.4-1 fail-safe）。
+// 双读：验签成功且实际使用的算法与当前 profile 主算法不一致时，
+// 记 `cryptop_dualread_total{artifact=billing}`（跨源指标，P0-4 §10.1）。
 func verifyWith(candidate string, key []byte, b *Bill) bool {
 	prefix, _, found := strings.Cut(candidate, ":")
 	if !found {
 		prefix = "" // 无前缀的历史数据 → 按 SHA-256 解析
 	}
 	mac := macByAlg(prefix, key, canonicalBill(b))
-	return hmac.Equal([]byte(prefix+":"+hex.EncodeToString(mac)), []byte(candidate))
+	ok := hmac.Equal([]byte(prefix+":"+hex.EncodeToString(mac)), []byte(candidate))
+	if ok {
+		isPrimary := (prefix == hmacAlgTag())
+		// 注意：intl 档 hmacAlgTag() = "hmac-sha256"，而无前缀 "" 也是 SHA-256（同算法），不算双读。
+		if prefix == "" && profileProvider.Profile() == cryptop.ProfileIntl {
+			isPrimary = true
+		}
+		if !isPrimary {
+			DefaultMetrics.IncCounter("cryptop_dualread_total", map[string]string{"artifact": "billing"}, 1)
+		}
+	}
+	return ok
 }
 
 func (s *billSigner) Sign(b *Bill) string {

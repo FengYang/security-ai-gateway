@@ -12,6 +12,10 @@
 // gateway_admin_audit_events                        审计链当前事件数（G1）
 // gateway_admin_broker_audit_write_failed_total     审计链写入失败计数（G1；fail-closed 拒绝变更）
 // gateway_cryptop_profile_switch_total{from,to}    密码 profile/mask_prg 切换计数（P0-4 §4.3.10，#12）
+//
+// 跨源指标（P0-4 §10.1 双读计数）：
+// cryptop_dualread_total{artifact}  用非主 profile 算法成功解算 wire/hash/signature 次数
+//   artifact ∈ {audit, billing}（本进程发射）；enclave 由 tee-infer 发射
 package main
 
 import (
@@ -31,12 +35,13 @@ type adminMetrics struct {
 	auditEvents     int64 // gauge：审计链当前事件数（G1）
 	auditWriteFails int64
 	profileSwitch   map[string]int64 // #12：key = from|to（P0-4 §4.3.10）
+	dualRead        map[string]int64 // 跨源：artifact（audit/billing）
 }
 
 var metrics = newAdminMetrics()
 
 func newAdminMetrics() *adminMetrics {
-	return &adminMetrics{broker: map[string]int64{}, profileSwitch: map[string]int64{}}
+	return &adminMetrics{broker: map[string]int64{}, profileSwitch: map[string]int64{}, dualRead: map[string]int64{}}
 }
 
 func (m *adminMetrics) request() {
@@ -88,6 +93,14 @@ func (m *adminMetrics) incProfileSwitch(from, to string) {
 	m.mu.Unlock()
 }
 
+// incDualRead 记录一次双读（用非主 profile 算法成功解算）。
+// artifact ∈ {audit, billing}（本进程），由调用方保证为有限枚举。
+func (m *adminMetrics) incDualRead(artifact string) {
+	m.mu.Lock()
+	m.dualRead[artifact]++
+	m.mu.Unlock()
+}
+
 func (m *adminMetrics) render(w io.Writer) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -125,5 +138,18 @@ func (m *adminMetrics) render(w io.Writer) {
 		parts := strings.SplitN(k, "|", 2)
 		fmt.Fprintf(w, "gateway_cryptop_profile_switch_total{from=%q,to=%q} %d\n",
 			parts[0], parts[1], m.profileSwitch[k])
+	}
+
+	// 跨源：cryptop_dualread_total{artifact}（audit/billing 由本进程发射）
+	if len(m.dualRead) > 0 {
+		fmt.Fprintf(w, "# HELP cryptop_dualread_total 双读计数（用非主 profile 算法成功解算 wire/hash/signature）\n# TYPE cryptop_dualread_total counter\n")
+		drKeys := make([]string, 0, len(m.dualRead))
+		for k := range m.dualRead {
+			drKeys = append(drKeys, k)
+		}
+		sort.Strings(drKeys)
+		for _, k := range drKeys {
+			fmt.Fprintf(w, "cryptop_dualread_total{artifact=%q} %d\n", k, m.dualRead[k])
+		}
 	}
 }
