@@ -2,15 +2,25 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
+
+	"security-ai-gateway/gateway/cryptop"
 )
+
+// tstAlgorithm TST 签名算法标识（P0-4 §5.4.1 组⑥ / §5.2.2「`TST.Algorithm` 版本化」）。
+// intl 档保持历史值 `sha256`（**intl TST 逐字节不变**）；sm 档为 `sm3`。
+// 验签按 §5.2.2 判定口径分派：**仅** `=="sm3"` 判 SM3；空/其它值一律按 SHA-256（fail-safe）。
+func tstAlgorithm() string {
+	if cryptoProvider.Profile() == cryptop.ProfileIntl {
+		return "sha256"
+	}
+	return "sm3"
+}
 
 // TST 时间戳令牌
 type TST struct {
@@ -37,51 +47,60 @@ type MockTSA struct {
 }
 
 func NewMockTSA() (*MockTSA, error) {
-	k := make([]byte, 32)
-	if _, err := rand.Read(k); err != nil {
+	k, err := cryptoProvider.Rand(32)
+	if err != nil {
 		return nil, fmt.Errorf("tsa: 生成密钥失败: %w", err)
 	}
 	return &MockTSA{key: k}, nil
 }
 
 func (m *MockTSA) Sign(messageImprint []byte) (*TST, error) {
-	if len(messageImprint) != sha256.Size {
-		return nil, errors.New("tsa: message_imprint 须为 32 字节摘要")
+	if len(messageImprint) != cryptoProvider.HashSize() {
+		return nil, fmt.Errorf("tsa: message_imprint 须为 %d 字节摘要", cryptoProvider.HashSize())
 	}
-	mac := hmac.New(sha256.New, m.key)
-	mac.Write(messageImprint)
-	// TSAPublicKey = 密钥指纹（SHA-256(key)），**仅供标识，绝不暴露密钥字节**。
+	mac, merr := hmacByAlg(hashAlgTag(), m.key, messageImprint)
+	if merr != nil {
+		return nil, fmt.Errorf("tsa: MAC 计算失败: %w", merr)
+	}
+	// TSAPublicKey = 密钥指纹（Hash(key)），**仅供标识，绝不暴露密钥字节**。
 	// 修复 F-9/U-7：原式 `sha256.New().Sum(append([]byte(nil), m.key...))[:16]` 的 Sum 语义为
 	// "把当前（空输入的）摘要附加到入参之后"，故其返回值前 16 字节 = HMAC key 的前 16 字节，
 	// 直接把密钥写进公开 TST —— 属泄密缺陷。
-	fp := sha256.Sum256(m.key)
+	fp, _ := hashByAlg(hashAlgTag(), m.key)
 	return &TST{
 		Version:        1,
-		Algorithm:      "sha256",
+		Algorithm:      tstAlgorithm(),
 		TimestampNS:    time.Now().UnixNano(),
 		MessageImprint: hex.EncodeToString(messageImprint),
-		Signature:      hex.EncodeToString(mac.Sum(nil)),
-		TSAPublicKey:   hex.EncodeToString(fp[:]),
+		Signature:      hex.EncodeToString(mac),
+		TSAPublicKey:   hex.EncodeToString(fp),
 		Source:         "mock",
 	}, nil
 }
 
-// Verify 验证 TST
+// Verify 验证 TST。算法按 §5.2.2 判定口径分派：**仅** `Algorithm=="sm3"` 判 SM3；
+// 空/其它值一律按 SHA-256（fail-safe 默认，防伪造字段绕过）；未知算法必然导致 MAC 不符而拒绝。
 func (m *MockTSA) Verify(t *TST) error {
 	if t == nil {
 		return errors.New("tsa: 空 TST")
 	}
-	if t.Version != 1 || t.Algorithm != "sha256" {
-		return errors.New("tsa: 版本/算法不支持")
+	if t.Version != 1 {
+		return errors.New("tsa: 版本不支持")
 	}
 	imprint, err := hex.DecodeString(t.MessageImprint)
 	if err != nil {
 		return errors.New("tsa: message_imprint 非 hex")
 	}
-	mac := hmac.New(sha256.New, m.key)
-	mac.Write(imprint)
+	alg := ""
+	if t.Algorithm == "sm3" {
+		alg = "sm3"
+	}
+	mac, merr := hmacByAlg(alg, m.key, imprint)
+	if merr != nil {
+		return errors.New("tsa: TST 签名无效（时间戳被篡改）")
+	}
 	got, _ := hex.DecodeString(t.Signature)
-	if !hmac.Equal(got, mac.Sum(nil)) {
+	if subtle.ConstantTimeCompare(got, mac) != 1 {
 		return errors.New("tsa: TST 签名无效（时间戳被篡改）")
 	}
 	return nil

@@ -33,7 +33,11 @@ type AuditEvent struct {
 	TokensOut  int    `json:"tokens_out,omitempty"`
 	Result     string `json:"result"` // ok / deny
 	PayloadSHA string `json:"payload_hash"`
-	PrevHash   string `json:"prev_hash"` // 哈希链
+	// HashAlg P0-4 §5.2.2：本条事件**所有哈希类字段**所用算法的自述标签
+	// （链哈希 + 请求载荷摘要同档）。**证据字段，不进 hash()**（B-5.2-1；否则历史链全废）。
+	// R-13：空/缺省 = SHA-256（不写字段以保 WORM 旧行逐字节不变）；"sm3" = SM3；R-12：其它值非法。
+	HashAlg  string `json:"hash_alg,omitempty"`
+	PrevHash string `json:"prev_hash"` // 哈希链
 	// P2a：改造后明文哈希（装饰/脱敏后的引擎实收内容；附加证据字段）。
 	// 不进 hash()（保持 WORM 旧链向后兼容）——链完整性由 PayloadSHA 段保障，
 	// TransformedHash 供"引擎实际收到什么"回溯（双 hash 审计）。
@@ -83,14 +87,24 @@ type AuditEvent struct {
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。
-// 使用长度前缀编码消除字段拼接歧义（防止 tenant="ab"+request="cd" 与 tenant="a"+request="bcd" 同 hash）。
+// 算法由事件自述 `hash_alg` 分派（§5.2.2）；**字段序与长度前缀方案逐字节不变** ⇒ intl 旧链哈希恒定。
+// 内部断言语义：`HashAlg` 由本进程生成、且 load 入口已校验 ⇒ 非法值不可达（见 hashWithErr）。
 func (e *AuditEvent) hash() string {
-	h := sha256.New()
+	h, err := e.hashWithErr()
+	if err != nil {
+		panic("audit: " + err.Error())
+	}
+	return h
+}
+
+// hashWithErr 同 hash()，但把未知 `hash_alg` 作为错误返回（R-12，供 load/写入路径 fail-closed）。
+func (e *AuditEvent) hashWithErr() (string, error) {
+	var buf bytes.Buffer
 	writeLP := func(s string) {
 		var l [8]byte
 		binary.BigEndian.PutUint64(l[:], uint64(len(s)))
-		h.Write(l[:])
-		h.Write([]byte(s))
+		buf.Write(l[:])
+		buf.WriteString(s)
 	}
 	writeLP(e.EventID)
 	writeLP(fmt.Sprint(e.Timestamp))
@@ -102,7 +116,7 @@ func (e *AuditEvent) hash() string {
 	writeLP(fmt.Sprint(e.TokensOut))
 	writeLP(e.Result)
 	writeLP(e.PayloadSHA)
-	return hex.EncodeToString(h.Sum(nil))
+	return hashHexByAlg(e.HashAlg, buf.Bytes())
 }
 
 // auditChain 哈希链审计存储。
@@ -176,7 +190,12 @@ func (c *auditChain) load(path string) error {
 		if e.PrevHash != c.lastHex {
 			return fmt.Errorf("audit: 事件文件第 %d 行哈希链断裂（历史被篡改）", len(c.events)+1)
 		}
-		c.lastHex = e.hash()
+		// R-12：未知 hash_alg → fail-closed 拒绝启动（不得静默按 SHA-256 重算）
+		h, herr := e.hashWithErr()
+		if herr != nil {
+			return fmt.Errorf("audit: 事件文件第 %d 行哈希算法非法: %w", len(c.events)+1, herr)
+		}
+		c.lastHex = h
 		c.events = append(c.events, e)
 	}
 	return scanner.Err()
@@ -194,6 +213,11 @@ func (c *auditChain) append(e AuditEvent) AuditEvent {
 	}
 	if e.InstanceID == "" {
 		e.InstanceID = c.instanceID // S5：标识写入实例（证据字段，不进 hash）
+	}
+	// R-12：算法非法即不落链（fail-safe 保链完整；按构造不可达——HashAlg 仅由本进程 hashAlgTag() 生成）
+	if _, herr := e.hashWithErr(); herr != nil {
+		log.Printf("[audit] 事件哈希算法非法，拒绝落链: %v", herr)
+		return e
 	}
 	if c.file != nil {
 		line, _ := json.Marshal(e)
@@ -231,8 +255,13 @@ func (c *auditChain) anchorNow() *AnchorRecord {
 	}
 	// 绑定 TST：对锚定哈希签发可信时间戳（TSA 不可用 → fail-closed 不锚定）
 	if c.tsa != nil {
-		imprint := sha256.Sum256([]byte(rec.ChainHash))
-		tst, err := c.tsa.Sign(imprint[:])
+		// imprint 随档（§5.2.2「imprint 哈希随 profile 分派」）；`TST.Algorithm` 即版本标签
+		imprint, ierr := hashByAlg(hashAlgTag(), []byte(rec.ChainHash))
+		if ierr != nil {
+			log.Printf("[audit] TST imprint 算法非法（锚定中止）: %v", ierr)
+			return nil
+		}
+		tst, err := c.tsa.Sign(imprint)
 		if err != nil {
 			log.Printf("[audit] TST 签发失败（锚定中止）: %v", err)
 			return nil
@@ -255,9 +284,15 @@ func (c *auditChain) verifyTST(rec *AnchorRecord) error {
 	if c.tsa == nil {
 		return errors.New("audit: TSA 未配置")
 	}
-	// 校验 TST 内 imprint 与锚定哈希一致（防锚定记录被替换）
-	want := sha256.Sum256([]byte(rec.ChainHash))
-	if rec.TST.MessageImprint != hex.EncodeToString(want[:]) {
+	// 校验 TST 内 imprint 与锚定哈希一致（防锚定记录被替换）。
+	// imprint 算法由令牌自述 `algorithm` 分派（§5.2.2 判定口径：**仅** `=="sm3"` 判 SM3；
+	// 空/其它值一律按 SHA-256，fail-safe 防伪造字段绕过）。
+	alg := ""
+	if rec.TST.Algorithm == "sm3" {
+		alg = "sm3"
+	}
+	want, werr := hashHexByAlg(alg, []byte(rec.ChainHash))
+	if werr != nil || rec.TST.MessageImprint != want {
 		return errors.New("audit: TST imprint 与锚定哈希不匹配")
 	}
 	return c.tsa.Verify(rec.TST)

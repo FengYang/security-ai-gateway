@@ -24,7 +24,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -33,6 +32,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"security-ai-gateway/gateway/cryptop"
 )
 
 // 审计动作常量（凭据 CRUD 由 broker_secret.go 落链；quota_set 由 A-2' 配额写复用本链）。
@@ -80,19 +81,59 @@ type adminAuditEvent struct {
 	Target         string `json:"target,omitempty"`          // 目标资源名（M3-A 账号管理：目标账号；其余动作为空）
 	RequestID      string `json:"request_id"`
 	Result         string `json:"result"` // 恒 "ok"（失败路径不落链）
-	PrevHash       string `json:"prev_hash"`
+	// HashAlg P0-4 §5.2.2：本条事件哈希算法自述（**证据字段，不进 hash()**，B-5.2-1）。
+	// R-13：空/缺省 = SHA-256；"sm3" = SM3；R-12：其它值非法。
+	// 注：`KeyFingerprint` 为**标识类**字段（API 可见、跨服务引用），恒 SHA-256，不随本标签迁移。
+	// 写入端打标随服务 profile 接线落地（B4）；本批先建分派机制。
+	HashAlg  string `json:"hash_alg,omitempty"`
+	PrevHash string `json:"prev_hash"`
 }
 
-// hash 计算事件哈希（不含 PrevHash 本身）。
-// 长度前缀编码消除字段拼接歧义（与 tee-infer audit.go 同法）。
-// 注：新链无向后兼容负担，全部内容字段进 hash。
+// ---- 算法分派（P0-4 §5.2.2）：与进程 profile 解耦 ----
+
+var (
+	hashProvSHA256 = mustProv(cryptop.ProfileIntl)
+	hashProvSM3    = mustProv(cryptop.ProfileSMSW)
+)
+
+func mustProv(p cryptop.Profile) cryptop.Provider {
+	prov, err := cryptop.New(p)
+	if err != nil {
+		panic("audit: 初始化 " + string(p) + " provider 失败: " + err.Error())
+	}
+	return prov
+}
+
+// hashByAlg 按事件自述算法哈希（R-13 缺省 = SHA-256；R-12 未知值 → 错误，不静默回退）。
+func hashByAlg(alg string, data []byte) ([]byte, error) {
+	switch alg {
+	case "":
+		return hashProvSHA256.Hash(data), nil
+	case "sm3":
+		return hashProvSM3.Hash(data), nil
+	default:
+		return nil, fmt.Errorf("audit: 未知 hash_alg %q（R-12：验证失败）", alg)
+	}
+}
+
+// hash 计算事件哈希（不含 PrevHash 本身）。长度前缀编码消除字段拼接歧义（与 tee-infer 同法）。
+// 注：新链无向后兼容负担，全部内容字段进 hash。算法由自述 `hash_alg` 分派（§5.2.2）。
 func (e *adminAuditEvent) hash() string {
-	h := sha256.New()
+	h, err := e.hashWithErr()
+	if err != nil {
+		panic("audit: " + err.Error())
+	}
+	return h
+}
+
+// hashWithErr 同 hash()，未知 `hash_alg` 作为错误返回（R-12，供 load/append fail-closed）。
+func (e *adminAuditEvent) hashWithErr() (string, error) {
+	var buf bytes.Buffer
 	writeLP := func(s string) {
 		var l [8]byte
 		binary.BigEndian.PutUint64(l[:], uint64(len(s)))
-		h.Write(l[:])
-		h.Write([]byte(s))
+		buf.Write(l[:])
+		buf.WriteString(s)
 	}
 	writeLP(e.EventID)
 	writeLP(fmt.Sprint(e.Timestamp))
@@ -109,7 +150,11 @@ func (e *adminAuditEvent) hash() string {
 	}
 	writeLP(e.RequestID)
 	writeLP(e.Result)
-	return hex.EncodeToString(h.Sum(nil))
+	sum, err := hashByAlg(e.HashAlg, buf.Bytes())
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(sum), nil
 }
 
 // auditAnchorRecord 锚定记录（链尾哈希独立落盘，供第三方校验链完整性）。
@@ -177,7 +222,11 @@ func (c *adminAuditChain) load(path string) error {
 		if e.PrevHash != c.lastHex {
 			return fmt.Errorf("audit: 事件文件第 %d 行哈希链断裂（历史被篡改）", len(c.events)+1)
 		}
-		c.lastHex = e.hash()
+		h, herr := e.hashWithErr()
+		if herr != nil {
+			return fmt.Errorf("audit: 事件文件第 %d 行哈希算法非法: %w", len(c.events)+1, herr)
+		}
+		c.lastHex = h
 		c.events = append(c.events, e)
 	}
 	return scanner.Err()
@@ -196,6 +245,10 @@ func (c *adminAuditChain) append(e adminAuditEvent) error {
 	e.Timestamp = time.Now().UnixNano()
 	if e.EventID == "" {
 		e.EventID = fmt.Sprintf("evt-%d", e.Timestamp)
+	}
+	// R-12：算法非法即拒绝落链（凭据变更不留痕/不可复算不可接受）
+	if _, herr := e.hashWithErr(); herr != nil {
+		return fmt.Errorf("audit: 事件哈希算法非法: %w", herr)
 	}
 	line, err := json.Marshal(e)
 	if err != nil {

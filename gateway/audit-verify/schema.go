@@ -14,13 +14,54 @@
 package auditverify
 
 import (
-	"crypto/sha256"
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
+
+	"security-ai-gateway/gateway/cryptop"
 )
+
+// ---- 算法分派（P0-4 §5.2.2 / R-12 / R-13）----
+//
+// 与进程 profile **解耦**：验证器须能同时复算 SHA-256（缺省）与 SM3 事件（混合链，T-5.2-3）。
+var (
+	hashProvSHA256 = mustProv(cryptop.ProfileIntl)
+	hashProvSM3    = mustProv(cryptop.ProfileSMSW)
+)
+
+func mustProv(p cryptop.Profile) cryptop.Provider {
+	prov, err := cryptop.New(p)
+	if err != nil {
+		panic("audit-verify: 初始化 " + string(p) + " provider 失败: " + err.Error())
+	}
+	return prov
+}
+
+// hashAlgOf 取事件自述 `hash_alg` 并做 R-12/R-13 判定：
+//   - 缺失/空 → SHA-256（R-13，唯一允许的缺省）；
+//   - "sm3"   → SM3；
+//   - 其它任何值（含拼写错误的 "sha256"）→ **错误**（R-12：验证失败，绝不静默回退）。
+func hashAlgOf(event map[string]any) (string, error) {
+	raw, ok := event["hash_alg"]
+	if !ok || raw == nil {
+		return "", nil
+	}
+	s, isStr := raw.(string)
+	if !isStr {
+		return "", fmt.Errorf("hash_alg 类型不支持：%T（应为 string）", raw)
+	}
+	switch s {
+	case "":
+		return "", nil
+	case "sm3":
+		return "sm3", nil
+	default:
+		return "", fmt.Errorf("未知 hash_alg %q（R-12：验证失败，不得静默回退 SHA-256）", s)
+	}
+}
 
 // Field 哈希输入字段。
 type Field struct {
@@ -104,10 +145,15 @@ func SchemaFor(name string) (Schema, error) {
 }
 
 // Hash 重算单条事件的哈希（与两端 hash() 同构：8 字节大端长度前缀 + 字段字节）。
+// 算法由事件自述 `hash_alg` 分派（R-12/R-13）；**长度前缀与字段序逐字节不变** ⇒ 旧链哈希恒定。
 // 事件字段从 JSON 解码而来，故数值字段用 json.Number 保留字面量，避免 float64 精度丢失
 // （如纳秒时间戳 1700000000000000000 转 float64 会失真）。
 func (s Schema) Hash(event map[string]any) (string, error) {
-	h := sha256.New()
+	alg, err := hashAlgOf(event)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
 	for _, f := range s.Fields {
 		str, err := fieldText(event, f)
 		if err != nil {
@@ -118,10 +164,14 @@ func (s Schema) Hash(event map[string]any) (string, error) {
 		}
 		var l [8]byte
 		binary.BigEndian.PutUint64(l[:], uint64(len(str)))
-		h.Write(l[:])
-		h.Write([]byte(str))
+		buf.Write(l[:])
+		buf.WriteString(str)
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	prov := hashProvSHA256
+	if alg == "sm3" {
+		prov = hashProvSM3
+	}
+	return hex.EncodeToString(prov.Hash(buf.Bytes())), nil
 }
 
 // fieldText 取字段文本（缺省 → 数值 "0"，字符串 ""）。

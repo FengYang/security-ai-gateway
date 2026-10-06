@@ -3,7 +3,6 @@ package auditverify
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -88,7 +87,7 @@ type TSTToken struct {
 	Version        int    `json:"version"`
 	Algorithm      string `json:"algorithm"`
 	TimestampNS    int64  `json:"timestamp_ns"`
-	MessageImprint string `json:"message_imprint"` // hex(SHA256(chain_hash))——本包校验此项
+	MessageImprint string `json:"message_imprint"` // hex(Hash(chain_hash))，算法随 TST.algorithm 分派——本包校验此项
 	Signature      string `json:"signature"`       // TSA 签名（验签需 TSA 密钥，属外部条件）
 	TSAPublicKey   string `json:"tsa_public_key"`
 	Source         string `json:"source"`
@@ -274,6 +273,7 @@ func scanChain(r io.Reader, schema Schema, opt Options) (*scanOutcome, error) {
 }
 
 // applyEvent 校验本条事件的 prev_hash 链接并重算哈希（返回重算哈希）。
+// `hash_alg` 非法（R-12）→ 以 ChainBreakError 形式返回（**验证失败**，非"输入不可用"）。
 func applyEvent(event map[string]any, schema Schema, running *string, absIndex, lineNo int) (string, error) {
 	prev, _ := event["prev_hash"].(string)
 	if prev != *running {
@@ -286,7 +286,11 @@ func applyEvent(event map[string]any, schema Schema, running *string, absIndex, 
 	}
 	h, err := schema.Hash(event)
 	if err != nil {
-		return "", fmt.Errorf("第 %d 行哈希重算失败: %w", lineNo, err)
+		return "", &ChainBreakError{
+			Index:    absIndex,
+			FileLine: lineNo,
+			Reason:   err.Error(),
+		}
 	}
 	*running = h
 	return h, nil
@@ -360,9 +364,13 @@ type ChainBreakError struct {
 	Got           string // 该行声明的 prev_hash
 	Want          string // 期望的 prev_hash（= 上一条重算哈希）
 	EntryMismatch bool   // 窗口首条事件不符入口哈希（抽样验证断言失败）
+	Reason        string // 非链接原因的验证失败（如 R-12 未知 hash_alg）
 }
 
 func (e *ChainBreakError) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("哈希重算失败：第 %d 条事件（文件第 %d 行）：%s", e.Index+1, e.FileLine, e.Reason)
+	}
 	if e.EntryMismatch {
 		return fmt.Sprintf("窗口起点哈希不符：第 %d 条事件（文件第 %d 行）prev_hash=%s，外部入口哈希为 %s（-from-hash 与链不一致）",
 			e.Index+1, e.FileLine, shortHash(e.Got), shortHash(e.Want))
@@ -467,11 +475,17 @@ func checkTST(records []AnchorRecord) (bool, bool, string) {
 			continue
 		}
 		withTST++
-		want := sha256.Sum256([]byte(rec.ChainHash))
-		if rec.TST.MessageImprint != hex.EncodeToString(want[:]) {
+		// imprint 算法按令牌自述 `algorithm` 分派（§5.2.2 判定口径：**仅** `=="sm3"` 判 SM3；
+		// 空/其它值一律按 SHA-256，fail-safe 防伪造字段绕过）。
+		prov := hashProvSHA256
+		if rec.TST.Algorithm == "sm3" {
+			prov = hashProvSM3
+		}
+		want := hex.EncodeToString(prov.Hash([]byte(rec.ChainHash)))
+		if rec.TST.MessageImprint != want {
 			return true, false, fmt.Sprintf(
 				"锚点记录 #%d 的 TST imprint 与 chain_hash 不符：令牌 %s，应为 %s —— 锚点记录被替换（令牌未同步更新）",
-				i+1, shortHash(rec.TST.MessageImprint), shortHash(hex.EncodeToString(want[:])))
+				i+1, shortHash(rec.TST.MessageImprint), shortHash(want))
 		}
 		okCount++
 	}

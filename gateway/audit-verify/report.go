@@ -33,7 +33,7 @@ type Report struct {
 var reportLimitations = []string{
 	"哈希链校验只覆盖“内容与链序是否被改动”；不验证事件时间戳真伪（需 TST 的 TSA 验签或外部公证）。",
 	"不覆盖“整链被整体替换成另一条自洽链”的场景（需外部可信锚点副本比对）。",
-	"TST 仅做 imprint 一致性校验（imprint == SHA256(chain_hash)）；令牌签名验签需 TSA 根证书，属外部条件。",
+	"TST 仅做 imprint 一致性校验（imprint == Hash(chain_hash)，算法随 TST.algorithm 分派）；令牌签名验签需 TSA 根证书，属外部条件。",
 }
 
 // windowLimitation 窗口抽样模式附加局限。
