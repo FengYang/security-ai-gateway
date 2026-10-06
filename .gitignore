@@ -78,6 +78,8 @@ docs/compliance/
 !deploy/higress/README.md
 !gateway/wasm/hello-plugin/README.md
 !gateway/wasm/otpmask-plugin/README.md
+# 代码包内的 API 文档（与代码同步版本管理，非设计文档）
+!gateway/gateway-core/internal/api/API.md
 ai-gateway-roadmap/
 confidential-ai-gateway-whitepaper/
 

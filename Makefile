@@ -96,6 +96,66 @@ wasm-guard:
 	if [ -n "$$out" ]; then echo "FAIL: protocol/go 链入密码包——"; echo "$$out"; exit 1; fi; \
 	echo "PASS: protocol/go 零密码"
 
+# ---- P0-1 多模型智能路由：测试/基准/竞态/E2E ----
+ROUTE_ENGINE_PKG = ./gateway/wasm/otpmask-plugin/routeengine/
+ROUTE_CACHE_PKG  = ./gateway/wasm/otpmask-plugin/routecache/
+ROUTE_PLUGIN_PKG = ./gateway/wasm/otpmask-plugin/
+
+# route-test —— 路由引擎 + 路由缓存单元测试（带覆盖率）
+.PHONY: route-test
+route-test:
+	$(GO) test -count=1 -cover -timeout 120s $(ROUTE_ENGINE_PKG)
+	$(GO) test -count=1 -cover -timeout 120s $(ROUTE_CACHE_PKG)
+
+# route-race —— 路由引擎竞态测试（-race，P1-3：评审补充）
+# 验证并发场景下 Pick/Record/Tick/Update/Snapshot 混合无数据竞争
+.PHONY: route-race
+route-race:
+	$(GO) test -race -count=1 -run TestRace -timeout 120s $(ROUTE_ENGINE_PKG)
+
+# route-bench —— 路由引擎基准测试（含 10 端点 + 100 端点大规模场景）
+.PHONY: route-bench
+route-bench:
+	$(GO) test -bench=. -benchmem -benchtime=500ms -run=^$$ $(ROUTE_ENGINE_PKG)
+
+# route-bench-scale —— 仅大规模端点基准（100 端点 + 10 优先级组 + 热更新）
+.PHONY: route-bench-scale
+route-bench-scale:
+	$(GO) test -bench="BenchmarkPickEndpoint_100|BenchmarkUpdateConfigSmooth_100|BenchmarkPickEndpoint_10Priority" -benchmem -benchtime=1s -run=^$$ $(ROUTE_ENGINE_PKG)
+
+# route-e2e-build —— 编译路由层 E2E 测试二进制（用于上传到 K8s 节点运行）
+# 产物：gateway/wasm/otpmask-plugin/e2e/e2e.test
+.PHONY: route-e2e-build
+route-e2e-build:
+	GOOS=linux GOARCH=amd64 $(GO) test -c -o gateway/wasm/otpmask-plugin/e2e/e2e.test \
+		./gateway/wasm/otpmask-plugin/e2e/
+
+# route-e2e —— 本地运行路由层 E2E 测试（需设置 E2E_GATEWAY_URL / E2E_CORE_URL / E2E_API_KEY / E2E_CORE_TOKEN）
+.PHONY: route-e2e
+route-e2e:
+	@: "$${E2E_GATEWAY_URL:?请设置 E2E_GATEWAY_URL 环境变量}"
+	@: "$${E2E_CORE_URL:?请设置 E2E_CORE_URL 环境变量}"
+	$(GO) test -count=1 -v -timeout 10m ./gateway/wasm/otpmask-plugin/e2e/
+
+# route-chaos —— 混沌测试入口（P0-2：评审补充，本地模拟故障注入）
+# 通过模拟端点失败率变化验证熔断/降级/重试的联动正确性
+.PHONY: route-chaos
+route-chaos:
+	$(GO) test -count=1 -v -run "TestE2E_" -timeout 120s $(ROUTE_ENGINE_PKG)
+	@echo ""
+	@echo "== 混沌测试说明 =="
+	@echo "完整混沌测试需在 K8s 环境执行，使用 route-e2e 配合故障注入："
+	@echo "  1. 先运行 make route-e2e-build 编译 Linux 二进制"
+	@echo "  2. 上传到 K8s 节点，设置 E2E_* 环境变量"
+	@echo "  3. 用 chaos-mesh / kubectl 注入故障（网络延迟、5xx、Pod 杀）"
+	@echo "  4. 观察熔断/降级/恢复行为是否符合预期"
+	@echo "  5. 验证指标：熔断触发时间、恢复时间、降级级别、错误率"
+
+# route-all —— 一键运行路由模块所有质量门禁（单测+竞态+基准+集成）
+.PHONY: route-all
+route-all: route-test route-race route-bench
+	@echo "✅ 路由模块全量门禁通过"
+
 # ---- P0-4 §12.6 profile 切换工具（B5-c）----
 # CRYPTOPSVC_URL/ADMIN_URL 缺省指向本机 loopback；ADMIN_TOKEN 须经环境提供（端点强制 admin）。
 CRYPTOPSVC_URL ?= http://127.0.0.1:8082

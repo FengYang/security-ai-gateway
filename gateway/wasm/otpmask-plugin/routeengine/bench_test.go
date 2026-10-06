@@ -1,6 +1,7 @@
 package routeengine
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -209,6 +210,123 @@ func BenchmarkTick_10Endpoints(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		now += 1000
 		e.Tick(now)
+	}
+}
+
+// ============================================================
+// 大规模端点基准测试（P1-4：评审补充）
+// 验证 100+ 端点规模下的决策性能与内存占用
+// ============================================================
+
+// BenchmarkPickEndpoint_100Weighted 100 端点权重路由（大规模场景）
+func BenchmarkPickEndpoint_100Weighted(b *testing.B) {
+	eps := make([]EndpointConfig, 100)
+	for i := 0; i < 100; i++ {
+		eps[i] = EndpointConfig{
+			Name:     fmt.Sprintf("ep-%03d", i),
+			Weight:   1.0 / 100,
+			Priority: 1,
+			Enabled:  true,
+		}
+	}
+	e := NewEngine(Config{
+		Strategy:  StrategyWeighted,
+		Endpoints: eps,
+	})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = e.PickEndpoint()
+	}
+}
+
+// BenchmarkPickEndpoint_100FailureAware 100 端点失败率感知（带熔断过滤）
+func BenchmarkPickEndpoint_100FailureAware(b *testing.B) {
+	eps := make([]EndpointConfig, 100)
+	for i := 0; i < 100; i++ {
+		eps[i] = EndpointConfig{
+			Name:     fmt.Sprintf("ep-%03d", i),
+			Weight:   1.0 / 100,
+			Priority: 1,
+			Enabled:  true,
+		}
+	}
+	e := NewEngine(Config{
+		Strategy:             StrategyFailureAware,
+		Endpoints:            eps,
+		EWMAMinSamples:       10,
+		EWMAAlpha:            0.2,
+		CircuitFailureThresh: 0.5,
+		CircuitMinSamples:    20,
+	})
+	// 预热：部分端点失败以建立 EWMA 基线（模拟真实场景）
+	for i := 0; i < 200; i++ {
+		for j := 0; j < 100; j++ {
+			// 每 5 个端点有 1 个失败率较高
+			success := j%5 != 0 || i%3 != 0
+			e.RecordResult(fmt.Sprintf("ep-%03d", j), success)
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = e.PickEndpoint()
+	}
+}
+
+// BenchmarkPickEndpoint_10PriorityGroups 10 个优先级组（每级 10 端点）
+func BenchmarkPickEndpoint_10PriorityGroups(b *testing.B) {
+	eps := make([]EndpointConfig, 100)
+	for i := 0; i < 100; i++ {
+		eps[i] = EndpointConfig{
+			Name:     fmt.Sprintf("ep-p%d-%d", i/10, i%10),
+			Weight:   0.1,
+			Priority: (i / 10) + 1, // 10 个优先级组
+			Enabled:  true,
+		}
+	}
+	e := NewEngine(Config{
+		Strategy:  StrategyPriority,
+		Endpoints: eps,
+	})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = e.PickEndpoint()
+	}
+}
+
+// BenchmarkUpdateConfigSmooth_100Endpoints 100 端点下配置平滑更新性能
+// 验证热更新路径的时间复杂度（应为 O(n)，n 为端点数）
+func BenchmarkUpdateConfigSmooth_100Endpoints(b *testing.B) {
+	eps := make([]EndpointConfig, 100)
+	for i := 0; i < 100; i++ {
+		eps[i] = EndpointConfig{
+			Name:     fmt.Sprintf("ep-%03d", i),
+			Weight:   1.0 / 100,
+			Priority: 1,
+			Enabled:  true,
+		}
+	}
+	e := NewEngine(Config{
+		Strategy:  StrategyFailureAware,
+		Endpoints: eps,
+	})
+	// 预热：积累一些状态
+	for i := 0; i < 100; i++ {
+		for j := 0; j < 100; j++ {
+			e.RecordResult(fmt.Sprintf("ep-%03d", j), true)
+		}
+	}
+	// 构造新配置（部分端点权重变化，模拟灰度调整）
+	newEps := make([]EndpointConfig, 100)
+	copy(newEps, eps)
+	newEps[0].Weight = 0.05
+	newEps[1].Weight = 0.15
+	newConfig := Config{
+		Strategy:  StrategyFailureAware,
+		Endpoints: newEps,
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		e.UpdateConfigSmooth(newConfig)
 	}
 }
 
