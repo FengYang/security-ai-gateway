@@ -1,0 +1,247 @@
+# promtool 规则单测（故障注入验证 P0-1 修复，promtool 3.x 格式）
+# 用法（在 docs/output-guard 目录）：
+#   promtool test rules GA-输出侧-告警规则-promtool-test.yaml
+#
+# 规则文件 .promtool-rules.yaml 由 CRD 文件机械化生成（spec 段去 2 空格缩进）：
+#   $l = GetContent CRD; spec: 之后各行 Substring(2) | SetContent .promtool-rules.yaml
+# promtool 3.x 对 annotations 严格比对，故 exp_annotations 写模板渲染后的完整文本。
+# 本文件与生成物均在 docs gitignore 白名单之外，仅本地/CI 使用，不入 git。
+rule_files:
+  - .promtool-rules.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # ===== 场景 1：截断率 15%、2 rps → warning 真实触发（旧规则此处永不触发）=====
+  - name: block-warning
+    interval: 30s
+    input_series:
+      - series: 'otpmask_output_guard_requests_total{mode="enforcing",field="answer"}'
+        values: "0+60x25" # 2 rps，共 12.5 分钟
+      - series: 'otpmask_output_guard_blocked_total{category="privacy",mode="enforcing",field="answer"}'
+        values: "0+9x25" # 0.3 rps = 15%
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: OutputGuardBlockRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: output-guard
+              team: content-compliance
+            exp_annotations:
+              summary: "输出侧审查整流截断率超过 10%"
+              description: "最近 10 分钟 enforcing 模式下 block 终止请求占比 15%（流量门 0.5 rps）。排查：策略变更、上游产出漂移、词库误命中。"
+              runbook_url: "GA-截断率监控与处置Runbook.md"
+    promql_expr_test:
+      - expr: 'output_guard:block_rate:rate5m'
+        eval_time: 11m
+        exp_samples:
+          - labels: '{__name__="output_guard:block_rate:rate5m",category="output-guard"}'
+            value: 0.15
+
+  # ===== 场景 2：截断率 30%、持续 65 分钟 → critical 双窗口触发 =====
+  - name: block-critical
+    interval: 30s
+    input_series:
+      - series: 'otpmask_output_guard_requests_total{mode="enforcing",field="answer"}'
+        values: "0+60x130" # 65 分钟
+      - series: 'otpmask_output_guard_blocked_total{category="privacy",mode="enforcing",field="answer"}'
+        values: "0+18x130" # 30%
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: OutputGuardBlockRateCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              category: output-guard
+              team: content-compliance
+            exp_annotations:
+              summary: "输出侧审查整流截断率严重升高（5m/1h 双窗口均 >25%）"
+              description: "截断率快速窗与慢速窗同时超过 25%（当前 30%），属真实事故而非抖动。立即按 runbook 排查并评估预授权降级。"
+              runbook_url: "GA-截断率监控与处置Runbook.md"
+      - eval_time: 65m
+        alertname: OutputGuardBlockRateCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              category: output-guard
+              team: content-compliance
+            exp_annotations:
+              summary: "输出侧审查整流截断率严重升高（5m/1h 双窗口均 >25%）"
+              description: "截断率快速窗与慢速窗同时超过 25%（当前 30%），属真实事故而非抖动。立即按 runbook 排查并评估预授权降级。"
+              runbook_url: "GA-截断率监控与处置Runbook.md"
+
+  # ===== 场景 3：低流量（0.1 rps）高比例 → 流量门拦截，不告警 =====
+  - name: low-traffic-gate
+    interval: 30s
+    input_series:
+      - series: 'otpmask_output_guard_requests_total{mode="enforcing",field="answer"}'
+        values: "0+3x25" # 0.1 rps（< 0.5 门）
+      - series: 'otpmask_output_guard_blocked_total{category="privacy",mode="enforcing",field="answer"}'
+        values: "0+2x25" # ~67%，但样本太少
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: OutputGuardBlockRateHigh
+        exp_alerts: [] # 空：warning 不得触发（流量门 0.5 rps 生效）
+      # P1-3 互补性验证：同一低流量场景下，绝对计数兜底规则**应当**触发
+      # （5m increase(blocked) ≈ 16 ≥ 10 且 rate(requests) ≈ 0.1 ≤ 0.5）
+      - eval_time: 11m
+        alertname: OutputGuardBlockBurstLowTraffic
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: output-guard
+              team: content-compliance
+            exp_annotations:
+              summary: "低流量下输出侧阻断计数偏高（绝对计数兜底）"
+              description: "5 分钟内 enforcing 阻断 ≥10 次，而流量 ≤0.5 rps——比率告警因流量门静默。核查是否误伤集中或上游产出异常。"
+              runbook_url: "GA-截断率监控与处置Runbook.md"
+
+  # ===== 场景 4：句级降级率 10%（L2 超时注入）→ critical 触发 =====
+  # pending 自 3m 起（sentences >1 闸门更严），firing 自 8m 起。
+  - name: sentence-degradation
+    interval: 30s
+    input_series:
+      - series: 'otpmask_output_guard_sentences_total'
+        values: "0+60x25" # 2 句/秒
+      - series: 'otpmask_output_guard_degraded_total{backend="l2",reason="l2_timeout"}'
+        values: "0+6x25" # 0.2 句/秒 = 10%
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: OutputGuardSentenceDegradationHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              category: output-guard
+              team: content-compliance
+            exp_annotations:
+              summary: "输出侧句级 fail-closed 降级率超过 5%"
+              description: "L2 超时/过载/不可用/未映射导致句级丢弃 10%；持续即大面积残句（HTTP 200 但内容为空），按 runbook 触发全局熔断或预授权降级。"
+              runbook_url: "GA-截断率监控与处置Runbook.md"
+    promql_expr_test:
+      - expr: 'output_guard:sentence_degradation:rate5m'
+        eval_time: 6m
+        exp_samples:
+          - labels: '{__name__="output_guard:sentence_degradation:rate5m",category="output-guard"}'
+            value: 0.1
+
+  # ===== 场景 5：slots_full 整流终止注入 → 3 分钟后 critical =====
+  - name: slots-full
+    interval: 30s
+    input_series:
+      - series: 'otpmask_output_guard_sentences_total'
+        values: "0+60x40"
+      - series: 'otpmask_output_guard_degraded_total{backend="l2",reason="l2_slots_full"}'
+        values: "0+0x21 1+1x10" # 第 11 分钟起每 30s 丢 1 句
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: OutputGuardSlotsFullTerminating
+        exp_alerts: [] # for 3m 未满：不触发
+      - eval_time: 14m
+        alertname: OutputGuardSlotsFullTerminating
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              category: output-guard
+              team: content-compliance
+            exp_annotations:
+              summary: "输出侧槽位耗尽触发整流终止"
+              description: "判定句数超过 P-MAX-SLOTS，enforcing 已 fail-closed 整流终止（合法长输出被硬切）。检查 MaxSlots 配置与长文档/代码类业务。"
+              runbook_url: "GA-截断率监控与处置Runbook.md"
+
+  # ===== 场景 6：Pod 15m 内重启 2 次 → warning；30m 内 4 次 → crash critical =====
+  - name: pod-restart
+    interval: 30s
+    input_series:
+      - series: 'kube_pod_container_status_restarts_total{namespace="security-ai-gateway",pod="tee-infer-0",container="tee-infer"}'
+        # s0..29=0；15m→1；15.5m→2 保持至 29.5m；30m→3；30.5m→4 保持
+        values: "0+0x29 1+0x0 2+0x28 3+0x0 4+0x30"
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: OutputGuardPodRestarting
+        exp_alerts:
+          - exp_labels:
+              namespace: security-ai-gateway
+              pod: tee-infer-0
+              container: tee-infer
+              severity: warning
+              category: output-guard
+              team: content-compliance
+            exp_annotations:
+              summary: "输出侧审查 Pod 反复重启（tee-infer-0）"
+              description: "tee-infer-0 15 分钟内重启 ≥2 次。排查 OOM、配置错误、上游依赖不可用。"
+              runbook_url: "GA-输出侧-告警演练验收单.md"
+      - eval_time: 33m
+        alertname: OutputGuardPodCrashLoop
+        exp_alerts:
+          - exp_labels:
+              namespace: security-ai-gateway
+              pod: tee-infer-0
+              container: tee-infer
+              severity: critical
+              category: output-guard
+              team: content-compliance
+            exp_annotations:
+              summary: "输出侧审查 Pod CrashLoop（tee-infer-0）"
+              description: "tee-infer-0 30 分钟内重启 ≥3 次，服务实质不可用。立即介入并检查重启风暴对审计链/会话的影响。"
+              runbook_url: "GA-输出侧-告警演练验收单.md"
+
+  # ===== 场景 7：无 kube-state-metrics 的后备规则（restart_detected 两次 0→1）=====
+  - name: restart-fallback
+    interval: 30s
+    input_series:
+      - series: 'otpmask_output_guard_restart_detected'
+        # 15m 第一次 0→1（进程重启后 gauge 归 0）；25m 第二次
+        values: "0+0x29 1+0x0 0+0x18 1+0x0 0+0x19"
+    alert_rule_test:
+      - eval_time: 28m
+        alertname: OutputGuardPodRestartingFallback
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: output-guard
+              team: content-compliance
+            exp_annotations:
+              summary: "输出侧审查 Pod 反复重启（后备规则，restart_detected）"
+              description: "30 分钟内 restart_detected 多次 0→1（≥2），即多次进程重启。无 kube-state-metrics 环境下使用。"
+              runbook_url: "GA-输出侧-告警演练验收单.md"
+
+  # ===== 场景 8：健康基线 → 全部告警静默 =====
+  - name: healthy-baseline
+    interval: 30s
+    input_series:
+      - series: 'otpmask_output_guard_requests_total{mode="enforcing",field="answer"}'
+        values: "0+60x40"
+      - series: 'otpmask_output_guard_blocked_total{category="privacy",mode="enforcing",field="answer"}'
+        values: "0+0x40"
+      - series: 'otpmask_output_guard_sentences_total'
+        values: "0+60x40"
+      - series: 'otpmask_output_guard_degraded_total{backend="l2",reason="l2_timeout"}'
+        values: "0+0x40"
+      - series: 'kube_pod_container_status_restarts_total{namespace="security-ai-gateway",pod="tee-infer-0",container="tee-infer"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: OutputGuardBlockRateHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: OutputGuardBlockRateCritical
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: OutputGuardSentenceDegradationHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: OutputGuardSlotsFullTerminating
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: OutputGuardPodRestarting
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: OutputGuardPodCrashLoop
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: OutputGuardPodRestartingFallback
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: OutputGuardBlockBurstLowTraffic
+        exp_alerts: []

@@ -1,0 +1,167 @@
+﻿groups:
+  - name: output-guard.rules
+    interval: 30s
+    rules:
+      # ---- 告警 1a：输出整流截断率升高（warning；核心业务告警）----
+      # 全局口径：blocked_total{mode=enforcing} / requests_total{mode=enforcing}
+      # 两侧均全局聚合（标签一致，向量匹配成立）；最小流量门 0.5 rps 防小样本噪声。
+      - alert: OutputGuardBlockRateHigh
+        expr: |
+          (
+            sum(rate(otpmask_output_guard_blocked_total{mode="enforcing"}[5m]))
+            /
+            sum(rate(otpmask_output_guard_requests_total{mode="enforcing"}[5m]))
+          ) > 0.10
+          and
+          sum(rate(otpmask_output_guard_requests_total{mode="enforcing"}[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          category: output-guard
+          team: content-compliance
+        annotations:
+          summary: "输出侧审查整流截断率超过 10%"
+          description: "最近 10 分钟 enforcing 模式下 block 终止请求占比 {{ $value | humanizePercentage }}（流量门 0.5 rps）。排查：策略变更、上游产出漂移、词库误命中。"
+          runbook_url: "GA-截断率监控与处置Runbook.md"
+
+      # ---- 告警 1b：截断率严重升高（critical；5m 与 1h 双窗口确认，多窗口抗抖动）----
+      - alert: OutputGuardBlockRateCritical
+        expr: |
+          (
+            sum(rate(otpmask_output_guard_blocked_total{mode="enforcing"}[5m]))
+            /
+            sum(rate(otpmask_output_guard_requests_total{mode="enforcing"}[5m]))
+          ) > 0.25
+          and
+          (
+            sum(rate(otpmask_output_guard_blocked_total{mode="enforcing"}[1h]))
+            /
+            sum(rate(otpmask_output_guard_requests_total{mode="enforcing"}[1h]))
+          ) > 0.25
+          and
+          sum(rate(otpmask_output_guard_requests_total{mode="enforcing"}[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: critical
+          category: output-guard
+          team: content-compliance
+        annotations:
+          summary: "输出侧审查整流截断率严重升高（5m/1h 双窗口均 >25%）"
+          description: "截断率快速窗与慢速窗同时超过 25%（当前 {{ $value | humanizePercentage }}），属真实事故而非抖动。立即按 runbook 排查并评估预授权降级。"
+          runbook_url: "GA-截断率监控与处置Runbook.md"
+
+      # ---- 告警 1c：低流量下的绝对计数兜底（评审 P1-3；补比率告警的流量门盲区）----
+      # 1a/1b 均带 0.5 rps 流量门 ⇒ 低流量时按设计**静默**（避免小样本比率噪声），
+      # 但低流量下真实误伤/上游异常仍会发生 → 用"绝对阻断计数"兜底（与 Runbook §4 建议同源）。
+      - alert: OutputGuardBlockBurstLowTraffic
+        expr: |
+          sum(increase(otpmask_output_guard_blocked_total{mode="enforcing"}[5m])) >= 10
+          and
+          sum(rate(otpmask_output_guard_requests_total{mode="enforcing"}[5m])) <= 0.5
+        for: 5m
+        labels:
+          severity: warning
+          category: output-guard
+          team: content-compliance
+        annotations:
+          summary: "低流量下输出侧阻断计数偏高（绝对计数兜底）"
+          description: "5 分钟内 enforcing 阻断 ≥10 次，而流量 ≤0.5 rps——比率告警因流量门静默。核查是否误伤集中或上游产出异常。"
+          runbook_url: "GA-截断率监控与处置Runbook.md"
+
+      # ---- 告警 2a：Pod 反复重启（warning；kube-state-metrics 事实源为主）----
+      - alert: OutputGuardPodRestarting
+        expr: |
+          increase(kube_pod_container_status_restarts_total{namespace="security-ai-gateway",container=~"tee-infer.*"}[15m]) >= 2
+        for: 2m
+        labels:
+          severity: warning
+          category: output-guard
+          team: content-compliance
+        annotations:
+          summary: "输出侧审查 Pod 反复重启（{{ $labels.pod }}）"
+          description: "{{ $labels.pod }} 15 分钟内重启 ≥2 次。排查 OOM、配置错误、上游依赖不可用。"
+          runbook_url: "GA-输出侧-告警演练验收单.md"
+
+      # ---- 告警 2b：CrashLoop（critical；30m 窗 ≥3 次）----
+      - alert: OutputGuardPodCrashLoop
+        expr: |
+          increase(kube_pod_container_status_restarts_total{namespace="security-ai-gateway",container=~"tee-infer.*"}[30m]) >= 3
+        for: 2m
+        labels:
+          severity: critical
+          category: output-guard
+          team: content-compliance
+        annotations:
+          summary: "输出侧审查 Pod CrashLoop（{{ $labels.pod }}）"
+          description: "{{ $labels.pod }} 30 分钟内重启 ≥3 次，服务实质不可用。立即介入并检查重启风暴对审计链/会话的影响。"
+          runbook_url: "GA-输出侧-告警演练验收单.md"
+
+      # ---- 告警 2c：无 kube-state-metrics 环境的后备规则（自定义 restart_detected gauge）----
+      # increase 窗口放宽至 30m（原 10m 在 CrashLoopBackOff 指数退避下会漏检）。
+      - alert: OutputGuardPodRestartingFallback
+        expr: |
+          increase(otpmask_output_guard_restart_detected[30m]) >= 2
+        for: 2m
+        labels:
+          severity: warning
+          category: output-guard
+          team: content-compliance
+        annotations:
+          summary: "输出侧审查 Pod 反复重启（后备规则，restart_detected）"
+          description: "30 分钟内 restart_detected 多次 0→1（≥2），即多次进程重启。无 kube-state-metrics 环境下使用。"
+          runbook_url: "GA-输出侧-告警演练验收单.md"
+
+      # ---- 告警 3a：句级 fail-closed 降级率升高（critical；替代原永不触发的 503 告警）----
+      # 数据源真实存在：degraded_total{backend="l2"}（reason=l2_timeout/l2_overload/l2_unavailable/
+      # l2_unmapped/l2_bad_conf/l2_slots_full）；分母 sentences_total 为本次修复新增对外 counter。
+      # 持续高降级率＝"HTTP 全绿、内容全空"的静默丢句风暴，须立即处置。
+      - alert: OutputGuardSentenceDegradationHigh
+        expr: |
+          (
+            sum(rate(otpmask_output_guard_degraded_total{backend="l2"}[5m]))
+            /
+            sum(rate(otpmask_output_guard_sentences_total[5m]))
+          ) > 0.05
+          and
+          sum(rate(otpmask_output_guard_sentences_total[5m])) > 1
+        for: 5m
+        labels:
+          severity: critical
+          category: output-guard
+          team: content-compliance
+        annotations:
+          summary: "输出侧句级 fail-closed 降级率超过 5%"
+          description: "L2 超时/过载/不可用/未映射导致句级丢弃 {{ $value | humanizePercentage }}；持续即大面积残句（HTTP 200 但内容为空），按 runbook 触发全局熔断或预授权降级。"
+          runbook_url: "GA-截断率监控与处置Runbook.md"
+
+      # ---- 告警 3b：slots_full 整流终止（critical；合法长输出被硬切，零容忍立即告警）----
+      - alert: OutputGuardSlotsFullTerminating
+        expr: |
+          sum(rate(otpmask_output_guard_degraded_total{backend="l2",reason="l2_slots_full"}[5m])) > 0
+        for: 3m
+        labels:
+          severity: critical
+          category: output-guard
+          team: content-compliance
+        annotations:
+          summary: "输出侧槽位耗尽触发整流终止"
+          description: "判定句数超过 P-MAX-SLOTS，enforcing 已 fail-closed 整流终止（合法长输出被硬切）。检查 MaxSlots 配置与长文档/代码类业务。"
+          runbook_url: "GA-截断率监控与处置Runbook.md"
+
+      # ---- 记录规则：全局截断率（供看板引用；两侧均无 by 分组，标签匹配成立）----
+      - record: output_guard:block_rate:rate5m
+        expr: |
+          sum(rate(otpmask_output_guard_blocked_total{mode="enforcing"}[5m]))
+          /
+          sum(rate(otpmask_output_guard_requests_total{mode="enforcing"}[5m]))
+        labels:
+          category: output-guard
+
+      # ---- 记录规则：句级降级率（供看板引用）----
+      - record: output_guard:sentence_degradation:rate5m
+        expr: |
+          sum(rate(otpmask_output_guard_degraded_total{backend="l2"}[5m]))
+          /
+          sum(rate(otpmask_output_guard_sentences_total[5m]))
+        labels:
+          category: output-guard
