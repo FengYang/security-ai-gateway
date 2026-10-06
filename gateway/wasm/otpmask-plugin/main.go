@@ -134,6 +134,14 @@ type PluginConfig struct {
 	// <=1 = 逐帧（等价改造前，T-5.4-2）；>1 = 攒 B 帧调一次 /v1/batch。
 	// 缺省 16（平衡延迟与 sidecar 调用次数）；上限 64（与 sidecar maxBatchOps 对齐）。
 	SSEBatchSize int64 `json:"sse_batch_size"`
+	// P2-1 流式重试（Envoy 层）：插件侧开关 + 重试归因头注入。
+	// **默认 false = 行为与接线前完全一致**（不注入重试控制头，由 Envoy 配置决定）。
+	// 启用后插件在流式请求头中注入 X-Otpmask-Retry-Attempt（首次=1，重发>=2），
+	// 供 TEE 侧识别不计费；同时注入 X-Otpmask-Stream-Retry 标识开启状态。
+	StreamRetryEnabled bool `json:"stream_retry_enabled"`
+	// P2-1 流式重试最大次数（仅头注入控制，实际以 Envoy 配置为准）。
+	// 缺省 0（关闭）；建议与 Envoy retry_policy.num_retries 保持一致。
+	StreamRetryMaxAttempts int64 `json:"stream_retry_max_attempts"`
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -187,6 +195,9 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.CryptoCircuitThreshold = json.Get("crypto_circuit_threshold").Int()
 	config.CryptoCircuitCooldownMS = json.Get("crypto_circuit_cooldown_ms").Int()
 	config.SSEBatchSize = json.Get("sse_batch_size").Int()
+	// P2-1 流式重试（Envoy 层）：默认关闭（false/0 = 与现有行为一致）。
+	config.StreamRetryEnabled = json.Get("stream_retry_enabled").Bool()
+	config.StreamRetryMaxAttempts = json.Get("stream_retry_max_attempts").Int()
 	if config.CryptoProfile == "" {
 		config.CryptoProfile = "intl"
 	}
@@ -479,6 +490,9 @@ func continueRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log lo
 	if action := applyRouteDecision(ctx, config, log); action != types.HeaderContinue {
 		return action
 	}
+	// P2-1 流式重试：注入重试归因头（仅启用时；关闭=零行为变化）。
+	// 独立于路由决策，即使路由未启用也可工作。
+	injectStreamRetryHeaders()
 	// P1b 修复：有请求体时持住请求头（ActionPause）——请求头在 HeaderContinue 后
 	// 即刻转发上游，body 阶段的 X-Session-ID/content-type 替换不生效（TEE 收不到
 	// 会话头 → 信封被当裸协议解码，审计表现为 decode_error/bad_signature 乱码）。

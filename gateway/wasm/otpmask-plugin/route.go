@@ -53,6 +53,11 @@ const (
 	hdrOtpStrategy  = "X-Otp-Strategy"  // P0-1 新增：使用的路由策略（tracing 关联用）
 	hdrOtpCanary    = "X-Otp-Canary"    // P0-1 新增：灰度分组（tracing 关联用）
 	hdrRequestID    = "X-Request-Id"    // Envoy 生成的请求 ID（日志-trace 关联用）
+	// P2-1 流式重试（Envoy 层）：重试归因头 + 开关头。
+	// X-Otpmask-Retry-Attempt：首次=1，重发>=2（TEE 侧识别不计费，与非流式重试对齐）。
+	// X-Otpmask-Stream-Retry：流式重试总开关（on/off），便于 Envoy/TEE 侧识别。
+	hdrRetryAttempt  = "X-Otpmask-Retry-Attempt"
+	hdrStreamRetry   = "X-Otpmask-Stream-Retry"
 )
 
 // routeRuntimeState 路由运行时状态：验签密钥 + 路由表缓存 + 拉取参数（由 parseConfig 初始化）。
@@ -74,6 +79,8 @@ type routeRuntimeState struct {
 	replayEnabled bool
 	// P1-2：防重放统计（可观测）
 	replayRejectCount int64 // 累计重放拒绝次数
+	// P2-1：流式重试（Envoy 层）开关。
+	streamRetryEnabled bool
 }
 
 // routeRuntime 运行时单例（含周期拉取参数）。
@@ -96,6 +103,9 @@ func initRouteRuntime(config PluginConfig, log logs.Log) {
 	routeRuntime.pollIntervalMs = 0
 	// 派发开关每次重解析都复位：未启用路由时不可能有端点决策，故必为 false（零行为变化）。
 	routeDispatchEnabled = false
+	// P2-1：流式重试（Envoy 层）开关。独立于路由决策，即使路由未启用也可配置。
+	// 默认 false = 不注入头 = 与 P0 行为一致。
+	routeRuntime.streamRetryEnabled = config.StreamRetryEnabled
 	if !config.GatewayCoreEnabled || config.RouteVerifyKeyHex == "" {
 		return
 	}
@@ -283,7 +293,24 @@ func finishRouteDecision(ctx wrapper.HttpContext, log logs.Log, tenant, model, r
 			}
 		}
 	}
+
 	return true
+}
+
+// injectStreamRetryHeaders P2-1 流式重试：注入重试归因头（仅启用时）。
+// 默认关闭（streamRetryEnabled=false）→ 不注入任何头 → 与现有行为完全一致。
+// 启用后注入：
+//   - X-Otpmask-Retry-Attempt: 1（首次请求基线；Envoy 重试时自增）
+//   - X-Otpmask-Stream-Retry: on（开关标识，Envoy/TEE 侧可识别）
+//
+// 计费归因：TEE 侧检测到此头值>=2 时不计费（与非流式重试 retryAttemptHeader 对齐）。
+// 纯 Wasm hostcall 封装；路由未启用时也可独立调用（流式重试不依赖路由决策）。
+func injectStreamRetryHeaders() {
+	if !routeRuntime.streamRetryEnabled {
+		return
+	}
+	_ = proxywasm.ReplaceHttpRequestHeader(hdrRetryAttempt, "1")
+	_ = proxywasm.ReplaceHttpRequestHeader(hdrStreamRetry, "on")
 }
 
 // ============================================================

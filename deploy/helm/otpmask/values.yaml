@@ -44,6 +44,21 @@ envoy:
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 1000m, memory: 512Mi }
+  # P2-1 流式重试（Envoy 层）：
+  # 默认关闭（numRetries=0），与现有行为完全一致；
+  # 开启后仅在响应头返回前重试（连接失败/5xx/reset）。
+  streamRetry:
+    enabled: false      # 总开关；false 时 numRetries 强制为 0
+    numRetries: 0       # 最大重试次数（0=关闭）
+    retryOn: "connect-failure,refused-stream,502,503,504,reset"
+    budgetPercent: 10   # 重试预算百分比（防重试风暴）
+  # 异常点检测（与重试配合）：
+  # 失败端点被临时摘除后，重试自动选健康端点。
+  outlierDetection:
+    enabled: true
+    consecutive5xx: 5
+    baseEjectionTime: 30s
+    maxEjectionPercent: 50
 
 # 文本向量服务
 embedding:

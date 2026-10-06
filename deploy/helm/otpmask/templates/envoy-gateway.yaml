@@ -41,6 +41,19 @@ data:
                       prefix: "/infer"
                     route:
                       cluster: tee-infer
+                      # P2-1 流式重试（Envoy 层，方案 §6.6 V3）
+                      # 默认关闭（num_retries=0），与现有行为完全一致；
+                      # 开启后仅在响应头返回前重试，流式中途断流不重试。
+                      {{- $retry := .Values.envoy.streamRetry }}
+                      {{- if and $retry.enabled (gt $retry.numRetries 0) }}
+                      retry_policy:
+                        num_retries: {{ $retry.numRetries }}
+                        retry_on: "{{ $retry.retryOn }}"
+                        retry_budget:
+                          budget_percent:
+                            value: {{ $retry.budgetPercent }}.0
+                          min_retry_concurrency: 1
+                      {{- end }}
               http_filters:
               - name: envoy.filters.http.buffer
                 typed_config:
@@ -93,6 +106,14 @@ data:
           healthy_threshold: 1
           http_health_check:
             path: /healthz/live
+        # P2-1 流式重试配套：异常点检测（outlier detection）
+        {{- $od := .Values.envoy.outlierDetection }}
+        {{- if $od.enabled }}
+        outlier_detection:
+          consecutive_5xx: {{ $od.consecutive5xx }}
+          base_ejection_time: {{ $od.baseEjectionTime }}
+          max_ejection_percent: {{ $od.maxEjectionPercent }}
+        {{- end }}
         type: LOGICAL_DNS
         dns_lookup_family: V4_ONLY
         lb_policy: ROUND_ROBIN

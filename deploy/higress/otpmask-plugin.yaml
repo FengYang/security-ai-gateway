@@ -115,3 +115,11 @@ spec:
       # 密态路径推荐以 tee-infer 为注入点，本插件仅兜底；两路同开由 SawLabel 去重防双份。
       content_label_enabled: "false"
       content_label_text: "内容由人工智能生成"
+      # ---- P2-1 流式重试（Envoy/Higress 层，默认关＝现网零变化）----
+      # 插件侧开关 + 重试归因头注入。默认关闭（false），与现有行为完全一致。
+      # 开启后注入 X-Otpmask-Retry-Attempt: 1（首次）+ X-Otpmask-Stream-Retry: on，
+      # TEE 侧识别重试不计费。实际重试行为由 Higress Ingress 注解
+      # （nginx.ingress.kubernetes.io/proxy-next-upstream-tries 等）控制，
+      # 需与 ingress-infer.yaml 的重试配置配合使用。
+      stream_retry_enabled: "false"
+      stream_retry_max_attempts: "0"

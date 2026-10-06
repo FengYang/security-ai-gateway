@@ -49,6 +49,18 @@ data:
                       prefix: "/infer"
                     route:
                       cluster: tee-infer
+                      # P2-1 流式重试（Envoy 层，方案 §6.6 V3）：
+                      # 默认 num_retries=0（关闭），与现有行为完全一致；
+                      # 开启后仅在响应头返回前重试（连接失败/5xx/reset），
+                      # 流式中途断流不重试（HTTP 语义限制）。
+                      # 配合 retry_budget 防重试风暴（默认 10% 预算）。
+                      retry_policy:
+                        num_retries: 0
+                        retry_on: "connect-failure,refused-stream,502,503,504,reset"
+                        retry_budget:
+                          budget_percent:
+                            value: 10.0
+                          min_retry_concurrency: 1
               http_filters:
               - name: envoy.filters.http.cors
                 typed_config:
@@ -148,6 +160,14 @@ data:
           healthy_threshold: 1
           http_health_check:
             path: /healthz/live
+        # P2-1 流式重试配套：异常点检测（outlier detection）
+        # 与 retry_policy 配合——失败端点被临时摘除后，重试会选健康端点。
+        # 默认宽松（5 次 5xx 才摘除，base_ejection_time=30s，max_ejection=50%），
+        # 单副本场景 max_ejection=50% 确保至少保留一个端点（否则全 503）。
+        outlier_detection:
+          consecutive_5xx: 5
+          base_ejection_time: 30s
+          max_ejection_percent: 50
         type: LOGICAL_DNS
         dns_lookup_family: V4_ONLY
         lb_policy: ROUND_ROBIN

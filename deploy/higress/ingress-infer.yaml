@@ -13,6 +13,16 @@ metadata:
   namespace: higress-system
   annotations:
     higress.io/destination: tee-infer.dns:19090
+    # P2-1 流式重试（Higress 层，兼容 Nginx Ingress 注解）：
+    # 默认 0 次（关闭），与现有行为完全一致；
+    # 开启后仅在响应头返回前重试（连接失败/5xx/timeout 等），
+    # 流式中途断流不重试（HTTP 语义限制）。
+    # proxy-next-upstream-tries=0 → 禁用重试；设为 1-3 启用。
+    nginx.ingress.kubernetes.io/proxy-next-upstream-tries: "0"
+    # 重试条件：error（连接错误）+ timeout + http_500 + http_502 + http_503 + http_504 + invalid_header
+    nginx.ingress.kubernetes.io/proxy-next-upstream: "error timeout http_500 http_502 http_503 http_504 invalid_header"
+    # 重试总超时（秒）；未设置 = 继承全局超时。
+    nginx.ingress.kubernetes.io/proxy-next-upstream-timeout: "60"
 spec:
   ingressClassName: higress
   rules:
