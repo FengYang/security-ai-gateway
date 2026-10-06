@@ -40,6 +40,11 @@ fuzz-quick:
 bench:
 	$(GO) test -bench=. -benchmem -run=^$$ ./cipher/paillier/ ./secagg/shares/
 
+# bench-s2 —— §8.3 国密 S2 基准（T-8.1 微基准 + T-8.2/T-8.3 sidecar 基准）。
+.PHONY: bench-s2
+bench-s2:
+	$(GO) test -bench=. -benchmem -run=^$$ ./gateway/cryptop/ ./gateway/cryptopsvc/
+
 .PHONY: coverage
 coverage:
 	$(GO) test -coverprofile=coverage.out ./...

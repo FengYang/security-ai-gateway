@@ -19,7 +19,7 @@ import (
 
 // ---- 测试夹具 ----
 
-func newTestServer(t *testing.T, profile cryptop.Profile) (*Server, *httptest.Server, cryptop.Provider) {
+func newTestServer(t testing.TB, profile cryptop.Profile) (*Server, *httptest.Server, cryptop.Provider) {
 	t.Helper()
 	p, err := cryptop.New(profile)
 	if err != nil {
