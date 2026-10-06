@@ -22,11 +22,11 @@ func setupCompletedSession(t *testing.T) (*teeSession, []byte) {
 		t.Fatal(err)
 	}
 	pub := s.ServerPub() // Complete 前记录（完成后私钥销毁）
-	c, err := newClientSession()
+	c, cPub, err := newClientSession()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Complete(c.PublicKey().Bytes()); err != nil {
+	if err := s.Complete(cPub); err != nil {
 		t.Fatal(err)
 	}
 	_, kenc, err := deriveClientSessionKey(c, pub, nonce)

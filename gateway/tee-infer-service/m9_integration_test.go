@@ -109,7 +109,7 @@ func TestRemoteAttestationE2E(t *testing.T) {
 	}
 
 	// 3. 客户生成 ECDH 密钥对 + 派生会话密钥
-	clientPriv, _ := newClientSession()
+	clientPriv, clientPub, _ := newClientSession()
 	serverPub, _ := hex.DecodeString(ar.ServerPub)
 	clientKsig, clientKenc, err := deriveClientSessionKey(clientPriv, serverPub, nonce)
 	if err != nil {
@@ -119,7 +119,7 @@ func TestRemoteAttestationE2E(t *testing.T) {
 	// 4. POST /attest/complete
 	compBody, _ := json.Marshal(map[string]string{
 		"session_id": ar.SessionID,
-		"client_pub": hex.EncodeToString(clientPriv.PublicKey().Bytes()),
+		"client_pub": hex.EncodeToString(clientPub),
 	})
 	compResp, err := http.Post(ts.URL+"/attest/complete", "application/json", bytes.NewReader(compBody))
 	if err != nil {
@@ -266,14 +266,14 @@ func setupTestSession(t *testing.T, ts *httptest.Server) (string, []byte, []byte
 	if err := VerifyAttestationProof(proof, expectedHash, reportDataBinding(nonce, serverPub)); err != nil {
 		t.Fatalf("证明链验证失败: %v", err)
 	}
-	clientPriv, _ := newClientSession()
+	clientPriv, clientPub, _ := newClientSession()
 	ksig, kenc, err := deriveClientSessionKey(clientPriv, serverPub, nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
 	compBody, _ := json.Marshal(map[string]string{
 		"session_id": ar.SessionID,
-		"client_pub": hex.EncodeToString(clientPriv.PublicKey().Bytes()),
+		"client_pub": hex.EncodeToString(clientPub),
 	})
 	compResp, err := http.Post(ts.URL+"/attest/complete", "application/json", bytes.NewReader(compBody))
 	if err != nil {

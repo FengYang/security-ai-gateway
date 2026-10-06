@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -59,27 +57,28 @@ func NewMockEnclave() (*MockEnclave, error) {
 	if err != nil {
 		return nil, fmt.Errorf("enclave: 生成证明签名密钥失败: %w", err)
 	}
-	// 固定测量值，真实环境用二进制哈希
-	measure := sha256.Sum256([]byte("mock-enclave-measurement:v1"))
+	// 固定测量值，真实环境用二进制哈希（经 Provider：intl=SHA-256，sm=SM3）
+	measure := cryptoProvider.Hash([]byte("mock-enclave-measurement:v1"))
 	return &MockEnclave{
 		sealKey:  sealKey,
-		measure:  measure[:],
+		measure:  measure,
 		signKey:  signKey,
 		platform: "mock",
 	}, nil
 }
 
-// loadSealKey 读取密封密钥（按环境变量名取；空则随机生成）。
+// loadSealKey 读取密封密钥（按环境变量名取；空则随机生成）。长度随 profile（intl=32B / sm=16B）。
 func loadSealKey(envName string) ([]byte, error) {
+	n := cryptoProvider.SymmetricKeySize()
 	if v := os.Getenv(envName); v != "" {
 		k, err := hex.DecodeString(v)
-		if err != nil || len(k) != 32 {
-			return nil, fmt.Errorf("enclave: %s 须为 32 字节 hex", envName)
+		if err != nil || len(k) != n {
+			return nil, fmt.Errorf("enclave: %s 须为 %d 字节 hex", envName, n)
 		}
 		return k, nil
 	}
-	k := make([]byte, 32)
-	if _, err := rand.Read(k); err != nil {
+	k, err := cryptoProvider.Rand(n)
+	if err != nil {
 		return nil, fmt.Errorf("enclave: 生成密封密钥失败: %w", err)
 	}
 	return k, nil
@@ -95,24 +94,17 @@ func (e *MockEnclave) Measure() ([]byte, error) {
 	return out, nil
 }
 
-// gcmSeal AES-256-GCM 密封，context 绑定防止跨用途解封。
-// 输出格式：AAD(sha256(context)) || nonce(12) || ciphertext||tag
+// sealWithContext 经 cryptop.Provider 密封（AEAD，context 绑定防跨用途解封）。
+// 输出格式（**与迁移前逐字节同构**，intl 档不变）：AAD(HashSize) || nonce(NonceSize) || ciphertext||tag
 // （mock 与 tdx 飞地共用同一密封格式，密封文件可跨实现恢复）。
-func gcmSeal(sealKey, plaintext []byte, context string) ([]byte, error) {
-	block, err := aes.NewCipher(sealKey)
-	if err != nil {
-		return nil, fmt.Errorf("enclave: AES 初始化失败: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("enclave: GCM 初始化失败: %w", err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("enclave: 生成 nonce 失败: %w", err)
-	}
+// v1.10：算法改经 Provider（intl=AES-256-GCM 等价；sm=SM4-GCM）；**suite 前缀 + 跨 profile 双读**
+// 属 B5 批次（§5.4.3 组⑨），本批不加前缀以免与双读批交叠。
+func sealWithContext(sealKey, plaintext []byte, context string) ([]byte, error) {
 	aad := contextHash(context)
-	sealed := gcm.Seal(nil, nonce, plaintext, aad)
+	nonce, sealed, err := cryptoProvider.SealWithNonce(sealKey, plaintext, aad)
+	if err != nil {
+		return nil, fmt.Errorf("enclave: 密封失败: %w", err)
+	}
 	out := make([]byte, 0, len(aad)+len(nonce)+len(sealed))
 	out = append(out, aad...)
 	out = append(out, nonce...)
@@ -120,44 +112,36 @@ func gcmSeal(sealKey, plaintext []byte, context string) ([]byte, error) {
 	return out, nil
 }
 
-// gcmUnseal 解封，验证 AAD 和 GCM tag。
-func gcmUnseal(sealKey, ciphertext []byte, context string) ([]byte, error) {
-	block, err := aes.NewCipher(sealKey)
-	if err != nil {
-		return nil, fmt.Errorf("enclave: AES 初始化失败: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("enclave: GCM 初始化失败: %w", err)
-	}
-	hs := sha256.Size
-	if len(ciphertext) < hs+gcm.NonceSize()+gcm.Overhead() {
+// unsealWithContext 解封，验证 AAD 和 AEAD tag。
+func unsealWithContext(sealKey, ciphertext []byte, context string) ([]byte, error) {
+	hs := cryptoProvider.HashSize()
+	ns := cryptoProvider.NonceSize()
+	if len(ciphertext) < hs+ns+16 { // GCM tag 至少 16 字节
 		return nil, errors.New("enclave: 密封数据长度不足")
 	}
 	aad := ciphertext[:hs]
-	nonce := ciphertext[hs : hs+gcm.NonceSize()]
-	sealed := ciphertext[hs+gcm.NonceSize():]
+	nonce := ciphertext[hs : hs+ns]
+	sealed := ciphertext[hs+ns:]
 	// AAD 就是 context 哈希本身，直接比较
-	wantAAD := contextHash(context)
-	if !bytes.Equal(aad, wantAAD) {
+	if !bytes.Equal(aad, contextHash(context)) {
 		return nil, errors.New("enclave: 密封上下文不匹配")
 	}
-	plain, err := gcm.Open(nil, nonce, sealed, aad)
+	plain, err := cryptoProvider.Open(sealKey, nonce, sealed, aad)
 	if err != nil {
 		return nil, fmt.Errorf("enclave: 解封失败（数据被篡改或密钥不符）: %w", err)
 	}
 	return plain, nil
 }
 
-// Seal 用 AES-256-GCM 密封，context 绑定防止跨用途解封
-// 输出格式：AAD(sha256(context)) || nonce(12) || ciphertext||tag
+// Seal 经 Provider 密封，context 绑定防止跨用途解封
+// 输出格式：AAD(HashSize) || nonce(NonceSize) || ciphertext||tag
 func (e *MockEnclave) Seal(plaintext []byte, context string) ([]byte, error) {
-	return gcmSeal(e.sealKey, plaintext, context)
+	return sealWithContext(e.sealKey, plaintext, context)
 }
 
-// Unseal 解封，验证 AAD 和 GCM tag
+// Unseal 解封，验证 AAD 和 AEAD tag
 func (e *MockEnclave) Unseal(ciphertext []byte, context string) ([]byte, error) {
-	return gcmUnseal(e.sealKey, ciphertext, context)
+	return unsealWithContext(e.sealKey, ciphertext, context)
 }
 
 // signProofBinding 证明签名（mock 与 tdx 共用）：对 (reportData ‖ signing_pub)
@@ -197,10 +181,9 @@ func (e *MockEnclave) Attest(challenge, reportData []byte) (*AttestationProof, e
 	}, nil
 }
 
-// contextHash 上下文哈希（Seal 的 AAD 前缀）。
+// contextHash 上下文哈希（Seal 的 AAD 前缀；经 Provider：intl=SHA-256，sm=SM3）。
 func contextHash(context string) []byte {
-	h := sha256.Sum256([]byte("otpmask/enclave/ctx/" + context))
-	return h[:]
+	return cryptoProvider.Hash([]byte("otpmask/enclave/ctx/" + context))
 }
 
 // encodeSig 编码 ECDSA 签名（r||s 定长，各 32 字节）。

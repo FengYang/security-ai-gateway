@@ -18,7 +18,7 @@ func TestSessionKeyAgreement(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 客户端密钥对 + 派生
-	clientPriv, err := newClientSession()
+	clientPriv, clientPub, err := newClientSession()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func TestSessionKeyAgreement(t *testing.T) {
 	}
 
 	// 服务端 complete
-	if err := srv.Complete(clientPriv.PublicKey().Bytes()); err != nil {
+	if err := srv.Complete(clientPub); err != nil {
 		t.Fatalf("服务端 complete 失败: %v", err)
 	}
 	if !srv.Completed {
@@ -45,7 +45,7 @@ func TestSessionKeyAgreement(t *testing.T) {
 		t.Fatal("K_sig 与 K_enc 域分离失败")
 	}
 	// 会话私钥已销毁（前向保密）
-	if srv.ServerPriv != nil {
+	if srv.serverPriv != nil {
 		t.Fatal("会话私钥未销毁")
 	}
 }
@@ -54,12 +54,12 @@ func TestSessionKeyAgreement(t *testing.T) {
 func TestSessionCompleteOnce(t *testing.T) {
 	nonce, _ := randomNonce()
 	srv, _ := newSession(nonce)
-	clientPriv, _ := newClientSession()
-	if err := srv.Complete(clientPriv.PublicKey().Bytes()); err != nil {
+	_, clientPub, _ := newClientSession()
+	if err := srv.Complete(clientPub); err != nil {
 		t.Fatal(err)
 	}
-	other, _ := newClientSession()
-	if err := srv.Complete(other.PublicKey().Bytes()); err == nil {
+	_, otherPub, _ := newClientSession()
+	if err := srv.Complete(otherPub); err == nil {
 		t.Fatal("重复 complete 未被拒绝")
 	}
 }

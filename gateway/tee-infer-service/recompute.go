@@ -155,9 +155,9 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 派生层掩码流
-	seed, ok := s.sessionSeed(r)
-	if !ok {
-		http.Error(w, "会话密钥缺失", http.StatusInternalServerError)
+	seed, serr := s.sessionSeed(r)
+	if serr != nil {
+		http.Error(w, "会话密钥缺失: "+serr.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer wipe(seed)
@@ -254,14 +254,17 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 		sess.ID[:8], req.Layer, req.Op, len(req.Batch), resp.MaskNext[:8])
 }
 
-// sessionSeed 取会话请求密钥
-func (s *teeServer) sessionSeed(r *http.Request) ([]byte, bool) {
+// sessionSeed 取会话请求密钥（经 cryptop.Provider.KDF；intl=HKDF-SHA256 逐字节等价）。
+func (s *teeServer) sessionSeed(r *http.Request) ([]byte, error) {
 	sess := s.sessionByID(r)
 	if sess == nil || len(sess.K_enc) == 0 {
-		return nil, false
+		return nil, errors.New("会话密钥缺失")
 	}
-	seed := hkdfSHA256(sess.K_enc, nil, []byte("otpmask/recompute-seed/v1"), 32)
-	return seed, true
+	seed, err := cryptoProvider.KDF(sess.K_enc, nil, []byte("otpmask/recompute-seed/v1"), 32)
+	if err != nil {
+		return nil, fmt.Errorf("掩码 seed 派生失败: %w", err)
+	}
+	return seed, nil
 }
 
 func verifyRecomputeSig(kSig []byte, req *recomputeRequest) bool {

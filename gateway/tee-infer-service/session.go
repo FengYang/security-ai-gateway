@@ -1,21 +1,15 @@
 package main
 
 import (
-	"crypto/ecdh"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
-	"math/big"
 	"sync"
 	"time"
 
+	"security-ai-gateway/gateway/cryptop"
 	"security-ai-gateway/protocol/go"
 	"security-ai-gateway/protocol/go/cryptoops"
 )
@@ -34,7 +28,8 @@ var kdfPurpose = map[string]string{
 type teeSession struct {
 	ID         string
 	Nonce      []byte
-	ServerPriv *ecdh.PrivateKey
+	serverPriv []byte // ECDH 私钥字节（派生后零化；P0-4：经 cryptop.Provider，无 stdlib ecdh 类型）
+	serverPub  []byte // ECDH 公钥字节（供 /attest/begin 下发）
 	K_sig      []byte
 	K_enc      []byte
 	CreatedAt  time.Time
@@ -48,43 +43,51 @@ type teeSession struct {
 }
 
 func newSession(nonce []byte) (*teeSession, error) {
-	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	priv, pub, err := cryptoProvider.GenerateECDHKeyPair()
 	if err != nil {
-		return nil, fmt.Errorf("session: 生成 X25519 密钥失败: %w", err)
+		return nil, fmt.Errorf("session: 生成 ECDH 密钥失败: %w", err)
 	}
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
+	id, err := cryptoProvider.Rand(16)
+	if err != nil {
 		return nil, fmt.Errorf("session: 生成会话 ID 失败: %w", err)
 	}
 	return &teeSession{
 		ID:         hex.EncodeToString(id),
 		Nonce:      nonce,
-		ServerPriv: priv,
+		serverPriv: priv,
+		serverPub:  pub,
 		CreatedAt:  time.Now(),
 	}, nil
 }
 
 // ServerPub 返回服务端 ECDH 公钥字节。
 func (s *teeSession) ServerPub() []byte {
-	return s.ServerPriv.PublicKey().Bytes()
+	return append([]byte(nil), s.serverPub...)
 }
 
-// Complete 客户端公钥到达后做 ECDH + HKDF 派生会话密钥
+// Complete 客户端公钥到达后做 ECDH + KDF 派生会话密钥（经 cryptop.Provider；intl 档逐字节等价）。
 func (s *teeSession) Complete(clientPubBytes []byte) error {
 	if s.Completed {
 		return errors.New("session: 会话已完成（不可重复 complete）")
 	}
-	pub, err := ecdh.X25519().NewPublicKey(clientPubBytes)
-	if err != nil {
-		return fmt.Errorf("session: 客户端公钥无效: %w", err)
-	}
-	shared, err := s.ServerPriv.ECDH(pub)
+	shared, err := cryptoProvider.ECDH(s.serverPriv, clientPubBytes)
 	if err != nil {
 		return fmt.Errorf("session: ECDH 失败: %w", err)
 	}
-	sessionKey := hkdfSHA256(shared, s.Nonce, []byte(sessionInfo), 32)
-	s.K_sig = kdf(sessionKey, "sig")
-	s.K_enc = kdf(sessionKey, "enc")
+	sessionKey, err := cryptoProvider.KDF(shared, s.Nonce, []byte(sessionInfo), 32)
+	if err != nil {
+		return fmt.Errorf("session: 会话密钥派生失败: %w", err)
+	}
+	ksig, err := kdf(sessionKey, "sig")
+	if err != nil {
+		return fmt.Errorf("session: K_sig 派生失败: %w", err)
+	}
+	kenc, err := kdf(sessionKey, "enc")
+	if err != nil {
+		return fmt.Errorf("session: K_enc 派生失败: %w", err)
+	}
+	s.K_sig = ksig
+	s.K_enc = kenc
 	s.Completed = true
 	// P1c：信封通道就绪（s2c 计数器从 1 起，c2s 反重放窗口清零——新会话 nonce 空间全新）
 	s.envMu.Lock()
@@ -94,7 +97,8 @@ func (s *teeSession) Complete(clientPubBytes []byte) error {
 	// 派生完就销毁共享秘密和私钥
 	wipe(shared)
 	wipe(sessionKey)
-	s.ServerPriv = nil
+	wipe(s.serverPriv)
+	s.serverPriv = nil
 	return nil
 }
 
@@ -110,7 +114,8 @@ func (s *teeSession) sealPayload(endpoint string, plaintext []byte) ([]byte, err
 	}
 	counter := s.sendCounter
 	s.sendCounter++
-	return cryptoops.SealEnvelope(s.K_enc, s.ID, endpoint, protocol.DirectionS2C, counter, plaintext)
+	// §5.1：套件随 profile（intl=AES-256-GCM 内置；sm=SM4-GCM）。open 侧按 wire suite 双读，无需协商。
+	return cryptoops.SealEnvelopeWithSuite(s.K_enc, cryptoSuite(), s.ID, endpoint, protocol.DirectionS2C, counter, plaintext)
 }
 
 // openPayload 解密 c2s 信封并做反重放窗口校验（请求入口；重放/越窗拒绝）。
@@ -144,39 +149,13 @@ func (s *teeSession) destroy() {
 	s.recvWindow = protocol.CounterWindow{}
 }
 
-// kdf 从会话密钥派生 sig/enc 用途密钥
-func kdf(sessionKey []byte, purpose string) []byte {
+// kdf 从会话密钥派生 sig/enc 用途密钥（经 cryptop.Provider.KDF；intl=HKDF-SHA256，sm=SM3-KDF）。
+func kdf(sessionKey []byte, purpose string) ([]byte, error) {
 	info, ok := kdfPurpose[purpose]
 	if !ok {
-		panic("session: 未知 KDF 用途: " + purpose)
+		return nil, errors.New("session: 未知 KDF 用途: " + purpose)
 	}
-	return hkdfSHA256(sessionKey, nil, []byte(info), 32)
-}
-
-// hkdfSHA256 RFC 5869 HKDF-SHA256
-func hkdfSHA256(ikm, salt, info []byte, length int) []byte {
-	// 标准库没有直接暴露 hkdf，这里手写 extract+expand
-	prk := hmacSHA256(salt, ikm)
-	out := make([]byte, 0, length)
-	var t []byte
-	counter := byte(1)
-	for len(out) < length {
-		mac := hmac.New(sha256.New, prk)
-		mac.Write(t)
-		mac.Write(info)
-		mac.Write([]byte{counter})
-		t = mac.Sum(nil)
-		out = append(out, t...)
-		counter++
-	}
-	wipe(prk)
-	return out[:length]
-}
-
-func hmacSHA256(key, data []byte) []byte {
-	mac := hmac.New(sha256.New, key)
-	mac.Write(data)
-	return mac.Sum(nil)
+	return cryptoProvider.KDF(sessionKey, nil, []byte(info), 32)
 }
 
 // ---------- 验证链 ----------
@@ -234,71 +213,46 @@ func constTimeEqualHex(a, b string) bool {
 	return subtle.ConstantTimeCompare(ab, bb) == 1
 }
 
-// verifyProofSignature 校验证明签名（覆盖 report_data ‖ signing_key，P1b 绑定升级）
+// verifyProofSignature 校验证明签名（覆盖 report_data ‖ signing_key，P1b 绑定升级）。
+// 恒 ECDSA-P256（§5.4.2 组⑦例外，**不随 profile**）；`cryptop.VerifyP256` 内部以 SHA-256 摘要，
+// 与现役 `sha256(toSign)`→`ecdsa.Verify` 逐字节等价。
 func verifyProofSignature(proof *AttestationProof) error {
-	pub, err := parseP256Pub(proof.SigningKey)
-	if err != nil {
-		return err
-	}
 	toSign := append(append([]byte(nil), proof.ReportData...), proof.SigningKey...)
-	h := sha256.Sum256(toSign)
-	ok, err := verifyP256Sig(pub, h[:], proof.Signature)
-	if err != nil {
-		return fmt.Errorf("attest: 签名校验失败: %w", err)
-	}
-	if !ok {
+	if err := cryptop.VerifyP256(proof.SigningKey, toSign, proof.Signature); err != nil {
 		return errors.New("attest: 证明签名无效")
 	}
 	return nil
 }
 
-// ---------- 客户端 ECDH 辅助 ----------
+// ---------- 客户端 ECDH 辅助（单测用：模拟插件侧握手，与服务端 Complete 对称） ----------
 
-func newClientSession() (*ecdh.PrivateKey, error) {
-	return ecdh.X25519().GenerateKey(rand.Reader)
+func newClientSession() (priv, pub []byte, err error) {
+	return cryptoProvider.GenerateECDHKeyPair()
 }
 
-// deriveClientSessionKey 客户端派生会话密钥，跟服务端 Complete 对称
-func deriveClientSessionKey(clientPriv *ecdh.PrivateKey, serverPubBytes, nonce []byte) (ksig, kenc []byte, err error) {
-	pub, err := ecdh.X25519().NewPublicKey(serverPubBytes)
-	if err != nil {
-		return nil, nil, fmt.Errorf("session: 服务端公钥无效: %w", err)
-	}
-	shared, err := clientPriv.ECDH(pub)
+// deriveClientSessionKey 客户端派生会话密钥，跟服务端 Complete 对称（经 cryptop.Provider）。
+func deriveClientSessionKey(clientPriv, serverPubBytes, nonce []byte) (ksig, kenc []byte, err error) {
+	shared, err := cryptoProvider.ECDH(clientPriv, serverPubBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("session: 客户端 ECDH 失败: %w", err)
 	}
-	sessionKey := hkdfSHA256(shared, nonce, []byte(sessionInfo), 32)
-	ksig = kdf(sessionKey, "sig")
-	kenc = kdf(sessionKey, "enc")
+	sessionKey, err := cryptoProvider.KDF(shared, nonce, []byte(sessionInfo), 32)
+	if err != nil {
+		return nil, nil, fmt.Errorf("session: 会话密钥派生失败: %w", err)
+	}
+	ksig, err = kdf(sessionKey, "sig")
+	if err != nil {
+		return nil, nil, err
+	}
+	kenc, err = kdf(sessionKey, "enc")
+	if err != nil {
+		return nil, nil, err
+	}
 	wipe(shared)
 	wipe(sessionKey)
 	return ksig, kenc, nil
 }
 
 func randomNonce() ([]byte, error) {
-	b := make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// ---------- P-256 验签辅助 ----------
-
-func parseP256Pub(raw []byte) (*ecdsa.PublicKey, error) {
-	x, y := elliptic.Unmarshal(elliptic.P256(), raw)
-	if x == nil {
-		return nil, errors.New("attest: signing_key 非 P-256 公钥")
-	}
-	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
-}
-
-func verifyP256Sig(pub *ecdsa.PublicKey, digest, sig []byte) (bool, error) {
-	if len(sig) != 64 {
-		return false, errors.New("attest: 签名长度须为 64 字节")
-	}
-	r := new(big.Int).SetBytes(sig[:32])
-	s := new(big.Int).SetBytes(sig[32:])
-	return ecdsa.Verify(pub, digest, r, s), nil
+	return cryptoProvider.Rand(32)
 }

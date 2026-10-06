@@ -14,7 +14,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -52,7 +51,7 @@ func NewTdxEnclave() (*TdxEnclave, error) {
 	}
 	// 测量值：摘要常量（跨实例稳定，与 mock 同策略）。真完整性证据在 Quote 的
 	// MRTD/RTMR（由验证方解析 Quote 校验）；升级路径：从 TDREPORT 读取 RTMR 摘要。
-	measure := sha256.Sum256([]byte("tdx-enclave-measurement:v1"))
+	measure := cryptoProvider.Hash([]byte("tdx-enclave-measurement:v1"))
 	return &TdxEnclave{
 		sealKey:  sealKey,
 		signKey:  signKey,
@@ -85,14 +84,14 @@ func (e *TdxEnclave) Measure() ([]byte, error) {
 	return out, nil
 }
 
-// Seal AES-256-GCM 密封（与 mock 同构；密钥经 OTPMASK_TDX_SEAL_KEY 注入）。
+// Seal 经 cryptop.Provider 密封（与 mock 同构；密钥经 OTPMASK_TDX_SEAL_KEY 注入）。
 func (e *TdxEnclave) Seal(plaintext []byte, context string) ([]byte, error) {
-	return gcmSeal(e.sealKey, plaintext, context)
+	return sealWithContext(e.sealKey, plaintext, context)
 }
 
-// Unseal 解封，验证 AAD 和 GCM tag。
+// Unseal 解封，验证 AAD 和 AEAD tag。
 func (e *TdxEnclave) Unseal(ciphertext []byte, context string) ([]byte, error) {
-	return gcmUnseal(e.sealKey, ciphertext, context)
+	return unsealWithContext(e.sealKey, ciphertext, context)
 }
 
 // tdxReportData 把握手绑定材料扩展为 TDX REPORTDATA（64 字节）：
