@@ -18,7 +18,12 @@ import (
 	protocol "security-ai-gateway/protocol/go"
 )
 
-// AttestationProof 远程证明载荷
+// enclaveDualReadInc enclave 双读计数回调（nil = 不计，测试默认）。
+// 由 main 启动时绑定到 metrics.IncEnclaveDualRead。
+var enclaveDualReadInc func()
+
+// setEnclaveDualReadHook 设置双读计数回调（供 main 启动时绑定）。
+func setEnclaveDualReadHook(fn func()) { enclaveDualReadInc = fn }
 type AttestationProof struct {
 	Nonce        []byte            `json:"nonce"`
 	Platform     string            `json:"platform"`
@@ -152,10 +157,16 @@ func sealWithContext(sealKey, plaintext []byte, context string) ([]byte, error) 
 // 首字节为已知 suite → 先按新格式解（AEAD tag 认证判别）；
 // 任一失败回退旧格式（无前缀，恒 AES-256-GCM，B-5.4-1 fail-safe）。
 // 候选密钥：当前 sealKey 优先，历史密钥环按序；仅尝试长度与套件匹配者。
+//
+// 双读统计：成功使用非主 profile 套件 / 旧格式回退时，调用 enclaveDualReadInc（若已绑定）。
 func unsealWithContext(sealKey []byte, keyRing [][]byte, ciphertext []byte, context string) ([]byte, error) {
 	if len(ciphertext) > 0 {
 		if prov, ok := providerForSuite(ciphertext[0]); ok {
 			if plain, err := openWithSuite(prov, ciphertext[1:], sealKey, keyRing, context); err == nil {
+				// suite 版本化：若 suite 与主 profile 不一致，则为双读。
+				if enclaveDualReadInc != nil && prov.Profile() != hashProvForProfile() {
+					enclaveDualReadInc()
+				}
 				return plain, nil
 			}
 		}
@@ -164,7 +175,18 @@ func unsealWithContext(sealKey []byte, keyRing [][]byte, ciphertext []byte, cont
 	if err != nil {
 		return nil, fmt.Errorf("enclave: 解封失败（数据被篡改、上下文不符或密钥不在环内）: %w", err)
 	}
+	// 旧格式回退（恒 SHA-256/AES-GCM）：主 profile 不是 intl 时为双读；
+	// 主 profile 是 intl 时，旧格式即主算法，不算双读。
+	if enclaveDualReadInc != nil && hashProvForProfile() != cryptop.ProfileIntl {
+		enclaveDualReadInc()
+	}
 	return plain, nil
+}
+
+// hashProvForProfile 返回当前进程主 profile（供双读判断）。
+// 主 profile 即 cryptoProvider.Profile()（seal 端也用它）。
+func hashProvForProfile() cryptop.Profile {
+	return cryptoProvider.Profile()
 }
 
 // openWithSuite 按指定 suite 解析 body（AAD‖nonce‖ct），校验上下文绑定后

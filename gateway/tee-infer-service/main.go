@@ -3503,11 +3503,11 @@ func main() {
 	case "tdx", "sgx", "nv-cc":
 		e, err := newPlatformEnclave(*enclaveMode)
 		if err != nil {
-			log.Fatalf("初始化 %s 飞地失败: %v", *enclaveMode, err)
+			log.Fatalf("初始化平台飞地失败: %v", err)
 		}
 		encl = e
 	default:
-		log.Fatalf("未知飞地实现: %q（mock|tdx|sgx）", *enclaveMode)
+		log.Fatalf("未知 enclave 模式: %s", *enclaveMode)
 	}
 	log.Printf("飞地实现: %s（测量值 %s）", encl.Platform(), hex.EncodeToString(mustMeasure(encl)))
 
@@ -3660,6 +3660,9 @@ func main() {
 		metrics:           newMetrics(),
 		disposition:       nilDisposition{}, // S4-4：默认永远放行；SaaS 构建由 initTenantDisposition 替换
 	}
+	// P0-4 §10.1：跨源 cryptop 指标绑定（须在 srv.metrics 初始化后）
+	srv.metrics.SetCryptopCompatMode("mask_bridge", *cryptoMaskPRG == "bridge")
+	setEnclaveDualReadHook(srv.metrics.IncEnclaveDualRead)
 	// P0-4 §6 B6#9：二级租户 KEK 体系（Root→KEK→会话master→seed 三级链）
 	rootKey := encl.rootKey()
 	if len(rootKey) != cryptoProvider.SymmetricKeySize() {

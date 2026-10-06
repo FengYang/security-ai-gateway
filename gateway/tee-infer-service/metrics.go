@@ -107,6 +107,10 @@ type otpmaskMetrics struct {
 	// P0-4 §10.1 #7/#8 跨源行（scope 固定 tenant_master，由 teecore TenantKeyManager 驱动）。
 	tenantKeyRotations int64
 	tenantKeyDestroys  int64
+	// P0-4 §10.1 双读计数：用非主 profile 套件成功解封 enclave 密封数据（含旧格式回退）。
+	enclaveDualReads int64
+	// P0-4 §10.1 #15 跨源兼容模式：当前 mask_prg 是否 bridge（0/1 gauge）。
+	cryptopCompatMode map[string]int64
 }
 
 func newMetrics() *otpmaskMetrics {
@@ -144,6 +148,7 @@ func newMetrics() *otpmaskMetrics {
 		ogL2OnlyHit:        make(map[string]int64),
 		ogL2DurationSec:    newHistogram(l2DurationSecBuckets),
 		contentLabelFrames: make(map[string]int64),
+		cryptopCompatMode:  make(map[string]int64),
 	}
 }
 
@@ -386,6 +391,24 @@ func (m *otpmaskMetrics) IncTenantDestroy() {
 	m.mu.Unlock()
 }
 
+// IncEnclaveDualRead 记录一次 enclave 双读（用非主 profile 套件 / 旧格式回退成功解封）。
+func (m *otpmaskMetrics) IncEnclaveDualRead() {
+	m.mu.Lock()
+	m.enclaveDualReads++
+	m.mu.Unlock()
+}
+
+// SetCryptopCompatMode 设置兼容/桥接模式标志（#15；与 sidecar 同名指标异进程发射）。
+func (m *otpmaskMetrics) SetCryptopCompatMode(feature string, on bool) {
+	m.mu.Lock()
+	if on {
+		m.cryptopCompatMode[feature] = 1
+	} else {
+		m.cryptopCompatMode[feature] = 0
+	}
+	m.mu.Unlock()
+}
+
 // setAuditRetentionDays 落审计留存期声明（gauge；启动期一次）。
 func (m *otpmaskMetrics) setAuditRetentionDays(days int) {
 	m.mu.Lock()
@@ -507,6 +530,21 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	fmt.Fprintf(w, "cryptop_key_rotations_total{scope=\"tenant_master\"} %d\n", m.tenantKeyRotations)
 	fmt.Fprintf(w, "# HELP cryptop_key_destroy_total 密钥销毁计数（按 scope；本行由 tee 进程发射）\n# TYPE cryptop_key_destroy_total counter\n")
 	fmt.Fprintf(w, "cryptop_key_destroy_total{scope=\"tenant_master\"} %d\n", m.tenantKeyDestroys)
+	// 跨源：cryptop_dualread_total{artifact=enclave}（双读：非主 profile 套件 / 旧格式回退解封成功）
+	fmt.Fprintf(w, "# HELP cryptop_dualread_total 双读计数（用非主 profile 算法成功解算 wire/hash/signature）\n# TYPE cryptop_dualread_total counter\n")
+	fmt.Fprintf(w, "cryptop_dualread_total{artifact=\"enclave\"} %d\n", m.enclaveDualReads)
+	// 跨源：cryptop_compat_mode{feature}（与 sidecar 同名指标异进程发射）
+	if len(m.cryptopCompatMode) > 0 {
+		fmt.Fprintf(w, "# HELP cryptop_compat_mode 兼容/桥接模式开启标志（feature=mask_bridge；1=on/0=off）\n# TYPE cryptop_compat_mode gauge\n")
+		keys := make([]string, 0, len(m.cryptopCompatMode))
+		for k := range m.cryptopCompatMode {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(w, "cryptop_compat_mode{feature=%q} %d\n", k, m.cryptopCompatMode[k])
+		}
+	}
 }
 
 // writeCounter 输出一个 counter 指标族（labels 决定标签维度）。

@@ -79,11 +79,10 @@ func (st *recomputeState) checkLayerOrder(layer int) error {
 	return nil
 }
 
-// maskNext 计算 mask_next 指纹
+// maskNext 计算 mask_next 指纹（MAC 下沉 Provider；intl=HMAC-SHA256 逐字节等价现役）。
 func maskNext(sessionKey []byte, layer int, requestID string) string {
-	mac := hmac.New(sha256.New, sessionKey)
-	mac.Write([]byte(fmt.Sprintf("%d|%s", layer+1, requestID)))
-	return hex.EncodeToString(mac.Sum(nil))
+	sum := cryptoProvider.HMAC(sessionKey, []byte(fmt.Sprintf("%d|%s", layer+1, requestID)))
+	return hex.EncodeToString(sum)
 }
 
 // LayerWeightProvider 层权重提供器
@@ -289,28 +288,26 @@ func verifyRecomputeSig(kSig []byte, req *recomputeRequest) bool {
 		return false
 	}
 	canonical := recomputeCanonical(req)
-	mac := hmac.New(sha256.New, kSig)
-	mac.Write(canonical)
-	return hmac.Equal(got, mac.Sum(nil))
+	want := cryptoProvider.HMAC(kSig, canonical)
+	return hmac.Equal(got, want)
 }
 
 func recomputeCanonical(req *recomputeRequest) []byte {
-	h := sha256.New()
-	h.Write([]byte(fmt.Sprintf("%s|%d|%s|%d", req.RequestID, req.Layer, req.Op, req.MaskVersion)))
+	var buf []byte
+	buf = append(buf, []byte(fmt.Sprintf("%s|%d|%s|%d", req.RequestID, req.Layer, req.Op, req.MaskVersion))...)
 	batchJSON, _ := json.Marshal(req.Batch)
-	h.Write(batchJSON)
-	return h.Sum(nil)
+	buf = append(buf, batchJSON...)
+	return cryptoProvider.Hash(buf)
 }
 
 func signRecompute(kSig []byte, resp *recomputeResponse) string {
-	h := sha256.New()
-	h.Write([]byte(resp.RequestID))
-	h.Write([]byte(resp.MaskNext))
+	var buf []byte
+	buf = append(buf, []byte(resp.RequestID)...)
+	buf = append(buf, []byte(resp.MaskNext)...)
 	resultJSON, _ := json.Marshal(resp.Result)
-	h.Write(resultJSON)
-	mac := hmac.New(sha256.New, kSig)
-	mac.Write(h.Sum(nil))
-	return hex.EncodeToString(mac.Sum(nil))
+	buf = append(buf, resultJSON...)
+	sum := cryptoProvider.HMAC(kSig, cryptoProvider.Hash(buf))
+	return hex.EncodeToString(sum)
 }
 
 func toFloat64(v []uint64) []float64 {
