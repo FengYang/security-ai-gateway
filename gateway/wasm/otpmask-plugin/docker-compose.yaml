@@ -7,6 +7,7 @@ services:
     command: -c /etc/envoy/envoy.yaml --component-log-level wasm:debug
     depends_on:
     - mock-infer
+    - cryptopsvc
     networks:
     - wasmtest
     ports:
@@ -54,6 +55,21 @@ services:
     - wasmtest
     ports:
     - "19090:19090"
+
+  cryptopsvc:
+    build:
+      context: ../../..
+      dockerfile: gateway/cryptopsvc/Dockerfile
+    command:
+    - "-listen"
+    - "0.0.0.0:19097"
+    - "-profile"
+    - "intl"
+    environment:
+    # 开发演示值（intl 32B hex）；生产由部署环境替换。
+    - CRYPTO_STATIC_KEYS={"session/sig/v1":"3031323334353637383961626364656630313233343536373839616263646566","session/hmac/v1":"3031323334353637383961626364656630313233343536373839616263646566"}
+    networks:
+    - wasmtest
 
 networks:
   wasmtest: {}

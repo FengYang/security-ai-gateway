@@ -165,29 +165,53 @@ func isSSEBody(body []byte) bool {
 
 // SSEStreamDecoder 增量 SSE 密文流解密状态机（P1b 流式外发）。
 //
-// 与整包 decryptSSEBody 的差异：后者在 endOfStream 一次性收全 body 再解密；
+// 与整包 decryptSSEBody 的差异：后者在 endOfStream 一次性收齐 body 再解密；
 // 本状态机把 tee-infer 密文 body 的字节流（逐 frame 到达）跨 frame 拼合为
 // 完整 data: 行，逐帧即时解密并追加输出，从而可配合 ProcessStreamingResponseBody
 // 逐片外发，规避 Envoy 响应整体缓冲的大响应挂起（§4.2）。
+//
+// 批量模式（batchSize > 1）：攒满 batchSize 个 data: 行后调一次 /v1/batch
+// 批量解密，减少 sidecar 调用次数（T-5.4-7）。不满一批的尾帧在 isLastChunk 时冲刷。
+// batchSize <= 1 等价于逐帧模式（T-5.4-2），与改造前行为一致。
 //
 // 安全语义与整包版等价：任一分片解密失败 / 外层计数器重放 / 内层 seq 乱序 →
 // 整流拒绝（err 非 nil，外层不再外发），不输出半截明文；已外发的合法前缀由
 // 外层以 fail-closed 截断丢弃（HTTP 上表现为流中断）。
 type SSEStreamDecoder struct {
-	dec           *sseStreamDecryptor
-	reqID         string
-	model         string
-	done          bool   // 已收到正常终止（stop/content_filter）并输出 [DONE]
+	dec       *sseStreamDecryptor
+	reqID     string
+	model     string
+	done      bool   // 已收到正常终止（stop/content_filter）并输出 [DONE]
 	contentFilter bool   // 已观察到 finish="content_filter"（OG-16 网关层独立指标用）
-	labelSeen     bool   // B1：上游已携带 label meta（SawLabel 去重注入的依据）
-	first         bool   // 是否已见到首个 data: 行（判空流）
-	pending       []byte // 跨 frame 未拼合完整行的残留字节
-	err           error  // 首个不可恢复错误（整流拒绝后不再处理新帧）
+	labelSeen bool   // B1：上游已携带 label meta（SawLabel 去重注入的依据）
+	first     bool   // 是否已见到首个 data: 行（判空流）
+	pending   []byte // 跨 frame 未拼合完整行的残留字节
+	err       error  // 首个不可恢复错误（整流拒绝后不再处理新帧）
+
+	// ---- 批量模式 ----
+	batchSize int      // 批大小（<=1 = 逐帧，等价原行为）
+	batched   [][]byte // 已攒的待解密密文信封（hex 解码前的 data: 行原始字符串 bytes，含空格）
+	emitQueue []byte   // 已解密待输出的明文 SSE 字节（顺序排列）
+	inBatch   bool     // 是否正在等批量解密回调（防止重入）
+	// 批结束时需要延续的状态（供 flushBatch 回调恢复 drain 上下文）
+	batchOut     []byte // 批回调时累积的 out
+	batchLast    bool   // 批回调时的 isLastChunk
+	batchCb      func(out []byte, err error) // 批回调时的 cb
 }
 
-// NewSSEStreamDecoder 创建增量解密状态机。
+// NewSSEStreamDecoder 创建增量解密状态机（默认逐帧，batchSize=1）。
 func NewSSEStreamDecoder(reqID, model string) *SSEStreamDecoder {
-	return &SSEStreamDecoder{dec: &sseStreamDecryptor{}, reqID: reqID, model: model}
+	return &SSEStreamDecoder{dec: &sseStreamDecryptor{}, reqID: reqID, model: model, batchSize: 1}
+}
+
+// NewSSEStreamDecoderWithBatch 创建带批量解密的增量解密状态机。
+// batchSize <= 1 等价于逐帧模式（T-5.4-2）；>1 启用批量（T-5.4-7）。
+func NewSSEStreamDecoderWithBatch(reqID, model string, batchSize int) *SSEStreamDecoder {
+	bs := batchSize
+	if bs < 1 {
+		bs = 1
+	}
+	return &SSEStreamDecoder{dec: &sseStreamDecryptor{}, reqID: reqID, model: model, batchSize: bs}
 }
 
 // ContentFiltered 报告本流是否以 finish="content_filter" 审核终止（OG-16）。
@@ -215,11 +239,28 @@ func (d *SSEStreamDecoder) Feed(chunk []byte, isLastChunk bool, cb func(out []by
 	d.drain(nil, isLastChunk, cb)
 }
 
-// drain 从 pending 逐行消费：非 data:/[DONE] 行忽略；data: 行经 CPS 解密后编译为
-// 客户端 SSE 行并追加到 out。pending 无完整行时进入 finish 收尾判定。
+// drain 从 pending 逐行消费：
+//   - 非 data:/[DONE] 行忽略
+//   - data: 行：逐帧模式（batchSize<=1）即时解密（走 decryptSSEChunk）；
+//     批量模式攒到 batched[]，满 batchSize 触发 flushBatch 批量解密
+//   - pending 无完整行时进入 finish 收尾判定
+//
+// emitQueue：批量模式下，已解密的明文 SSE 字节先进入 emitQueue 排队，
+// 下次 drain 开头优先输出，输出完再继续攒新帧。
 func (d *SSEStreamDecoder) drain(out []byte, isLastChunk bool, cb func(out []byte, err error)) {
+	// 第一步：优先输出 emitQueue 里已解密的内容（批量模式用）
+	if len(d.emitQueue) > 0 {
+		out = append(out, d.emitQueue...)
+		d.emitQueue = nil
+	}
+
 	idx := bytes.IndexByte(d.pending, '\n')
 	if idx < 0 {
+		// pending 无完整行：批量模式且有剩余待解密帧 + isLastChunk → 冲刷尾批
+		if d.batchSize > 1 && len(d.batched) > 0 && isLastChunk {
+			d.flushBatch(out, isLastChunk, cb)
+			return
+		}
 		d.finish(out, isLastChunk, cb)
 		return
 	}
@@ -234,39 +275,135 @@ func (d *SSEStreamDecoder) drain(out []byte, isLastChunk bool, cb func(out []byt
 		d.drain(out, isLastChunk, cb)
 		return
 	}
-	d.dec.decryptSSEChunk(dataLine, func(sc *streamChunk, err error) {
+
+	if d.batchSize <= 1 {
+		// ---- 逐帧模式（原逻辑）----
+		d.dec.decryptSSEChunk(dataLine, func(sc *streamChunk, err error) {
+			if err != nil {
+				d.err = err
+				cb(nil, err)
+				return
+			}
+			d.first = true
+			if sc.Label != nil {
+				d.labelSeen = true // B1：上游已带标识（head/repeat/tail 任一）
+			}
+			bs, err := sseLine(d.reqID, d.model, sc)
+			if err != nil {
+				d.err = err
+				cb(nil, err)
+				return
+			}
+			out = append(out, bs...)
+			if sc.Finish != "" {
+				// stop=正常结束；content_filter=内容安全审核终止（OG-16，正常收尾可提示）；
+				// 其他值（error/未知码）整流拒绝。
+				if sc.Finish != "stop" && sc.Finish != "content_filter" {
+					d.err = fmt.Errorf("envelope: SSE 流异常终止（finish=%q）", sc.Finish)
+					cb(nil, d.err)
+					return
+				}
+				if sc.Finish == "content_filter" {
+					d.contentFilter = true
+				}
+				out = append(out, "data: [DONE]\n\n"...)
+				d.done = true
+				cb(out, nil)
+				return
+			}
+			d.drain(out, isLastChunk, cb)
+		})
+		return
+	}
+
+	// ---- 批量模式 ----
+	d.batched = append(d.batched, []byte(strings.TrimSpace(dataLine)))
+
+	if len(d.batched) >= d.batchSize {
+		d.flushBatch(out, isLastChunk, cb)
+		return
+	}
+
+	// 继续攒下一行
+	d.drain(out, isLastChunk, cb)
+}
+
+// flushBatch 批量解密当前 batched 中的所有帧。
+// 成功后结果按顺序追加到 emitQueue，清空 batched，继续 drain。
+// 任一帧失败 → 整流拒绝（fail-closed）。
+func (d *SSEStreamDecoder) flushBatch(out []byte, isLastChunk bool, cb func(out []byte, err error)) {
+	n := len(d.batched)
+	if n == 0 {
+		d.drain(out, isLastChunk, cb)
+		return
+	}
+	// hex 解码每帧
+	wires := make([][]byte, n)
+	for i, line := range d.batched {
+		wire, err := hex.DecodeString(string(line))
 		if err != nil {
-			d.err = err
-			cb(nil, err)
+			d.err = fmt.Errorf("envelope batch[%d]: SSE 分片非 hex: %w", i, err)
+			cb(nil, d.err)
 			return
 		}
-		d.first = true
-		if sc.Label != nil {
-			d.labelSeen = true // B1：上游已带标识（head/repeat/tail 任一）
-		}
-		bs, err := sseLine(d.reqID, d.model, sc)
-		if err != nil {
-			d.err = err
-			cb(nil, err)
+		wires[i] = wire
+	}
+	// 清空 batched（复用底层数组）
+	d.batched = d.batched[:0]
+
+	d.inBatch = true
+	Session.batchOpenPayloads(protocol.EndpointInfer, wires, func(results []batchOpenResult, berr error) {
+		d.inBatch = false
+		if berr != nil {
+			d.err = berr
+			cb(nil, berr)
 			return
 		}
-		out = append(out, bs...)
-		if sc.Finish != "" {
-			// stop=正常结束；content_filter=内容安全审核终止（OG-16，正常收尾可提示）；
-			// 其他值（error/未知码）整流拒绝。
-			if sc.Finish != "stop" && sc.Finish != "content_filter" {
-				d.err = fmt.Errorf("envelope: SSE 流异常终止（finish=%q）", sc.Finish)
+		// 逐帧处理结果（按顺序）
+		for i, r := range results {
+			if r.Err != nil {
+				d.err = fmt.Errorf("envelope batch[%d]: %w", i, r.Err)
 				cb(nil, d.err)
 				return
 			}
-			if sc.Finish == "content_filter" {
-				d.contentFilter = true
+			var chunk streamChunk
+			if err := json.Unmarshal(r.Pt, &chunk); err != nil {
+				d.err = fmt.Errorf("envelope batch[%d]: SSE 分片 JSON 无效: %w", i, err)
+				cb(nil, d.err)
+				return
 			}
-			out = append(out, "data: [DONE]\n\n"...)
-			d.done = true
-			cb(out, nil)
-			return
+			// seq 严格递增校验
+			if err := protocol.CheckStreamSequence(d.dec.lastSeq, chunk.Seq); err != nil {
+				d.err = err
+				cb(nil, d.err)
+				return
+			}
+			d.dec.lastSeq = chunk.Seq
+			d.first = true
+			if chunk.Label != nil {
+				d.labelSeen = true
+			}
+			bs, err := sseLine(d.reqID, d.model, &chunk)
+			if err != nil {
+				d.err = err
+				cb(nil, d.err)
+				return
+			}
+			d.emitQueue = append(d.emitQueue, bs...)
+			if chunk.Finish != "" {
+				if chunk.Finish != "stop" && chunk.Finish != "content_filter" {
+					d.err = fmt.Errorf("envelope: SSE 流异常终止（finish=%q）", chunk.Finish)
+					cb(nil, d.err)
+					return
+				}
+				if chunk.Finish == "content_filter" {
+					d.contentFilter = true
+				}
+				d.emitQueue = append(d.emitQueue, "data: [DONE]\n\n"...)
+				d.done = true
+			}
 		}
+		// 本批全部处理完，继续 drain（emitQueue 有内容 → 输出 → 再攒新帧）
 		d.drain(out, isLastChunk, cb)
 	})
 }

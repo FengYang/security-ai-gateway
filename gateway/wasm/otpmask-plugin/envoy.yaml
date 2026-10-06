@@ -121,7 +121,11 @@ static_resources:
                         "tee_service": "tee_infer_service.dns",
                         "tee_port": 19090,
                         "sig_key": "3031323334353637383961626364656630313233343536373839616263646566",
-                        "attest_token": "3031323334353637383961626364656630313233343536373839616263646566"
+                        "attest_token": "3031323334353637383961626364656630313233343536373839616263646566",
+                        "crypto_service": "cryptop-svc.dns",
+                        "crypto_service_port": 19097,
+                        "crypto_profile": "intl",
+                        "mask_prg": "hmac-sha256"
                       }
           - name: envoy.filters.http.router
             typed_config:
@@ -174,3 +178,19 @@ static_resources:
               socket_address:
                 address: tee-infer-service
                 port_value: 19090
+  # cryptop sidecar（compose 下经服务名 LOGICAL_DNS；k8s 同 Pod 时为 127.0.0.1 STATIC，
+  # 见 deploy/k8s 与 deploy/helm）。簇名须与插件 FQDNCluster 口径一致。
+  - name: "outbound|19097||cryptop-svc.dns"
+    connect_timeout: 5s
+    type: LOGICAL_DNS
+    dns_lookup_family: V4_ONLY
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: "outbound|19097||cryptop-svc.dns"
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: cryptopsvc
+                port_value: 19097

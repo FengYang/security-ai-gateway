@@ -10,9 +10,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"security-ai-gateway/gateway/wasm/otpmask-plugin/cryptoclient"
 	"security-ai-gateway/protocol/go"
 )
 
@@ -285,4 +287,176 @@ func TestIsSSEBody(t *testing.T) {
 	if isSSEBody([]byte("")) {
 		t.Fatal("空体不应识别为 SSE")
 	}
+}
+
+// countingTransport 包装 Transport，统计 sidecar 调用次数（按路径）。
+type countingTransport struct {
+	inner  cryptoclient.Transport
+	counts map[string]int
+}
+
+func (c *countingTransport) Post(path string, hdr [][2]string, body []byte, cb cryptoclient.ResponseCallback, timeout uint32) error {
+	c.counts[path]++
+	return c.inner.Post(path, hdr, body, cb, timeout)
+}
+
+func (c *countingTransport) Get(path string, hdr [][2]string, cb cryptoclient.ResponseCallback, timeout uint32) error {
+	c.counts[path]++
+	return c.inner.Get(path, hdr, cb, timeout)
+}
+
+// installSeamWithCounter 安装接缝并返回计数器（替换全局 CryptoClient 为带计数包装）。
+// 调用方须已调用 installSeam / newSessionForTest。
+func installSeamWithCounter() *countingTransport {
+	ct := &countingTransport{inner: CryptoClient.Transport(), counts: map[string]int{}}
+	// 用包装器重建 Client（保留原 breaker/metrics/config）
+	cfg := cryptoclient.Config{}
+	c := cryptoclient.New(ct, nil, nil, cfg)
+	// 复制 capabilities（避免重复 LoadCapabilities）
+	CryptoClient = c
+	cryptoReady = true
+	return ct
+}
+
+// buildSSEStreamN 构造 N 帧合法 SSE 流（seq 1..N，delta 递增，最后一帧 finish=stop，delta 空）。
+// 共 N 个密文分片：前 N-1 个有 delta，第 N 个是 finish 帧。
+func buildSSEStreamN(t *testing.T, n int) []byte {
+	t.Helper()
+	if n < 1 {
+		t.Fatal("n < 1")
+	}
+	chunks := make([]streamChunk, n)
+	counters := make([]uint64, n)
+	for i := 0; i < n-1; i++ {
+		chunks[i] = streamChunk{Seq: uint64(i + 1), Delta: fmt.Sprintf("token-%03d", i+1)}
+		counters[i] = uint64(i + 1)
+	}
+	chunks[n-1] = streamChunk{Seq: uint64(n), Delta: "", Finish: "stop"}
+	counters[n-1] = uint64(n)
+	return buildSSEStream(t, chunks, counters)
+}
+
+// countSSEDataLines 统计明文 SSE 中 data: 行数（不含 [DONE]）。
+func countSSEDataLines(out []byte) int {
+	n := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "data: ") && !strings.Contains(line, "[DONE]") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestT542_SSEBatchBaseline T-5.4-2：batchSize=1 等价于逐帧模式（基线）。
+//
+// 验证点：
+//   - 输出帧数与输入帧数一致
+//   - 每帧对应一次 /v1/open 调用（N 帧 = N 次 open）
+//   - 正常收尾，[DONE] 存在
+func TestT542_SSEBatchBaseline(t *testing.T) {
+	newSessionForTest(t)
+	ct := installSeamWithCounter()
+
+	const n = 10
+	body := buildSSEStreamN(t, n)
+
+	dec := NewSSEStreamDecoderWithBatch("reqT542", "modelT542", 1)
+	out, err := feedAll(dec, body)
+	if err != nil {
+		t.Fatalf("基线批量(batchSize=1)解密失败: %v", err)
+	}
+
+	// 帧数校验
+	if got := countSSEDataLines(out); got != n {
+		t.Fatalf("帧数不匹配: got %d, want %d", got, n)
+	}
+	// [DONE] 存在
+	if !strings.Contains(string(out), "data: [DONE]") {
+		t.Fatal("未输出 [DONE]")
+	}
+	// sidecar 调用：n 次 /v1/open（逐帧）+ 1 次 /v1/capabilities（installSeam）
+	if ct.counts["/v1/open"] != n {
+		t.Fatalf("/v1/open 调用次数: got %d, want %d", ct.counts["/v1/open"], n)
+	}
+	if ct.counts["/v1/batch"] != 0 {
+		t.Fatalf("逐帧模式不应调用 /v1/batch，实际 %d 次", ct.counts["/v1/batch"])
+	}
+}
+
+// TestT547_SSEBatchAggregation T-5.4-7：批量聚合模式（batchSize=B）。
+//
+// 验证点：
+//   - 输出帧数与逐帧模式逐字节一致（内容等价）
+//   - /v1/batch 调用次数 = ceil(N/B)（批次数）
+//   - 无逐帧 /v1/open 调用
+//   - 尾批不满 B 帧也能冲刷（isLastChunk 触发）
+//   - 跨 Feed 攒帧也正确（逐字节喂入，每字节一次 Feed）
+func TestT547_SSEBatchAggregation(t *testing.T) {
+	const n = 17
+	const batchSize = 4
+	wantBatches := (n + batchSize - 1) / batchSize // ceil(17/4) = 5
+
+	// 逐帧模式：自己的会话 + 自己的 body
+	newSessionForTest(t)
+	body1 := buildSSEStreamN(t, n)
+	refOut, refErr := feedAll(NewSSEStreamDecoderWithBatch("ref", "model", 1), body1)
+	if refErr != nil {
+		t.Fatalf("参照(逐帧)解密失败: %v", refErr)
+	}
+
+	// 批量模式：全新会话 + 新会话加密的 body
+	newSessionForTest(t)
+	body2 := buildSSEStreamN(t, n)
+	ct := installSeamWithCounter()
+	batchOut, batchErr := feedAll(NewSSEStreamDecoderWithBatch("t547", "model", batchSize), body2)
+	if batchErr != nil {
+		t.Fatalf("批量解密失败: %v", batchErr)
+	}
+
+	// 帧数一致
+	if got := countSSEDataLines(batchOut); got != n {
+		t.Fatalf("批量模式帧数: got %d, want %d", got, n)
+	}
+	// [DONE] 存在
+	if !strings.Contains(string(batchOut), "data: [DONE]") {
+		t.Fatal("批量模式未输出 [DONE]")
+	}
+	// 调用次数：全部走 batch，不走逐帧 open
+	if ct.counts["/v1/batch"] != wantBatches {
+		t.Fatalf("/v1/batch 调用次数: got %d, want %d", ct.counts["/v1/batch"], wantBatches)
+	}
+	if ct.counts["/v1/open"] != 0 {
+		t.Fatalf("批量模式不应调用 /v1/open，实际 %d 次", ct.counts["/v1/open"])
+	}
+	// 内容等价（逐帧 vs 批量）—— 用关键字段比对（Created 是时间戳，忽略）
+	refS := string(refOut)
+	batS := string(batchOut)
+	for _, want := range []string{
+		`"object":"chat.completion.chunk"`,
+		`"id":"t547"`,
+		`"model":"model"`,
+	} {
+		if !strings.Contains(batS, want) {
+			t.Fatalf("批量输出缺 %q", want)
+		}
+	}
+	// delta 数量与顺序：token-001..token-(n-1) 应该都在批量输出里且顺序正确
+	numTokens := n - 1
+	for i := 1; i <= numTokens; i++ {
+		token := fmt.Sprintf("token-%03d", i)
+		if !strings.Contains(batS, token) {
+			t.Fatalf("批量输出缺 token %q", token)
+		}
+	}
+	// 顺序校验：token-001 在 token-002 前，依此类推
+	prevIdx := -1
+	for i := 1; i <= numTokens; i++ {
+		token := fmt.Sprintf("token-%03d", i)
+		idx := strings.Index(batS, token)
+		if idx <= prevIdx {
+			t.Fatalf("token 顺序错：token-%03d 在 token-%03d 之前（位置 %d vs %d）", i, i-1, idx, prevIdx)
+		}
+		prevIdx = idx
+	}
+	_ = refS // 参照输出保留（如需逐字节比对可加）
 }

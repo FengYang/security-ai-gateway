@@ -121,6 +121,10 @@ type PluginConfig struct {
 	CryptoCallTimeoutMS     int64  `json:"crypto_call_timeout_ms"`     // R-3（缺省 50）
 	CryptoCircuitThreshold  int64  `json:"crypto_circuit_threshold"`   // R-4（缺省 5）
 	CryptoCircuitCooldownMS int64  `json:"crypto_circuit_cooldown_ms"` // R-4（缺省 30000）
+	// C1：SSE 流解密批量大小（T-5.4-7）。
+	// <=1 = 逐帧（等价改造前，T-5.4-2）；>1 = 攒 B 帧调一次 /v1/batch。
+	// 缺省 16（平衡延迟与 sidecar 调用次数）；上限 64（与 sidecar maxBatchOps 对齐）。
+	SSEBatchSize int64 `json:"sse_batch_size"`
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -170,6 +174,7 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.CryptoCallTimeoutMS = json.Get("crypto_call_timeout_ms").Int()
 	config.CryptoCircuitThreshold = json.Get("crypto_circuit_threshold").Int()
 	config.CryptoCircuitCooldownMS = json.Get("crypto_circuit_cooldown_ms").Int()
+	config.SSEBatchSize = json.Get("sse_batch_size").Int()
 	if config.CryptoProfile == "" {
 		config.CryptoProfile = "intl"
 	}
@@ -1038,7 +1043,14 @@ func driveStream(ctx wrapper.HttpContext, config PluginConfig, st *respStreamSta
 	if !st.first && len(st.rawPending) > 0 {
 		st.first = true
 		if looksLikeSSEEnvelope(ctx, config, st.rawPending) {
-			st.dec = NewSSEStreamDecoder(pendingRequestID, config.Model)
+			batchSize := int(config.SSEBatchSize)
+			if batchSize <= 0 {
+				batchSize = 16 // 缺省
+			}
+			if batchSize > 64 {
+				batchSize = 64 // 上限（sidecar maxBatchOps 对齐）
+			}
+			st.dec = NewSSEStreamDecoderWithBatch(pendingRequestID, config.Model, batchSize)
 		}
 	}
 	if st.dec != nil {

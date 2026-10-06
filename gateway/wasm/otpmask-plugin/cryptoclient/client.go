@@ -165,6 +165,9 @@ func New(tr Transport, br *Breaker, m Metrics, cfg Config) *Client {
 // Capabilities 返回上次 LoadCapabilities 的结果。
 func (c *Client) Capabilities() Capabilities { return c.caps }
 
+// Transport 返回当前出站 transport（测试用；生产代码勿用）。
+func (c *Client) Transport() Transport { return c.tr }
+
 // ---- 低层：统一调用入口 ----
 
 // call 统一入口：熔断 → #13 → POST → 状态码/解码 → 错误码映射 → #4(隐含)/#14/#5。

@@ -23,11 +23,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -200,6 +202,153 @@ func (s *attestSession) openPayload(endpoint string, wire []byte, cb func(pt []b
 		}
 		cb(pt, nil)
 	})
+}
+
+// batchOpenPayloads 批量解密 s2c 信封（一次 /v1/batch 解多帧），顺序做反重放窗口校验。
+//
+// 安全语义与 openPayload 等价：任一帧解密失败 / 版本/方向/suite 不符 / 反重放窗口拒绝
+// → 该帧索引的 err 非 nil；调用方负责 fail-closed（整批中任一失败则整流拒绝）。
+// 窗口校验按 wires 原始顺序依次执行（与逐帧模式顺序一致，保证窗口状态机等价）。
+//
+// CPS 交付：cb(results, overallErr)。overallErr 非 nil = 批整体失败（熔断/传输/解码）；
+// results 与 wires 等长，逐帧给出 pt/err。
+func (s *attestSession) batchOpenPayloads(endpoint string, wires [][]byte, cb func(results []batchOpenResult, overallErr error)) {
+	if !cryptoUsable() {
+		cb(nil, errCryptoUnavailable)
+		return
+	}
+	n := len(wires)
+	if n == 0 {
+		cb(nil, nil)
+		return
+	}
+
+	// 第一步：每帧做 framing/version/direction/suite 预校验，构造 batch ops
+	type validatedFrame struct {
+		env       *protocol.Envelope
+		aad       []byte
+		nonce     []byte
+		ciphertext []byte
+	}
+	validated := make([]validatedFrame, n)
+	for i, wire := range wires {
+		env, err := protocol.DecodeEnvelope(wire)
+		if err != nil {
+			cb(nil, fmt.Errorf("envelope[%d]: framing 失败: %w", i, err))
+			return
+		}
+		if env.Version != protocol.EnvelopeVersion {
+			cb(nil, fmt.Errorf("envelope[%d]: 版本不符（got=%d want=%d）", i, env.Version, protocol.EnvelopeVersion))
+			return
+		}
+		if env.Direction != protocol.DirectionS2C {
+			cb(nil, fmt.Errorf("envelope[%d]: 方向不符（期望 s2c，got=%d）", i, byte(env.Direction)))
+			return
+		}
+		if env.Suite != cryptoSuite {
+			cb(nil, fmt.Errorf("envelope[%d]: suite 不符（got=%d want=%d）", i, env.Suite, cryptoSuite))
+			return
+		}
+		validated[i] = validatedFrame{env: env, ciphertext: env.Ciphertext}
+	}
+
+	s.mu.Lock()
+	if s.SessionID == "" || s.S2CRef == "" {
+		s.mu.Unlock()
+		cb(nil, errSessionMissing)
+		return
+	}
+	sid, ref := s.SessionID, s.S2CRef
+	s.mu.Unlock()
+
+	// 构造 batch ops（每帧 aad/nonce 派生）
+	ops := make([]cryptoclient.Op, n)
+	for i := 0; i < n; i++ {
+		v := &validated[i]
+		v.aad = protocol.EnvelopeAAD(sid, protocol.DirectionS2C, v.env.Counter, endpoint)
+		v.nonce = protocol.EnvelopeNonce(v.env.Counter)
+		ops[i] = cryptoclient.Op{
+			ID: strconv.Itoa(i),
+			Op: cryptoclient.OpOpen,
+			Payload: map[string]any{
+				"key_ref":    string(ref),
+				"aad":        b64str(v.aad),
+				"nonce":      b64str(v.nonce),
+				"ciphertext": b64str(v.ciphertext),
+			},
+		}
+	}
+
+	// 调一次 /v1/batch
+	CryptoClient.Batch(ops, func(bresults []cryptoclient.OpResult, berr error) {
+		if berr != nil {
+			cb(nil, fmt.Errorf("envelope batch: %w", berr))
+			return
+		}
+		// 按 id 重排为原始顺序
+		sorted := make([]cryptoclient.OpResult, n)
+		seen := 0
+		for _, r := range bresults {
+			idx, cerr := strconv.Atoi(r.ID)
+			if cerr != nil || idx < 0 || idx >= n {
+				continue
+			}
+			sorted[idx] = r
+			seen++
+		}
+		if seen != n {
+			cb(nil, fmt.Errorf("envelope batch: 结果数量不匹配（got %d want %d）", seen, n))
+			return
+		}
+
+		// 顺序交付：先做窗口校验（与逐帧模式状态机等价），再组装结果
+		results := make([]batchOpenResult, n)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for i := 0; i < n; i++ {
+			r := sorted[i]
+			if r.Error != nil {
+				results[i] = batchOpenResult{Err: r.Error}
+				continue
+			}
+			ptStr, ok := r.Fields["plaintext"].(string)
+			if !ok {
+				results[i] = batchOpenResult{Err: fmt.Errorf("envelope batch[%d]: 响应缺 plaintext", i)}
+				continue
+			}
+			pt, derr := unb64(ptStr)
+			if derr != nil {
+				results[i] = batchOpenResult{Err: fmt.Errorf("envelope batch[%d]: plaintext base64 失败: %w", i, derr)}
+				continue
+			}
+			// 反重放窗口校验（顺序执行，与逐帧模式一致）
+			if werr := s.recvWindow.Check(validated[i].env.Counter); werr != nil {
+				results[i] = batchOpenResult{Err: werr}
+				continue
+			}
+			results[i] = batchOpenResult{Pt: pt}
+		}
+		cb(results, nil)
+	})
+}
+
+// batchOpenResult 单帧批量解密结果。
+type batchOpenResult struct {
+	Pt  []byte // 明文（成功时）
+	Err error  // 该帧错误（失败时）
+}
+
+// b64str base64 编码（attest 内辅助）。
+func b64str(b []byte) string {
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// unb64 base64 解码（attest 内辅助）。
+func unb64(s string) ([]byte, error) {
+	if s == "" {
+		return nil, nil
+	}
+	return base64.StdEncoding.DecodeString(s)
 }
 
 // Session 全局会话（进程级）。
