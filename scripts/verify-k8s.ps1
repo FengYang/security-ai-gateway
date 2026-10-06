@@ -1,4 +1,4 @@
-﻿# verify-k8s.ps1 - M10 K8s manifests verification (single-node dev env)
+# verify-k8s.ps1 - M10 K8s manifests verification (single-node dev env)
 #
 # Validates the K8s/monitoring manifests and app images WITHOUT a cluster:
 #   1. kustomize render  (kubectl kustomize, catches structural errors)
@@ -64,16 +64,16 @@ $files = Get-ChildItem -Recurse deploy -Filter *.yaml |
     Where-Object { $_.FullName -notmatch '\\templates\\' } | # Helm 模板含 Go template 语法，由 helm lint 校验
     ForEach-Object { $_.FullName }
 $r3 = Invoke-Native 'python' (@('-c', $yamlCheck) + @($files))
-Check 'YAML syntax (all deploy/*.yaml)' ($r3.Code -eq 0) (($r3.Out -replace "`n", ' ').Trim)
+Check 'YAML syntax (all deploy/*.yaml)' ($r3.Code -eq 0) (($r3.Out -replace "`n", ' ').Trim())
 
 # 3. kubectl dry-run (requires a cluster context; otherwise covered by kustomize+YAML)
 Write-Host "`n[3/5] kubectl dry-run" -ForegroundColor Yellow
 $r4 = Invoke-Native 'kubectl' @('config', 'current-context')
-if ($r4.Code -eq 0 -and $r4.Out.Trim -ne '') {
+if ($r4.Code -eq 0 -and $r4.Out.Trim() -ne '') {
     $r5 = Invoke-Native 'kubectl' @('apply', '--dry-run=server', '-k', 'deploy/k8s', '-o', 'name')
-    Check 'kubectl server dry-run (k8s)' ($r5.Code -eq 0) (($r5.Out -replace "`n", ' ').Trim)
+    Check 'kubectl server dry-run (k8s)' ($r5.Code -eq 0) (($r5.Out -replace "`n", ' ').Trim())
     $r6 = Invoke-Native 'kubectl' @('apply', '--dry-run=server', '-k', 'deploy/monitoring', '-o', 'name')
-    Check 'kubectl server dry-run (monitoring)' ($r6.Code -eq 0) (($r6.Out -replace "`n", ' ').Trim)
+    Check 'kubectl server dry-run (monitoring)' ($r6.Code -eq 0) (($r6.Out -replace "`n", ' ').Trim())
 } else {
     Check 'kubectl server dry-run (no cluster, skipped)' $true '(kustomize + YAML checks cover syntax)'
 }
@@ -99,7 +99,7 @@ if (Test-Path $helmBin) {
     $r13 = Invoke-Native $helmBin @('template', 'otpmask', 'deploy/helm/otpmask') # 无值必须失败（required 守卫生效）
     $ok = ($r11.Code -eq 0) -and ($r12.Code -eq 0) -and ($r12.Out -match 'kind: Deployment')
     Check 'helm lint + template render (with ci-values)' $ok
-    Check 'helm template without values fails (secret required guard)' (($r13.Code -ne 0) -and ($r13.Out -match 'sigKey')) (($r13.Out -replace "`n", ' ').Trim)
+    Check 'helm template without values fails (secret required guard)' (($r13.Code -ne 0) -and ($r13.Out -match 'sigKey')) (($r13.Out -replace "`n", ' ').Trim())
 } else {
     Check 'helm lint + template (helm not found, skipped)' $true '(set $env:HELM_BIN)'
 }

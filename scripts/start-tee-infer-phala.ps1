@@ -1,4 +1,4 @@
-﻿# 启动 tee-infer-service 并对接 Phala 密态推理网关（R1-B 预演线）。
+# 启动 tee-infer-service 并对接 Phala 密态推理网关（R1-B 预演线）。
 # 密钥从 deploy/secrets/cmaas.env 读取（gitignored），经环境变量注入，
 # 不出现在命令行与进程列表。
 #
@@ -41,7 +41,10 @@ $goArgs = @(
     "run", "-mod=mod", "./gateway/tee-infer-service",
     "-listen", ":$Port",
     "-cmaas-url", $config["CMAAS_URL"],
-    "-cmaas-model", $config["CMAAS_MODEL"]
+    "-cmaas-model", $config["CMAAS_MODEL"],
+    # 威胁模型 GAP-01/GAP-05：本脚本为开发/演示线（mock 飞地、无管理令牌），
+    # 显式声明 -dev-mode；生产须改用 -enclave=tdx 与 -admin-token 并移除本开关。
+    "-dev-mode"
 )
 
 Write-Host "[start] 启动 tee-infer-service（:$Port，密钥经 env 注入）"

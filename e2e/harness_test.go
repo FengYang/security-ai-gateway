@@ -203,6 +203,8 @@ func startStack(t *testing.T) *stack {
 		"-admin-token", teeAdminToken,
 		"-meter-token", teeMeterToken,
 		"-audit-file", filepath.Join(dir, "tee-audit.jsonl"),
+		// 威胁模型 GAP-01：E2E 用 mock 飞地，须显式声明开发模式（生产禁 mock）。
+		"-dev-mode",
 	}, os.Environ())
 	waitOK(t, teeURL+"/healthz", 30*time.Second)
 

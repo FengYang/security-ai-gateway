@@ -52,6 +52,8 @@ echo "       CMAAS_URL=$CMAAS_URL  CMAAS_MODEL=$CMAAS_MODEL  API_KEY=***${CMAAS_
 #   甲 = 自建 vLLM/llama.cpp：ENGINE_URL=<http://127.0.0.1:8080>
 #   双路线策略文件：ROUTE_CONFIG=/opt/tee-infer/route-config.json（deploy/tee-infer/route-config.dual.example.json）
 #   飞地实现：ENCLAVE=tdx（真 TDX Quote；缺省 mock）
+#   GAP-01/GAP-05：缺省 DEV_MODE=1（开发形态，透传 -dev-mode）；生产须设 DEV_MODE=0
+#                  并在 cmaas.env 配置 ADMIN_TOKEN，否则启动守卫拒绝启动。
 EXTRA_OPTS=""
 if [[ -n "${ENGINE_URL:-}" ]]; then
     EXTRA_OPTS+=" -engine-url=${ENGINE_URL}"
@@ -64,6 +66,17 @@ fi
 if [[ -n "${ENCLAVE:-}" ]]; then
     EXTRA_OPTS+=" -enclave=${ENCLAVE}"
     echo "       飞地实现 ENCLAVE=$ENCLAVE"
+fi
+# 威胁模型 GAP-01/GAP-05：默认 mock 形态须显式 -dev-mode 方可启动。
+# 生产（ENCLAVE=tdx）应设 DEV_MODE=0，并在 cmaas.env 配置 ADMIN_TOKEN。
+if [[ "${DEV_MODE:-1}" == "1" ]]; then
+    EXTRA_OPTS+=" -dev-mode"
+    echo "       开发模式 DEV_MODE=1（放行 mock 飞地/空管理令牌；生产请设 DEV_MODE=0）"
+fi
+if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+    # 经 EnvironmentFile 注入，不出现于命令行/进程列表。
+    EXTRA_OPTS+=" -admin-token=\${ADMIN_TOKEN}"
+    echo "       管理令牌：经 EnvironmentFile 的 ADMIN_TOKEN 注入"
 fi
 
 echo "[4/6] 写 systemd 单元（密钥经 EnvironmentFile 注入，不出现在命令行）"

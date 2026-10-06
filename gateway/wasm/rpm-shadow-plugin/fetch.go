@@ -5,6 +5,8 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -17,7 +19,6 @@ import (
 
 var (
 	ruleCache   *ratelimitcache.Cache
-	tableKey    []byte
 	tableParams struct {
 		service string
 		port    int64
@@ -25,9 +26,19 @@ var (
 	}
 )
 
+// rmHMACVerifier 实现 ratelimitcache.Verifier：本插件**自带** K_rx 字节（不经 cryptop sidecar，
+// 本插件不属 §9.1 门禁作用域），故直接以 HMAC-SHA256 同步校验。
+type rmHMACVerifier struct{ key []byte }
+
+func (v rmHMACVerifier) VerifySym(_ string, data, sig []byte, cb func(ok bool, err error)) {
+	m := hmac.New(sha256.New, v.key)
+	_, _ = m.Write(data)
+	cb(hmac.Equal(sig, m.Sum(nil)), nil)
+}
+
 // initTableFetch 初始化限流表拉取（K_rx 有效且配了控制面地址才启用）。
 func initTableFetch(c PluginConfig) {
-	ruleCache, tableKey = nil, nil
+	ruleCache = nil
 	if !c.Enabled || c.RouteVerifyKeyHex == "" || c.GatewayCoreService == "" {
 		return
 	}
@@ -36,8 +47,7 @@ func initTableFetch(c PluginConfig) {
 		logWarnf("rpm-shadow-plugin: 限流表拉取未启用（route_verify_key 无效）")
 		return
 	}
-	ruleCache = ratelimitcache.New(key)
-	tableKey = key
+	ruleCache = ratelimitcache.New(rmHMACVerifier{key: key}, "")
 	tableParams.service = c.GatewayCoreService
 	tableParams.port = c.GatewayCorePort
 	tableParams.token = c.GatewayCoreToken
@@ -78,11 +88,7 @@ func fetchTableOnce() {
 			logWarnf("rpm-shadow-plugin: 解析限流表失败: %v（保留旧表）", err)
 			return
 		}
-		if !ratelimitcache.Verify(tableKey, &tbl) {
-			metricTableFetchRej.incr()
-			logWarnf("rpm-shadow-plugin: 限流表验签失败，拒绝（保留旧表）")
-			return
-		}
+		// 版本判定（同版本=常态；回退=异常）——签名校验在 Update 内经 verifier 完成。
 		if cur := ruleCache.Version(); tbl.Version == cur {
 			return // 同版本＝无变更（常态，不计 ok）
 		} else if tbl.Version < cur {
@@ -90,13 +96,15 @@ func fetchTableOnce() {
 			logWarnf("rpm-shadow-plugin: 限流表版本回退 %d < %d，拒绝（保留旧表）", tbl.Version, cur)
 			return
 		}
-		if !ruleCache.Update(&tbl) {
-			metricTableFetchRej.incr()
-			logWarnf("rpm-shadow-plugin: 限流表未入缓存（版本未递增）version=%d", tbl.Version)
-			return
-		}
-		metricTableFetchOK.incr()
-		logInfof("rpm-shadow-plugin: 限流表验签通过并入缓存 version=%d rules=%d", tbl.Version, len(tbl.Rules))
+		ruleCache.Update(&tbl, func(accepted bool) {
+			if !accepted {
+				metricTableFetchRej.incr()
+				logWarnf("rpm-shadow-plugin: 限流表未入缓存（验签失败/版本未递增）version=%d", tbl.Version)
+				return
+			}
+			metricTableFetchOK.incr()
+			logInfof("rpm-shadow-plugin: 限流表验签通过并入缓存 version=%d rules=%d", tbl.Version, len(tbl.Rules))
+		})
 	})
 	if err != nil {
 		metricTableFetchRej.incr()

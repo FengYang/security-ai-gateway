@@ -163,3 +163,18 @@ og13-results/
 
 # ===== §13 国密切换演练报告与证据（本地产物，不入库；真实演练在部署环境跑出）=====
 deploy/drill-runs/
+
+# ===== 临时调试脚本（不入库）=====
+tmp_*.py
+
+# ===== 覆盖率输出目录（运行时生成，不入库）=====
+cover/
+gateway/tee-infer-service/cover
+gateway/wasm/*/cover
+gateway/wasm/*/routeengine/cover
+
+# ===== WASM 插件本地构建输出目录（编译产物，不入库）=====
+/otpmask-plugin/
+
+# ===== 基准测试结果数据（非源码，不入库）=====
+deploy/tlcp/bench-*.txt
