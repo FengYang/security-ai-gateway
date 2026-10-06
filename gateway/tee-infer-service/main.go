@@ -119,7 +119,7 @@ type keyIssueResponse struct {
 
 type teeServer struct {
 	km            *teecore.KeyManager            // 默认租户（向后兼容）
-	tenants       map[string]*teecore.KeyManager // 租户 → 独立 KeyManager（M9 隔离）
+	tkm           *teecore.TenantKeyManager      // 二级租户 KEK + 三级会话管理器（P0-4 §6）
 	kSig          []byte
 	attest        string             // 远程证明共享令牌（MVP）
 	enclave       Enclave            // 飞地抽象
@@ -250,25 +250,6 @@ const tenantHeader = "X-Tenant-ID"
 
 // defaultTenant 未指定租户时的默认租户（向后兼容）。
 const defaultTenant = "default"
-
-// kmFor 返回租户对应的 KeyManager（懒创建，密钥按租户物理隔离）。
-func (s *teeServer) kmFor(tenant string) *teecore.KeyManager {
-	if tenant == "" {
-		tenant = defaultTenant
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if km, ok := s.tenants[tenant]; ok {
-		return km
-	}
-	km, err := teecore.NewKeyManager(0)
-	if err != nil {
-		// 懒创建失败几乎不可能（仅随机数），fail-closed 返回 nil（上层拒绝请求）
-		return nil
-	}
-	s.tenants[tenant] = km
-	return km
-}
 
 // recordUsage 累加租户用量。
 func (s *teeServer) recordUsage(tenant string, tokensIn, tokensOut int, denied bool) {
@@ -934,20 +915,15 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request_id/model 必填", http.StatusBadRequest)
 		return
 	}
-	// M9-1：密钥按租户物理隔离（独立 KeyManager -> 独立主密钥与密钥表）
+	// P0-4 §6：三级链签发——KEK(二级)→会话master(三级)→request seed
 	tenant := tenantOf(r)
-	km := s.kmFor(tenant)
-	if km == nil {
-		http.Error(w, "密钥管理初始化失败（fail-closed）", http.StatusInternalServerError)
-		return
-	}
-	seed, nonceHex, err := km.Issue(req.RequestID, req.Model)
+	seed, nonceHex, masterID, err := s.tkm.Issue(tenant, req.RequestID, req.Model)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("签发密钥失败: %v", err), http.StatusInternalServerError)
 		return
 	}
 	defer wipe(seed)
-	log.Printf("[tee] 密钥签发 tenant=%s req=%s master=%d", tenant, req.RequestID[:8], km.MasterID())
+	log.Printf("[tee] 密钥签发 tenant=%s req=%s master=%d", tenant, req.RequestID[:8], masterID)
 	// M9-3：审计
 	s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: req.RequestID, Action: "key_issue",
@@ -956,7 +932,7 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 	// M10：指标
 	s.metrics.incKeyIssue(tenant)
 	respJSON, err := json.Marshal(keyIssueResponse{
-		Seed: hex.EncodeToString(seed), Nonce: nonceHex, MasterID: km.MasterID(),
+		Seed: hex.EncodeToString(seed), Nonce: nonceHex, MasterID: masterID,
 		ProtocolVersion: s.protoVersion,
 	})
 	if err != nil {
@@ -1074,14 +1050,8 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// M9-1：按租户取密钥（租户隔离；无签发记录 -> 拒绝）
-	km := s.kmFor(tenant)
-	if km == nil {
-		s.denyAndAudit(tenant, req.RequestID, "keymgr_unavailable", payloadSHA)
-		http.Error(w, "密钥管理初始化失败（fail-closed）", http.StatusInternalServerError)
-		return
-	}
-	seed, ok := km.Lookup(hex.EncodeToString(req.Nonce))
+	// P0-4 §6：按租户 KEK 域回溯请求 seed（无签发记录 -> 拒绝）
+	seed, masterID, ok := s.tkm.LookupDetail(tenant, hex.EncodeToString(req.Nonce))
 	if !ok {
 		s.denyAndAudit(tenant, req.RequestID, "unknown_nonce", payloadSHA)
 		http.Error(w, "nonce 未知（密钥未签发或已过期）", http.StatusBadRequest)
@@ -1140,7 +1110,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		tokens = append(tokens, uint64(tokenID))
 	}
 	log.Printf("[tee] infer tenant=%s request=%s vectors=%d -> %d tokens %v master=%d",
-		tenant, req.RequestID, len(req.CipherVectors), len(tokens), tokens, km.MasterID())
+		tenant, req.RequestID, len(req.CipherVectors), len(tokens), tokens, masterID)
 
 	// 加密输出（同 seed）：token ID 序列密文（方案 C：TEE 内采样后加密回传）
 	cipherOut, err := maskVector(seed, maskModulus, tokens)
@@ -3448,6 +3418,8 @@ func main() {
 	requireAttest := flag.Bool("require-attest", false, "强制证明模式")
 	enclaveMode := flag.String("enclave", "mock", "飞地实现：mock|tdx|sgx")
 	sealFile := flag.String("seal-file", "", "飞地密封数据文件（主密钥/K_sig 经 Seal 持久化；为空 = 内存模式，重启重新生成）")
+	tenantKeyFilePath := flag.String("tenant-key-file", "", "二级租户 KEK 状态密封文件（Snapshot 经 Enclave.Seal 落盘、重启 Unseal 恢复，§6 P1；为空 = 内存模式重启重建）")
+	rotateScanInterval := flag.Duration("rotate-scan-interval", 24*time.Hour, "二级租户主密钥轮换扫描周期（§6.4；扫描 last_rotated_at 超 90 天者）")
 	// P0-4 §12.3：进程级密码档（intl 逐字节等价；profile 是配置而非编译开关，§11.5）。
 	cryptoProfile := flag.String("crypto-profile", "intl", "密码算法档（P0-4 §12.3）：intl|sm-software|sm-module（默认 intl；sm-module 未实现=启动拒，绝不回退冒充）")
 	cryptoMaskPRG := flag.String("mask-prg", "", "掩码 PRG 档（P0-4 §5.3.2/R-14）：hmac-sha256|sm4|bridge；为空=随 profile（intl→hmac-sha256，sm→sm4）。bridge 须 sm 档（R-21）")
@@ -3675,7 +3647,6 @@ func main() {
 		route:             routeCfg,
 		tokenizer:         nil,                       // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
 		cache:             model.NewExactCache(1024), // GF.4.1：精确缓存演示（LRU 1024）；真机替换为语义缓存
-		tenants:           make(map[string]*teecore.KeyManager),
 		usage:             make(map[string]*usageRecord),
 		quota:             make(map[string]quotaSpec),
 		quotaDefault:      *tokenQuota,
@@ -3689,6 +3660,35 @@ func main() {
 		metrics:           newMetrics(),
 		disposition:       nilDisposition{}, // S4-4：默认永远放行；SaaS 构建由 initTenantDisposition 替换
 	}
+	// P0-4 §6 B6#9：二级租户 KEK 体系（Root→KEK→会话master→seed 三级链）
+	rootKey := encl.rootKey()
+	if len(rootKey) != cryptoProvider.SymmetricKeySize() {
+		log.Fatalf("[tenant-key] 一级根密钥长度 %d != profile=%s SymmetricKeySize %d（KEK 封装不可用，fail-closed）",
+			len(rootKey), cryptoProvider.Profile(), cryptoProvider.SymmetricKeySize())
+	}
+	rootWrap := &cryptoRootWrapper{prov: cryptoProvider, root: rootKey}
+	var persist *tenantKeyPersist
+	var changeHook teecore.ChangeHook
+	if *tenantKeyFilePath != "" {
+		persist = &tenantKeyPersist{path: *tenantKeyFilePath, encl: encl, root: rootWrap}
+		changeHook = persist
+	}
+	tkm := teecore.NewTenantKeyManager(cryptoProvider, 0, srv.metrics, &tenantKeyAudit{chain: audit}, changeHook)
+	srv.tkm = tkm
+	if persist != nil {
+		persist.tkm = tkm
+		snaps, err := loadTenantKeyFile(*tenantKeyFilePath, encl)
+		if err != nil {
+			log.Fatalf("[tenant-key] 恢复密封 KEK 状态失败（fail-closed）: %v", err)
+		}
+		if len(snaps) > 0 {
+			if err := tkm.Restore(snaps, rootWrap); err != nil {
+				log.Fatalf("[tenant-key] Restore 失败（fail-closed）: %v", err)
+			}
+			log.Printf("[tenant-key] 恢复租户 KEK 状态：tenants=%d", len(snaps))
+		}
+	}
+	go runTenantKeyScanner(tkm, *rotateScanInterval)
 	// 审计/日志留存期**声明**（校验 fail-closed）。
 	// 声明式：仅暴露声明值（启动日志 / GET /config / otpmask_audit_retention_days）；
 	// 服务**不删除**审计数据——WORM 只追加，就地裁剪会破坏哈希链完整性（audit-verify 无法从创世重算）。

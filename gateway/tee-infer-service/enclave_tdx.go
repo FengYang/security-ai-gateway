@@ -83,6 +83,8 @@ func openTdxQuoteProvider() (any, error) {
 // Platform 返回平台标识。
 func (e *TdxEnclave) Platform() string { return "tdx" }
 
+func (e *TdxEnclave) rootKey() []byte { return append([]byte(nil), e.sealKey...) }
+
 // Measure 返回进程内测量值。
 func (e *TdxEnclave) Measure() ([]byte, error) {
 	out := make([]byte, len(e.measure))

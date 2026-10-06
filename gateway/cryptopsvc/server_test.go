@@ -416,10 +416,12 @@ func TestNewServerConfigValidation(t *testing.T) {
 		{"intl+bridge 非法", intl, Config{MaskPRG: "bridge"}},
 		{"sm+hmac-sha256 非法", sm, Config{MaskPRG: "hmac-sha256"}},
 		{"非 loopback 拒绝", intl, Config{ListenAddr: "0.0.0.0:8443"}},
+		{"R-16 intl 短键（16≠32）", intl, Config{StaticKeys: map[string][]byte{"static/aead": bytes.Repeat([]byte{1}, 16)}}},
+		{"R-16 sm 长键（32≠16）", sm, Config{StaticKeys: map[string][]byte{"static/aead": bytes.Repeat([]byte{1}, 32)}}},
 	}
 	for _, c := range cases {
 		if _, err := NewServer(c.p, c.cfg); err == nil {
-			t.Fatalf("[%s] 应报错（R-2/R-14/R-20/R-21）", c.name)
+			t.Fatalf("[%s] 应报错（R-2/R-14/R-16/R-20/R-21）", c.name)
 		}
 	}
 	// 合法：sm-software + bridge（R-21）
@@ -429,6 +431,12 @@ func TestNewServerConfigValidation(t *testing.T) {
 	// 合法：loopback
 	if _, err := NewServer(intl, Config{ListenAddr: "127.0.0.1:8443"}); err != nil {
 		t.Fatalf("127.0.0.1 loopback 应合法: %v", err)
+	}
+	// 合法：静态键长度匹配 profile（R-16 启动期通过）
+	if _, err := NewServer(intl, Config{StaticKeys: map[string][]byte{
+		"static/aead": bytes.Repeat([]byte{0xAB}, intl.SymmetricKeySize()),
+	}}); err != nil {
+		t.Fatalf("长度匹配的静态键应登记成功: %v", err)
 	}
 }
 

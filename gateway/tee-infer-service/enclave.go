@@ -38,6 +38,9 @@ type Enclave interface {
 	Unseal(ciphertext []byte, context string) ([]byte, error)
 	Measure() ([]byte, error)
 	Platform() string
+	// rootKey 返回一级根密钥（KEK 封装密钥；§6 封装链）。仅供同进程内
+	// cryptop.WrapKey 适配使用，不离开本进程。
+	rootKey() []byte
 }
 
 // ---------- MockEnclave ----------
@@ -116,6 +119,8 @@ func loadSealKeyHistory(envName string) ([][]byte, error) {
 
 // Platform 返回平台标识。
 func (e *MockEnclave) Platform() string { return e.platform }
+
+func (e *MockEnclave) rootKey() []byte { return append([]byte(nil), e.sealKey...) }
 
 // Measure 返回应用测量值（Seal 上下文绑定）。
 func (e *MockEnclave) Measure() ([]byte, error) {

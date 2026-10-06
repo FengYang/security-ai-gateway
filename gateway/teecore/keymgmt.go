@@ -36,14 +36,20 @@ type keyRecord struct {
 // KeyManager 主密钥 + 请求密钥派生管理器（模拟 TEE 飞地内安全存储）。
 //
 // 并发安全；所有密钥仅内存驻留，轮换后旧主密钥在在途窗口内保留后销毁。
+//
+// deriveMaster（§6 三级链，P0-4 B6#9）：非 nil 时每次轮换的 master 不再随机，
+// 而由二级租户 KEK 经 KDF 按 epoch 派生（KEK 来自 TenantKeyManager）；
+// nil = 旧路径（随机/密封恢复实例级 master），行为不变。
 type KeyManager struct {
-	mu        sync.Mutex
-	masterKey []byte
-	masterID  uint64
-	masterGen time.Time
-	keys      map[string]keyRecord // nonce(hex) → 请求密钥
-	masterTTL time.Duration
-	stop      chan struct{}
+	mu           sync.Mutex
+	masterKey    []byte
+	masterID     uint64
+	masterGen    time.Time
+	keys         map[string]keyRecord // nonce(hex) → 请求密钥
+	masterTTL    time.Duration
+	stop         chan struct{}
+	closeOnce    sync.Once
+	deriveMaster func(epoch uint64) []byte
 }
 
 // NewKeyManager 构造 KeyManager 并启动主密钥轮换。
@@ -86,11 +92,20 @@ func NewKeyManagerWithMaster(ttl time.Duration, masterKey []byte) (*KeyManager, 
 	return km, nil
 }
 
-// Close 停止轮换 goroutine。
-func (km *KeyManager) Close() { close(km.stop) }
+// Close 停止轮换 goroutine（幂等：重复调用安全）。
+func (km *KeyManager) Close() {
+	km.closeOnce.Do(func() { close(km.stop) })
+}
 
 // rotateLocked 生成新主密钥并递增版本（须持锁）。
 func (km *KeyManager) rotateLocked() error {
+	if km.deriveMaster != nil {
+		// 三级链：master = KDF(租户 KEK, epoch)——长度固定 32（KDF 输出弱约束，随 KEK 所属 profile 均可）。
+		km.masterID++
+		km.masterKey = km.deriveMaster(km.masterID)
+		km.masterGen = time.Now()
+		return nil
+	}
 	mk := make([]byte, 32)
 	if _, err := rand.Read(mk); err != nil {
 		return fmt.Errorf("teecore: 生成主密钥失败: %w", err)
@@ -175,13 +190,19 @@ func (km *KeyManager) deriveLocked(requestID, model string, ts int64) []byte {
 
 // Lookup 按 nonce 回溯请求密钥（推理服务解密用）。返回副本。
 func (km *KeyManager) Lookup(nonceHex string) ([]byte, bool) {
+	seed, _, ok := km.lookupDetail(nonceHex)
+	return seed, ok
+}
+
+// lookupDetail 同 Lookup，额外返回签发时的 master 版本。
+func (km *KeyManager) lookupDetail(nonceHex string) (seed []byte, masterID uint64, ok bool) {
 	km.mu.Lock()
 	defer km.mu.Unlock()
 	rec, ok := km.keys[nonceHex]
 	if !ok {
-		return nil, false
+		return nil, 0, false
 	}
-	return append([]byte(nil), rec.seed...), true
+	return append([]byte(nil), rec.seed...), rec.masterID, true
 }
 
 // MasterID 当前主密钥版本（观测/审计用）。
@@ -189,6 +210,18 @@ func (km *KeyManager) MasterID() uint64 {
 	km.mu.Lock()
 	defer km.mu.Unlock()
 	return km.masterID
+}
+
+// wipeAll 零化当前 master 与全部请求种子并清空登记表（供 TenantKeyManager.DestroyTenant）。
+// 调用后本实例不得再用（调用方须已先 Close 或保证无新 Issue）。
+func (km *KeyManager) wipeAll() {
+	km.mu.Lock()
+	defer km.mu.Unlock()
+	wipe(km.masterKey)
+	for nonce, rec := range km.keys {
+		wipe(rec.seed)
+		delete(km.keys, nonce)
+	}
 }
 
 // wipe 清零敏感内存（统一使用 internal/memzero，防止 dead-store elimination）。

@@ -400,7 +400,6 @@ func newM9Server(t *testing.T) (*teeServer, *httptest.Server) {
 		weightProvider:    NewMockWeightProvider(8),
 		route:             DefaultRouteConfig(),
 		cache:             model.NewExactCache(1024), // GF.4.1 精确缓存演示
-		tenants:           make(map[string]*teecore.KeyManager),
 		usage:             make(map[string]*usageRecord),
 		quota:             make(map[string]quotaSpec),
 		quotaWindowUsage:  make(map[string]int64),
@@ -412,6 +411,7 @@ func newM9Server(t *testing.T) (*teeServer, *httptest.Server) {
 		guard:             newGuardrail(),
 		metrics:           newMetrics(),
 	}
+	srv.tkm = teecore.NewTenantKeyManager(cryptoProvider, 0, srv.metrics, &tenantKeyAudit{chain: srv.audit}, nil)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/attest", srv.handleAttest)
 	mux.HandleFunc("/attest/complete", srv.handleAttestComplete)

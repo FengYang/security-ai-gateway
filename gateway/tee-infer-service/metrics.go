@@ -21,6 +21,10 @@
 // otpmask_billing_blocked                          对外出账是否被阻断（gauge 0/1，S5）
 // otpmask_reconcile_last_run_timestamp_seconds     最近一次对账时刻（gauge，S5）
 // otpmask_audit_events                             审计链当前长度（gauge）
+//
+// 跨源指标（P0-4 §10.1 #7/#8；与 cryptop sidecar 同名异进程，见 §10.3）：
+// cryptop_key_rotations_total{scope="tenant_master"}  二级租户主密钥轮换（TenantKeyManager.RotateTenant）
+// cryptop_key_destroy_total{scope="tenant_master"}    二级租户主密钥销毁（TenantKeyManager.DestroyTenant）
 package main
 
 import (
@@ -100,6 +104,9 @@ type otpmaskMetrics struct {
 	contentLabelEnabled  int64            // gauge 0/1：当前是否启用强标标识
 	contentLabelRequests int64            // counter：启用标识的请求数（conditional）
 	contentLabelFrames   map[string]int64 // position（head|repeat|tail；conditional）
+	// P0-4 §10.1 #7/#8 跨源行（scope 固定 tenant_master，由 teecore TenantKeyManager 驱动）。
+	tenantKeyRotations int64
+	tenantKeyDestroys  int64
 }
 
 func newMetrics() *otpmaskMetrics {
@@ -365,6 +372,20 @@ func (m *otpmaskMetrics) incKeyIssue(tenant string) {
 	m.mu.Unlock()
 }
 
+// IncTenantRotation 实现 teecore.TenantMetrics：#7 scope=tenant_master 轮换计数。
+func (m *otpmaskMetrics) IncTenantRotation() {
+	m.mu.Lock()
+	m.tenantKeyRotations++
+	m.mu.Unlock()
+}
+
+// IncTenantDestroy 实现 teecore.TenantMetrics：#8 scope=tenant_master 销毁计数。
+func (m *otpmaskMetrics) IncTenantDestroy() {
+	m.mu.Lock()
+	m.tenantKeyDestroys++
+	m.mu.Unlock()
+}
+
 // setAuditRetentionDays 落审计留存期声明（gauge；启动期一次）。
 func (m *otpmaskMetrics) setAuditRetentionDays(days int) {
 	m.mu.Lock()
@@ -481,6 +502,11 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 		fmt.Fprintf(w, "# HELP otpmask_audit_events 审计哈希链当前长度\n# TYPE otpmask_audit_events gauge\n")
 		fmt.Fprintf(w, "otpmask_audit_events %d\n", auditEvents)
 	}
+	// ---- P0-4 #7/#8 跨源行（scope 固定 tenant_master；恒输出供注册门禁，见 §10.3）----
+	fmt.Fprintf(w, "# HELP cryptop_key_rotations_total 密钥轮换计数（按 scope；本行由 tee 进程发射）\n# TYPE cryptop_key_rotations_total counter\n")
+	fmt.Fprintf(w, "cryptop_key_rotations_total{scope=\"tenant_master\"} %d\n", m.tenantKeyRotations)
+	fmt.Fprintf(w, "# HELP cryptop_key_destroy_total 密钥销毁计数（按 scope；本行由 tee 进程发射）\n# TYPE cryptop_key_destroy_total counter\n")
+	fmt.Fprintf(w, "cryptop_key_destroy_total{scope=\"tenant_master\"} %d\n", m.tenantKeyDestroys)
 }
 
 // writeCounter 输出一个 counter 指标族（labels 决定标签维度）。

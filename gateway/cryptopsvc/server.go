@@ -118,8 +118,12 @@ func NewServer(p cryptop.Provider, cfg Config) (*Server, error) {
 		cfg:  cfg,
 		m:    m,
 	}
-	// 登记静态密钥（§12.3；R-16 键长由 Provider 在首次使用时校验，此处仅登记）。
+	// 登记静态密钥（§12.3）；R-16：AEAD 对称键长度启动期即拒，不留待首次使用。
 	for ref, key := range cfg.StaticKeys {
+		if len(key) != p.SymmetricKeySize() { // R-16
+			return nil, fmt.Errorf("cryptopsvc: 静态密钥 %q 长度 %d != profile=%s 对称键长 %d（R-16，启动拒）",
+				ref, len(key), p.Profile(), p.SymmetricKeySize())
+		}
 		if err := store.Register(keystore.KeyRef(ref), key, keystore.KeyMeta{
 			Scope:     keystore.ScopeStatic,
 			Profile:   p.Profile(),
