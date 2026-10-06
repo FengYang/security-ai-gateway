@@ -8,8 +8,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -244,9 +242,11 @@ func (b *billingWebhook) notify(ev AuditEvent) {
 	}
 	var sig string
 	if b.secret != "" {
-		mac := hmac.New(sha256.New, []byte(b.secret))
-		mac.Write(body)
-		sig = "sha256=" + hex.EncodeToString(mac.Sum(nil))
+		// MAC 经 cryptop（intl=HMAC-SHA256 逐字节等价；sm=HMAC-SM3）。
+		// 注：头前缀 `sha256=` 属**既有 wire 契约**（接收端解析），本批不改；sm 档下该前缀语义与
+		// 算法不符的问题随"计费链版本化（组⑬）"一并处理（B5，见 §5.4.3）。
+		mac := cryptoProvider.HMAC([]byte(b.secret), body)
+		sig = "sha256=" + hex.EncodeToString(mac)
 	}
 	var lastErr error
 	for attempt := 0; attempt < webhookMaxAttempts; attempt++ {

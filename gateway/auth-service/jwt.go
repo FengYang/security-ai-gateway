@@ -3,8 +3,7 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -33,9 +32,9 @@ func signJWT(secret []byte, tenant string, ttl time.Duration) (string, error) {
 		Sub: tenant, Tenant: tenant, IAT: now, EXP: now + int64(ttl.Seconds()),
 	})
 	signingInput := b64.EncodeToString(header) + "." + b64.EncodeToString(claims)
-	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write([]byte(signingInput))
-	return signingInput + "." + b64.EncodeToString(mac.Sum(nil)), nil
+	// MAC 经 cryptop（intl=HMAC-SHA256；sm=HMAC-SM3；§5.4.4 组⑪）。
+	mac := cryptoProvider.HMAC(secret, []byte(signingInput))
+	return signingInput + "." + b64.EncodeToString(mac), nil
 }
 
 // verifyJWT 校验签名与过期时间，返回声明。
@@ -45,10 +44,9 @@ func verifyJWT(secret []byte, token string) (*Claims, error) {
 		return nil, errors.New("jwt: 段数不为 3")
 	}
 	// 验签（常量时间比较）
-	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write([]byte(parts[0] + "." + parts[1]))
+	mac := cryptoProvider.HMAC(secret, []byte(parts[0]+"."+parts[1]))
 	sig, err := b64.DecodeString(parts[2])
-	if err != nil || !hmac.Equal(sig, mac.Sum(nil)) {
+	if err != nil || subtle.ConstantTimeCompare(sig, mac) != 1 {
 		return nil, errors.New("jwt: 签名无效")
 	}
 	// 解析载荷

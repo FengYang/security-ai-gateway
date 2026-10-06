@@ -9,8 +9,7 @@
 package mcpsec
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 )
@@ -135,16 +134,14 @@ func canonicalBytes(values ...any) ([]byte, error) {
 	return json.Marshal(values)
 }
 
-// sign 计算 HMAC-SHA256。
+// sign 计算 MAC（经 cryptop：intl=HMAC-SHA256，逐字节等价现役实现；sm=HMAC-SM3）。
 func sign(key, data []byte) []byte {
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write(data)
-	return mac.Sum(nil)
+	return cryptoProvider.HMAC(key, data)
 }
 
 // verify 常量时间比对签名。
 func verify(key, data, sig []byte) bool {
-	return hmac.Equal(sig, sign(key, data))
+	return subtle.ConstantTimeCompare(sig, sign(key, data)) == 1
 }
 
 // NewToolCatalog 构造空目录。

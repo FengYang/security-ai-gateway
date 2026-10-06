@@ -11,9 +11,7 @@
 package teecore
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"sync"
@@ -156,15 +154,23 @@ func (km *KeyManager) Issue(requestID, model string) (seed []byte, nonceHex stri
 }
 
 // deriveLocked 派生请求密钥（须持锁）。
+//
+// 字节布局与现役**逐字节一致**：`requestID ‖ "||" ‖ model ‖ BE64(ts)`，MAC 经 cryptop
+// （intl=HMAC-SHA256 逐字节等价；sm=HMAC-SM3）。
+//
+// ⚠️ **与 §5.4.4 映射的偏差（有意）**：该表原写"改为 `cryptop.KDF`"。`KDF`（HKDF-SHA256）会**改变
+// 派生值**，而该值即 `/key/issue` 下发、TEE `/v1/infer` 回溯、插件侧掩码共用的**跨进程请求 seed**
+// ⇒ 属 intl 行为变更。故本批**保留 HMAC 语义**、仅把求值下沉 Provider；是否切 KDF 需按"双读/迁移"
+// 单独裁决（B5 批次）。
 func (km *KeyManager) deriveLocked(requestID, model string, ts int64) []byte {
-	mac := hmac.New(sha256.New, km.masterKey)
-	_, _ = mac.Write([]byte(requestID))
-	_, _ = mac.Write([]byte("||"))
-	_, _ = mac.Write([]byte(model))
+	buf := make([]byte, 0, len(requestID)+2+len(model)+8)
+	buf = append(buf, requestID...)
+	buf = append(buf, "||"...)
+	buf = append(buf, model...)
 	var tsb [8]byte
 	binary.BigEndian.PutUint64(tsb[:], uint64(ts))
-	_, _ = mac.Write(tsb[:])
-	return mac.Sum(nil)
+	buf = append(buf, tsb[:]...)
+	return cryptoProvider.HMAC(km.masterKey, buf)
 }
 
 // Lookup 按 nonce 回溯请求密钥（推理服务解密用）。返回副本。
