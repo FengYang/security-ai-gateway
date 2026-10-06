@@ -6,8 +6,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
+	"fmt"
 	"math/big"
 	"testing"
+
+	"security-ai-gateway/gateway/cryptop"
+	protocol "security-ai-gateway/protocol/go"
 )
 
 // TestMockEnclaveSealUnseal 密封-解封往返一致性（A3 密钥驻留基础）。
@@ -199,5 +203,188 @@ func TestSealFileRoundtrip(t *testing.T) {
 	// 不存在的文件返回 nil
 	if a, b := readSealFile(dir + "/missing.bin"); a != nil || b != nil {
 		t.Fatal("缺失密封文件应返回 nil")
+	}
+}
+
+// ---- B5-a：suite 版本化双读（§5.4.3 组⑨；T-7.1/T-7.2/T-7.4）----
+
+// newSealTestEnclave 直接构造仅用于密封测试的 mock 飞地（不经 env/证明密钥）。
+func newSealTestEnclave(currentKey []byte, ring [][]byte) *MockEnclave {
+	return &MockEnclave{sealKey: currentKey, sealKeyRing: ring, platform: "mock"}
+}
+
+// assembleSealBlob 按指定 provider 手工装配密封 blob：
+// suite=0 旧格式（无前缀）；否则 suite‖AAD‖nonce‖ct。
+func assembleSealBlob(t *testing.T, prov cryptop.Provider, suite byte, key, plaintext []byte, ctx string) []byte {
+	t.Helper()
+	aad := contextHashFor(prov, ctx)
+	nonce, sealed, err := prov.SealWithNonce(key, plaintext, aad)
+	if err != nil {
+		t.Fatalf("装配密封 blob 失败: %v", err)
+	}
+	if suite == 0 {
+		out := make([]byte, 0, len(aad)+len(nonce)+len(sealed))
+		out = append(out, aad...)
+		out = append(out, nonce...)
+		out = append(out, sealed...)
+		return out
+	}
+	out := make([]byte, 0, 1+len(aad)+len(nonce)+len(sealed))
+	out = append(out, suite)
+	out = append(out, aad...)
+	out = append(out, nonce...)
+	out = append(out, sealed...)
+	return out
+}
+
+// legacyCtxWithFirstByte 搜索一个 context，使其旧格式 blob 首字节（AAD 首字节）
+// 恰为 want——构造"旧 blob 首字节撞 suite 值"的认证判别场景。
+func legacyCtxWithFirstByte(t *testing.T, want byte) string {
+	t.Helper()
+	for i := 0; i < 100000; i++ {
+		ctx := fmt.Sprintf("ambig-%d", i)
+		if contextHashFor(hashProvSHA256, ctx)[0] == want {
+			return ctx
+		}
+	}
+	t.Fatalf("未找到首字节=0x%02x 的上下文", want)
+	return ""
+}
+
+func TestStorageSealDualRead(t *testing.T) {
+	intlKey := bytes.Repeat([]byte{0x11}, 32) // AES-256
+	smKey := bytes.Repeat([]byte{0x22}, 16)   // SM4
+	plaintext := []byte("sealed-master-key-material-32B")
+	const ctx = "master"
+
+	t.Run("T-7.1 intl 写→sm 读（密钥环）", func(t *testing.T) {
+		blob := assembleSealBlob(t, hashProvSHA256, protocol.SuiteAESGCM, intlKey, plaintext, ctx)
+		// sm 侧：当前 SM4 密钥 + 环内保留旧 AES 密钥
+		smSide := newSealTestEnclave(smKey, [][]byte{intlKey})
+		got, err := smSide.Unseal(blob, ctx)
+		if err != nil {
+			t.Fatalf("sm 侧解 intl blob 失败: %v", err)
+		}
+		if !bytes.Equal(got, plaintext) {
+			t.Fatal("解封明文不符")
+		}
+		// 环内缺旧密钥 → 拒绝（fail-closed）
+		if _, err := newSealTestEnclave(smKey, nil).Unseal(blob, ctx); err == nil {
+			t.Fatal("环内无 AES 密钥却解封成功")
+		}
+	})
+
+	t.Run("T-7.2 sm 写→intl 回滚读（密钥环）", func(t *testing.T) {
+		blob := assembleSealBlob(t, hashProvSM3, protocol.SuiteSM4GCM, smKey, plaintext, ctx)
+		intlSide := newSealTestEnclave(intlKey, [][]byte{smKey})
+		got, err := intlSide.Unseal(blob, ctx)
+		if err != nil {
+			t.Fatalf("intl 侧解 sm blob 失败: %v", err)
+		}
+		if !bytes.Equal(got, plaintext) {
+			t.Fatal("解封明文不符")
+		}
+	})
+
+	t.Run("T-7.4 旧格式（无前缀）fail-safe 按 AES 解析", func(t *testing.T) {
+		legacy := assembleSealBlob(t, hashProvSHA256, 0, intlKey, plaintext, ctx)
+		// intl 进程当前密钥即可解
+		if got, err := newSealTestEnclave(intlKey, nil).Unseal(legacy, ctx); err != nil {
+			t.Fatalf("intl 侧解旧 blob 失败: %v", err)
+		} else if !bytes.Equal(got, plaintext) {
+			t.Fatal("明文不符")
+		}
+		// sm 进程须环内保留 AES 旧密钥
+		if got, err := newSealTestEnclave(smKey, [][]byte{intlKey}).Unseal(legacy, ctx); err != nil {
+			t.Fatalf("sm 侧解旧 blob 失败: %v", err)
+		} else if !bytes.Equal(got, plaintext) {
+			t.Fatal("明文不符")
+		}
+	})
+
+	t.Run("旧 blob 首字节撞 0x01：AEAD 认证判别后回退", func(t *testing.T) {
+		c := legacyCtxWithFirstByte(t, protocol.SuiteAESGCM)
+		legacy := assembleSealBlob(t, hashProvSHA256, 0, intlKey, plaintext, c)
+		got, err := newSealTestEnclave(intlKey, nil).Unseal(legacy, c)
+		if err != nil {
+			t.Fatalf("首字节 0x01 旧 blob 回退解封失败: %v", err)
+		}
+		if !bytes.Equal(got, plaintext) {
+			t.Fatal("明文不符")
+		}
+	})
+
+	t.Run("旧 blob 首字节撞 0x02：SM4 预解析失败后回退", func(t *testing.T) {
+		c := legacyCtxWithFirstByte(t, protocol.SuiteSM4GCM)
+		legacy := assembleSealBlob(t, hashProvSHA256, 0, intlKey, plaintext, c)
+		got, err := newSealTestEnclave(intlKey, nil).Unseal(legacy, c)
+		if err != nil {
+			t.Fatalf("首字节 0x02 旧 blob 回退解封失败: %v", err)
+		}
+		if !bytes.Equal(got, plaintext) {
+			t.Fatal("明文不符")
+		}
+	})
+
+	t.Run("密钥环按序试解：第二枚命中", func(t *testing.T) {
+		blob := assembleSealBlob(t, hashProvSHA256, protocol.SuiteAESGCM, intlKey, plaintext, ctx)
+		wrong := bytes.Repeat([]byte{0x33}, 32)
+		side := newSealTestEnclave(smKey, [][]byte{wrong, intlKey})
+		got, err := side.Unseal(blob, ctx)
+		if err != nil {
+			t.Fatalf("环内第二枚密钥应解封: %v", err)
+		}
+		if !bytes.Equal(got, plaintext) {
+			t.Fatal("明文不符")
+		}
+	})
+
+	t.Run("篡改/上下文错均拒绝（即使环内有密钥）", func(t *testing.T) {
+		blob := assembleSealBlob(t, hashProvSHA256, protocol.SuiteAESGCM, intlKey, plaintext, ctx)
+		side := newSealTestEnclave(smKey, [][]byte{intlKey})
+		tampered := make([]byte, len(blob))
+		copy(tampered, blob)
+		tampered[len(tampered)-1] ^= 0xFF
+		if _, err := side.Unseal(tampered, ctx); err == nil {
+			t.Fatal("篡改 blob 未被拒绝")
+		}
+		if _, err := side.Unseal(blob, "other-context"); err == nil {
+			t.Fatal("上下文不符未被拒绝")
+		}
+	})
+
+	t.Run("新写入恒定带 suite 前缀", func(t *testing.T) {
+		e := newSealTestEnclave(intlKey, nil)
+		blob, err := e.Seal(plaintext, ctx)
+		if err != nil {
+			t.Fatalf("Seal: %v", err)
+		}
+		if blob[0] != protocol.SuiteAESGCM {
+			t.Fatalf("intl 新 blob 首字节应为 0x01，实际 0x%02x", blob[0])
+		}
+	})
+}
+
+// TestLoadSealKeyHistory 历史密钥环 env 解析（冒号分隔；32/16 可混；非法拒绝）。
+func TestLoadSealKeyHistory(t *testing.T) {
+	const envName = "TEST_SEAL_KEY_HISTORY"
+	t.Setenv(envName, "")
+	ring, err := loadSealKeyHistory(envName)
+	if err != nil || ring != nil {
+		t.Fatalf("未设置时应返回 nil: %v %d", err, len(ring))
+	}
+	t.Setenv(envName,
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0123456789abcdef0123456789abcdef")
+	ring, err = loadSealKeyHistory(envName)
+	if err != nil || len(ring) != 2 || len(ring[0]) != 32 || len(ring[1]) != 16 {
+		t.Fatalf("两枚混列解析异常: %v %+v", err, ring)
+	}
+	t.Setenv(envName, "not-hex")
+	if _, err := loadSealKeyHistory(envName); err == nil {
+		t.Fatal("非法 hex 应返回错误")
+	}
+	t.Setenv(envName, "0123456789abcdef") // 8B：长度不合法
+	if _, err := loadSealKeyHistory(envName); err == nil {
+		t.Fatal("非 32/16 字节密钥应返回错误")
 	}
 }

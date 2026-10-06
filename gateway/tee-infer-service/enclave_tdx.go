@@ -28,10 +28,11 @@ const tdxSealKeyEnv = "OTPMASK_TDX_SEAL_KEY"
 
 // TdxEnclave 真 TDX 飞地。
 type TdxEnclave struct {
-	sealKey  []byte            // 密封密钥（Seal/Unseal）
-	signKey  *ecdsa.PrivateKey // 证明签名密钥（会话级，进程内）
-	measure  []byte            // 进程内测量值（真完整性证据在 Quote 的 MRTD/RTMR）
-	provider any               // client.QuoteProvider（ConfigFS）或 client.Device（/dev/tdx_guest）
+	sealKey     []byte            // 密封密钥（Seal/Unseal）
+	sealKeyRing [][]byte          // 历史密封密钥（跨 profile 解旧数据）
+	signKey     *ecdsa.PrivateKey // 证明签名密钥（会话级，进程内）
+	measure     []byte            // 进程内测量值（真完整性证据在 Quote 的 MRTD/RTMR）
+	provider    any               // client.QuoteProvider（ConfigFS）或 client.Device（/dev/tdx_guest）
 }
 
 // NewTdxEnclave 构造真 TDX 飞地；构造期探测 quote 通道，不可用即失败（fail-closed，
@@ -45,6 +46,10 @@ func NewTdxEnclave() (*TdxEnclave, error) {
 	if err != nil {
 		return nil, err
 	}
+	keyRing, err := loadSealKeyHistory(tdxSealKeyEnv + "_HISTORY")
+	if err != nil {
+		return nil, err
+	}
 	signKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("enclave: 生成证明签名密钥失败: %w", err)
@@ -53,10 +58,11 @@ func NewTdxEnclave() (*TdxEnclave, error) {
 	// MRTD/RTMR（由验证方解析 Quote 校验）；升级路径：从 TDREPORT 读取 RTMR 摘要。
 	measure := cryptoProvider.Hash([]byte("tdx-enclave-measurement:v1"))
 	return &TdxEnclave{
-		sealKey:  sealKey,
-		signKey:  signKey,
-		measure:  measure[:],
-		provider: provider,
+		sealKey:     sealKey,
+		sealKeyRing: keyRing,
+		signKey:     signKey,
+		measure:     measure[:],
+		provider:    provider,
 	}, nil
 }
 
@@ -89,9 +95,9 @@ func (e *TdxEnclave) Seal(plaintext []byte, context string) ([]byte, error) {
 	return sealWithContext(e.sealKey, plaintext, context)
 }
 
-// Unseal 解封，验证 AAD 和 AEAD tag。
+// Unseal 解封 suite 版本化密封数据（当前密钥 + 历史环 + 旧格式回退）。
 func (e *TdxEnclave) Unseal(ciphertext []byte, context string) ([]byte, error) {
-	return unsealWithContext(e.sealKey, ciphertext, context)
+	return unsealWithContext(e.sealKey, e.sealKeyRing, ciphertext, context)
 }
 
 // tdxReportData 把握手绑定材料扩展为 TDX REPORTDATA（64 字节）：
