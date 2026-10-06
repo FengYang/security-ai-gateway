@@ -63,6 +63,15 @@ docs/benchmark/*
 # GF.4.3 语义分类器评测结果（量化证据，随门禁 #1 入库；语料本身不入库，靠 SHA-256 复现）
 !docs/benchmark/guardrail-classifier/
 !docs/benchmark/guardrail-classifier/*.json
+# P0-5 TEE 威胁模型三份核心交付物 + 研发计划（2026-10-06 补充入库，与代码同步版本管理）
+!docs/详细设计/
+docs/详细设计/*
+!docs/详细设计/GA-AI网关能力补齐--研发计划与进度跟踪.md
+!docs/详细设计/P0/
+docs/详细设计/P0/*
+!docs/详细设计/P0/GA-AI网关能力补齐方案--P0--TEE威胁模型.md
+!docs/详细设计/P0/GA-AI网关能力补齐方案--P0--安全白皮书大纲.md
+!docs/详细设计/P0/GA-AI网关能力补齐方案--P0--侧信道风险披露说明.md
 # 合规映射资产（等保/金融/GDPR 逐条 + 四态 + 证据锚点）属内部资产：含缺口清单与适用性判定，
 # 随代码对外发布会暴露我方缺口，故整体不入库（本地/交付环境为权威；Phase 3 一键报告脚本读本地源）
 docs/compliance/
