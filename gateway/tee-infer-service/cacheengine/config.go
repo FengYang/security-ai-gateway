@@ -243,6 +243,7 @@ type WarmupConfig struct {
 	DailyAt      string `json:"daily_at"`
 	MaxItems     int    `json:"max_items"`
 	BudgetExempt bool   `json:"budget_exempt"`
+	QPS          int    `json:"qps"` // 预热节流上限（次/秒；0 = 不限）
 }
 
 // GuardConfig 缓存安全配置。
@@ -381,6 +382,7 @@ func DefaultConfig() CacheConfig {
 			Source:   "file",
 			Trigger:  "manual",
 			MaxItems: 1000,
+			QPS:      0, // 0 = 不限速
 		},
 		Guard: GuardConfig{
 			ReadFastCheck:       true,
@@ -467,6 +469,22 @@ func (c CacheConfig) Validate() []error {
 	if memBudget > c.CacheMemoryBudget.Bytes() {
 		errs = append(errs, fmt.Errorf("rule 6: exact.max_entries × max_entry_bytes (%d) > cache_memory_budget (%d)",
 			memBudget, c.CacheMemoryBudget.Bytes()))
+	}
+
+	// 规则 11：预热配置（§6.7）。文件存在性/逐行 JSON 校验由 LoadWarmItems 承担（装配期调用，按行号报错）。
+	if c.Warmup.Enabled {
+		if c.Warmup.Source != "file" {
+			errs = append(errs, fmt.Errorf("rule 11: warmup.source must be \"file\""))
+		}
+		if strings.TrimSpace(c.Warmup.File) == "" {
+			errs = append(errs, fmt.Errorf("rule 11: warmup.file must be set when warmup.enabled=true"))
+		}
+		if c.Warmup.MaxItems <= 0 {
+			errs = append(errs, fmt.Errorf("rule 11: warmup.max_items must be >= 1"))
+		}
+	}
+	if c.Warmup.QPS < 0 || c.Warmup.QPS > 10000 {
+		errs = append(errs, fmt.Errorf("rule 11: warmup.qps must be in [0, 10000]"))
 	}
 
 	// 规则 13：semantic.enabled 时 scope 必须为 per_tenant

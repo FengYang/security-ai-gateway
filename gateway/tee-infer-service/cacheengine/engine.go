@@ -528,7 +528,8 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 	}
 
 	// §7.4.2 写入限流：超限丢弃写入（不影响响应下发），记 #6（不计入 #5）。
-	if !e.limiter.allowWrite(ctx.TenantID, e.nowFn()) {
+	// 受信离线路径（预热 §6.7）置 BypassWriteLimit 跳过限流。
+	if !ctx.BypassWriteLimit && !e.limiter.allowWrite(ctx.TenantID, e.nowFn()) {
 		e.stats.observeWriteThrottled(ctx.TenantID) // §9.1 #6
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "throttled"}
 	}

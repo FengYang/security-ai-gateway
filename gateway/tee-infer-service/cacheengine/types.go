@@ -142,6 +142,9 @@ type CacheDecision struct {
 type StoreContext struct {
 	LookupContext
 	Writable bool // 写前审查门禁：由主链依 out.Blocked/finish 计算
+	// BypassWriteLimit 跳过写入限流（§7.4.2）。仅用于受信离线路径（预热 §6.7）；
+	// 请求驱动写入不得置位（否则绕过 L-F 写入滥用防护）。
+	BypassWriteLimit bool
 }
 
 // InferResult 本轮到源端推理的产出（最小必要集）。

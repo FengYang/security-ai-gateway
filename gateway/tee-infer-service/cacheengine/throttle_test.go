@@ -204,6 +204,31 @@ func TestWriteThrottle_WindowDurFallback(t *testing.T) {
 	}
 }
 
+// TestWriteThrottle_BypassForWarmup §7.4.2：受信离线路径（预热 §6.7）置 BypassWriteLimit 跳过限流。
+func TestWriteThrottle_BypassForWarmup(t *testing.T) {
+	eng := NewCacheEngine(throttleTestCfg(1, 1.2, time.Second)).(*engine)
+	freezeNow(eng, 1_700_000_000_000)
+
+	// 无入向硬顶=1：首写占满额度
+	if out := eng.Store(throttleStoreCtx("t1", "k-0"), throttleRes()); !out.Stored {
+		t.Fatalf("首写应放行，实际 %+v", out)
+	}
+	// 常规第二写会被限流
+	if out := eng.Store(throttleStoreCtx("t1", "k-1"), throttleRes()); out.Skipped != "throttled" {
+		t.Fatalf("常规第二写应被限流，实际 %+v", out)
+	}
+
+	sc := throttleStoreCtx("t1", "k-warm")
+	sc.BypassWriteLimit = true
+	if out := eng.Store(sc, throttleRes()); !out.Stored {
+		t.Fatalf("预热写应豁免限流，实际 %+v", out)
+	}
+	// 全程只应记 1 次限流（来自常规第二写），豁免写不记 #6
+	if n := eng.stats.writeThrottledSnapshot()["t1"]; n != 1 {
+		t.Fatalf("write_throttled{t1} = %d, want 1", n)
+	}
+}
+
 // TestWriteLimit_ConfigValidationRule26 §4.2.1 规则 26：写入限流配置区间校验。
 func TestWriteLimit_ConfigValidationRule26(t *testing.T) {
 	cases := []struct {
