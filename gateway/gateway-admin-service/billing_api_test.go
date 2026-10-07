@@ -216,10 +216,13 @@ func TestBillingIsolationDisabledWhenFeatureOff(t *testing.T) {
 
 const testPushSecretEnv = "TEST_BILLING_PUSH_SECRET"
 
+// testEventsSecretEnv 独立 events 密钥的环境变量名（BUG-002：events_secret_ref 优先域）。
+const testEventsSecretEnv = "TEST_BILLING_EVENTS_SECRET"
+
 // newBillingPushTestHandler 构造推送消费 handler（sync_mode=push + HMAC 密钥引用）。
-func newBillingPushTestHandler(t *testing.T, secret string) *billingHandler {
+// pushSecret 为空 = 不配置 push_secret_ref；eventsSecret 为空 = 不配置 events_secret_ref（触发回退）。
+func newBillingPushTestHandler(t *testing.T, pushSecret, eventsSecret string) *billingHandler {
 	t.Helper()
-	t.Setenv(testPushSecretEnv, secret)
 	dir := t.TempDir()
 	pricing := filepath.Join(dir, "pricing.json")
 	if err := os.WriteFile(pricing, []byte(`{"version":"v1","currency":"CNY",
@@ -235,6 +238,15 @@ func newBillingPushTestHandler(t *testing.T, secret string) *billingHandler {
 			SyncMode:      billing.SyncModePush,
 			PushSecretRef: "env:" + testPushSecretEnv,
 		},
+	}
+	if pushSecret != "" {
+		t.Setenv(testPushSecretEnv, pushSecret)
+	} else {
+		cfg.Source.PushSecretRef = ""
+	}
+	if eventsSecret != "" {
+		t.Setenv(testEventsSecretEnv, eventsSecret)
+		cfg.Secrets = billing.SecretsConfig{EventsSecretRef: "env:" + testEventsSecretEnv}
 	}
 	h, err := newBillingHandler(cfg, nil)
 	if err != nil {
@@ -253,7 +265,7 @@ func signEventsBody(secret string, body []byte) string {
 
 func TestBillingEventsWebhook(t *testing.T) {
 	const secret = "test-hook-secret"
-	h := newBillingPushTestHandler(t, secret)
+	h := newBillingPushTestHandler(t, secret, "")
 	mux := buildAdminMux(testCfg(), nil, nil, nil, nil, nil, nil, nil, h, false)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -328,6 +340,44 @@ func TestBillingEventsWebhook_NoSecretFailClosed(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("未配置密钥 status = %d, want 401 (fail-closed)", resp.StatusCode)
+	}
+}
+
+// BUG-002：events_secret_ref 优先；未配置时回退 push_secret_ref（向后兼容）。
+func TestBillingEventsWebhook_EventsSecretPreferredAndFallback(t *testing.T) {
+	const pushSecret = "push-secret"
+	const eventsSecret = "events-secret"
+	body := []byte(`{"event_id":"e1","tenant":"t1","model":"m1","tokens_in":100,"ts":"2026-10-01T00:00:00Z"}`)
+	post := func(url, sig string) int {
+		req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		req.Header.Set("X-Signature", sig)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("请求失败: %v", err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// 1) 配置 events_secret → events 密钥签名通过；push 密钥签名被拒（401）
+	h1 := newBillingPushTestHandler(t, pushSecret, eventsSecret)
+	srv1 := httptest.NewServer(buildAdminMux(testCfg(), nil, nil, nil, nil, nil, nil, nil, h1, false))
+	defer srv1.Close()
+	url1 := srv1.URL + billingAPIBase + "/events"
+	if code := post(url1, signEventsBody(eventsSecret, body)); code != http.StatusOK {
+		t.Errorf("events 密钥签名 status = %d, want 200", code)
+	}
+	if code := post(url1, signEventsBody(pushSecret, body)); code != http.StatusUnauthorized {
+		t.Errorf("push 密钥签名 status = %d, want 401（events 域优先）", code)
+	}
+
+	// 2) 未配置 events_secret → 回退 push 密钥（向后兼容）
+	h2 := newBillingPushTestHandler(t, pushSecret, "")
+	srv2 := httptest.NewServer(buildAdminMux(testCfg(), nil, nil, nil, nil, nil, nil, nil, h2, false))
+	defer srv2.Close()
+	url2 := srv2.URL + billingAPIBase + "/events"
+	if code := post(url2, signEventsBody(pushSecret, body)); code != http.StatusOK {
+		t.Errorf("回退 push 密钥签名 status = %d, want 200", code)
 	}
 }
 

@@ -52,7 +52,7 @@ type billingHandler struct {
 	signer           billing.BillSigner
 	pricePublicURL   string
 	audit            *adminAuditChain
-	eventsSecret     []byte             // 推送 webhook HMAC 验签密钥（source.push_secret_ref；空 = 一律 401）
+	eventsSecret     []byte             // 推送 webhook HMAC 验签密钥（events_secret_ref 优先，回退 push_secret_ref；空 = 一律 401）
 	quotaApplyBudget time.Duration      // M6 回读确认预算（零值 = m6ApplyWithin；测试可缩短）
 	sched            *billing.Scheduler // nil = 后台调度未启用
 	backfillDays     int                // S-8 回看窗口（日志用）
@@ -140,8 +140,13 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 	// 端点为只读校验；令牌可选（无令牌时省略管理头）。
 	svc.SetAuditChainVerifier(billing.NewTEEAuditVerifier(cfg.Source.TEEURL, string(token), 10*time.Second))
 
-	// 推送 webhook 验签密钥（§4.2：source.push_secret_ref；未配置 → 端点一律 401，fail-closed）
-	pushSecret, _ := resolveSecretRef(cfg.Source.PushSecretRef)
+	// 推送 webhook 验签密钥（§4.2/R-27 独立事件密钥域）：
+	//   优先 `secrets.events_secret_ref`；未配置 → 回退 `source.push_secret_ref`（向后兼容）；
+	//   两者皆缺 → 端点一律 401（fail-closed）。
+	eventsSecret, _ := resolveSecretRef(cfg.Secrets.EventsSecretRef)
+	if len(eventsSecret) == 0 {
+		eventsSecret, _ = resolveSecretRef(cfg.Source.PushSecretRef)
+	}
 
 	h := &billingHandler{
 		store:          store,
@@ -150,7 +155,7 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 		freeze:         billing.NewFreezeController(store.Freezes(), freezeAuditSink{audit}, func() int64 { return time.Now().UnixNano() }),
 		pricePublicURL: cfg.API.PricePublicURL,
 		audit:          audit,
-		eventsSecret:   pushSecret,
+		eventsSecret:   eventsSecret,
 		backfillDays:   cfg.Schedule.BackfillLookbackDays,
 	}
 

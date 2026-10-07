@@ -327,13 +327,16 @@ func validateConfig(c *BillingConfig) error {
 		return fmt.Errorf("R-26: schedule.quota_scan_interval must be in [1m, 1h], got %v", c.Schedule.QuotaScanInterval)
 	}
 
-	// R-27: events_secret_ref 同 R-5 引用形式，且必须不同于 push_secret_ref（独立鉴权域 S-2）
-	if !secretRefPattern.MatchString(c.Secrets.EventsSecretRef) {
-		return fmt.Errorf("R-27: secrets.events_secret_ref must be 'env:NAME' or 'file:PATH', got %q",
-			c.Secrets.EventsSecretRef)
-	}
-	if c.Source.PushEnabled && c.Secrets.EventsSecretRef == c.Source.PushSecretRef {
-		return fmt.Errorf("R-27: secrets.events_secret_ref must differ from source.push_secret_ref (S-2: separate auth domains)")
+	// R-27: events_secret_ref **可选**（未配置 → 回退 source.push_secret_ref，向后兼容）；
+	// 配置时须为引用形式，且与推送密钥不同源（S-2：独立子密钥）。
+	if c.Secrets.EventsSecretRef != "" {
+		if !secretRefPattern.MatchString(c.Secrets.EventsSecretRef) {
+			return fmt.Errorf("R-27: secrets.events_secret_ref must be 'env:NAME' or 'file:PATH' when set, got %q",
+				c.Secrets.EventsSecretRef)
+		}
+		if c.Source.PushSecretRef != "" && c.Secrets.EventsSecretRef == c.Source.PushSecretRef {
+			return fmt.Errorf("R-27: secrets.events_secret_ref must differ from source.push_secret_ref (S-2: separate auth domains)")
+		}
 	}
 
 	// R-28: price_public_url 空 = 单价表不对外公开；非空须为 https
