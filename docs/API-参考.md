@@ -155,6 +155,59 @@ MVP 兼容：`POST /attest`（空 body）返回旧版握手确认（`{"status":"
 
 审计事件字段（6.3 数据模型）：`event_id`、`timestamp`、`tenant_id`、`request_id`、`action`（key_issue/infer/deny）、`result`（ok 或拒绝原因，如 `guardrail_pii`/`quota_exceeded`）、`payload_hash`、`prev_hash`；P2a 起 infer 事件附 `transformed_hash`（装饰/脱敏后引擎实收内容哈希，双 hash 审计）。
 
+### 5.5 缓存管理 API（P0-2 语义缓存）
+
+> 语义缓存为 tee-infer 内的模块（不新增独立服务），管理 API **同进程同端口**（`:19090`）。默认 `mode=off` 时缓存不产生任何行为变化。
+
+**通用约定**：
+
+- **鉴权**：`X-Admin-Token`（与 `/config`、`/metrics`、`/audit` 同一管理令牌）；缺失/错误 → `403 CACHE_FORBIDDEN`。（`cache-admin` 角色体系未落地，当前为等价鉴权。）
+- **响应信封**：成功 `{"ok":true,"data":{…},"request_id":…}`；失败 `{"ok":false,"error":{"code","message"},"request_id":…}`；`request_id` 原样回显请求头 `X-Request-Id`。
+- **门控**：`mode=off`（默认）或引擎未装配 → 运营端点一律 `409 CACHE_DISABLED`（`GET /config/cache` 仍可读）。
+- **幂等**：所有 `DELETE` 与 `/cache/feedback`（按 `request_id`）均幂等。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/cache/stats` | 缓存总览：`mode`/`backend`/`entries{exact,negative,vector}`/`evictions`/`fast_check_blocks`/`semantic_false_positive`/`saved_tokens`/`lookups{kind:result}` |
+| DELETE | `/cache/entry/{key_hash}` | 精确失效（按键）；返回 `{key_hash,deleted}` |
+| DELETE | `/cache/tenant/{tenant_id}` | 失效（按租户，含向量）；返回 `{tenant_id,deleted}` |
+| DELETE | `/cache/model/{model}` | 失效（按模型）；返回 `{model,deleted}` |
+| DELETE | `/cache/all?confirm=yes` | 全量清空（**须 `confirm=yes`**）；返回 `{deleted}` |
+| POST | `/cache/warmup` | 触发预热（体 `{"reset":bool}` 可空）；返回 `{task_id,total}` |
+| GET | `/cache/warmup/{task_id}` | 预热任务进度（`WarmTask`） |
+| POST | `/cache/feedback` | 误命中反馈上报；返回 `{request_id,verdict,duplicate}` |
+| GET | `/cache/inspect/{key_hash}` | 条目检视（**仅元数据，不含文本**，I-6） |
+| GET | `/config/cache` | 缓存配置只读快照 `{configured,config}`（`mode=off` 时仍可读） |
+
+**错误码**：
+
+| `error.code` | HTTP | 触发 |
+| --- | --- | --- |
+| `CACHE_DISABLED` | 409 | `mode=off`/引擎未装配时调用运营端点；或 `warmup.enabled=false` |
+| `CACHE_INVALID_ARG` | 400 | 参数非法（缺 `confirm`、路径参数、体非法、预热文件不可读含 `warmup line N`）；方法不符为 **405** 同码 |
+| `CACHE_NOT_FOUND` | 404 | `key_hash` 不存在；`task_id` 不存在或已过期 |
+| `CACHE_FORBIDDEN` | 403 | 鉴权失败 |
+| `CACHE_WARMUP_BUSY` | 409 | 已有活跃预热任务（单飞） |
+| `CACHE_BACKEND_UNAVAILABLE` | 503 | 失效操作的后端（如 Redis）不可用 |
+
+**要点**：
+
+- **`/cache/inspect` 零文本**：`Entry.Text`/`Entry.Segments` 以 `json:"-"` 序列化隐藏，响应**天然不含缓存正文**；仅覆盖精确层（负向层无 `Entry` 元数据 → 404）。字段：`kind`/`id`/`tenant`/`engine`/`model`/`key_hash`/`prompt_hash`/`tin`/`tout`/`hits`/`lh_at`/`created_at`/`expire_at`/`pver`/`gver`/`cksum`。
+- **`/cache/warmup` 单飞**：并发触发 → `409 CACHE_WARMUP_BUSY`；`GET` 返回 `WarmTask`：`id`/`status`(`idle|running|succeeded|failed`)/`total`/`succeeded`/`failed`/`skipped`/`truncated`/`started_at`/`finished_at`/`last_error`。**任务态不持久化**（进程重启即丢）。
+- **`/cache/feedback`**：体 `{"request_id","verdict"∈good|bad|irrelevant,"note"?}`；`note` 截断 256 字节且**不落审计链/日志/库**；同 `request_id` 重复上报返回 `duplicate=true`（覆盖不重复计数）；未知 `request_id` 不报错。**归因（`request_id→scene`）归后续**。
+- **策略/词库变更**：`policy_version`/`GuardVer` 变更后旧条目**自然失效**，无需清缓存。
+
+**示例**：
+
+```bash
+BASE="http://127.0.0.1:19090"; TOKEN="<admin token>"
+curl -s -H "X-Admin-Token: $TOKEN" "$BASE/cache/stats"
+curl -s -X DELETE -H "X-Admin-Token: $TOKEN" "$BASE/cache/entry/<key_hash>"
+curl -s -X DELETE -H "X-Admin-Token: $TOKEN" "$BASE/cache/all?confirm=yes"
+curl -s -X POST -H "X-Admin-Token: $TOKEN" -d '{"reset":false}' "$BASE/cache/warmup"
+curl -s -H "X-Admin-Token: $TOKEN" "$BASE/cache/inspect/<key_hash>"
+```
+
 ## 6. vllm-adapter API（:19190，TEE 内）
 
 `POST /generate`：请求 `{"vectors":[[...]],"text":""}` → 响应 `{"tokens":[...]}`。明文推理接口，真实 vLLM 环境由 `vllm_adapter.py` 提供（`--mock` 与 `--model` 两种引擎，接口一致）。
@@ -168,7 +221,10 @@ MVP 兼容：`POST /attest`（空 body）返回旧版握手确认（`{"status":"
 | 200 | 成功（SSE 为流式 200） |
 | 400 | 协议/请求错误：签名无效路径外的解码失败、重放、超窗时间戳、未知 nonce、畸形 body |
 | 401 | 南向验签失败 / attestation 令牌无效 |
-| 403 | 内容安全拦截（guardrail）：**以状态码判定**，响应体不保证存在与结构 |
+| 403 | 内容安全拦截（guardrail）：**以状态码判定**，响应体不保证存在与结构；缓存管理 API 鉴权失败（`CACHE_FORBIDDEN`） |
+| 404 | 缓存管理 API：资源不存在（`key_hash`/`task_id`，`CACHE_NOT_FOUND`） |
+| 405 | 缓存管理 API：方法不符（同 `CACHE_INVALID_ARG`） |
+| 409 | 缓存管理 API：门控/冲突（`CACHE_DISABLED`/`CACHE_WARMUP_BUSY`） |
 | 413 | 请求体超过 16MB |
 | 429 | 租户 token 配额超限（P1）或网关 QPS 限流（P0a，Envoy 层） |
 | 503 | TEE 不可用（fail-closed 拒绝） |

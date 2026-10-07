@@ -203,6 +203,20 @@ HPA 参数（`deploy/k8s/hpa.yaml`）：embedding CPU 60%（min 1 / max 5）、t
 **应急**：任一回滚失败都不会改变当前生效版本；彻底回到镜像默认策略 = `POST /config/policy/rollback`（缺省）。
 **未配置版本库**（无 `versions/index.json`）时上述能力全部不启用，行为与改造前**逐字节一致**。
 
+### 5.5 功能 / 子系统专项运维文档索引
+
+> 项目级运维入口为本章；各功能/子系统的**专项运维细则**（Runbook/SOP/演练）保留在各自子域，**须以本章为索引**（不得成为影子标准文档）。统一规范见《[GA-文档体系规范.md](GA-文档体系规范.md)》。
+
+| 功能/子系统 | 专项运维文档 | 说明 |
+|---|---|---|
+| 多模型智能路由（P0-1） | 本文件 **§10** | 已内联 |
+| 语义缓存（P0-2） | 本文件 **§11** | 已内联 |
+| 策略/词库版本发布与回滚 | 本文件 **§5.4** | 已内联 |
+| 输出侧内容审查 | [截断率监控与处置 Runbook](output-guard/GA-截断率监控与处置Runbook.md)；[OG20 模式热切换与回滚演练 SOP](output-guard/GA-输出侧-OG20模式热切换与回滚演练SOP.md)；[告警演练验收单](output-guard/GA-输出侧-告警演练验收单.md) | 子域 `docs/output-guard/`；口径以其本体为准 |
+| 管理门户（Higress 控制台） | [升级操作手册](管理门户-升级操作手册.md) | 子系统操作细则（**非**项目级标准文档） |
+
+> **索引维护**：新增功能级 Runbook/SOP 时，须同步登记本表。
+
 ## 6. 已知限制（MVP → 生产迁移清单）
 
 | 项 | 现状 | 生产要求 |
@@ -804,6 +818,16 @@ kubectl rollout history deployment/tee-infer-service -n otpmask
 >
 > 验收通过后，方可进入 §7 的合规放行流程（门 A → 门 B → 具名放行）。
 
+### 9.7 真机验收与准备件索引（跨功能）
+
+> 项目级验收主体为本章 §9.1–§9.6；**真机（TDX / GPU-CC）验收操作单与准备件**保留为**过程留证/模板**，索引如下（不计入标准文档）。
+
+| 件 | 文档 | 用途 |
+|---|---|---|
+| GF3.2 真机 TDX 密态 SSE 端到端验收 | [GA-GF3.2-真机TDX验收操作单.md](GA-GF3.2-真机TDX验收操作单.md) | 对齐改造成果的真机验收步骤 |
+| GF5 真机验收（R1-A/B/C） | [GF5-真机验收模板.md](GF5-真机验收模板.md) | 性能决策门 / C-MaaS 验证 / 规格 |
+| TEE 虚拟机验证准备包 | [GA-TEE虚拟机验证准备包.md](GA-TEE虚拟机验证准备包.md) | 租用 TEE 云主机后的验证清单与判据 |
+
 ---
 
 ## 10. 路由模块（多模型智能路由）运维手册
@@ -1047,6 +1071,325 @@ kubectl exec -n higress-system <pod> -- \
 | R-OPS05 | 监控指标完整 | Prometheus 能查到所有 `otpmask_route_*` 指标 | ☐ |
 | R-OPS06 | 关键告警配置 | fail-closed 激增 / 拉取停滞 / 熔断 三类告警可用 | ☐ |
 | R-OPS07 | 日志可追溯 | 每条路由决策有日志，含 request_id / endpoint / strategy | ☐ |
+
+#### 上线前 Go/No-Go 检查
+
+- [ ] 所有 P0 功能项 ✅
+- [ ] 性能指标在目标范围内 ✅
+- [ ] 安全验收全部通过 ✅
+- [ ] 监控告警接入完成 ✅
+- [ ] 回滚方案验证通过 ✅
+- [ ] 运维团队培训完成 ✅
+- [ ] 已知问题与规避措施文档化 ✅
+
+---
+
+## 11. 语义缓存模块（P0-2）运维手册
+
+> **本章定位**：语义缓存模块（P0-2）专项部署与运维指南，覆盖组件拓扑、配置、日常操作、故障排查、观测与回滚。
+> 通用部署与运维见 §1–§6；全局上线验收见 §9；本章为语义缓存专项补充（**结构对齐 §10 路由模块**）。
+> **对应实现**：E1–E4B + G3（`HEAD=8552be1`）；**默认 `mode=off`**，行为与现网逐字节一致。
+
+### 11.0 红线（务必保持）
+
+| # | 红线 | 说明 | 违反后果 |
+|---|---|---|---|
+| R1 | **`mode=off`（默认）逐字节一致** | 不组装语义存储、不追加 `/metrics` 缓存指标、不写 L1 | 现网行为漂移 |
+| R2 | **缓存故障绝不拖垮推理主链** | 一切异常 fail-open 到 miss（§6.9） | 缓存问题放大为可用性事故 |
+| R3 | **明文不出飞地** | 内存明文随进程消亡；Redis 只存 AEAD 密文（§5.3） | 合规事故 |
+| R4 | **管理 API 凭证不下发租户侧** | `X-Admin-Token` 属平台运维凭证 | 越权操作缓存 |
+
+### 11.1 组件与部署拓扑
+
+语义缓存是 **tee-infer-service 内的模块**（不新增独立服务，§3.5）：
+
+```
+客户端 → Higress 网关 → tee-infer-service（TEE 内）
+                              │  cacheengine 模块
+                              ├── L0 精确缓存（进程内）
+                              ├── 负向缓存（进程内）
+                              ├── 语义缓存（embedding + 向量索引）
+                              └── 管理 API（/cache/* 同进程同端口）
+                                     │
+                     ┌───────────────┼────────────────┐
+                     ▼               ▼                ▼
+                  Redis         embedding sidecar   预热清单文件
+                （密文共享，       （向量化，        （只读挂载，
+                  形态 B/C）        形态 C）         /etc/og/warmup.jsonl）
+```
+
+| 组件 | 部署形态 | 关键配置 | 说明 |
+|---|---|---|---|
+| **cacheengine 模块** | tee-infer 进程内 | `CACHE_CONFIG_PATH` / `CACHE_MODE` | 缓存主逻辑；默认 `off` 不激活 |
+| **Redis** | K8s Deployment/Service（或托管） | `redis.*` | 形态 B/C；**只存 AEAD 密文** |
+| **embedding sidecar** | 同 Pod sidecar 或内网服务 | `semantic.embedder.*` | 形态 C；向量化（维度须一致） |
+| **预热清单文件** | 只读卷（`0444`） | `warmup.file` | JSONL；由控制面/运营投递 |
+| **管理 API** | tee-infer 同端口 `:19090` | `-admin-token` / `-listen` | `/cache/*` 十端点（见 API 参考 §5.5） |
+
+**部署形态与选择**：
+
+| 形态 | 说明 | 前置依赖 | 适用 |
+|---|---|---|---|
+| **A · 进程内精确** | 仅精确键缓存，无外部依赖 | 无 | 起步/单实例；`mode=exact` |
+| **B · Redis 共享精确** | 精确层落 Redis（多副本共享） | Redis ≥6.2 | 多副本、跨重启保留 |
+| **C · 语义（+向量）** | 精确 + 语义（sidecar + 向量） | Redis + embedding sidecar（+VSS 可选） | 语义命中收益场景 |
+
+**选择建议**：先以**形态 A**（`mode=exact`）验证零回归与精确命中，再按需演进 B/C。
+
+**依赖关系**：
+- 缓存激活 = `mode ≠ off`（默认 `off`）。
+- 语义启用 = `semantic.enabled=true` **且** 启动期维度探针通过（否则**自动降级 `mode=exact`**）。
+- `redis-vss` 向量后端 = **双条件**（Redis 向量能力探测通过 **且** `redis.addr` 落在 `trusted_cidr` 内），缺一**启动拒绝**。
+- Redis 不可达 = 形态 B/C 降级形态 A（fail-open），不阻断推理。
+
+### 11.2 配置参数速查表
+
+**加载顺序**（启动期）：
+
+```
+DefaultConfig()（mode=off）
+  → CACHE_CONFIG_PATH 指定文件（LoadConfig）
+  → ApplyEnv()（CACHE_* 覆盖）
+  → Validate()（失败：告警 + 回退默认 off）
+  → 语义探针 / BuildSemanticStoreFromConfig（失败：降级 exact 或关闭语义）
+```
+
+> 任一环节失败均 **fail-safe 回退 off/精确**，不阻断 tee-infer 启动；但缓存会静默不可用，须查日志 `[tee] 缓存配置加载失败…` / `[tee] 语义缓存探针失败…`。
+
+**环境变量（部署期切换，无需改配置文件；仅覆盖"总开关与连接参数"）**：
+
+| 变量 | 取值 | 风险 | 说明 |
+|---|---|---|---|
+| `CACHE_CONFIG_PATH` | 文件路径 | 低 | JSON 配置路径（缺省用默认 `mode=off`） |
+| `CACHE_MODE` | `off`/`exact`/`semantic`/`full` | ⚠️ 中 | 缓存总开关 |
+| `CACHE_REDIS_ENABLED` | `1/0/true/false/yes/no` | ⚠️ 中 | Redis L1（形态 B/C）开关 |
+| `CACHE_REDIS_ADDR` | `host:port` | 低 | Redis 地址 |
+| `CACHE_SEMANTIC_ENABLED` | 同上 | ⚠️ 中 | 语义层开关 |
+| `CACHE_EMBEDDER_ENDPOINT` | URL | 低 | sidecar 端点（默认 `http://127.0.0.1:18081/embed`） |
+| `CACHE_EMBEDDER_MODEL` | 模型名 | 低 | 默认 `bge-small-zh-v1.5` |
+| `CACHE_EMBEDDER_DIM` | 正整数 | ⚠️ 中 | 默认 `512`；**须与 sidecar 一致**，否则探针失败降级 |
+| `CACHE_VECTOR_BACKEND` | `flat`/`hnsw`/`redis-vss` | ⚠️ 中 | `redis-vss` 需**双条件**，否则启动拒绝 |
+
+> **安全阈值（`threshold.*` 等）只能走配置文件评审**（`ApplyEnv` 不覆盖）。
+
+**配置文件高频项**（完整字段以 `cacheengine/config.go` 为准；JSON，时长 `"5s"`、容量 `"256MB"`）：
+
+| 路径 | 类型 | 风险 | 说明 |
+|---|---|---|---|
+| `mode` | enum | ⚠️ 中 | `off/exact/semantic/full`（**默认 off**，红线 R1） |
+| `scope` | enum | ⚠️ 中 | `per_tenant`（默认）/`global` |
+| `policy_version` | string | 低 | 变更 → 旧条目**自然失效**（无需清缓存） |
+| `cache_memory_budget` | size | ⚠️ 中 | 超 `watermark_high` → 只读态；回落 `watermark_low` → 恢复写 |
+| `exact.*` | — | 低 | `enabled`/`ttl`/`max_entries`/`max_entry_bytes` |
+| `negative.*` | — | 低 | 负向缓存（`only_for` 限定快失败类） |
+| `semantic.embedder.dim` | int | ⚠️ 中 | **须与 sidecar 一致** |
+| `semantic.vector.backend` | enum | ⚠️ 中 | `flat/hnsw/redis-vss`（后者双条件） |
+| `semantic.threshold.*` | float | 🔴 高 | 场景化阈值（事实/通用/代码/数学） |
+| `redis.password_ref` | string | 🔴 高 | 引用外部机密（`env:VAR`/密钥管理），**不落明文** |
+| `guard.read_fast_check` / `write_requires_out_guard` | bool | ⚠️ 中 | 读时快审 / 写前门禁（安全，慎改） |
+| `write_limit.*` | — | 低 | 写入限流：上限 = `min(入向QPS × inbound_headroom, max_qps)`（§7.4.2） |
+| `gray.stage` | enum | ⚠️ 中 | `G-0..G-5`（§12.2；驱动 `#36`） |
+| `warmup.file` / `warmup.qps` | string/int | 低 | 预热清单路径 / 节流（0=不限） |
+
+**配置示例**：
+
+```json
+// 形态 A（推荐起步）
+{ "mode": "exact", "scope": "per_tenant", "policy_version": "p1",
+  "cache_memory_budget": "256MB", "exact": { "enabled": true, "ttl": "10m" },
+  "semantic": { "enabled": false }, "redis": { "enabled": false },
+  "gray": { "enabled": false, "stage": "G-0" },
+  "write_limit": { "enabled": true, "max_qps": 200, "inbound_headroom": 1.2, "window": "1s" } }
+```
+
+```json
+// 形态 B（Redis 共享精确）
+{ "mode": "exact",
+  "redis": { "enabled": true, "addr": "redis.og.svc:6379", "db": 0,
+             "password_ref": "env:REDIS_PASSWORD", "trusted_cidr": ["10.0.0.0/8"],
+             "key_prefix": "og:cache:", "ttl_slack": "5s", "pool_size": 64, "max_retries": 2 } }
+```
+
+```json
+// 形态 C（语义）
+{ "mode": "semantic",
+  "semantic": { "enabled": true,
+    "embedder": { "kind": "sidecar", "endpoint": "http://127.0.0.1:18081/embed",
+                  "model_id": "bge-small-zh-v1.5", "dim": 512, "timeout": "200ms", "fail_open": true },
+    "vector": { "backend": "flat", "flat_max_entries": 50000, "top_k": 5 },
+    "threshold": { "factual": 0.92, "general": 0.88, "code": 0.95, "math": 0.97 } },
+  "gray": { "enabled": true, "stage": "G-4", "canary_tenants": ["t1"], "traffic_percent": 5 } }
+```
+
+> 示例阈值/水印为**示意值**；实际取值以本体 §4.2/§6.5 与评审结论为准。
+
+**依赖部署要点**：
+
+- **Redis**：≥6.2（RESP）；`redis-vss` 需 **Redis 8.0+ / Redis Stack**；凭证经 `password_ref` 引用；仅内网可达、`trusted_cidr` 收紧。
+- **embedding sidecar**：端点 + `health_endpoint`（留空按 endpoint 推导）；输出维度**必须**等于 `dim`；`fail_open=true` 时不可用 → 语义 miss（不阻塞主链）。
+- **预热清单挂载**：`warmup.file`（建议 `/etc/og/warmup.jsonl`）以**只读卷** `0444` 挂载；格式 JSONL `{"tenant","engine","model","prompt","max_new_tokens"}`（**不含 text**）；更新为**全量替换**，导入 `sha256` 记入审计。
+
+### 11.3 日常运维操作
+
+#### 11.3.1 开关与回滚
+
+| 操作 | 命令/方式 | 生效 |
+|---|---|---|
+| 启用精确缓存 | `CACHE_MODE=exact` + 滚动重启 | 重启后 |
+| 启用语义 | `CACHE_SEMANTIC_ENABLED=true`（+ sidecar 就绪） | 重启后 |
+| **一键止血** | `CACHE_MODE=off` + 滚动重启 | **无需清缓存** |
+| 降级精确 | `CACHE_SEMANTIC_ENABLED=false` | 重启后 |
+| Redis 降级 | `CACHE_REDIS_ENABLED=false`（形态 B/C → A） | 重启后 |
+
+> **⚠️ 重要**：§6.10「配置热更新」**尚未接线**——配置文件变更需**滚动重启**方能生效。
+
+#### 11.3.2 缓存失效
+
+| 场景 | 操作 |
+|---|---|
+| 单条错误条目 | `DELETE /cache/entry/{key_hash}` |
+| 租户隔离/清退 | `DELETE /cache/tenant/{tenant_id}`（含向量） |
+| 模型升级/下线 | `DELETE /cache/model/{model}` |
+| 事故期全清 | `DELETE /cache/all?confirm=yes`（**须 confirm**，留痕，建议限频+变更单） |
+| 策略/词库更新 | **无需清缓存**：`policy_version`/`GuardVer` 变更后旧条目自然失效 |
+
+#### 11.3.3 预热
+
+```bash
+# 触发（reset=true 先全量失效；返回 task_id）
+curl -s -X POST -H "X-Admin-Token: $TOKEN" -d '{"reset":false}' "$BASE/cache/warmup"
+# 查询进度
+curl -s -H "X-Admin-Token: $TOKEN" "$BASE/cache/warmup/<task_id>"
+```
+
+- **单飞**：并发触发返回 `409 CACHE_WARMUP_BUSY`。
+- **节流**：`warmup.qps` 防打爆上游。
+- **失败处置**：文件/行非法 → `400 CACHE_INVALID_ARG`（`message` 含 `warmup line N`）；单条失败 → 记 `failed` 继续；全失败 → 任务 `failed`（不写条目）；被写前审查拦截 → 记 `skipped`（**不算失败**）。
+- **任务态不持久化**：进程重启后任务丢失（P0 接受）。
+
+#### 11.3.4 灰度放量与门禁
+
+```bash
+# 阶段门禁校验（需 /metrics）
+CACHE_METRICS_URL=http://127.0.0.1:19090/metrics bash scripts/cache-canary.sh --stage G-2
+# 回滚动作指引
+bash scripts/cache-canary.sh --rollback --to G-1
+```
+
+| 阶段 | 门禁（脚本可算项） |
+|---|---|
+| G-0 影子（`write_only`） | 写入成功率/无误命中 → **MANUAL**（无 stores 计数器/需告警系统） |
+| G-1 白名单 5% | M1 精确命中率 > 10% |
+| G-2 白名单 50% | M1 > 15% 且 精确查表 p95 < 1ms |
+| G-3 全量精确 | 无 P1 告警 → **MANUAL** |
+| G-4 语义 | M5 误命中率 < 1% |
+| G-5 语义全场景 | 无 P1 告警 → **MANUAL** |
+
+- **退出码**：`0` 通过（MANUAL 不判失败）/ `1` 未过 / `2` 参数或环境错误；证据 JSON 落 `CACHE_CANARY_OUT`。
+- **回滚判据**（§12.2）：误命中率 >1% / 命中延迟 p95 超预算 / 数据串租（I-8）/ 任一安全告警（AL-1、AL-5）。
+- **⚠️ 回滚方式**：§12.3 依赖 `gray` 配置下发热更新（§6.10 未接线），脚本**只产出指引 + 证据**；实际回滚按 11.3.1 执行（写回 `gray.stage` + 滚动重启）。
+
+### 11.4 故障排查手册
+
+| 症状 | 判断 | 处置 |
+|---|---|---|
+| 缓存全不命中（精确也 miss） | `lookups_total{kind="exact",result="disabled"}` 增长 / 日志回退 | 查配置加载与 `mode`；确认 sidecar/Redis 探针 |
+| 语义命中恒 miss | `otpmask_cache_embedder_errors_total` / `embed_timeout_total` 增长 | 查 embedding sidecar；不可用时语义**自动 fail-open 为 miss**，必要时 `CACHE_MODE=exact` |
+| Redis 报错（`redis_errors_total` 增长） | AL-4 | 查 Redis 连通/容量；必要时 `CACHE_REDIS_ENABLED=false` 降级形态 A |
+| 只读态（`readonly=1`） | AL-8 内存水位 | 查泄漏（`estimated_bytes`）；或上调 `cache_memory_budget` 并重启；回落低水位**自动恢复写** |
+| `panic_total` 增长 | AL-1 | 查 error 日志栈；缓存 panic 已 recover 转 miss（不拖垮主链）；必要时 `mode=off` |
+| `write_throttled_total` 增长 | AL-6 | 疑似批量灌入；按 `tenant` 定位；核对 `write_limit` |
+| `audit_fail_total` 增长 | AL-10 | 查审计后端（旁路信号，不阻塞缓存写入） |
+| 命中回放异常 | `replay_total{result="error"}` | 查条目完整性（`entry_corrupt_total`）与分片；必要时删除该条目 |
+| 预热后仍 miss | — | 预热条目键由"与真实请求同一链路"的 `transformed_hash` 决定；核对清单 prompt 与线上请求口径 |
+| `/metrics` 无 `otpmask_cache_*` | — | `CACHE_MODE=off`（默认）时不追加缓存指标（红线 R1） |
+
+> **通用止血顺序**：① 定位；② 降级（`semantic→exact`）；③ 禁用（`mode=off`）；④ 回滚变更。全程**不清缓存**亦可恢复（版本自然失效）。
+
+### 11.5 观测指标速查
+
+| 指标 | 用途 |
+|---|---|
+| `otpmask_cache_lookups_total{kind,result}` | 命中率（M1/M2） |
+| `otpmask_cache_lookup_duration_seconds{kind}` | 查表延迟（M3） |
+| `otpmask_ttft_seconds{mode,cache}` | TTFT 命中改善（M4） |
+| `otpmask_cache_semantic_false_positive_total` | 误命中（M5） |
+| `otpmask_cache_redis_errors_total` | Redis 错误 |
+| `otpmask_cache_write_throttled_total{tenant}` | 写入限流 |
+| `otpmask_cache_canary_total{stage,result}` | 灰度放量 |
+| `otpmask_cache_warmup_items_total{result}` | 预热条目 |
+| `otpmask_cache_estimated_bytes` / `readonly` | 内存水位/只读态 |
+| `otpmask_cache_panic_total` | panic 计数 |
+| `otpmask_cache_read_fast_check_block_total` | 读时快审拦下 |
+
+**告警（§9.3）**：
+
+| # | 告警 | 级别 | 处置 |
+|---|---|---|---|
+| AL-1 | `rate(otpmask_cache_panic_total[5m]) > 0` | P1 | 有 panic 即查；必要时 `mode=off` 止血 |
+| AL-2 | 语义误命中率 > 1%（且命中样本 > 100/h） | P1 | 收紧场景阈值 / 关闭该场景 |
+| AL-3 | 命中延迟 p95 > 15ms | P2 | 查 sidecar 与向量索引 |
+| AL-4 | `rate(otpmask_cache_redis_errors_total[5m]) > 1` | P2 | 查 Redis；必要时降级形态 A |
+| AL-5 | 读时快审拦下激增 | P1 | 疑似投毒或词库更新；查审计链 |
+| AL-6 | 写入限流触发 | P2 | 疑似批量灌入；查 `tenant` |
+| AL-7 | 向量容量 > `flat_max_entries×0.9` | P2 | 扩容或清理 |
+| AL-8 | `estimated_bytes > cache_memory_budget×0.9` | P1 | 查泄漏/上调预算 |
+| AL-9 | `rate(embed_invalid_total[5m]) > 5` | P2 | 查 sidecar；语义自动降级为精确 |
+| AL-10 | `rate(audit_fail_total[5m]) > 0` | P2 | 查审计后端 |
+| AL-11 | 流式分片降级占比 > 20% | P2 | 查 `stream.max_segments` 与响应长度 |
+
+**门禁**：`scripts/metrics-required.txt`（缓存指标均 `conditional`，触发条件 `CACHE_MODE != off`）；`pwsh scripts/check-metrics-green.ps1`。
+
+### 11.6 上线前检查清单（语义缓存专项）
+
+> 本清单为 §9 全局上线验收的**语义缓存专项补充**，结构与 §10.6 一致。
+
+#### 功能验收
+
+| # | 项 | 验证方法 | 结果 |
+|---|---|---|---|
+| C-F01 | `mode=off` 零回归 | 开关前后同一请求逐字节对比响应 | ☐ |
+| C-F02 | 精确命中生效 | 同口径请求二次调用，审计 `cache_hit=true` | ☐ |
+| C-F03 | 租户隔离 | 跨租户同 prompt 不互相命中 | ☐ |
+| C-F04 | 语义命中（形态 C） | 相似问题命中；不相似不命中 | ☐ |
+| C-F05 | 写前门禁 | 未过输出审查的结果不写缓存 | ☐ |
+| C-F06 | 读时快审 | 命中回放前审查生效（`read_fast_check_block_total`） | ☐ |
+| C-F07 | 失效（按键/租户/模型/全量） | 四类 DELETE 幂等且生效 | ☐ |
+| C-F08 | 预热 | 触发→进度至 `succeeded`；`not_writable` 记 skipped | ☐ |
+| C-F09 | 写入限流 | 超限写入被丢弃并记 `write_throttled_total` | ☐ |
+| C-F10 | 灰度放量 | G-0 影子只写不读；阶段门禁脚本可用 | ☐ |
+
+#### 性能验收（详见 §8.3 BM-1..8）
+
+| # | 项 | 目标值 | 验证方法 | 结果 |
+|---|---|---|---|---|
+| C-P01 | 精确查表延迟 | p95 < 1ms | BM-1 | ☐ |
+| C-P02 | 语义查表延迟 | p95 < 15ms | BM-2（真机） | ☐ |
+| C-P03 | 命中 TTFT 改善 | 首帧显著下降 | BM-3（真机） | ☐ |
+| C-P04 | 内存占用 | ≤ `cache_memory_budget` | BM-5 | ☐ |
+| C-P05 | 侧信道抖动 | KS p>0.05 | BM-4 | ☐ |
+
+#### 安全验收
+
+| # | 项 | 验证方法 | 结果 |
+|---|---|---|---|
+| C-S01 | 明文不出飞地 | Redis 取值非明文；`/cache/inspect` 响应无正文 | ☐ |
+| C-S02 | 管理 API 鉴权 | 无/错 `X-Admin-Token` → 403 | ☐ |
+| C-S03 | `mode=off` 门控 | 运营端点 → 409 `CACHE_DISABLED` | ☐ |
+| C-S04 | 管理凭证不落明文 | 配置文件无 token 明文；grep 日志无泄漏 | ☐ |
+| C-S05 | `redis-vss` 双条件 | 能力探测 + `trusted_cidr` 缺失时启动拒绝 | ☐ |
+| C-S06 | 预热无直灌文本 | 清单不含 text；正文仅由推理产出 | ☐ |
+
+#### 运维验收
+
+| # | 项 | 验证方法 | 结果 |
+|---|---|---|---|
+| C-OPS01 | 一键回滚 | `CACHE_MODE=off` + 重启，请求恢复正常 | ☐ |
+| C-OPS02 | 指标完整 | Prometheus 可查全部 `otpmask_cache_*` | ☐ |
+| C-OPS03 | 告警可用 | AL-1/AL-2/AL-5/AL-8 四类配置并验证 | ☐ |
+| C-OPS04 | 灰度门禁脚本 | `cache-canary.sh` 各退出码可复现 | ☐ |
+| C-OPS05 | 降级可用 | sidecar/Redis 停服后正常推理（fail-open） | ☐ |
+| C-OPS06 | 启动自检 | `/config/cache` 与 `/cache/stats` 与形态一致 | ☐ |
 
 #### 上线前 Go/No-Go 检查
 
