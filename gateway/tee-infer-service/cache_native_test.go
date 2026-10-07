@@ -156,6 +156,54 @@ func TestSegmentCapturingEngine_RecordsJitterMiss(t *testing.T) {
 	}
 }
 
+// TestJitter_InjectionWired T-7.3-9（§7.3.1 / N4-P0-1）：注入侧接线回归——
+// 命中路径首片、miss 路径首字节均**不早于** releaseAt；两条路径各记一次 jitter（path=hit/miss）。
+func TestJitter_InjectionWired(t *testing.T) {
+	const jitter = 20 * time.Millisecond
+
+	// 命中路径：segmentReplayEngine 首片前等待 releaseAt
+	{
+		rec := &fakeJitterRec{}
+		releaseAt := time.Now().Add(jitter)
+		r := &segmentReplayEngine{text: "hit", releaseAt: releaseAt, rec: rec}
+		var firstAt time.Time
+		if err := r.Generate(model.GenerateRequest{}, func(string) error {
+			firstAt = time.Now()
+			return nil
+		}); err != nil {
+			t.Fatalf("hit Generate: %v", err)
+		}
+		if firstAt.Before(releaseAt) {
+			t.Fatalf("命中首片早于 releaseAt（注入未生效）：first=%v releaseAt=%v", firstAt, releaseAt)
+		}
+		if len(rec.paths) != 1 || rec.paths[0] != "hit" {
+			t.Fatalf("命中路径应记一次 jitter path=hit，got %v", rec.paths)
+		}
+	}
+
+	// miss 路径：segmentCapturingEngine 首字节前等待 releaseAt（fast-miss 亦不漏网）
+	{
+		rec := &fakeJitterRec{}
+		releaseAt := time.Now().Add(jitter)
+		c := newSegmentCapturingEngine(&fakeDeltaEngine{deltas: []string{"a", "b"}}, releaseAt, rec)
+		var firstAt time.Time
+		if err := c.Generate(model.GenerateRequest{}, func(string) error {
+			if firstAt.IsZero() {
+				firstAt = time.Now()
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("miss Generate: %v", err)
+		}
+		if firstAt.Before(releaseAt) {
+			t.Fatalf("miss 首字节早于 releaseAt（注入未生效）：first=%v releaseAt=%v", firstAt, releaseAt)
+		}
+		if len(rec.paths) != 1 || rec.paths[0] != "miss" {
+			t.Fatalf("miss 路径应记一次 jitter path=miss，got %v", rec.paths)
+		}
+	}
+}
+
 // TestTextInferCacheNegativeHitDenial R1（§7.3.1/§4.5）：负向缓存命中 → 拒答分流
 // （仅终止帧 finish=content_filter、无内容；审计 cache_negative_hit；计配额不计费）。
 func TestTextInferCacheNegativeHitDenial(t *testing.T) {

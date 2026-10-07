@@ -147,3 +147,36 @@ func TestSegmentsFor_NotStream(t *testing.T) {
 		t.Fatal("expected nil for non-stream")
 	}
 }
+
+// TestReplay_CorruptSegmentsTreatedMiss T-6.12-7（§6.12.4 ④ / B-6.12-9 / §9.1 #35）：
+// 条目"分片拼接"与全文不一致 → 视为 miss + 记 segments_mismatch（绝不部分回放）。
+func TestReplay_CorruptSegmentsTreatedMiss(t *testing.T) {
+	cfg := testConfig()
+	cfg.Stream.Enabled = true
+	eng := NewCacheEngine(cfg).(*engine)
+	ctx := LookupContext{TenantID: "t1", EngineType: "cmaas", Model: "m1", MaxNewTokens: 100,
+		TransformedHash: "corrupt-seg", PromptText: "long enough prompt", PolicyVer: "1", GuardVer: "v1",
+		Stream: true}
+	if out := eng.Store(StoreContext{LookupContext: ctx, Writable: true},
+		InferResult{Text: "abcdef", TokensOut: 10, Finish: "stop",
+			Segments: []Segment{{Text: "abc", At: 0}, {Text: "def", At: time.Millisecond}}}); !out.Stored {
+		t.Fatalf("precondition: store failed: %+v", out)
+	}
+
+	// 篡改分片（拼接 ≠ 全文），但 Text 的校验和仍自洽 → 应命 segments_mismatch 而非 integrity_mismatch。
+	st := eng.exact.(*lruExactStore)
+	st.mu.Lock()
+	st.items[eng.exactKey(ctx)].entry.Segments = []Segment{{Text: "xyz", At: 0}}
+	st.mu.Unlock()
+
+	r := eng.Lookup(ctx)
+	if r.Hit {
+		t.Fatal("分片与全文不一致的条目应视为 miss")
+	}
+	if got := eng.stats.entryCorruptC.snapshot()["segments_mismatch"]; got != 1 {
+		t.Fatalf("§9.1 #35 应记 1 次 segments_mismatch，got %d", got)
+	}
+	if got := eng.stats.entryCorruptC.snapshot()["integrity_mismatch"]; got != 0 {
+		t.Fatalf("不应记 integrity_mismatch，got %d", got)
+	}
+}

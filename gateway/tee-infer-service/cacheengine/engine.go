@@ -404,8 +404,10 @@ func (e *engine) doLookup(ctx LookupContext) (res LookupResult) {
 }
 
 // entryCorruptReason 条目完整性校验（§9.1 #35 / §5.1 / B-6.12-9）；空串 = 完整。
-// 注：segments_mismatch 校验暂缓——写入侧经输出侧改写（mask/rewrite）时分片与全文可能不等，
-// 需先与该口径对齐再启用，避免误判导致命中率回退。
+// segments_mismatch（H2-c 启用）：条目带分片时，"分片拼接"必须等于条目全文（§6.12.4 ④）。
+// 口径已核实：写入侧 Segments 与 Text 同源（`main.go` 的 `agg == capture.segments()`），且 `segmentsFor`
+// 只做"全量保留 / nil 降级"（不截断），故 native 路径恒等；本校验用于捕获外部/未来生产者构造的
+// 不一致条目（防"部分回放"），而非 native 常态。
 func entryCorruptReason(e *Entry) string {
 	if e == nil || e.Checksum == "" {
 		return ""
@@ -413,7 +415,29 @@ func entryCorruptReason(e *Entry) string {
 	if ComputeChecksum(e.Text) != e.Checksum {
 		return "integrity_mismatch"
 	}
+	if len(e.Segments) > 0 && !segmentsMatchText(e.Segments, e.Text) {
+		return "segments_mismatch"
+	}
 	return ""
+}
+
+// segmentsMatchText 判定分片拼接是否等于全文（无分配，O(len(text))）。
+func segmentsMatchText(segs []Segment, text string) bool {
+	total := 0
+	for _, s := range segs {
+		total += len(s.Text)
+	}
+	if total != len(text) {
+		return false
+	}
+	i := 0
+	for _, s := range segs {
+		if text[i:i+len(s.Text)] != s.Text {
+			return false
+		}
+		i += len(s.Text)
+	}
+	return true
 }
 
 // finishHit 命中收尾：完整性校验 → 读时快审 → 抖动采样 → 组装结果。

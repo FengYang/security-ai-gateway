@@ -1,7 +1,9 @@
 package cacheengine
 
 import (
+	"context"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"testing"
 )
@@ -264,4 +266,75 @@ func testSemanticConfig() CacheConfig {
 	cfg.Exact.MinPromptTokens = 2
 	cfg.Exact.MinTokens = 2
 	return cfg
+}
+
+// ===== H2-a（I-3）：语义命中端到端 =====
+
+// semanticTestEmbedder 测试专用"语义"编码器（H2-a）：
+// 以字符二元组（bigram）词袋哈希落入 dim 维并计数——文本重叠越多、余弦相似度越高，
+// 使"近义 → 语义命中"路径可被端到端断言。**真实语义质量**由真机 sidecar 验收（C-2），
+// 本编码器只保证"语义可达"以覆盖接线，不作为语义正确性判据。
+type semanticTestEmbedder struct{ dim int }
+
+// newSemanticTestEmbedder 构造测试专用语义编码器。
+func newSemanticTestEmbedder(dim int) Embedder {
+	if dim <= 0 {
+		dim = 32
+	}
+	return &semanticTestEmbedder{dim: dim}
+}
+
+func (s *semanticTestEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
+	vec := make([]float32, s.dim)
+	rs := []rune(text)
+	for i := 0; i < len(rs); i++ {
+		gram := string(rs[i])
+		if i+1 < len(rs) {
+			gram = string(rs[i : i+2]) // 字符二元组
+		}
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(gram))
+		vec[int(h.Sum32())%s.dim]++
+	}
+	return vec, nil
+}
+
+func (s *semanticTestEmbedder) Dim() int        { return s.dim }
+func (s *semanticTestEmbedder) Model() string   { return "semantic-test" }
+func (s *semanticTestEmbedder) Available() bool { return true }
+
+// TestSemanticHit_EndToEnd I-3（本体 §10.2）：近义两次请求 → 第二次"语义命中"（命中 + 指纹相容）。
+func TestSemanticHit_EndToEnd(t *testing.T) {
+	cfg := testSemanticConfig()
+	// 本用例考察"语义可达"接线而非阈值调参：把 factual 阈值也降到 0.5。
+	// 选词避开 code/math 关键词（"算法"/"计算"等），使其落入 factual（无实体指纹门禁）。
+	cfg.Semantic.Threshold.Factual = 0.5
+	sem, err := NewSemanticStore(&cfg, newSemanticTestEmbedder(32), NewFlatVectorIndex(32, 1000))
+	if err != nil {
+		t.Fatalf("new semantic store: %v", err)
+	}
+	eng := NewCacheEngine(cfg, WithSemanticStore(sem))
+
+	// 第一条：写入（同时落精确层 + 语义层）
+	base := LookupContext{
+		TenantID: "t1", EngineType: "cmaas", Model: "m1", MaxNewTokens: 100,
+		TransformedHash: "h-base", PromptText: "请介绍一下机器学习的基本概念", PolicyVer: "1", GuardVer: "v1",
+	}
+	if out := eng.Store(StoreContext{LookupContext: base, Writable: true},
+		InferResult{Text: "机器学习是人工智能的一个分支", TokensIn: 20, TokensOut: 15, Finish: "stop"}); !out.Stored {
+		t.Fatalf("store 失败: %+v", out)
+	}
+
+	// 第二条：近义改写——不同 hash（精确 miss）→ 走语义检索 → 语义命中
+	q := base
+	q.TransformedHash = "h-near"
+	q.PromptText = "请介绍一下机器学习的基本定义"
+	r := eng.Lookup(q)
+	if !r.Hit || r.Kind != KindSemantic {
+		t.Fatalf("期望语义命中，got hit=%v kind=%s reason=%s sim=%.3f",
+			r.Hit, r.Kind, r.RejectReason, r.Similarity)
+	}
+	if r.Entry == nil || r.Entry.Text == "" {
+		t.Fatal("语义命中应带回条目正文")
+	}
 }
