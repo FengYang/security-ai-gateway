@@ -112,7 +112,55 @@ type statsCollector struct {
 	// 附加耗时直方图（§9.1 #10 快审 / #39 embed 等）：shortName -> histogram
 	extraDurMu sync.Mutex
 	extraDur   map[string]*durationHistogram
+
+	// 带标签计数（§9.1 #21 流式降级 / #33 场景 / #34 指纹拒绝 / #38 负向写入）
+	streamDegradedC  labelCounter // key: reason
+	sceneC           labelCounter // key: scene|source
+	fingerprintRejC  labelCounter // key: scene
+	negativeStoreC   labelCounter // key: result
 }
+
+// labelCounter 带标签计数（key 为标签按序以 "|" 拼接），可选枚举校验。
+type labelCounter struct {
+	mu    sync.Mutex
+	m     map[string]uint64
+	valid map[string]struct{} // nil = 不校验
+}
+
+func (c *labelCounter) inc(key string) {
+	if c.valid != nil {
+		if _, ok := c.valid[key]; !ok {
+			panic(fmt.Sprintf("cacheengine: invalid metric label %q", key))
+		}
+	}
+	c.mu.Lock()
+	if c.m == nil {
+		c.m = make(map[string]uint64)
+	}
+	c.m[key]++
+	c.mu.Unlock()
+}
+
+func (c *labelCounter) snapshot() map[string]uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]uint64, len(c.m))
+	for k, v := range c.m {
+		out[k] = v
+	}
+	return out
+}
+
+// 枚举集合（§9.1 #21/#38）。
+var (
+	validStreamDegradedReasons = map[string]struct{}{
+		"too_many_segments": {}, "too_large": {}, "disabled": {},
+	}
+	validNegativeStoreResults = map[string]struct{}{"ok": {}, "stage_excluded": {}}
+	validScenes               = map[string]struct{}{
+		"factual": {}, "general": {}, "code": {}, "math": {},
+	}
+)
 
 // validWriteRejectedReasons §9.1 #5 写入被拒 reason 枚举（发射时硬校验）。
 var validWriteRejectedReasons = map[string]struct{}{
@@ -122,15 +170,30 @@ var validWriteRejectedReasons = map[string]struct{}{
 
 func newStatsCollector() *statsCollector {
 	return &statsCollector{
-		lookups:       make(map[string]map[string]uint64),
-		durs:          make(map[string]*durationHistogram),
-		slowLookups:   make(map[string]uint64),
-		disabled:      make(map[string]uint64),
-		jitters:       make(map[string]*durationHistogram),
-		writeRejected: make(map[string]uint64),
-		extraDur:      make(map[string]*durationHistogram),
+		lookups:         make(map[string]map[string]uint64),
+		durs:            make(map[string]*durationHistogram),
+		slowLookups:     make(map[string]uint64),
+		disabled:        make(map[string]uint64),
+		jitters:         make(map[string]*durationHistogram),
+		writeRejected:   make(map[string]uint64),
+		extraDur:        make(map[string]*durationHistogram),
+		streamDegradedC: labelCounter{valid: validStreamDegradedReasons},
+		fingerprintRejC: labelCounter{valid: validScenes},
+		negativeStoreC:  labelCounter{valid: validNegativeStoreResults},
 	}
 }
+
+// observeStreamDegraded 记录流式分片缓存降级（§9.1 #21）。
+func (s *statsCollector) observeStreamDegraded(reason string) { s.streamDegradedC.inc(reason) }
+
+// observeScene 记录场景分类计数（§9.1 #33；key=scene|source）。
+func (s *statsCollector) observeScene(scene, source string) { s.sceneC.inc(scene + "|" + source) }
+
+// observeFingerprintReject 记录实体指纹不相容拒绝（§9.1 #34）。
+func (s *statsCollector) observeFingerprintReject(scene string) { s.fingerprintRejC.inc(scene) }
+
+// observeNegativeStore 记录负向缓存写入结果（§9.1 #38）。
+func (s *statsCollector) observeNegativeStore(result string) { s.negativeStoreC.inc(result) }
 
 // observeLookup 记录一次查询结果。
 // kind ∈ {precheck,exact,negative,semantic}；result ∈ {hit,miss,disabled,not_cacheable,fastcheck_miss}。

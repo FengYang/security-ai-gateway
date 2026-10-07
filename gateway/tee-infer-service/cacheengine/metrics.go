@@ -37,6 +37,26 @@ func (e *engine) RenderPrometheus(w io.Writer) {
 	e.renderExtraDuration(w, "read_fast_check",
 		"otpmask_cache_read_fast_check_duration_seconds", "读时快审耗时（秒）")
 
+	// #21 stream_degraded_total{reason}（§6.12 流式分片降级为单块）
+	writeCacheCounter(w, "otpmask_cache_stream_degraded_total",
+		"流式分片缓存降级为单块次数（reason=too_many_segments|too_large|disabled）",
+		e.stats.streamDegradedC.snapshot(), []string{"reason"})
+
+	// #33 scene_total{scene,source}（§6.5.2）
+	writeCacheCounter(w, "otpmask_cache_scene_total",
+		"场景分类计数（scene=factual|general|code|math；source=rule|hint）",
+		e.stats.sceneC.snapshot(), []string{"scene", "source"})
+
+	// #34 fingerprint_reject_total{scene}（§6.5.2 实体指纹不相容）
+	writeCacheCounter(w, "otpmask_cache_fingerprint_reject_total",
+		"实体指纹不相容拒绝次数（按场景）",
+		e.stats.fingerprintRejC.snapshot(), []string{"scene"})
+
+	// #38 negative_store_total{result}（§6.4.2 负向缓存写入）
+	writeCacheCounter(w, "otpmask_cache_negative_store_total",
+		"负向缓存写入次数（result=ok|stage_excluded）",
+		e.stats.negativeStoreC.snapshot(), []string{"result"})
+
 	// #3 entries{store}
 	fmt.Fprintf(w, "# HELP otpmask_cache_entries 当前缓存条目数（按 store）\n# TYPE otpmask_cache_entries gauge\n")
 	fmt.Fprintf(w, "otpmask_cache_entries{store=\"exact\"} %d\n", s.ExactEntries)

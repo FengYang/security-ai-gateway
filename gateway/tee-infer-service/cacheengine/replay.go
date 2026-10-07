@@ -61,6 +61,28 @@ func (r *entryReplayer) Replay(entry *Entry, stream bool) []Segment {
 	return segs
 }
 
+// segmentsDegradeReason 返回流式分片降级原因（§9.1 #21）；空串 = 未降级。
+// 仅在"本应产生分片但被降级"时给出原因（不含 stream=false / finish!=stop / 无分片等常态）。
+func segmentsDegradeReason(ctx StoreContext, res InferResult, cfg *CacheConfig) string {
+	if !ctx.Stream || res.Finish != "stop" || len(res.Segments) == 0 {
+		return ""
+	}
+	if cfg == nil || !cfg.Stream.Enabled {
+		return "disabled"
+	}
+	if len(res.Segments) > cfg.Stream.MaxSegments {
+		return "too_many_segments"
+	}
+	var total int
+	for _, s := range res.Segments {
+		total += len(s.Text)
+		if total > int(cfg.Exact.MaxEntryBytes.Bytes()) {
+			return "too_large"
+		}
+	}
+	return ""
+}
+
 // segmentsFor 流式分片采集判断（§6.1.3 伪代码 segmentsFor）。
 // 返回可写入缓存的分片；超限/异常返回 nil（降级单块）。
 func segmentsFor(ctx StoreContext, res InferResult, cfg *CacheConfig) []Segment {

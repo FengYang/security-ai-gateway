@@ -212,6 +212,7 @@ func (e *engine) Lookup(ctx LookupContext) (res LookupResult) {
 
 	// 1. 场景分类（必须先于可缓存性判定）
 	ctx.Scene = e.scene.Classify(ctx.PromptText)
+	e.stats.observeScene(string(ctx.Scene), "rule") // §9.1 #33：场景分类计数（source=rule）
 
 	// 2. 可缓存性判定
 	if d := e.cache.Cacheable(&ctx); !d.Cacheable {
@@ -313,6 +314,7 @@ func (e *engine) doLookup(ctx LookupContext) (res LookupResult) {
 					fpTh := e.fingerprintThreshold(sceneStr)
 					if !qfp.Compatible(rfp, fpTh) {
 						// 实体不兼容 → 不命中（指标枚举归一化为 miss，详见 §9.1 #34/#37）
+						e.stats.observeFingerprintReject(sceneStr) // §9.1 #34
 						e.stats.observeLookup("semantic", "miss")
 						return LookupResult{
 							Hit:          false,
@@ -462,6 +464,7 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 
 	// 可缓存性判定（写入侧重新判定）
 	ctx.Scene = e.scene.Classify(ctx.PromptText)
+	e.stats.observeScene(string(ctx.Scene), "rule") // §9.1 #33：场景分类计数（source=rule）
 	if d := e.cache.Cacheable(&ctx.LookupContext); !d.Cacheable {
 		e.stats.observeWriteRejected("not_cacheable") // §9.1 #5
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "not_cacheable:" + d.Reason}
@@ -474,6 +477,7 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 			negTTL := e.cfg.Negative.TTL.D()
 			e.neg.Put(nkey, res.Negative, negTTL)
 			e.stats.observeStore("negative")
+			e.stats.observeNegativeStore("ok") // §9.1 #38
 			if e.l1 != nil {
 				expireAt := unixMs(e.nowFn) + negTTL.Milliseconds()
 				ne := &Entry{Kind: KindNegative, TenantID: ctx.TenantID, Negative: res.Negative,
@@ -491,6 +495,7 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 	// 正常响应 → 写正向缓存
 	if res.Negative != nil {
 		// 负向但不在 only_for 范围内 → 不写
+		e.stats.observeNegativeStore("stage_excluded") // §9.1 #38
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "negative_not_allowed"}
 	}
 
@@ -512,6 +517,9 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 	ttl := e.ttl.TTLFor(ctx)
 	now := unixMs(e.nowFn)
 	segs := segmentsFor(ctx, res, e.cfg)
+	if reason := segmentsDegradeReason(ctx, res, e.cfg); reason != "" {
+		e.stats.observeStreamDegraded(reason) // §9.1 #21：流式分片降级为单块
+	}
 
 	entry := &Entry{
 		Kind:       KindExact,

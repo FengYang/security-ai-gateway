@@ -144,6 +144,41 @@ func TestRenderPrometheus_WriteRejectedAndFastCheck(t *testing.T) {
 	}
 }
 
+// TestRenderPrometheus_R3BStreamSceneNegative R3-B（§9.1 #21 流式降级 / #33 场景 / #38 负向写入）。
+func TestRenderPrometheus_R3BStreamSceneNegative(t *testing.T) {
+	cfg := testConfig()
+	cfg.Stream.Enabled = false // 使"应产生分片"的写入降级为单块（reason=disabled）
+	eng := NewCacheEngine(cfg)
+
+	base := LookupContext{TenantID: "t1", EngineType: "cmaas", Model: "m1", MaxNewTokens: 100,
+		TransformedHash: "h1", PromptText: "long enough prompt", PolicyVer: "1", GuardVer: "v1", Stream: true}
+
+	// #33：Lookup 即发射场景计数
+	eng.Lookup(base)
+
+	// #21：带分片但 Stream 关闭 → 降级 disabled
+	eng.Store(StoreContext{LookupContext: base, Writable: true},
+		InferResult{Text: "answer text", TokensOut: 10, Finish: "stop",
+			Segments: []Segment{{Text: "a", At: 0}}})
+
+	// #38：Stage 不在 only_for（默认 guardrail/output_guard）→ stage_excluded
+	eng.Store(StoreContext{LookupContext: base, Writable: true},
+		InferResult{Finish: "stop", Negative: &NegativePayload{Reason: "r", Stage: "other"}})
+
+	var buf bytes.Buffer
+	eng.RenderPrometheus(&buf)
+	out := buf.String()
+	for _, want := range []string{
+		"otpmask_cache_scene_total{",
+		`otpmask_cache_stream_degraded_total{reason="disabled"} 1`,
+		`otpmask_cache_negative_store_total{result="stage_excluded"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("缺指标：%s\n%s", want, out)
+		}
+	}
+}
+
 // TestObserveLookup_InvalidKindPanics 非法 kind 标签必须 panic（§9.1 硬约束）。
 func TestObserveLookup_InvalidKindPanics(t *testing.T) {
 	s := newStatsCollector()
