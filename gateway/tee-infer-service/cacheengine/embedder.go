@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -28,7 +29,8 @@ type Embedder interface {
 
 // SidecarEmbedderConfig sidecar 编码器配置。
 type SidecarEmbedderConfig struct {
-	URL            string        // sidecar endpoint，如 http://127.0.0.1:8080/embed
+	URL            string        // sidecar embed endpoint，如 http://127.0.0.1:18081/embed
+	HealthURL      string        // 健康检查端点；留空则由 URL 推导为 scheme://host/health
 	Model          string        // 请求的模型名，如 bge-large-zh-v1.5
 	Dim            int           // 预期维度
 	Timeout        time.Duration // 请求超时
@@ -66,6 +68,11 @@ func NewSidecarEmbedder(cfg SidecarEmbedderConfig) (Embedder, error) {
 	}
 	if cfg.MaxConns <= 0 {
 		cfg.MaxConns = 32
+	}
+	// HealthURL 留空时由 embed endpoint 推导（scheme://host/health），
+	// 避免把健康检查拼到 /embed 之后（历史上的 /embed/health 缺陷）。
+	if cfg.HealthURL == "" {
+		cfg.HealthURL = deriveHealthURL(cfg.URL)
 	}
 	return &sidecarEmbedder{
 		cfg: cfg,
@@ -148,11 +155,15 @@ func (s *sidecarEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 func (s *sidecarEmbedder) Dim() int      { return s.cfg.Dim }
 func (s *sidecarEmbedder) Model() string { return s.cfg.Model }
 
-// Available 通过轻量 GET 请求检查 sidecar 是否存活（/health 或 head）。
+// Available 通过轻量 GET 请求检查 sidecar 是否存活。
+// 使用独立推导/配置的 HealthURL（不再把 "/health" 拼到 embed 端点之后）。
 func (s *sidecarEmbedder) Available() bool {
+	if s.cfg.HealthURL == "" {
+		return false // 无法推导健康端点 → 视为不可用（fail-closed 到语义 miss）
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.URL+"/health", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.HealthURL, nil)
 	if err != nil {
 		return false
 	}
@@ -162,6 +173,17 @@ func (s *sidecarEmbedder) Available() bool {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+// deriveHealthURL 从 embed endpoint 推导健康检查地址（scheme://host/health）。
+// 例：http://127.0.0.1:18081/embed → http://127.0.0.1:18081/health
+// 无法解析（缺 scheme/host）时返回空串，由调用方按不可用处理。
+func deriveHealthURL(embedURL string) string {
+	u, err := url.Parse(embedURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host + "/health"
 }
 
 // ===== stub 实现（测试/默认关闭） =====
