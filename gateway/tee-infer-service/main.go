@@ -3660,7 +3660,15 @@ func main() {
 			cacheCfg.Semantic.Enabled = false
 		}
 	}
-	cacheEng := cacheengine.NewCacheEngine(cacheCfg)
+	// P5：语义装配（embedder + 向量索引 + SemanticStore）。失败即按 §6.9/B-7.6-1 降级为精确缓存。
+	var cacheOpts []cacheengine.EngineOption
+	if store, err := cacheengine.BuildSemanticStoreFromConfig(context.Background(), &cacheCfg); err != nil {
+		log.Printf("[tee] 语义存储装配失败，禁用语义缓存：%v", err)
+		cacheCfg.Semantic.Enabled = false
+	} else if store != nil {
+		cacheOpts = append(cacheOpts, cacheengine.WithSemanticStore(store))
+	}
+	cacheEng := cacheengine.NewCacheEngine(cacheCfg, cacheOpts...)
 
 	srv := &teeServer{
 		km: km, kSig: kSig, attest: *attestToken,
