@@ -47,8 +47,14 @@ func buildSemanticStore(ctx context.Context, cfg *CacheConfig, ops redisOps, cap
 		if err != nil {
 			return nil, err
 		}
-	default:
+	case "hnsw":
+		h := cfg.Semantic.Vector.HNSW
+		idx = NewHNSWVectorIndex(cfg.Semantic.Embedder.Dim, h.MaxEntries, h.M, h.EfConstruction, h.EfSearch)
+	case "flat":
 		idx = NewFlatVectorIndex(cfg.Semantic.Embedder.Dim, cfg.Semantic.Vector.FlatMaxEntries)
+	default:
+		// 显式拒绝未知后端（修正历史"静默降级为 flat"隐患）
+		return nil, fmt.Errorf("cache: unsupported vector backend %q (allowed: flat|hnsw|redis-vss)", backend)
 	}
 	return NewSemanticStore(cfg, emb, idx)
 }

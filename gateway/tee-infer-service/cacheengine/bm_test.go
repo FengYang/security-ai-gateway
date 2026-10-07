@@ -278,36 +278,56 @@ func TestBM8_FaultInjectionLatency(t *testing.T) {
 	}
 }
 
-// TestBM2_LocalReference_FlatSearch BM-2 本地参考：flat 暴力检索延迟（**不含** embedder；端到端待真实 sidecar）。
-func TestBM2_LocalReference_FlatSearch(t *testing.T) {
+// TestBM2_LocalReference_Backends BM-2 本地参考：flat 与 HNSW 后端检索延迟对照
+// （**不含** embedder；端到端待真实 sidecar）。判据（p95 < 15ms）在本地对 HNSW 生效。
+func TestBM2_LocalReference_Backends(t *testing.T) {
 	bmSkipShort(t)
 	const vecN = 50000
-	idx := NewFlatVectorIndex(512, vecN)
+	const dim = 512
 	rng := rand.New(rand.NewSource(2))
-	vec := make([]float32, 512)
-	for i := 0; i < vecN; i++ {
-		for k := range vec {
-			vec[k] = rng.Float32()
-		}
-		if err := idx.Upsert(fmt.Sprintf("v-%d", i), vec, VectorMeta{
-			TenantID: "t1", EngineType: "cmaas", Model: "m1", PolicyVer: "v1", GuardVer: "v1",
-		}); err != nil {
-			t.Fatalf("向量插入失败 i=%d: %v", i, err)
-		}
+	vecs := make([][]float32, vecN)
+	for i := range vecs {
+		vecs[i] = randVec(rng, dim)
 	}
-	const samples = 200 // flat 暴力检索昂贵（~17ms/次），采样量下调以控制套件耗时
-	durs := make([]float64, 0, samples)
-	for i := 0; i < samples; i++ {
-		for k := range vec {
-			vec[k] = rng.Float32()
-		}
+	build := func(idx VectorIndex) time.Duration {
 		start := time.Now()
-		if _, err := idx.Search(vec, 5, VectorFilter{TenantID: "t1"}); err != nil {
-			t.Fatalf("检索失败: %v", err)
+		for i, v := range vecs {
+			if err := idx.Upsert(fmt.Sprintf("v-%d", i), v, hnswTestMeta(i, "t1")); err != nil {
+				t.Fatalf("插入失败 i=%d: %v", i, err)
+			}
 		}
-		durs = append(durs, float64(time.Since(start).Nanoseconds())/1e6)
+		return time.Since(start)
 	}
-	t.Logf("BM-2 本地参考（flat 检索，不含 embedder；端到端待真实 sidecar）：p50=%.3fms p95=%.3fms p99=%.3fms（n=%d，向量=%d）",
-		percentile(durs, 0.50), percentile(durs, 0.95), percentile(durs, 0.99), samples, vecN)
-	// 端到端判据（p95 < 15ms，含 sidecar）待环境，本用例不作验收断言。
+
+	flat := NewFlatVectorIndex(dim, vecN)
+	flatBuild := build(flat)
+	hn := NewHNSWVectorIndex(dim, vecN, 16, 200, 64)
+	hnBuild := build(hn)
+
+	// 采样：flat 昂贵（每样本 1 次），HNSW 快（每样本 50 次取均）
+	measure := func(idx VectorIndex, samples, batch int) (p50, p95, p99 float64) {
+		durs := make([]float64, 0, samples)
+		for s := 0; s < samples; s++ {
+			start := time.Now()
+			for k := 0; k < batch; k++ {
+				if _, err := idx.Search(randVec(rng, dim), 5, VectorFilter{TenantID: "t1"}); err != nil {
+					t.Fatalf("检索失败: %v", err)
+				}
+			}
+			durs = append(durs, float64(time.Since(start).Nanoseconds())/float64(batch)/1e6)
+		}
+		return percentile(durs, 0.50), percentile(durs, 0.95), percentile(durs, 0.99)
+	}
+	f50, f95, f99 := measure(flat, 200, 1)
+	h50, h95, h99 := measure(hn, 200, 50)
+
+	t.Logf("BM-2 本地参考（不含 embedder；向量=%d×%d）：flat 建索引=%.2fs 检索 p50/p95/p99 = %.2f/%.2f/%.2f ms",
+		vecN, dim, flatBuild.Seconds(), f50, f95, f99)
+	t.Logf("BM-2 本地参考（不含 embedder）：hnsw 建索引=%.2fs 检索 p50/p95/p99 = %.2f/%.2f/%.2f ms",
+		hnBuild.Seconds(), h50, h95, h99)
+
+	if h95 >= 15.0 {
+		t.Fatalf("BM-2 本地参考（hnsw）未达标：p95=%.2fms ≥ 15ms", h95)
+	}
+	// 端到端判据（含 sidecar）待环境，本用例仅本地对照。
 }

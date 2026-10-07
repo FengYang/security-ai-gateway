@@ -67,20 +67,25 @@ func ProbeCapabilities(ctx context.Context, ops redisOps, cfg RedisConfig) Capab
 }
 
 // ResolveVectorBackend 解析最终向量后端。
-// 默认（flat/hnsw 等）原样返回；配置为 redis-vss 但不同时满足
-// "RediSearch 可用 且 处于可信域" 时返回错误，由调用方拒绝启动（fail-closed，§3.1.2 / §7.7）。
+// 空值取默认 hnsw（§4.2）；flat/hnsw 原样返回；redis-vss 需同时满足
+// "RediSearch 可用 且 处于可信域"，否则返回错误由调用方拒绝启动（fail-closed，§3.1.2 / §7.7）；
+// 未知后端显式报错（修正历史"静默降级为 flat"隐患）。
 func ResolveVectorBackend(cfg *CacheConfig, caps Capabilities) (string, error) {
 	backend := cfg.Semantic.Vector.Backend
 	if backend == "" {
-		backend = "flat"
+		backend = "hnsw"
 	}
-	if backend != "redis-vss" {
+	switch backend {
+	case "flat", "hnsw":
 		return backend, nil
+	case "redis-vss":
+		if !caps.CanVSS() {
+			return "", fmt.Errorf(
+				"cache: vector.backend=redis-vss rejected (fail-closed): requires RediSearch available AND Redis in trusted_cidr (redisearch=%v trusted=%v)",
+				caps.RediSearch, caps.Trusted)
+		}
+		return "redis-vss", nil
+	default:
+		return "", fmt.Errorf("cache: unsupported vector backend %q (allowed: flat|hnsw|redis-vss)", backend)
 	}
-	if !caps.CanVSS() {
-		return "", fmt.Errorf(
-			"cache: vector.backend=redis-vss rejected (fail-closed): requires RediSearch available AND Redis in trusted_cidr (redisearch=%v trusted=%v)",
-			caps.RediSearch, caps.Trusted)
-	}
-	return "redis-vss", nil
 }

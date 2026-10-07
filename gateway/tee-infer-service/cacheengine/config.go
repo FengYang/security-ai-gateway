@@ -190,10 +190,19 @@ type EmbedderConfig struct {
 
 // VectorConfig 向量索引配置。
 type VectorConfig struct {
-	Backend        string            `json:"backend"` // flat | hnsw | redis-vss
-	FlatMaxEntries int              `json:"flat_max_entries"`
+	Backend        string            `json:"backend"` // flat | hnsw | redis-vss（默认 hnsw）
+	FlatMaxEntries int               `json:"flat_max_entries"`
 	TopK           int               `json:"top_k"`
 	TenantPolicy   map[string]string `json:"tenant_policy"` // off | exact_only
+	HNSW           HNSWConfig        `json:"hnsw"`
+}
+
+// HNSWConfig HNSW 图索引参数（§4.2；backend=hnsw 时生效）。
+type HNSWConfig struct {
+	M              int `json:"m"`               // 邻居数
+	EfConstruction int `json:"ef_construction"` // 建图候选宽度
+	EfSearch       int `json:"ef_search"`       // 检索候选宽度
+	MaxEntries     int `json:"max_entries"`     // 容量
 }
 
 // ThresholdConfig 相似度阈值配置（场景化）。
@@ -346,10 +355,16 @@ func DefaultConfig() CacheConfig {
 				FailOpen:       true,
 			},
 			Vector: VectorConfig{
-				Backend:        "flat",
+				Backend:        "hnsw", // 默认 HNSW（§4.2；flat 仅用于小规模/基准对照）
 				FlatMaxEntries: 50000,
 				TopK:           5,
 				TenantPolicy:   map[string]string{},
+				HNSW: HNSWConfig{
+					M:              16,
+					EfConstruction: 200,
+					EfSearch:       64,
+					MaxEntries:     50000,
+				},
 			},
 			Threshold: ThresholdConfig{
 				Factual:          0.93,
@@ -534,6 +549,31 @@ func (c CacheConfig) Validate() []error {
 		}
 		if c.WriteLimit.Window.D() < 100*time.Millisecond || c.WriteLimit.Window.D() > 60*time.Second {
 			errs = append(errs, fmt.Errorf("rule 26: write_limit.window must be in [100ms, 60s]"))
+		}
+	}
+
+	// 规则 27：向量后端与 HNSW 参数（§4.2）
+	switch c.Semantic.Vector.Backend {
+	case "", "flat", "hnsw", "redis-vss":
+	default:
+		errs = append(errs, fmt.Errorf("rule 27: semantic.vector.backend must be one of flat|hnsw|redis-vss, got %q", c.Semantic.Vector.Backend))
+	}
+	if bk := c.Semantic.Vector.Backend; bk == "hnsw" || bk == "" {
+		h := c.Semantic.Vector.HNSW
+		if h.M < 4 || h.M > 64 {
+			errs = append(errs, fmt.Errorf("rule 27: semantic.vector.hnsw.m must be in [4, 64]"))
+		}
+		if h.EfConstruction < 16 || h.EfConstruction > 2000 {
+			errs = append(errs, fmt.Errorf("rule 27: semantic.vector.hnsw.ef_construction must be in [16, 2000]"))
+		}
+		if h.EfSearch < 4 || h.EfSearch > 2000 {
+			errs = append(errs, fmt.Errorf("rule 27: semantic.vector.hnsw.ef_search must be in [4, 2000]"))
+		}
+		if h.MaxEntries < 1 {
+			errs = append(errs, fmt.Errorf("rule 27: semantic.vector.hnsw.max_entries must be >= 1"))
+		}
+		if h.EfSearch < c.Semantic.Vector.TopK {
+			errs = append(errs, fmt.Errorf("rule 27: semantic.vector.hnsw.ef_search must be >= vector.top_k"))
 		}
 	}
 

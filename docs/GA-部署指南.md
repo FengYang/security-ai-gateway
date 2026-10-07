@@ -1089,7 +1089,7 @@ kubectl exec -n higress-system <pod> -- \
 
 > **本章定位**：语义缓存模块（P0-2）专项部署与运维指南，覆盖组件拓扑、配置、日常操作、故障排查、观测与回滚。
 > 通用部署与运维见 §1–§6；全局上线验收见 §9；本章为语义缓存专项补充（**结构对齐 §10 路由模块**）。
-> **对应实现**：E1–E4B + G3（`HEAD=8552be1`）；**默认 `mode=off`**，行为与现网逐字节一致。
+> **对应实现**：E1–E4B + G3（`HEAD=8552be1`）+ **HNSW 向量索引（v1.11，默认后端 `hnsw`）**；**默认 `mode=off`**，行为与现网逐字节一致。
 
 ### 11.0 红线（务必保持）
 
@@ -1140,6 +1140,7 @@ kubectl exec -n higress-system <pod> -- \
 **依赖关系**：
 - 缓存激活 = `mode ≠ off`（默认 `off`）。
 - 语义启用 = `semantic.enabled=true` **且** 启动期维度探针通过（否则**自动降级 `mode=exact`**）。
+- **向量后端（`semantic.vector.backend`）默认 `hnsw`**（v1.11；进程内图索引，无外部依赖）；`flat` 为显式可选（小容量/需零召回损失）；`redis-vss` 需**双条件**——三者**无自动切换**，未知值**启动拒绝**（规则 27）。
 - `redis-vss` 向量后端 = **双条件**（Redis 向量能力探测通过 **且** `redis.addr` 落在 `trusted_cidr` 内），缺一**启动拒绝**。
 - Redis 不可达 = 形态 B/C 降级形态 A（fail-open），不阻断推理。
 
@@ -1169,7 +1170,7 @@ DefaultConfig()（mode=off）
 | `CACHE_EMBEDDER_ENDPOINT` | URL | 低 | sidecar 端点（默认 `http://127.0.0.1:18081/embed`） |
 | `CACHE_EMBEDDER_MODEL` | 模型名 | 低 | 默认 `bge-small-zh-v1.5` |
 | `CACHE_EMBEDDER_DIM` | 正整数 | ⚠️ 中 | 默认 `512`；**须与 sidecar 一致**，否则探针失败降级 |
-| `CACHE_VECTOR_BACKEND` | `flat`/`hnsw`/`redis-vss` | ⚠️ 中 | `redis-vss` 需**双条件**，否则启动拒绝 |
+| `CACHE_VECTOR_BACKEND` | `flat`/`hnsw`/`redis-vss` | ⚠️ 中 | **默认 `hnsw`**（v1.11）；`redis-vss` 需**双条件**；**未知值启动拒绝**（不再静默回退 flat） |
 
 > **安全阈值（`threshold.*` 等）只能走配置文件评审**（`ApplyEnv` 不覆盖）。
 
@@ -1184,7 +1185,8 @@ DefaultConfig()（mode=off）
 | `exact.*` | — | 低 | `enabled`/`ttl`/`max_entries`/`max_entry_bytes` |
 | `negative.*` | — | 低 | 负向缓存（`only_for` 限定快失败类） |
 | `semantic.embedder.dim` | int | ⚠️ 中 | **须与 sidecar 一致** |
-| `semantic.vector.backend` | enum | ⚠️ 中 | `flat/hnsw/redis-vss`（后者双条件） |
+| `semantic.vector.backend` | enum | ⚠️ 中 | `flat/hnsw/redis-vss`（**默认 `hnsw`**；后者双条件；未知值启动拒绝——规则 27） |
+| `semantic.vector.hnsw.*` | — | ⚠️ 中 | HNSW 参数：`m`(16)/`ef_construction`(200)/`ef_search`(64)/`max_entries`(50000)；**`ef_search ≥ top_k`**（规则 27）；`ef_search`↑召回↑延迟↑，`m`↑内存↑ |
 | `semantic.threshold.*` | float | 🔴 高 | 场景化阈值（事实/通用/代码/数学） |
 | `redis.password_ref` | string | 🔴 高 | 引用外部机密（`env:VAR`/密钥管理），**不落明文** |
 | `guard.read_fast_check` / `write_requires_out_guard` | bool | ⚠️ 中 | 读时快审 / 写前门禁（安全，慎改） |
@@ -1217,7 +1219,8 @@ DefaultConfig()（mode=off）
   "semantic": { "enabled": true,
     "embedder": { "kind": "sidecar", "endpoint": "http://127.0.0.1:18081/embed",
                   "model_id": "bge-small-zh-v1.5", "dim": 512, "timeout": "200ms", "fail_open": true },
-    "vector": { "backend": "flat", "flat_max_entries": 50000, "top_k": 5 },
+    "vector": { "backend": "hnsw", "top_k": 5,
+                "hnsw": { "m": 16, "ef_construction": 200, "ef_search": 64, "max_entries": 50000 } },
     "threshold": { "factual": 0.92, "general": 0.88, "code": 0.95, "math": 0.97 } },
   "gray": { "enabled": true, "stage": "G-4", "canary_tenants": ["t1"], "traffic_percent": 5 } }
 ```
@@ -1333,7 +1336,7 @@ bash scripts/cache-canary.sh --rollback --to G-1
 | AL-4 | `rate(otpmask_cache_redis_errors_total[5m]) > 1` | P2 | 查 Redis；必要时降级形态 A |
 | AL-5 | 读时快审拦下激增 | P1 | 疑似投毒或词库更新；查审计链 |
 | AL-6 | 写入限流触发 | P2 | 疑似批量灌入；查 `tenant` |
-| AL-7 | 向量容量 > `flat_max_entries×0.9` | P2 | 扩容或清理 |
+| AL-7 | 向量容量 > `hnsw.max_entries×0.9`（默认后端）/ `flat_max_entries×0.9`（flat） | P2 | 扩容或清理；**不自动切换后端** |
 | AL-8 | `estimated_bytes > cache_memory_budget×0.9` | P1 | 查泄漏/上调预算 |
 | AL-9 | `rate(embed_invalid_total[5m]) > 5` | P2 | 查 sidecar；语义自动降级为精确 |
 | AL-10 | `rate(audit_fail_total[5m]) > 0` | P2 | 查审计后端 |
