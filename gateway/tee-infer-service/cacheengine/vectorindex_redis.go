@@ -95,8 +95,39 @@ func (v *redisVectorIndex) Delete(id string) error {
 	return err
 }
 
-// Size 条目不在此维护（VSS 侧由 FT.INFO 提供）。
-func (v *redisVectorIndex) Size() int { return 0 }
+// Size 通过 FT.INFO 读取索引实时条目数（num_docs）；失败回退 0（不影响主链）。
+func (v *redisVectorIndex) Size() int {
+	res, err := v.ops.Do(context.Background(), "FT.INFO", v.index)
+	if err != nil {
+		return 0
+	}
+	return parseVSSNumDocs(res)
+}
+
+// parseVSSNumDocs 从 FT.INFO 返回序列（[name, value, name, value, ...]）解析 num_docs（纯函数，便于单测）。
+func parseVSSNumDocs(res any) int {
+	arr, ok := res.([]any)
+	if !ok {
+		return 0
+	}
+	for i := 0; i+1 < len(arr); i += 2 {
+		name, _ := arr[i].(string)
+		if name != "num_docs" {
+			continue
+		}
+		switch n := arr[i+1].(type) {
+		case int64:
+			return int(n)
+		case int:
+			return n
+		case string:
+			if v, err := strconv.Atoi(n); err == nil {
+				return v
+			}
+		}
+	}
+	return 0
+}
 
 // Search FT.SEARCH KNN + TAG 硬过滤（§5.4）。
 // 硬过滤（租户/引擎/模型/版本/过期）绝不交给相似度决定。

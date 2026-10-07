@@ -57,6 +57,23 @@ func TestNegativeStore_Eviction(t *testing.T) {
 	}
 }
 
+// TestNegativeStore_Clear 全量清空（§6.8.1）。
+func TestNegativeStore_Clear(t *testing.T) {
+	s := NewLRUNegativeStore(10)
+	s.Put("k1", &NegativePayload{Reason: "r", Stage: "guardrail"}, time.Hour)
+	s.Put("k2", &NegativePayload{Reason: "r", Stage: "guardrail"}, time.Hour)
+
+	if n := s.Clear(); n != 2 {
+		t.Fatalf("Clear() = %d, want 2", n)
+	}
+	if s.Len() != 0 {
+		t.Fatalf("expected len=0 after clear, got %d", s.Len())
+	}
+	if _, ok := s.Get("k1"); ok {
+		t.Fatal("k1 should be cleared")
+	}
+}
+
 // TestNegativeStore_NegativeHitEngine 引擎层负向命中完整流程。
 func TestNegativeStore_NegativeHitEngine(t *testing.T) {
 	cfg := testConfig()

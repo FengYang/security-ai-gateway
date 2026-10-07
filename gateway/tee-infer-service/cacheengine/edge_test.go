@@ -408,3 +408,50 @@ func TestEdge_NoCacheFlag(t *testing.T) {
 		t.Fatal("expected miss with no-cache flag")
 	}
 }
+
+// TestEdge_InvalidateByModel 按模型失效（§6.8.1）：仅目标模型条目被删。
+func TestEdge_InvalidateByModel(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Mode = ModeExact
+	cfg.Exact.MinPromptTokens = 2
+	cfg.Exact.MinTokens = 2
+	cfg.Guard.ReadFastCheck = false
+	eng := NewCacheEngine(cfg)
+
+	mkCtx := func(model, hash string) LookupContext {
+		return LookupContext{
+			TenantID:        "t1",
+			EngineType:      "cmaas",
+			Model:           model,
+			MaxNewTokens:    100,
+			TransformedHash: hash,
+			PromptText:      "long enough prompt",
+			PolicyVer:       "1",
+			GuardVer:        "v1",
+		}
+	}
+
+	m1a := mkCtx("m1", "h1")
+	m1b := mkCtx("m1", "h2")
+	m2 := mkCtx("m2", "h3")
+	for _, ctx := range []LookupContext{m1a, m1b, m2} {
+		eng.Store(StoreContext{LookupContext: ctx, Writable: true}, InferResult{Text: "answer", TokensOut: 10, Finish: "stop"})
+	}
+
+	count, err := eng.Invalidate(InvalidateSelector{Model: "m1"})
+	if err != nil {
+		t.Fatalf("invalidate failed: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 invalidated, got %d", count)
+	}
+	if r := eng.Lookup(m1a); r.Hit {
+		t.Fatal("m1 entry should be invalidated")
+	}
+	if r := eng.Lookup(m1b); r.Hit {
+		t.Fatal("m1 entry should be invalidated")
+	}
+	if r := eng.Lookup(m2); !r.Hit {
+		t.Fatal("m2 entry should survive model invalidation")
+	}
+}

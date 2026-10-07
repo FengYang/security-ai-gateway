@@ -1,6 +1,7 @@
 package cacheengine
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -77,6 +78,41 @@ func TestSingleFlight_DifferentKeys(t *testing.T) {
 
 	if atomic.LoadInt32(&execCount) != 5 {
 		t.Fatalf("expected 5 executions for 5 different keys, got %d", execCount)
+	}
+}
+
+// TestSingleFlight_MaxWaitFallback 跟随者等待超过 max_wait → 返回超时哨兵（§6.13 B-6.13-3 / T-6.13-4）。
+func TestSingleFlight_MaxWaitFallback(t *testing.T) {
+	cfg := SingleFlightConfig{Enabled: true, MaxWait: Duration(20 * time.Millisecond)}
+	sf := NewSingleFlight(cfg)
+
+	release := make(chan struct{})
+	leaderStarted := make(chan struct{})
+	fn := func() (LookupResult, error) {
+		close(leaderStarted)
+		<-release // 阻塞 leader，制造跟随者等待超时
+		return LookupResult{Hit: true, Kind: KindExact}, nil
+	}
+
+	type out struct {
+		res LookupResult
+		err error
+	}
+	leaderCh := make(chan out, 1)
+	go func() {
+		r, e := sf.Do("k", fn)
+		leaderCh <- out{r, e}
+	}()
+	<-leaderStarted
+
+	// 跟随者：leader 仍阻塞，应在 max_wait 后超时返回哨兵
+	if _, err := sf.Do("k", func() (LookupResult, error) { return LookupResult{}, nil }); !errors.Is(err, ErrSingleFlightTimeout) {
+		t.Fatalf("expected ErrSingleFlightTimeout, got %v", err)
+	}
+
+	close(release)
+	if lo := <-leaderCh; lo.err != nil || !lo.res.Hit {
+		t.Fatalf("leader should succeed: res=%+v err=%v", lo.res, lo.err)
 	}
 }
 

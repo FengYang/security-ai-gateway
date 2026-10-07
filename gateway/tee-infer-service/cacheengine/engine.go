@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -224,9 +225,13 @@ func (e *engine) Lookup(ctx LookupContext) (res LookupResult) {
 	// single-flight 合并
 	if e.sf != nil && e.cfg.SingleFlight.Enabled {
 		sfKey := ctx.TenantID + ":" + ctx.TransformedHash
-		result, _ := e.sf.Do(sfKey, func() (LookupResult, error) {
+		result, err := e.sf.Do(sfKey, func() (LookupResult, error) {
 			return e.doLookup(ctx), nil
 		})
+		if errors.Is(err, ErrSingleFlightTimeout) {
+			// 跟随者等待超 max_wait → fail-open：自行查询（未命中则由主链打上游，§6.13 B-6.13-3）
+			return e.doLookup(ctx)
+		}
 		return result
 	}
 
@@ -586,14 +591,12 @@ func (e *engine) Invalidate(sel InvalidateSelector) (int, error) {
 	count := 0
 
 	if sel.All {
-		// 全量清空：重建 store
+		// 全量清空：原地 Clear（不重建对象，避免并发读侧无锁访问 e.exact/e.neg 的数据竞争）
 		if e.exact != nil {
-			count += e.exact.Len()
-			e.exact = NewLRUExactStore(e.cfg.Exact.MaxEntries, int(e.cfg.Exact.MaxEntryBytes.Bytes()))
+			count += e.exact.Clear()
 		}
 		if e.neg != nil {
-			count += e.neg.Len()
-			e.neg = NewLRUNegativeStore(e.cfg.Negative.MaxEntries)
+			count += e.neg.Clear()
 		}
 		e.stats.observeInvalidate("all", count)
 		return count, nil
@@ -651,11 +654,12 @@ func (e *engine) Invalidate(sel InvalidateSelector) (int, error) {
 	return count, nil
 }
 
-// deleteByModel 按模型删除精确缓存条目。
+// deleteByModel 按模型删除精确缓存条目（§6.8.1 按模型失效）。
 func (e *engine) deleteByModel(model string) int {
-	// lruExactStore 没有按 model 批量删除的优化接口，
-	// 这里先返回 0；一期可接受，二期接 Redis 后有 SCAN 实现。
-	return 0
+	if e.exact == nil {
+		return 0
+	}
+	return e.exact.DeleteByModel(model)
 }
 
 // ===== 统计 =====

@@ -15,6 +15,8 @@ type ExactStore interface {
 	Put(key string, e *Entry)
 	Delete(key string) bool
 	DeleteByTenant(tenant string) int
+	DeleteByModel(model string) int
+	Clear() int
 	Len() int
 	Evictions() uint64
 }
@@ -129,6 +131,36 @@ func (s *lruExactStore) DeleteByTenant(tenant string) int {
 		}
 	}
 	return count
+}
+
+// DeleteByModel 按模型删除，返回受影响条目数（§6.8.1 按模型失效）。
+func (s *lruExactStore) DeleteByModel(model string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	count := 0
+	for key, item := range s.items {
+		if item.entry.Model == model {
+			s.lru.Remove(item.elem)
+			delete(s.items, key)
+			count++
+		}
+	}
+	return count
+}
+
+// Clear 清空全部条目，返回清空前条目数（§6.8.1 全量清空）。
+// 原地清空（不重建对象）：避免并发读侧对 e.exact 字段的无锁读取产生数据竞争；
+// 淘汰计数归零，保持与既有"重建 store"一致的对外语义。
+func (s *lruExactStore) Clear() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	n := len(s.items)
+	s.lru.Init()
+	s.items = make(map[string]*lruExactItem, s.cap)
+	atomic.StoreUint64(&s.evictions, 0)
+	return n
 }
 
 // Len 当前条目数。

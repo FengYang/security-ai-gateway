@@ -76,13 +76,17 @@ func (e *engine) applyInvalidation(ev InvalidateEvent) {
 			e.neg.DeleteByTenant(ev.Target)
 		}
 	case "model":
-		// L0 无按模型索引（deleteByModel 为空实现）→ 跳过；L1 侧已由发起方删除。
-	case "all":
+		// L0 按模型删除（§6.8.1）；L1 侧已由发起方删除。
 		if e.exact != nil {
-			e.exact = NewLRUExactStore(e.cfg.Exact.MaxEntries, int(e.cfg.Exact.MaxEntryBytes.Bytes()))
+			e.exact.DeleteByModel(ev.Target)
+		}
+	case "all":
+		// 原地 Clear（不重建对象，避免并发读侧无锁访问 e.exact/e.neg 的数据竞争）。
+		if e.exact != nil {
+			e.exact.Clear()
 		}
 		if e.neg != nil {
-			e.neg = NewLRUNegativeStore(e.cfg.Negative.MaxEntries)
+			e.neg.Clear()
 		}
 	}
 }

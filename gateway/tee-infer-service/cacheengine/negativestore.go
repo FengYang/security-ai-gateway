@@ -14,6 +14,7 @@ type NegativeStore interface {
 	Put(key string, p *NegativePayload, ttl time.Duration)
 	Delete(key string) bool
 	DeleteByTenant(tenant string) int
+	Clear() int
 	Len() int
 	Enabled() bool
 }
@@ -125,6 +126,19 @@ func (s *lruNegativeStore) Delete(key string) bool {
 // 二期接 Redis 后用 SCAN + meta 实现。
 func (s *lruNegativeStore) DeleteByTenant(tenant string) int {
 	return 0
+}
+
+// Clear 清空全部条目，返回清空前条目数（§6.8.1 全量清空）。
+// 原地清空（不重建对象）：避免并发读侧对 e.neg 字段的无锁读取产生数据竞争。
+func (s *lruNegativeStore) Clear() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	n := len(s.items)
+	s.lru.Init()
+	s.items = make(map[string]*negItem, s.cap)
+	atomic.StoreUint64(&s.evictions, 0)
+	return n
 }
 
 // Len 当前条目数。

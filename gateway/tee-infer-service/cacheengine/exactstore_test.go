@@ -106,6 +106,50 @@ func TestExactStore_DeleteByTenant(t *testing.T) {
 	}
 }
 
+// TestExactStore_DeleteByModel 按模型删除（§6.8.1）。
+func TestExactStore_DeleteByModel(t *testing.T) {
+	s := NewLRUExactStore(10, 1024)
+	expireAt := time.Now().Add(time.Hour).UnixMilli()
+
+	s.Put("k1", &Entry{Text: "v1", Model: "m1", ExpireAt: expireAt})
+	s.Put("k2", &Entry{Text: "v2", Model: "m1", ExpireAt: expireAt})
+	s.Put("k3", &Entry{Text: "v3", Model: "m2", ExpireAt: expireAt})
+
+	count := s.DeleteByModel("m1")
+	if count != 2 {
+		t.Fatalf("expected 2 deleted, got %d", count)
+	}
+	if s.Len() != 1 {
+		t.Fatalf("expected len=1, got %d", s.Len())
+	}
+	if _, ok := s.Get("k3"); !ok {
+		t.Fatal("m2 entry should still exist")
+	}
+}
+
+// TestExactStore_Clear 全量清空（§6.8.1）：返回清空前条目数，清空后可继续写入。
+func TestExactStore_Clear(t *testing.T) {
+	s := NewLRUExactStore(10, 1024)
+	expireAt := time.Now().Add(time.Hour).UnixMilli()
+	s.Put("k1", &Entry{Text: "v1", ExpireAt: expireAt})
+	s.Put("k2", &Entry{Text: "v2", ExpireAt: expireAt})
+
+	if n := s.Clear(); n != 2 {
+		t.Fatalf("Clear() = %d, want 2", n)
+	}
+	if s.Len() != 0 {
+		t.Fatalf("expected len=0 after clear, got %d", s.Len())
+	}
+	if _, ok := s.Get("k1"); ok {
+		t.Fatal("k1 should be cleared")
+	}
+	// 原地清空：对象复用，清空后仍可写入
+	s.Put("k3", &Entry{Text: "v3", ExpireAt: expireAt})
+	if _, ok := s.Get("k3"); !ok {
+		t.Fatal("should accept writes after clear")
+	}
+}
+
 // TestComputeChecksum 测试校验和计算。
 func TestComputeChecksum(t *testing.T) {
 	c1 := ComputeChecksum("hello")

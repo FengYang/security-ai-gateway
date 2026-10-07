@@ -192,6 +192,54 @@ func TestRedisVectorIndex_SearchDimMismatch(t *testing.T) {
 	}
 }
 
+// ===== Size（FT.INFO）=====
+
+func TestParseVSSNumDocs(t *testing.T) {
+	// 典型 FT.INFO 返回序列：[name, value, name, value, ...]
+	res := []any{"index_name", "og:c:1:idx", "num_docs", int64(7), "num_records", int64(9)}
+	if got := parseVSSNumDocs(res); got != 7 {
+		t.Fatalf("parseVSSNumDocs = %d, want 7", got)
+	}
+	// 字符串形态兼容
+	if got := parseVSSNumDocs([]any{"num_docs", "3"}); got != 3 {
+		t.Fatalf("string num_docs = %d, want 3", got)
+	}
+	// 缺字段 / 非法形态 → 0
+	if got := parseVSSNumDocs([]any{"foo", "bar"}); got != 0 {
+		t.Fatalf("missing num_docs = %d, want 0", got)
+	}
+	if got := parseVSSNumDocs("not-an-array"); got != 0 {
+		t.Fatalf("non-array = %d, want 0", got)
+	}
+}
+
+func TestRedisVectorIndex_Size(t *testing.T) {
+	ops := newFakeOps()
+	ops.doFn = func(args ...any) (any, error) {
+		switch args[0] {
+		case "FT.CREATE":
+			return "OK", nil
+		case "FT.INFO":
+			return []any{"num_docs", int64(5)}, nil
+		default:
+			return nil, errors.New("unexpected command")
+		}
+	}
+	v, err := NewRedisVectorIndex(context.Background(), newTestVSSCfg(), ops)
+	if err != nil {
+		t.Fatalf("NewRedisVectorIndex: %v", err)
+	}
+	if got := v.Size(); got != 5 {
+		t.Fatalf("Size() = %d, want 5", got)
+	}
+
+	// FT.INFO 失败 → 回退 0（不影响主链）
+	ops.doFn = func(args ...any) (any, error) { return nil, errors.New("down") }
+	if got := v.Size(); got != 0 {
+		t.Fatalf("Size() on error = %d, want 0", got)
+	}
+}
+
 // ===== 集成（真实 Redis Stack；未配置或未探测到 RediSearch 时跳过） =====
 
 func TestRedisVectorIndex_Integration(t *testing.T) {

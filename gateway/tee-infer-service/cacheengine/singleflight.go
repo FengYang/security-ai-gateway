@@ -1,9 +1,14 @@
 package cacheengine
 
 import (
+	"errors"
 	"sync"
 	"time"
 )
+
+// ErrSingleFlightTimeout 跟随者等待超过 max_wait 时返回（§6.13 B-6.13-3）：
+// 调用方应据此 fail-open（自行查询/推理），绝不因等待拖死请求。
+var ErrSingleFlightTimeout = errors.New("cache: singleflight wait timeout")
 
 // SingleFlight 请求合并接口（防缓存击穿）。
 type SingleFlight interface {
@@ -23,10 +28,9 @@ type singleflightGroup struct {
 }
 
 type sfCall struct {
-	wg  sync.WaitGroup
-	val LookupResult
-	err error
-	done bool
+	done chan struct{} // leader 完成后关闭；跟随者据此读取 val/err（channel 关闭提供 happens-before）
+	val  LookupResult
+	err  error
 }
 
 // NewSingleFlight 构造请求合并器。
@@ -46,24 +50,28 @@ func NewSingleFlight(cfg SingleFlightConfig) SingleFlight {
 func (g *singleflightGroup) Do(key string, fn func() (LookupResult, error)) (LookupResult, error) {
 	g.mu.Lock()
 	if call, ok := g.m[key]; ok {
-		// 跟随者：等待 leader 完成
+		// 跟随者：等待 leader 完成；若超过 max_wait 则放弃等待（fail-open，§6.13 B-6.13-3）。
 		g.mu.Unlock()
-		call.wg.Wait()
-		return call.val, call.err
+		timer := time.NewTimer(g.cfg.MaxWait.D())
+		defer timer.Stop()
+		select {
+		case <-call.done:
+			return call.val, call.err
+		case <-timer.C:
+			return LookupResult{}, ErrSingleFlightTimeout
+		}
 	}
 
 	// leader：创建分组并执行
-	call := &sfCall{}
-	call.wg.Add(1)
+	call := &sfCall{done: make(chan struct{})}
 	g.m[key] = call
 	g.mu.Unlock()
 
-	// 执行函数
+	// 执行函数（val/err 写完后 close(done) 对跟随者可见）
 	val, err := fn()
 	call.val = val
 	call.err = err
-	call.done = true
-	call.wg.Done()
+	close(call.done)
 
 	// 清理分组
 	g.mu.Lock()
