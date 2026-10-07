@@ -34,6 +34,9 @@ type CacheEngine interface {
 	// RecordWarmupItem 记录预热条目结果（§9.1 #18；result ∈ {ok,fail}）。
 	// 由预热器（warmer.go）经唯一发射通道发射。
 	RecordWarmupItem(result string)
+	// Inspect 按 key_hash 返回条目元数据（§4.3 #9；Text/Segments 以 json:"-" 隐藏，绝不外泄明文）。
+	// 未命中返回 false。仅覆盖精确层（负向层无 Entry 元数据）。
+	Inspect(keyHash string) (*Entry, bool)
 	Close() error
 }
 
@@ -768,6 +771,18 @@ func (e *engine) RecordAuditFailure() {
 // RecordWarmupItem 记录预热条目结果（§9.1 #18；result ∈ {ok,fail}；唯一发射入口）。
 func (e *engine) RecordWarmupItem(result string) {
 	e.stats.observeWarmupItem(result)
+}
+
+// Inspect 按 key_hash 返回精确层条目元数据（§4.3 #9）。
+// 调用方负责序列化；Entry.Text/Segments 已标 json:"-"，序列化天然不含明文。
+func (e *engine) Inspect(keyHash string) (*Entry, bool) {
+	if e.exact == nil {
+		return nil, false
+	}
+	if en, ok := e.exact.Get(keyHash); ok {
+		return en, true
+	}
+	return nil, false
 }
 
 // deleteByModel 按模型删除精确缓存条目（§6.8.1 按模型失效）。

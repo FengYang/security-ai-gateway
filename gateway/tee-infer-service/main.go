@@ -212,6 +212,7 @@ type teeServer struct {
 	tokenizer       Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
 	cache           model.SemanticCache      // GF.4.1 精确缓存（P0-2：legacy 兜底；仅 cacheEngine==nil 时使用）
 	cacheEngine     cacheengine.CacheEngine  // P0-2 原生语义缓存引擎（命中/回填 + /metrics；nil = 未装配）
+	cacheConfig     *cacheengine.CacheConfig // E4：/cache/* 与 /config/cache 的配置快照来源
 	cacheEnabled    bool                     // P0-2 B2：原生缓存是否生效（mode != off）；false 时零开销
 	cacheMode       string                   // P0-2 §9.1 #20：缓存运行模式（TTFT 标签）
 	cacheReplay     cacheReplayConfig        // P0-2 B2：§6.12 回放节拍参数快照
@@ -3813,6 +3814,7 @@ func main() {
 		tokenizer:         nil,                       // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
 		cache:             cacheengine.NewLegacyAdapter(cacheEng), // P0-2：legacy 兜底（仅 cacheEngine==nil 时使用）
 		cacheEngine:       cacheEng,                                // P0-2 B2：原生语义缓存（命中/回填）+ /metrics
+		cacheConfig:       &cacheCfg,                               // E4：/cache/* 管理 API 的配置快照
 		cacheEnabled:      cacheCfg.Mode != cacheengine.ModeOff,    // P0-2 B2：mode=off → 不进原生路径（零开销）
 		cacheMode:         string(cacheCfg.Mode),                   // P0-2 §9.1 #20：TTFT 标签
 		cacheReplay:       cacheReplayConfig{minGap: cacheCfg.Stream.MinGap.D(), maxGap: cacheCfg.Stream.MaxGap.D()}, // P0-2 B2：§6.12 节拍快照
@@ -4115,6 +4117,9 @@ func main() {
 	initTenantDisposition(srv, mux)
 	mux.HandleFunc("/healthz", srv.handleHealthz)                  // 探针与证明状态联动
 	mux.HandleFunc("/healthz/live", srv.handleHealthz)             // liveness
+
+	// E4：P0-2 缓存管理 API（§4.3；8 端点，warmup 归后续批次）
+	srv.registerCacheAPIRoutes(mux)
 
 	defer audit.Close() // WORM 模式落盘文件随进程退出关闭
 
