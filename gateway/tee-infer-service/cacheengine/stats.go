@@ -109,6 +109,10 @@ type statsCollector struct {
 	writeRejMu    sync.Mutex
 	writeRejected map[string]uint64
 
+	// 写入限流（§9.1 #6）：tenant -> count（基数受控）
+	writeThrottledMu sync.Mutex
+	writeThrottled   map[string]uint64
+
 	// 附加耗时直方图（§9.1 #10 快审 / #39 embed 等）：shortName -> histogram
 	extraDurMu sync.Mutex
 	extraDur   map[string]*durationHistogram
@@ -365,6 +369,34 @@ func (s *statsCollector) writeRejectedSnapshot() map[string]uint64 {
 	defer s.writeRejMu.Unlock()
 	out := make(map[string]uint64, len(s.writeRejected))
 	for k, v := range s.writeRejected {
+		out[k] = v
+	}
+	return out
+}
+
+// writeThrottledMaxTenants 写入限流指标的租户基数上限（§9.1 基数控制）。
+const writeThrottledMaxTenants = 1024
+
+// observeWriteThrottled 记录一次写入被限流丢弃（§9.1 #6，按 tenant）。
+// 基数控制：最多保留 writeThrottledMaxTenants 个租户，超出并入 "__other__"。
+func (s *statsCollector) observeWriteThrottled(tenant string) {
+	s.writeThrottledMu.Lock()
+	if s.writeThrottled == nil {
+		s.writeThrottled = make(map[string]uint64)
+	}
+	if _, ok := s.writeThrottled[tenant]; !ok && len(s.writeThrottled) >= writeThrottledMaxTenants {
+		tenant = "__other__"
+	}
+	s.writeThrottled[tenant]++
+	s.writeThrottledMu.Unlock()
+}
+
+// writeThrottledSnapshot 返回写入限流计数的只读快照（供指标渲染）。
+func (s *statsCollector) writeThrottledSnapshot() map[string]uint64 {
+	s.writeThrottledMu.Lock()
+	defer s.writeThrottledMu.Unlock()
+	out := make(map[string]uint64, len(s.writeThrottled))
+	for k, v := range s.writeThrottled {
 		out[k] = v
 	}
 	return out

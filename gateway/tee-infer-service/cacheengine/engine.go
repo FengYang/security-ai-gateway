@@ -48,6 +48,7 @@ type engine struct {
 	scanner FastScanner
 	jitter  JitterInjector
 	canary  CanaryController
+	limiter *writeLimiter // 写入限流（§7.4.2；nil = 未启用）
 	l1      RedisBackend // 形态 B/C 的 Redis 密文 L1（nil = 仅进程内 L0）
 	stats   *statsCollector
 	feedback FeedbackDetector
@@ -153,6 +154,10 @@ func NewCacheEngine(cfg CacheConfig, opts ...EngineOption) CacheEngine {
 	if e.canary == nil {
 		e.canary = NewConfigCanaryController(e.cfg)
 	}
+	// 写入限流（§7.4.2）：仅 mode≠off 时启用（off 时零行为变化）。
+	if e.limiter == nil && e.cfg.WriteLimit.Enabled && e.cfg.Mode != ModeOff {
+		e.limiter = newWriteLimiter(e.cfg.WriteLimit)
+	}
 
 	// 初始化语义缓存（二期）
 	if e.sem == nil && e.cfg.Mode == ModeSemantic {
@@ -187,6 +192,9 @@ func (e *engine) Lookup(ctx LookupContext) (res LookupResult) {
 	if e.closed.Load() {
 		return LookupResult{Hit: false, Kind: "miss", RejectReason: "closed"}
 	}
+
+	// §7.4.2：以入向请求数（Lookup 次数）为写入限流基准（限流器未启用时为空操作）。
+	e.limiter.recordInbound(ctx.TenantID, e.nowFn())
 
 	// 0. 请求级开关（全局 mode + 租户策略）
 	if e.cfg.Mode == ModeOff || tenantPolicy(e.cfg, ctx.TenantID) == PolicyOff {
@@ -517,6 +525,12 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 	if d := e.cache.Cacheable(&ctx.LookupContext); !d.Cacheable {
 		e.stats.observeWriteRejected("not_cacheable") // §9.1 #5
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "not_cacheable:" + d.Reason}
+	}
+
+	// §7.4.2 写入限流：超限丢弃写入（不影响响应下发），记 #6（不计入 #5）。
+	if !e.limiter.allowWrite(ctx.TenantID, e.nowFn()) {
+		e.stats.observeWriteThrottled(ctx.TenantID) // §9.1 #6
+		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "throttled"}
 	}
 
 	// 拒答 → 写负向缓存（§6.3）

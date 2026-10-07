@@ -132,6 +132,8 @@ type CacheConfig struct {
 	Guard    GuardConfig    `json:"guard"`
 	Gray     GrayConfig     `json:"gray"`
 
+	WriteLimit WriteLimitConfig `json:"write_limit"`
+
 	SingleFlight SingleFlightConfig `json:"singleflight"`
 	Stream       StreamConfig       `json:"stream"`
 	Cacheability CacheabilityConfig `json:"cacheability"`
@@ -248,6 +250,15 @@ type GuardConfig struct {
 	ReadFastCheck       bool   `json:"read_fast_check"`
 	ReadFastCheckAction string `json:"read_fast_check_action"` // treat_as_miss | block
 	WriteRequiresOutGuard bool `json:"write_requires_out_guard"`
+}
+
+// WriteLimitConfig 写入限流配置（§7.4.2 写入滥用约束）。
+// 单租户写入速率上限 = min(入向QPS × InboundHeadroom, MaxQPS)；超限写入丢弃。
+type WriteLimitConfig struct {
+	Enabled         bool     `json:"enabled"`
+	MaxQPS          int      `json:"max_qps"`          // 单租户写入速率硬上限（次/秒）
+	InboundHeadroom float64  `json:"inbound_headroom"` // 入向QPS 余量系数
+	Window          Duration `json:"window"`           // 统计窗口
 }
 
 // GrayConfig 灰度配置。
@@ -380,6 +391,12 @@ func DefaultConfig() CacheConfig {
 			Enabled:        false,
 			TrafficPercent: 0,
 		},
+		WriteLimit: WriteLimitConfig{
+			Enabled:         true,
+			MaxQPS:          200,
+			InboundHeadroom: 1.2,
+			Window:          Duration(1 * time.Second),
+		},
 		SingleFlight: SingleFlightConfig{
 			Enabled:       true,
 			MaxWait:       Duration(3 * time.Second),
@@ -476,6 +493,19 @@ func (c CacheConfig) Validate() []error {
 	}
 	if c.KeyFormat == "v1" && c.Semantic.Enabled {
 		errs = append(errs, fmt.Errorf("rule 24: key_format=v1 cannot be used with semantic.enabled=true"))
+	}
+
+	// 规则 26：写入限流（§7.4.2）
+	if c.WriteLimit.Enabled {
+		if c.WriteLimit.MaxQPS < 1 || c.WriteLimit.MaxQPS > 100000 {
+			errs = append(errs, fmt.Errorf("rule 26: write_limit.max_qps must be in [1, 100000]"))
+		}
+		if c.WriteLimit.InboundHeadroom < 1.0 || c.WriteLimit.InboundHeadroom > 10.0 {
+			errs = append(errs, fmt.Errorf("rule 26: write_limit.inbound_headroom must be in [1.0, 10.0]"))
+		}
+		if c.WriteLimit.Window.D() < 100*time.Millisecond || c.WriteLimit.Window.D() > 60*time.Second {
+			errs = append(errs, fmt.Errorf("rule 26: write_limit.window must be in [100ms, 60s]"))
+		}
 	}
 
 	return errs

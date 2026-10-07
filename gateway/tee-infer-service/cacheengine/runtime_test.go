@@ -25,6 +25,7 @@ func runtimeCfg(readFastCheck bool) CacheConfig {
 	cfg.Exact.MinPromptTokens = 2
 	cfg.Exact.MinTokens = 2
 	cfg.Guard.ReadFastCheck = readFastCheck
+	cfg.WriteLimit.Enabled = false // 单测聚焦各自特性；写入限流的专项用例在 throttle_test.go 显式开启
 	return cfg
 }
 

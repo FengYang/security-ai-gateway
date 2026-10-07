@@ -29,6 +29,20 @@ func (e *engine) RenderPrometheus(w io.Writer) {
 		"缓存写入被拒次数（按原因：too_large|too_short|not_stop|not_writable|not_cacheable|would_reject）",
 		e.stats.writeRejectedSnapshot(), []string{"reason"})
 
+	// #6 write_throttled_total{tenant}（§7.4.2 写入限流丢弃）。
+	// 注：tenant 可能含 ":"，故不走 writeCacheCounter 的 ":" 分隔拼接，改为直接渲染。
+	if tw := e.stats.writeThrottledSnapshot(); len(tw) > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_cache_write_throttled_total 缓存写入被限流丢弃次数（按租户；§7.4.2）\n# TYPE otpmask_cache_write_throttled_total counter\n")
+		tenants := make([]string, 0, len(tw))
+		for k := range tw {
+			tenants = append(tenants, k)
+		}
+		sort.Strings(tenants)
+		for _, t := range tenants {
+			fmt.Fprintf(w, "otpmask_cache_write_throttled_total{tenant=%q} %d\n", t, tw[t])
+		}
+	}
+
 	// #9 read_fast_check_error_total（快审分类器不可用，fail-closed）
 	fmt.Fprintf(w, "# HELP otpmask_cache_read_fast_check_error_total 读时快审分类器不可用次数（fail-closed）\n# TYPE otpmask_cache_read_fast_check_error_total counter\n")
 	fmt.Fprintf(w, "otpmask_cache_read_fast_check_error_total %d\n", e.stats.fastCheckErrorCount())
