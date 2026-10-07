@@ -31,6 +31,9 @@ type CacheEngine interface {
 	// RecordAuditFailure 记录审计链写入失败（§9.1 #16 / B-7.5-1）；
 	// 由主链在审计链写入失败回调中调用（不阻塞缓存写入）。
 	RecordAuditFailure()
+	// RecordWarmupItem 记录预热条目结果（§9.1 #18；result ∈ {ok,fail}）。
+	// 由预热器（warmer.go）经唯一发射通道发射。
+	RecordWarmupItem(result string)
 	Close() error
 }
 
@@ -755,6 +758,11 @@ func (e *engine) RecordReplay(mode, result string) {
 // RecordAuditFailure 记录审计链写入失败（§9.1 #16 / B-7.5-1；唯一发射入口）。
 func (e *engine) RecordAuditFailure() {
 	e.stats.observeAuditFailure()
+}
+
+// RecordWarmupItem 记录预热条目结果（§9.1 #18；result ∈ {ok,fail}；唯一发射入口）。
+func (e *engine) RecordWarmupItem(result string) {
+	e.stats.observeWarmupItem(result)
 }
 
 // deleteByModel 按模型删除精确缓存条目（§6.8.1 按模型失效）。

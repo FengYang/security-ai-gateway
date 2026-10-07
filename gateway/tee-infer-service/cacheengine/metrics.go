@@ -71,6 +71,11 @@ func (e *engine) RenderPrometheus(w io.Writer) {
 		"负向缓存写入次数（result=ok|stage_excluded）",
 		e.stats.negativeStoreC.snapshot(), []string{"result"})
 
+	// #18 warmup_items_total{result}（§6.7 预热条目；result=ok|fail）
+	writeCacheCounter(w, "otpmask_cache_warmup_items_total",
+		"预热条目计数（result=ok|fail；§6.7）",
+		e.stats.warmupItemsC.snapshot(), []string{"result"})
+
 	// #17 embed_invalid_total{reason}（embedding 无效）
 	writeCacheCounter(w, "otpmask_cache_embed_invalid_total",
 		"embedding 无效次数（reason=empty|bad_response）",

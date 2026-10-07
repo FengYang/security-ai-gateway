@@ -113,6 +113,9 @@ type statsCollector struct {
 	writeThrottledMu sync.Mutex
 	writeThrottled   map[string]uint64
 
+	// 预热条目（§9.1 #18）：result(ok|fail) -> count
+	warmupItemsC labelCounter
+
 	// 附加耗时直方图（§9.1 #10 快审 / #39 embed 等）：shortName -> histogram
 	extraDurMu sync.Mutex
 	extraDur   map[string]*durationHistogram
@@ -196,6 +199,8 @@ var (
 		"integrity_mismatch": {}, "segments_mismatch": {},
 	}
 	validReplayKeys = map[string]struct{}{} // 由 init 填充（mode×result 组合）
+	// validWarmupResults §9.1 #18 预热条目 result 枚举。
+	validWarmupResults = map[string]struct{}{"ok": {}, "fail": {}}
 )
 
 func init() {
@@ -232,6 +237,7 @@ func newStatsCollector() *statsCollector {
 		replayC:         labelCounter{valid: validReplayKeys},
 		singleflightC:   labelCounter{valid: validSingleflightResults},
 		entryCorruptC:   labelCounter{valid: validEntryCorruptReasons},
+		warmupItemsC:    labelCounter{valid: validWarmupResults},
 	}
 }
 
@@ -290,6 +296,9 @@ func (s *statsCollector) observeFingerprintReject(scene string) { s.fingerprintR
 
 // observeNegativeStore 记录负向缓存写入结果（§9.1 #38）。
 func (s *statsCollector) observeNegativeStore(result string) { s.negativeStoreC.inc(result) }
+
+// observeWarmupItem 记录预热条目结果（§9.1 #18；result ∈ {ok,fail}）。
+func (s *statsCollector) observeWarmupItem(result string) { s.warmupItemsC.inc(result) }
 
 // observeLookup 记录一次查询结果。
 // kind ∈ {precheck,exact,negative,semantic}；result ∈ {hit,miss,disabled,not_cacheable,fastcheck_miss}。
