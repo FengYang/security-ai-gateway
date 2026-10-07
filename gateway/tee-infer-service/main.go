@@ -1397,6 +1397,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	var cacheReleaseAt time.Time
 	var cacheNegative *cacheengine.NegativePayload
 	var cacheStoreCtx *cacheengine.StoreContext
+	replaySegments := 0 // §9.1 #22：命中回放分片数（0 = 单块/降级）
 	if s.cacheEngine != nil && s.cacheEnabled {
 		lctx := buildCacheLookupContext(tenant, engType, req.Model, txHash,
 			inputText.String(), int(req.MaxNewTokens), req.Stream, s.policyVersion())
@@ -1410,6 +1411,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 			cacheNegative = lr.Entry.Negative
 		case lr.Hit && lr.Entry != nil:
 			cacheHit = true
+			replaySegments = len(lr.Entry.Segments)
 			eng = &segmentReplayEngine{
 				text: lr.Entry.Text, segs: lr.Entry.Segments, releaseAt: cacheReleaseAt,
 				minGap: s.cacheReplay.minGap, maxGap: s.cacheReplay.maxGap,
@@ -1443,14 +1445,32 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	if cacheNegative != nil {
 		denialFinish = "content_filter"
 	}
-	if serr := s.streamTextInfer(w, sess, eng, genReq, &agg, tenant, req.RequestID, &out, denialFinish); serr != nil {
+	// §9.1 #22：命中回放模式（native=分段/single/degraded_single；legacy=single）。
+	cacheReplayMode := ""
+	if cacheHit && cacheNegative == nil {
+		switch {
+		case s.cacheEngine == nil:
+			cacheReplayMode = "single" // legacy 单块回放
+		case !req.Stream:
+			cacheReplayMode = "single"
+		case replaySegments == 0:
+			cacheReplayMode = "degraded_single"
+		default:
+			cacheReplayMode = "segmented"
+		}
+	}
+	streamErr := s.streamTextInfer(w, sess, eng, genReq, &agg, tenant, req.RequestID, &out, denialFinish)
+	if streamErr != nil {
+		if cacheReplayMode != "" && s.cacheEngine != nil {
+			s.cacheEngine.RecordReplay(cacheReplayMode, "error") // §9.1 #22
+		}
 		// X-3：输出侧整流拦截优先于引擎 error 判定——按实际下发回冲（block+genErr 同此）。
 		if out.Blocked {
 			s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
 				s.countTokens(inputText.String()), out, isRetry)
 			return
 		}
-		log.Printf("[tee] infer(text) 引擎失败 request=%s engine=%s err=%v", req.RequestID, engType, serr)
+		log.Printf("[tee] infer(text) 引擎失败 request=%s engine=%s err=%v", req.RequestID, engType, streamErr)
 		// GA-计费 P0-3/P1-3 失败路径计费口径：
 		// - 已有部分输出（客户端已收到）→ 按实收计费：输入计量保留，输出按 agg
 		//   实际累计补记，审计记 infer/engine_error 事件（带 token 数，供出账聚合）；
@@ -1479,9 +1499,16 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	}
 	// X-3：正常收尾（genErr=nil）但输出侧在 Process/Finish 整流拦截 → 按实际下发回冲。
 	if out.Blocked {
+		if cacheReplayMode != "" && s.cacheEngine != nil {
+			s.cacheEngine.RecordReplay(cacheReplayMode, "ok") // §9.1 #22（回放完成，内容随后被拦）
+		}
 		s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
 			s.countTokens(inputText.String()), out, isRetry)
 		return
+	}
+	// §9.1 #22：回放成功。
+	if cacheReplayMode != "" && s.cacheEngine != nil {
+		s.cacheEngine.RecordReplay(cacheReplayMode, "ok")
 	}
 	// R1（§7.3.1 / §4.5）：负向命中拒答的计费与审计——**计配额不计费**（交付 token=0，
 	// 输入预占保留不回冲），审计 cache_negative_hit（与命中路径同签名，CacheHit=true）。

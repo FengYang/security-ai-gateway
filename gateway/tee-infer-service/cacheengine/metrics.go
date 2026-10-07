@@ -100,6 +100,21 @@ func (e *engine) RenderPrometheus(w io.Writer) {
 	// #39 embed_duration_seconds（histogram）
 	e.renderExtraDuration(w, "embed", "otpmask_cache_embed_duration_seconds", "embedding 侧车调用耗时（秒）")
 
+	// #22 replay_total{mode,result}
+	writeCacheCounter(w, "otpmask_cache_replay_total",
+		"命中回放次数（mode=single|segmented|degraded_single；result=ok|error|canceled）",
+		e.stats.replayC.snapshot(), []string{"mode", "result"})
+
+	// #23 singleflight_total{result}
+	writeCacheCounter(w, "otpmask_cache_singleflight_total",
+		"请求合并次数（result=leader|shared|timeout|fallback）",
+		e.stats.singleflightC.snapshot(), []string{"result"})
+
+	// #35 entry_corrupt_total{reason}
+	writeCacheCounter(w, "otpmask_cache_entry_corrupt_total",
+		"条目损坏次数（reason=integrity_mismatch|segments_mismatch）",
+		e.stats.entryCorruptC.snapshot(), []string{"reason"})
+
 	// #3 entries{store}
 	fmt.Fprintf(w, "# HELP otpmask_cache_entries 当前缓存条目数（按 store）\n# TYPE otpmask_cache_entries gauge\n")
 	fmt.Fprintf(w, "otpmask_cache_entries{store=\"exact\"} %d\n", s.ExactEntries)

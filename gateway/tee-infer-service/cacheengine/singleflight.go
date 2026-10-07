@@ -13,8 +13,9 @@ var ErrSingleFlightTimeout = errors.New("cache: singleflight wait timeout")
 // SingleFlight 请求合并接口（防缓存击穿）。
 type SingleFlight interface {
 	// Do 执行 key 的操作，同 key 的并发请求会合并为一次。
-	// 返回值是 leader 的结果；如果 leader 失败，根据 failure_policy 决定等待者行为。
-	Do(key string, fn func() (LookupResult, error)) (LookupResult, error)
+	// shared=true 表示本调用为**跟随者**（复用 leader 结果）；leader（shared=false）执行 fn。
+	// 等待超 max_wait 返回 ErrSingleFlightTimeout（shared=false）。
+	Do(key string, fn func() (LookupResult, error)) (LookupResult, bool, error)
 
 	// Len 当前活跃的分组数。
 	Len() int
@@ -47,7 +48,7 @@ func NewSingleFlight(cfg SingleFlightConfig) SingleFlight {
 	}
 }
 
-func (g *singleflightGroup) Do(key string, fn func() (LookupResult, error)) (LookupResult, error) {
+func (g *singleflightGroup) Do(key string, fn func() (LookupResult, error)) (LookupResult, bool, error) {
 	g.mu.Lock()
 	if call, ok := g.m[key]; ok {
 		// 跟随者：等待 leader 完成；若超过 max_wait 则放弃等待（fail-open，§6.13 B-6.13-3）。
@@ -56,9 +57,9 @@ func (g *singleflightGroup) Do(key string, fn func() (LookupResult, error)) (Loo
 		defer timer.Stop()
 		select {
 		case <-call.done:
-			return call.val, call.err
+			return call.val, true, call.err
 		case <-timer.C:
-			return LookupResult{}, ErrSingleFlightTimeout
+			return LookupResult{}, false, ErrSingleFlightTimeout
 		}
 	}
 
@@ -78,7 +79,7 @@ func (g *singleflightGroup) Do(key string, fn func() (LookupResult, error)) (Loo
 	delete(g.m, key)
 	g.mu.Unlock()
 
-	return val, err
+	return val, false, err
 }
 
 func (g *singleflightGroup) Len() int {

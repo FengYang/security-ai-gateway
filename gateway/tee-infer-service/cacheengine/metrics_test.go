@@ -213,6 +213,55 @@ func TestRenderPrometheus_EmbedVectorRedis(t *testing.T) {
 	}
 }
 
+// TestRenderPrometheus_ReplaySingleflightCorrupt R3-B③（§9.1 #22/#23/#35）。
+func TestRenderPrometheus_ReplaySingleflightCorrupt(t *testing.T) {
+	cfg := testConfig()
+	eng := NewCacheEngine(cfg).(*engine)
+
+	eng.RecordReplay("segmented", "ok")
+	eng.stats.observeSingleflight("leader")
+	eng.stats.observeEntryCorrupt("integrity_mismatch")
+
+	var buf bytes.Buffer
+	eng.RenderPrometheus(&buf)
+	out := buf.String()
+	for _, want := range []string{
+		`otpmask_cache_replay_total{mode="segmented",result="ok"} 1`,
+		`otpmask_cache_singleflight_total{result="leader"} 1`,
+		`otpmask_cache_entry_corrupt_total{reason="integrity_mismatch"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("缺指标：%s\n%s", want, out)
+		}
+	}
+}
+
+// TestEntryCorrupt_TreatedAsMiss §9.1 #35 / B-6.12-9：校验和不符的条目按 miss 处理并计数。
+func TestEntryCorrupt_TreatedAsMiss(t *testing.T) {
+	cfg := testConfig()
+	eng := NewCacheEngine(cfg).(*engine)
+	ctx := LookupContext{TenantID: "t1", EngineType: "cmaas", Model: "m1", MaxNewTokens: 100,
+		TransformedHash: "corrupt", PromptText: "long enough prompt", PolicyVer: "1", GuardVer: "v1"}
+	if out := eng.Store(StoreContext{LookupContext: ctx, Writable: true},
+		InferResult{Text: "answer text", TokensOut: 10, Finish: "stop"}); !out.Stored {
+		t.Fatalf("precondition: store failed: %+v", out)
+	}
+
+	// 篡改校验和，模拟条目损坏
+	st := eng.exact.(*lruExactStore)
+	st.mu.Lock()
+	st.items[eng.exactKey(ctx)].entry.Checksum = "deadbeef"
+	st.mu.Unlock()
+
+	r := eng.Lookup(ctx)
+	if r.Hit {
+		t.Fatal("损坏条目应视为 miss")
+	}
+	if got := eng.stats.entryCorruptC.snapshot()["integrity_mismatch"]; got != 1 {
+		t.Fatalf("§9.1 #35 应记 1 次 integrity_mismatch，got %d", got)
+	}
+}
+
 // TestObserveLookup_InvalidKindPanics 非法 kind 标签必须 panic（§9.1 硬约束）。
 func TestObserveLookup_InvalidKindPanics(t *testing.T) {
 	s := newStatsCollector()

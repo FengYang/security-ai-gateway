@@ -129,9 +129,14 @@ type statsCollector struct {
 	// 无标签计数（§9.1 #29 embed 超时 / #30 维度不匹配）
 	embedTimeout     uint64
 	embedDimMismatch uint64
+
+	// 带标签计数（§9.1 #22 回放 / #23 请求合并 / #35 条目损坏）
+	replayC        labelCounter // key: mode|result
+	singleflightC  labelCounter // key: result
+	entryCorruptC  labelCounter // key: reason
 }
 
-// labelCounter 带标签计数（key 为标签按序以 "|" 拼接），可选枚举校验。
+// labelCounter 带标签计数（key 为标签按序以 ":" 拼接，与 metrics.writeCacheCounter 约定一致），可选枚举校验。
 type labelCounter struct {
 	mu    sync.Mutex
 	m     map[string]uint64
@@ -179,7 +184,22 @@ var (
 		"get": {}, "put": {}, "delete": {}, "delete_by_tenant": {},
 		"delete_by_model": {}, "publish": {}, "subscribe": {},
 	}
+	validSingleflightResults = map[string]struct{}{
+		"leader": {}, "shared": {}, "timeout": {}, "fallback": {},
+	}
+	validEntryCorruptReasons = map[string]struct{}{
+		"integrity_mismatch": {}, "segments_mismatch": {},
+	}
+	validReplayKeys = map[string]struct{}{} // 由 init 填充（mode×result 组合）
 )
+
+func init() {
+	for _, m := range []string{"single", "segmented", "degraded_single"} {
+		for _, r := range []string{"ok", "error", "canceled"} {
+			validReplayKeys[m+":"+r] = struct{}{}
+		}
+	}
+}
 
 // validWriteRejectedReasons §9.1 #5 写入被拒 reason 枚举（发射时硬校验）。
 var validWriteRejectedReasons = map[string]struct{}{
@@ -204,8 +224,20 @@ func newStatsCollector() *statsCollector {
 		vectorErrC:      labelCounter{valid: validVectorOps},
 		semanticRejC:    labelCounter{valid: validSemanticRejectReason},
 		redisErrC:       labelCounter{valid: validRedisOps},
+		replayC:         labelCounter{valid: validReplayKeys},
+		singleflightC:   labelCounter{valid: validSingleflightResults},
+		entryCorruptC:   labelCounter{valid: validEntryCorruptReasons},
 	}
 }
+
+// observeReplay 记录命中回放（§9.1 #22）。
+func (s *statsCollector) observeReplay(mode, result string) { s.replayC.inc(mode + ":" + result) }
+
+// observeSingleflight 记录请求合并结果（§9.1 #23）。
+func (s *statsCollector) observeSingleflight(result string) { s.singleflightC.inc(result) }
+
+// observeEntryCorrupt 记录条目损坏（§9.1 #35）。
+func (s *statsCollector) observeEntryCorrupt(reason string) { s.entryCorruptC.inc(reason) }
 
 // observeEmbedInvalid 记录 embedding 无效（§9.1 #17）。
 func (s *statsCollector) observeEmbedInvalid(reason string) { s.embedInvalidC.inc(reason) }
@@ -239,8 +271,8 @@ func (s *statsCollector) observeRedisError(op string) { s.redisErrC.inc(op) }
 // observeStreamDegraded 记录流式分片缓存降级（§9.1 #21）。
 func (s *statsCollector) observeStreamDegraded(reason string) { s.streamDegradedC.inc(reason) }
 
-// observeScene 记录场景分类计数（§9.1 #33；key=scene|source）。
-func (s *statsCollector) observeScene(scene, source string) { s.sceneC.inc(scene + "|" + source) }
+// observeScene 记录场景分类计数（§9.1 #33；key=scene:source）。
+func (s *statsCollector) observeScene(scene, source string) { s.sceneC.inc(scene + ":" + source) }
 
 // observeFingerprintReject 记录实体指纹不相容拒绝（§9.1 #34）。
 func (s *statsCollector) observeFingerprintReject(scene string) { s.fingerprintRejC.inc(scene) }

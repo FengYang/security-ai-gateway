@@ -28,12 +28,13 @@ func TestSingleFlight_Basic(t *testing.T) {
 	n := 10
 	results := make([]LookupResult, n)
 	errs := make([]error, n)
+	sharedFlags := make([]bool, n)
 
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			results[idx], errs[idx] = sf.Do("same-key", fn)
+			results[idx], sharedFlags[idx], errs[idx] = sf.Do("same-key", fn)
 		}(i)
 	}
 	wg.Wait()
@@ -43,7 +44,8 @@ func TestSingleFlight_Basic(t *testing.T) {
 		t.Fatalf("expected 1 execution, got %d", execCount)
 	}
 
-	// 所有请求都应拿到结果
+	// 所有请求都应拿到结果；恰好一个 leader（shared=false），其余为跟随者（shared=true）
+	leaders := 0
 	for i := 0; i < n; i++ {
 		if errs[i] != nil {
 			t.Fatalf("unexpected error at %d: %v", i, errs[i])
@@ -51,6 +53,12 @@ func TestSingleFlight_Basic(t *testing.T) {
 		if !results[i].Hit {
 			t.Fatalf("expected hit at %d", i)
 		}
+		if !sharedFlags[i] {
+			leaders++
+		}
+	}
+	if leaders != 1 {
+		t.Fatalf("expected exactly 1 leader, got %d", leaders)
 	}
 }
 
@@ -71,7 +79,7 @@ func TestSingleFlight_DifferentKeys(t *testing.T) {
 		wg.Add(1)
 		go func(key string) {
 			defer wg.Done()
-			sf.Do(key, fn)
+			_, _, _ = sf.Do(key, fn)
 		}(string(rune('a' + i)))
 	}
 	wg.Wait()
@@ -100,14 +108,16 @@ func TestSingleFlight_MaxWaitFallback(t *testing.T) {
 	}
 	leaderCh := make(chan out, 1)
 	go func() {
-		r, e := sf.Do("k", fn)
+		r, _, e := sf.Do("k", fn)
 		leaderCh <- out{r, e}
 	}()
 	<-leaderStarted
 
 	// 跟随者：leader 仍阻塞，应在 max_wait 后超时返回哨兵
-	if _, err := sf.Do("k", func() (LookupResult, error) { return LookupResult{}, nil }); !errors.Is(err, ErrSingleFlightTimeout) {
+	if _, shared, err := sf.Do("k", func() (LookupResult, error) { return LookupResult{}, nil }); !errors.Is(err, ErrSingleFlightTimeout) {
 		t.Fatalf("expected ErrSingleFlightTimeout, got %v", err)
+	} else if shared {
+		t.Fatal("timeout 跟随者不应标记为 shared")
 	}
 
 	close(release)
@@ -127,7 +137,9 @@ func TestSingleFlight_Disabled(t *testing.T) {
 		return LookupResult{}, nil
 	}
 
-	sf.Do("k", fn)
+	if _, shared, _ := sf.Do("k", fn); shared {
+		t.Fatal("首次调用应为 leader（shared=false）")
+	}
 	if count != 1 {
 		t.Fatalf("expected 1 call, got %d", count)
 	}

@@ -25,6 +25,9 @@ type CacheEngine interface {
 	// RecordJitter 记录抖动注入量（§9.1 #11；path ∈ {hit,miss}）。
 	// 供主链注入点（§7.3.1 waitUntil）在**实际发生注入**时发射。
 	RecordJitter(path string, d time.Duration)
+	// RecordReplay 记录命中回放（§9.1 #22；mode ∈ {single,segmented,degraded_single}，
+	// result ∈ {ok,error,canceled}）。供主链回放出口发射。
+	RecordReplay(mode, result string)
 	Close() error
 }
 
@@ -231,15 +234,24 @@ func (e *engine) Lookup(ctx LookupContext) (res LookupResult) {
 		}
 	}
 
-	// single-flight 合并
+	// single-flight 合并（§6.13；§9.1 #23 指标）
 	if e.sf != nil && e.cfg.SingleFlight.Enabled {
 		sfKey := ctx.TenantID + ":" + ctx.TransformedHash
-		result, err := e.sf.Do(sfKey, func() (LookupResult, error) {
+		result, shared, err := e.sf.Do(sfKey, func() (LookupResult, error) {
 			return e.doLookup(ctx), nil
 		})
-		if errors.Is(err, ErrSingleFlightTimeout) {
-			// 跟随者等待超 max_wait → fail-open：自行查询（未命中则由主链打上游，§6.13 B-6.13-3）
+		switch {
+		case errors.Is(err, ErrSingleFlightTimeout):
+			e.stats.observeSingleflight("timeout") // §9.1 #23
+			// 跟随者等待超 max_wait → fail-open：自行查询（§6.13 B-6.13-3）
 			return e.doLookup(ctx)
+		case err != nil:
+			e.stats.observeSingleflight("fallback") // §9.1 #23：leader 失败 → fail-open 自行查询
+			return e.doLookup(ctx)
+		case shared:
+			e.stats.observeSingleflight("shared") // §9.1 #23
+		default:
+			e.stats.observeSingleflight("leader") // §9.1 #23
 		}
 		return result
 	}
@@ -378,9 +390,32 @@ func (e *engine) doLookup(ctx LookupContext) (res LookupResult) {
 	}
 }
 
-// finishHit 命中收尾：读时快审 → 抖动采样 → 组装结果。
+// entryCorruptReason 条目完整性校验（§9.1 #35 / §5.1 / B-6.12-9）；空串 = 完整。
+// 注：segments_mismatch 校验暂缓——写入侧经输出侧改写（mask/rewrite）时分片与全文可能不等，
+// 需先与该口径对齐再启用，避免误判导致命中率回退。
+func entryCorruptReason(e *Entry) string {
+	if e == nil || e.Checksum == "" {
+		return ""
+	}
+	if ComputeChecksum(e.Text) != e.Checksum {
+		return "integrity_mismatch"
+	}
+	return ""
+}
+
+// finishHit 命中收尾：完整性校验 → 读时快审 → 抖动采样 → 组装结果。
 // 精确与语义两条命中路径共用本收尾。
 func (e *engine) finishHit(ctx LookupContext, entry *Entry, kind EntryKind, sim, topCand float64) LookupResult {
+	// §9.1 #35 / B-6.12-9：条目损坏 → miss + 指标（不部分回放），并清理损坏条目。
+	if reason := entryCorruptReason(entry); reason != "" {
+		e.stats.observeEntryCorrupt(reason)
+		if entry.KeyHash != "" && e.exact != nil {
+			e.exact.Delete(entry.KeyHash)
+		}
+		return LookupResult{Hit: false, Kind: "miss", RejectReason: "entry_corrupt",
+			Jitter: e.jitter.Sample(ctx)}
+	}
+
 	// 读时快审（§7.2）
 	allow, action, v := e.readFastCheck(entry, ctx.GuardVer)
 	if !allow {
@@ -692,6 +727,11 @@ func (e *engine) Invalidate(sel InvalidateSelector) (int, error) {
 // RecordJitter 记录抖动注入量（§9.1 #11；主链注入点唯一发射入口）。
 func (e *engine) RecordJitter(path string, d time.Duration) {
 	e.stats.observeJitter(path, d)
+}
+
+// RecordReplay 记录命中回放（§9.1 #22；主链回放出口唯一发射入口）。
+func (e *engine) RecordReplay(mode, result string) {
+	e.stats.observeReplay(mode, result)
 }
 
 // deleteByModel 按模型删除精确缓存条目（§6.8.1 按模型失效）。
