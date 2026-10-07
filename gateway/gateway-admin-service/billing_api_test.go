@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"security-ai-gateway/gateway/cryptop"
 	"security-ai-gateway/gateway/gateway-admin-service/billing"
 )
 
@@ -378,6 +379,34 @@ func TestBillingEventsWebhook_EventsSecretPreferredAndFallback(t *testing.T) {
 	url2 := srv2.URL + billingAPIBase + "/events"
 	if code := post(url2, signEventsBody(pushSecret, body)); code != http.StatusOK {
 		t.Errorf("回退 push 密钥签名 status = %d, want 200", code)
+	}
+}
+
+// SEC-001：对端 CRYPTO_PROFILE=sm 时以 HMAC-SM3 签名（头前缀仍 sha256=），
+// 本端（intl）应仍可通过 —— 双算法兼容，消除 profile 不一致导致的推送全 401。
+func TestBillingEventsWebhook_HMACAlgCompat(t *testing.T) {
+	const secret = "shared-secret"
+	h := newBillingPushTestHandler(t, secret, "")
+	mux := buildAdminMux(testCfg(), nil, nil, nil, nil, nil, nil, nil, h, false)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	body := []byte(`{"event_id":"e1","tenant":"t1","model":"m1","tokens_in":10,"ts":"2026-10-01T00:00:00Z"}`)
+	smProv, err := cryptop.New(cryptop.ProfileSMSW)
+	if err != nil {
+		t.Fatalf("cryptop sm provider: %v", err)
+	}
+	sig := "sha256=" + hex.EncodeToString(smProv.HMAC([]byte(secret), body))
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+billingAPIBase+"/events", bytes.NewReader(body))
+	req.Header.Set("X-Signature", sig)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("SM3 签名（对端 sm profile）status = %d, want 200（双算法兼容）", resp.StatusCode)
 	}
 }
 

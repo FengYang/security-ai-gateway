@@ -11,7 +11,10 @@ package billing
 // profile 取自 `CRYPTO_PROFILE`（§12.3；默认 intl，与现役 HMAC-SHA256/SHA-256 逐字节等价）。
 
 import (
+	"crypto/subtle"
+	"encoding/hex"
 	"os"
+	"strings"
 
 	"security-ai-gateway/gateway/cryptop"
 )
@@ -63,4 +66,25 @@ func macByAlg(prefix string, key, data []byte) []byte {
 		return hashProvSM3.HMAC(key, data)
 	}
 	return hashProvSHA256.HMAC(key, data)
+}
+
+// VerifyEventMAC 校验推送事件签名（`X-Signature: sha256=<hex>`），**兼容 intl↔sm 双算法**（★ SEC-001）。
+//
+// 头前缀恒为 `sha256=`（既有 wire 契约，不改），但实际 MAC 算法随**发送端** `CRYPTO_PROFILE` 变化。
+// 本函数依次以 SHA-256 与 SM3 两种 provider 复算，任一命中即通过（常量时间比较）——
+// 从而消除「发送端（tee-infer）与本端 profile 不一致 → 推送全部 401」的部署耦合。
+func VerifyEventMAC(secret, body []byte, sig string) bool {
+	const prefix = "sha256="
+	if len(secret) == 0 || !strings.HasPrefix(sig, prefix) {
+		return false
+	}
+	got, err := hex.DecodeString(strings.TrimPrefix(sig, prefix))
+	if err != nil {
+		return false
+	}
+	if subtle.ConstantTimeCompare(got, hashProvSHA256.HMAC(secret, body)) == 1 {
+		return true
+	}
+	// SM3 与 SHA-256 输出长度不同；ConstantTimeCompare 对不等长返回 0（安全）。
+	return subtle.ConstantTimeCompare(got, hashProvSM3.HMAC(secret, body)) == 1
 }

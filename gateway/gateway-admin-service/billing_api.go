@@ -25,8 +25,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -268,18 +266,9 @@ func (h *billingHandler) handleBillingEvents(w http.ResponseWriter, r *http.Requ
 
 // verifyEventsHMAC 校验推送签名（§6.3.1）。
 // 密钥未配置 / 头缺失或非 `sha256=<hex>` / 常量时间不等 → false（fail-closed）。
+// ★ SEC-001：委托 billing.VerifyEventMAC 做 **intl↔sm 双算法**兼容校验（解耦两端 CRYPTO_PROFILE）。
 func (h *billingHandler) verifyEventsHMAC(sig string, body []byte) bool {
-	const prefix = "sha256="
-	if len(h.eventsSecret) == 0 || !strings.HasPrefix(sig, prefix) {
-		return false
-	}
-	got, err := hex.DecodeString(strings.TrimPrefix(sig, prefix))
-	if err != nil {
-		return false
-	}
-	// MAC 经 cryptop（intl=HMAC-SHA256；sm=HMAC-SM3）；常量时间比较。
-	mac := cryptoProvider.HMAC(h.eventsSecret, body)
-	return subtle.ConstantTimeCompare(got, mac) == 1
+	return billing.VerifyEventMAC(h.eventsSecret, body, sig)
 }
 
 // billingStatus 捕获响应码（用于指标 #1）。
