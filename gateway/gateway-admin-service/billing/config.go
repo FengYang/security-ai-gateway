@@ -139,7 +139,8 @@ func LoadBillingConfig() (*BillingConfig, error) {
 	cfg.Period.MonthlyCloseAt = getEnv(envPrefix+"PERIOD_MONTHLY_CLOSE_AT", "03:10")
 
 	// Rating
-	cfg.Rating.PriceTable = getEnv(envPrefix+"RATING_PRICE_TABLE", "/etc/gateway/pricing.yaml")
+	// 默认路径与加载器（JSON）及样例文件（pricing.sample.json）一致（★ DOC-003：此前默认 .yaml 属陷阱）
+	cfg.Rating.PriceTable = getEnv(envPrefix+"RATING_PRICE_TABLE", "/etc/gateway/pricing.json")
 	cfg.Rating.Rounding = getEnv(envPrefix+"RATING_ROUNDING", "half_up")
 	cfg.Rating.AccumulateThenRound = getEnv(envPrefix+"RATING_ACCUMULATE_THEN_ROUND", "true") == "true"
 	cfg.Rating.TierMode = getEnv(envPrefix+"RATING_TIER_MODE", "progressive")

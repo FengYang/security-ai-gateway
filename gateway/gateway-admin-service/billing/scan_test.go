@@ -51,7 +51,7 @@ func TestScan_QuotaWarn(t *testing.T) {
 	if err := s.Plans().Bind(Subscription{TenantID: "t1", PlanID: "free", EffectiveAt: 0}); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	// free 月配额 5,000,000；用 4.6M → 剩余 8% < 20% → 预警
+	// free 月配额 1,000,000（附录 D.1）；用 4.6M → 剩余 0 < 20% → 预警
 	seedLedger(t, s, LedgerEntry{TenantID: "t1", ModelKey: "cheap-model",
 		Day: "2026-10-01", TokensIn: 4600000, StdIn: 4600000, EventKey: "e1"})
 

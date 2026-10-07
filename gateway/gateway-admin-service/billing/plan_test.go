@@ -151,6 +151,40 @@ func TestPlan_ResolveExpired(t *testing.T) {
 	}
 }
 
+// DOC-001 回归锚：默认 4 档与详设附录 D.1「P0 默认」逐字段一致。
+func TestDefaultPlans_MatchSpec(t *testing.T) {
+	want := map[string]struct {
+		monthly int64
+		conc    int
+		cache   string
+		over    string
+	}{
+		"free":       {1000000, 5, "exact", "reject"},
+		"basic":      {10000000, 20, "exact", "reject"},
+		"pro":        {100000000, 100, "semantic", "charge"},
+		"enterprise": {0, 200, "semantic", "charge"},
+	}
+	got := map[string]Plan{}
+	for _, p := range DefaultPlans() {
+		got[p.ID] = p
+	}
+	if len(got) != len(want) {
+		t.Fatalf("default plans = %d, want %d", len(got), len(want))
+	}
+	for id, w := range want {
+		p, ok := got[id]
+		if !ok {
+			t.Fatalf("missing plan %q", id)
+		}
+		if p.MonthlyTokens != w.monthly || p.Concurrency != w.conc ||
+			p.CacheTier != w.cache || p.OverQuota != w.over {
+			t.Errorf("plan %s = (%d,%d,%s,%s), want (%d,%d,%s,%s)",
+				id, p.MonthlyTokens, p.Concurrency, p.CacheTier, p.OverQuota,
+				w.monthly, w.conc, w.cache, w.over)
+		}
+	}
+}
+
 func TestInitDefaultPlans_Idempotent(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()

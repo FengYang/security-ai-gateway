@@ -204,14 +204,16 @@ func (s *sqlitePlanStore) ListSubscriptions(now int64) ([]Subscription, error) {
 // ---------- 默认套餐（4 档，§4.1.3） ----------
 
 // DefaultPlans 返回 4 档默认套餐定义（初始化时写入 DB）。
+//
+// ★ DOC-001：与详设附录 D.1「P0 默认」逐字段对齐（月标准 token / 并发 / 缓存档 / 超额策略）。
 func DefaultPlans() []Plan {
 	return []Plan{
 		{
 			ID:            "free",
 			Name:          "免费版",
-			MonthlyTokens: 5000000, // 5M 标准 token / 月
-			Concurrency:   2,
-			CacheTier:     "none",
+			MonthlyTokens: 1000000, // 1M 标准 token / 月
+			Concurrency:   5,
+			CacheTier:     "exact",
 			OverQuota:     "reject",
 			PayMode:       "postpaid",
 			ExtraLimits: []QuotaLimit{
@@ -222,10 +224,10 @@ func DefaultPlans() []Plan {
 		{
 			ID:            "basic",
 			Name:          "基础版",
-			MonthlyTokens: 50000000, // 50M / 月
-			Concurrency:   10,
+			MonthlyTokens: 10000000, // 10M / 月
+			Concurrency:   20,
 			CacheTier:     "exact",
-			OverQuota:     "degrade",
+			OverQuota:     "reject",
 			PayMode:       "postpaid",
 			ExtraLimits: []QuotaLimit{
 				{Window: "minute", MaxTokens: 500000},
@@ -235,8 +237,8 @@ func DefaultPlans() []Plan {
 		{
 			ID:            "pro",
 			Name:          "专业版",
-			MonthlyTokens: 500000000, // 500M / 月
-			Concurrency:   50,
+			MonthlyTokens: 100000000, // 100M / 月
+			Concurrency:   100,
 			CacheTier:     "semantic",
 			OverQuota:     "charge",
 			PayMode:       "postpaid",
