@@ -120,6 +120,19 @@ func NewSemanticStoreDual(cfg *CacheConfig, plain Embedder, secure Embedder, ind
 	return ss, nil
 }
 
+// CloneWithConfig 返回共享同一向量索引与 embedder、但使用新配置的语义存储（§6.10 热更新）。
+// 索引实例复用 → 已有向量条目保留；仅把"配置读取"（阈值 / top_k / 租户策略 / scene_hint）切到新配置。
+func (s *semanticStore) CloneWithConfig(cfg *CacheConfig) *semanticStore {
+	return &semanticStore{
+		cfg:            cfg,
+		embedder:       s.embedder,
+		secureEmbedder: s.secureEmbedder,
+		index:          s.index,
+		nowFn:          s.nowFn,
+		stats:          s.stats,
+	}
+}
+
 // Enabled 语义缓存是否启用。
 func (s *semanticStore) Enabled(tenantID string) bool {
 	if s.cfg.Mode != ModeSemantic && s.cfg.Mode != ModeFull {

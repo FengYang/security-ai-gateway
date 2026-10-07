@@ -14,11 +14,12 @@ import (
 //   - mode=off（默认）→ /metrics 不得追加任何 otpmask_cache_* 指标（与现网输出一致）；
 //   - mode=exact      → /metrics 追加缓存指标（entries 等）。
 func TestHandleMetrics_CacheGating(t *testing.T) {
+	offCfg := cacheengine.DefaultConfig()
 	offSrv := &teeServer{
-		audit:       newAuditChainWithTSA(nil),
-		metrics:     newMetrics(),
-		cacheEngine: cacheengine.NewCacheEngine(cacheengine.DefaultConfig()),
+		audit:   newAuditChainWithTSA(nil),
+		metrics: newMetrics(),
 	}
+	offSrv.cacheRT.Store(newCacheState(&offCfg, cacheengine.NewCacheEngine(offCfg)))
 	if body := fetchMetrics(t, offSrv); strings.Contains(body, "otpmask_cache_") {
 		t.Fatalf("mode=off 不得追加缓存指标（/metrics 应与现网一致）:\n%s", body)
 	}
@@ -26,10 +27,10 @@ func TestHandleMetrics_CacheGating(t *testing.T) {
 	cfg := cacheengine.DefaultConfig()
 	cfg.Mode = cacheengine.ModeExact
 	onSrv := &teeServer{
-		audit:       newAuditChainWithTSA(nil),
-		metrics:     newMetrics(),
-		cacheEngine: cacheengine.NewCacheEngine(cfg),
+		audit:   newAuditChainWithTSA(nil),
+		metrics: newMetrics(),
 	}
+	onSrv.cacheRT.Store(newCacheState(&cfg, cacheengine.NewCacheEngine(cfg)))
 	if body := fetchMetrics(t, onSrv); !strings.Contains(body, "otpmask_cache_entries") {
 		t.Fatalf("mode=exact 应追加缓存指标，实际输出:\n%s", body)
 	}
@@ -42,11 +43,12 @@ func TestHandleMetrics_ModeOffByteIdentical(t *testing.T) {
 		audit:   newAuditChainWithTSA(nil),
 		metrics: newMetrics(),
 	}
+	offCfg := cacheengine.DefaultConfig()
 	offSrv := &teeServer{
-		audit:       newAuditChainWithTSA(nil),
-		metrics:     newMetrics(),
-		cacheEngine: cacheengine.NewCacheEngine(cacheengine.DefaultConfig()), // mode=off（默认）
+		audit:   newAuditChainWithTSA(nil),
+		metrics: newMetrics(),
 	}
+	offSrv.cacheRT.Store(newCacheState(&offCfg, cacheengine.NewCacheEngine(offCfg))) // mode=off（默认）
 
 	baseline := fetchMetrics(t, baselineSrv)
 	off := fetchMetrics(t, offSrv)

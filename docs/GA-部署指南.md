@@ -1125,7 +1125,7 @@ kubectl exec -n higress-system <pod> -- \
 | **Redis** | K8s Deployment/Service（或托管） | `redis.*` | 形态 B/C；**只存 AEAD 密文** |
 | **embedding sidecar** | 同 Pod sidecar 或内网服务 | `semantic.embedder.*` | 形态 C；向量化（维度须一致） |
 | **预热清单文件** | 只读卷（`0444`） | `warmup.file` | JSONL；由控制面/运营投递 |
-| **管理 API** | tee-infer 同端口 `:19090` | `-admin-token` / `-listen` | `/cache/*` 十端点（见 API 参考 §5.5） |
+| **管理 API** | tee-infer 同端口 `:19090` | `-admin-token` / `-listen` | `/cache/*` 十一端点（含 `POST /config/cache/reload`；见 API 参考 §5.5） |
 
 **部署形态与选择**：
 
@@ -1245,7 +1245,8 @@ DefaultConfig()（mode=off）
 | 降级精确 | `CACHE_SEMANTIC_ENABLED=false` | 重启后 |
 | Redis 降级 | `CACHE_REDIS_ENABLED=false`（形态 B/C → A） | 重启后 |
 
-> **⚠️ 重要**：§6.10「配置热更新」**尚未接线**——配置文件变更需**滚动重启**方能生效。
+> **配置热更新（§6.10，v1.12 起支持）**：`POST /config/cache/reload`（`X-Admin-Token` 鉴权）重读 `CACHE_CONFIG_PATH`（+ 环境覆盖）并**热更**——`mode`/`threshold`/`ttl_policy`/`gray`/`write_limit`/`jitter`/`guard`/`tenant_policy` 等**即时生效、既有条目保留**；**结构性维度**（embedder、`vector.backend`、`max_entries`、`redis.*`、`key_format`、`scope`）**拒绝热更**，返回 **409 `restart_required`**，需**滚动重启**。
+> **⚠️ 注意**：`mode=off` 时该端点返回 409 `CACHE_DISABLED`（与其它运营端点一致）；热更不影响 `/metrics` 计数与既有条目（便于快速回滚）。
 
 #### 11.3.2 缓存失效
 

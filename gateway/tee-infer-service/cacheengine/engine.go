@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +39,10 @@ type CacheEngine interface {
 	// 未命中返回 false。仅覆盖精确层（负向层无 Entry 元数据）。
 	Inspect(keyHash string) (*Entry, bool)
 	Close() error
+	// Rebuild 以新配置构造**共享同一批 store（既有条目保留）**的新引擎（本体 §6.10 配置热更新）。
+	// 结构性维度变更（embedder/backend/容量/redis/key_format/scope/semantic 启用）→ 返回错误（需重启）；
+	// 校验失败 → 返回错误（旧引擎继续服务，all-or-nothing）。
+	Rebuild(newCfg CacheConfig) (CacheEngine, error)
 }
 
 // engine 默认实现。
@@ -112,6 +117,14 @@ func WithRedisBackend(b RedisBackend) EngineOption {
 	return func(e *engine) { e.l1 = b }
 }
 
+// withStats 注入指标收集器（包内使用：§6.10 热更新复用既有计数器，避免 reload 重置 Prometheus 计数）。
+func withStats(s *statsCollector) EngineOption {
+	return func(e *engine) { e.stats = s }
+}
+
+// ErrReloadRestartRequired 热更新遇到结构性维度变更时返回（需滚动重启，§6.10.1 / B-6.10-2）。
+var ErrReloadRestartRequired = errors.New("cache: config change requires restart")
+
 // NewCacheEngine 构造缓存引擎。
 // mode=off 时引擎返回 NullCacheEngine 行为（永不命中），保证向后兼容。
 func NewCacheEngine(cfg CacheConfig, opts ...EngineOption) CacheEngine {
@@ -177,6 +190,37 @@ func NewCacheEngine(cfg CacheConfig, opts ...EngineOption) CacheEngine {
 	}
 
 	return e
+}
+
+// Rebuild 实现 §6.10 配置热更新（B′：新引擎 + 复用既有 store，条目保留）。
+// 顺序：① 配置校验（all-or-nothing）→ ② 结构维度比对（拒绝则需重启）→ ③ 共享 store 构造新引擎。
+// 复用的 store：exact / negative / redis-L1 / semantic（索引复用，仅切配置视图）；
+// 指标计数器经 withStats 复用（避免 Prometheus 计数在 reload 时归零）。
+// 其余派生组件（ttl / replay / jitter / canary / limiter / cacheability / singleflight）由
+// NewCacheEngine 按新配置重建，从而"阈值/TTL/灰度/限流/抖动"等维度即时生效。
+func (e *engine) Rebuild(newCfg CacheConfig) (CacheEngine, error) {
+	if errs := newCfg.Validate(); len(errs) > 0 {
+		return nil, fmt.Errorf("cache: reload config invalid: %v", errs)
+	}
+	if diffs := StructuralDiff(e.cfg, &newCfg); len(diffs) > 0 {
+		return nil, fmt.Errorf("%w: %s", ErrReloadRestartRequired, strings.Join(diffs, "; "))
+	}
+
+	opts := []EngineOption{
+		WithExactStore(e.exact),
+		WithNegativeStore(e.neg),
+		WithRedisBackend(e.l1),
+		WithSceneClassifier(e.scene),
+		WithFastScanner(e.scanner),
+		WithFeedbackDetector(e.feedback),
+		withStats(e.stats),
+	}
+	if ss, ok := e.sem.(*semanticStore); ok {
+		opts = append(opts, WithSemanticStore(ss.CloneWithConfig(&newCfg)))
+	} else if e.sem != nil {
+		opts = append(opts, WithSemanticStore(e.sem))
+	}
+	return NewCacheEngine(newCfg, opts...), nil
 }
 
 // ===== CacheEngine 接口实现 =====

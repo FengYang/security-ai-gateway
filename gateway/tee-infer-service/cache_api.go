@@ -55,6 +55,7 @@ func (s *teeServer) registerCacheAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/cache/inspect/", api.handleInspect)
 	mux.HandleFunc("/cache/feedback", api.handleFeedback)
 	mux.HandleFunc("/config/cache", api.handleConfigSnapshot)
+	mux.HandleFunc("/config/cache/reload", api.handleConfigCacheReload) // §6.10 配置热更新
 	// E4-B：预热端点（§4.3 #6/#7）
 	mux.HandleFunc("/cache/warmup", api.handleWarmupTrigger)
 	mux.HandleFunc("/cache/warmup/", api.handleWarmupStatus)
@@ -88,12 +89,14 @@ func (a *cacheAdminAPI) authorize(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // enabled 运营端点门控：引擎未装配或 mode=off → 409 CACHE_DISABLED。
-func (a *cacheAdminAPI) enabled(w http.ResponseWriter, r *http.Request) bool {
-	if a.srv.cacheEngine == nil || a.srv.cacheEngine.Stats().Mode == string(cacheengine.ModeOff) {
+// 通过时返回当前运行时快照（非 nil，engine 非 nil 且 mode != off），供调用点在同一快照上继续读取。
+func (a *cacheAdminAPI) enabled(w http.ResponseWriter, r *http.Request) (*cacheState, bool) {
+	st := a.srv.cacheState()
+	if st == nil || st.engine == nil || st.engine.Stats().Mode == string(cacheengine.ModeOff) {
 		writeCacheErr(w, r, http.StatusConflict, "CACHE_DISABLED", "缓存未启用（mode=off 或引擎未装配）")
-		return false
+		return nil, false
 	}
-	return true
+	return st, true
 }
 
 // requireMethod 方法守卫；不匹配写出 405。
@@ -116,10 +119,11 @@ func pathSuffix(r *http.Request, prefix string) (string, bool) {
 
 // backendName 后端形态名（供 /cache/stats）。
 func (a *cacheAdminAPI) backendName() string {
-	cfg := a.srv.cacheConfig
-	if cfg == nil {
+	st := a.srv.cacheState()
+	if st == nil || st.config == nil {
 		return "unknown"
 	}
+	cfg := st.config
 	switch {
 	case cfg.Redis.Enabled:
 		return "redis"
@@ -134,10 +138,14 @@ func (a *cacheAdminAPI) backendName() string {
 
 // handleStats GET /cache/stats：条目数/容量/后端/查询统计（§4.3 #1）。
 func (a *cacheAdminAPI) handleStats(w http.ResponseWriter, r *http.Request) {
-	if !requireCacheMethod(w, r, http.MethodGet) || !a.authorize(w, r) || !a.enabled(w, r) {
+	if !requireCacheMethod(w, r, http.MethodGet) || !a.authorize(w, r) {
 		return
 	}
-	st := a.srv.cacheEngine.Stats()
+	cs, ok := a.enabled(w, r)
+	if !ok {
+		return
+	}
+	st := cs.engine.Stats()
 	writeCacheOK(w, r, map[string]any{
 		"mode":                    st.Mode,
 		"backend":                 a.backendName(),
@@ -152,7 +160,11 @@ func (a *cacheAdminAPI) handleStats(w http.ResponseWriter, r *http.Request) {
 
 // handleInvalidateKey DELETE /cache/entry/{key_hash}（§4.3 #2）。
 func (a *cacheAdminAPI) handleInvalidateKey(w http.ResponseWriter, r *http.Request) {
-	if !requireCacheMethod(w, r, http.MethodDelete) || !a.authorize(w, r) || !a.enabled(w, r) {
+	if !requireCacheMethod(w, r, http.MethodDelete) || !a.authorize(w, r) {
+		return
+	}
+	cs, ok := a.enabled(w, r)
+	if !ok {
 		return
 	}
 	key, ok := pathSuffix(r, "/cache/entry/")
@@ -160,7 +172,7 @@ func (a *cacheAdminAPI) handleInvalidateKey(w http.ResponseWriter, r *http.Reque
 		writeCacheErr(w, r, http.StatusBadRequest, "CACHE_INVALID_ARG", "key_hash 必填")
 		return
 	}
-	n, err := a.srv.cacheEngine.Invalidate(cacheengine.InvalidateSelector{KeyHash: key})
+	n, err := cs.engine.Invalidate(cacheengine.InvalidateSelector{KeyHash: key})
 	if err != nil {
 		writeCacheErr(w, r, http.StatusServiceUnavailable, "CACHE_BACKEND_UNAVAILABLE", err.Error())
 		return
@@ -170,7 +182,11 @@ func (a *cacheAdminAPI) handleInvalidateKey(w http.ResponseWriter, r *http.Reque
 
 // handleInvalidateTenant DELETE /cache/tenant/{tenant_id}（§4.3 #3）。
 func (a *cacheAdminAPI) handleInvalidateTenant(w http.ResponseWriter, r *http.Request) {
-	if !requireCacheMethod(w, r, http.MethodDelete) || !a.authorize(w, r) || !a.enabled(w, r) {
+	if !requireCacheMethod(w, r, http.MethodDelete) || !a.authorize(w, r) {
+		return
+	}
+	cs, ok := a.enabled(w, r)
+	if !ok {
 		return
 	}
 	tenant, ok := pathSuffix(r, "/cache/tenant/")
@@ -178,7 +194,7 @@ func (a *cacheAdminAPI) handleInvalidateTenant(w http.ResponseWriter, r *http.Re
 		writeCacheErr(w, r, http.StatusBadRequest, "CACHE_INVALID_ARG", "tenant_id 必填")
 		return
 	}
-	n, err := a.srv.cacheEngine.Invalidate(cacheengine.InvalidateSelector{TenantID: tenant})
+	n, err := cs.engine.Invalidate(cacheengine.InvalidateSelector{TenantID: tenant})
 	if err != nil {
 		writeCacheErr(w, r, http.StatusServiceUnavailable, "CACHE_BACKEND_UNAVAILABLE", err.Error())
 		return
@@ -188,7 +204,11 @@ func (a *cacheAdminAPI) handleInvalidateTenant(w http.ResponseWriter, r *http.Re
 
 // handleInvalidateModel DELETE /cache/model/{model}（§4.3 #4）。
 func (a *cacheAdminAPI) handleInvalidateModel(w http.ResponseWriter, r *http.Request) {
-	if !requireCacheMethod(w, r, http.MethodDelete) || !a.authorize(w, r) || !a.enabled(w, r) {
+	if !requireCacheMethod(w, r, http.MethodDelete) || !a.authorize(w, r) {
+		return
+	}
+	cs, ok := a.enabled(w, r)
+	if !ok {
 		return
 	}
 	model, ok := pathSuffix(r, "/cache/model/")
@@ -196,7 +216,7 @@ func (a *cacheAdminAPI) handleInvalidateModel(w http.ResponseWriter, r *http.Req
 		writeCacheErr(w, r, http.StatusBadRequest, "CACHE_INVALID_ARG", "model 必填")
 		return
 	}
-	n, err := a.srv.cacheEngine.Invalidate(cacheengine.InvalidateSelector{Model: model})
+	n, err := cs.engine.Invalidate(cacheengine.InvalidateSelector{Model: model})
 	if err != nil {
 		writeCacheErr(w, r, http.StatusServiceUnavailable, "CACHE_BACKEND_UNAVAILABLE", err.Error())
 		return
@@ -206,14 +226,18 @@ func (a *cacheAdminAPI) handleInvalidateModel(w http.ResponseWriter, r *http.Req
 
 // handleInvalidateAll DELETE /cache/all?confirm=yes（§4.3 #5）。
 func (a *cacheAdminAPI) handleInvalidateAll(w http.ResponseWriter, r *http.Request) {
-	if !requireCacheMethod(w, r, http.MethodDelete) || !a.authorize(w, r) || !a.enabled(w, r) {
+	if !requireCacheMethod(w, r, http.MethodDelete) || !a.authorize(w, r) {
+		return
+	}
+	cs, ok := a.enabled(w, r)
+	if !ok {
 		return
 	}
 	if r.URL.Query().Get("confirm") != "yes" {
 		writeCacheErr(w, r, http.StatusBadRequest, "CACHE_INVALID_ARG", "全量清空需 confirm=yes")
 		return
 	}
-	n, err := a.srv.cacheEngine.Invalidate(cacheengine.InvalidateSelector{All: true})
+	n, err := cs.engine.Invalidate(cacheengine.InvalidateSelector{All: true})
 	if err != nil {
 		writeCacheErr(w, r, http.StatusServiceUnavailable, "CACHE_BACKEND_UNAVAILABLE", err.Error())
 		return
@@ -223,7 +247,11 @@ func (a *cacheAdminAPI) handleInvalidateAll(w http.ResponseWriter, r *http.Reque
 
 // handleInspect GET /cache/inspect/{key_hash}：返回元数据（不含文本；§4.3 #9 / I-6）。
 func (a *cacheAdminAPI) handleInspect(w http.ResponseWriter, r *http.Request) {
-	if !requireCacheMethod(w, r, http.MethodGet) || !a.authorize(w, r) || !a.enabled(w, r) {
+	if !requireCacheMethod(w, r, http.MethodGet) || !a.authorize(w, r) {
+		return
+	}
+	cs, ok := a.enabled(w, r)
+	if !ok {
 		return
 	}
 	key, ok := pathSuffix(r, "/cache/inspect/")
@@ -231,7 +259,7 @@ func (a *cacheAdminAPI) handleInspect(w http.ResponseWriter, r *http.Request) {
 		writeCacheErr(w, r, http.StatusBadRequest, "CACHE_INVALID_ARG", "key_hash 必填")
 		return
 	}
-	entry, found := a.srv.cacheEngine.Inspect(key)
+	entry, found := cs.engine.Inspect(key)
 	if !found {
 		writeCacheErr(w, r, http.StatusNotFound, "CACHE_NOT_FOUND", "key_hash 不存在")
 		return
@@ -250,7 +278,10 @@ type cacheFeedbackRequest struct {
 // handleFeedback POST /cache/feedback（§4.3 #8）。
 // 本轮：校验 + 幂等（B-6.6-2）；归因到 scene/驱动检测器需 request_id→scene 索引（会话层），归后续（偏差登记）。
 func (a *cacheAdminAPI) handleFeedback(w http.ResponseWriter, r *http.Request) {
-	if !requireCacheMethod(w, r, http.MethodPost) || !a.authorize(w, r) || !a.enabled(w, r) {
+	if !requireCacheMethod(w, r, http.MethodPost) || !a.authorize(w, r) {
+		return
+	}
+	if _, ok := a.enabled(w, r); !ok {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
@@ -291,11 +322,12 @@ func (a *cacheAdminAPI) handleConfigSnapshot(w http.ResponseWriter, r *http.Requ
 	if !requireCacheMethod(w, r, http.MethodGet) || !a.authorize(w, r) {
 		return
 	}
-	if a.srv.cacheConfig == nil {
+	cs := a.srv.cacheState()
+	if cs == nil || cs.config == nil {
 		writeCacheOK(w, r, map[string]any{"configured": false})
 		return
 	}
-	writeCacheOK(w, r, map[string]any{"configured": true, "config": a.srv.cacheConfig})
+	writeCacheOK(w, r, map[string]any{"configured": true, "config": cs.config})
 }
 
 // ===== 预热端点（E4-B；§4.3 #6/#7） =====
@@ -354,10 +386,14 @@ func (s *teeServer) warmupInfer(ctx context.Context, it cacheengine.WarmItem) (c
 
 // handleWarmupTrigger POST /cache/warmup（§4.3 #6；体 {reset:bool} 可空）。
 func (a *cacheAdminAPI) handleWarmupTrigger(w http.ResponseWriter, r *http.Request) {
-	if !requireCacheMethod(w, r, http.MethodPost) || !a.authorize(w, r) || !a.enabled(w, r) {
+	if !requireCacheMethod(w, r, http.MethodPost) || !a.authorize(w, r) {
 		return
 	}
-	cfg := a.srv.cacheConfig
+	cs, ok := a.enabled(w, r)
+	if !ok {
+		return
+	}
+	cfg := cs.config
 	if a.srv.warmer == nil || cfg == nil || !cfg.Warmup.Enabled {
 		writeCacheErr(w, r, http.StatusConflict, "CACHE_DISABLED", "预热未启用（warmup.enabled=false 或未装配）")
 		return
@@ -396,7 +432,10 @@ func (a *cacheAdminAPI) handleWarmupTrigger(w http.ResponseWriter, r *http.Reque
 
 // handleWarmupStatus GET /cache/warmup/{task_id}（§4.3 #7）。
 func (a *cacheAdminAPI) handleWarmupStatus(w http.ResponseWriter, r *http.Request) {
-	if !requireCacheMethod(w, r, http.MethodGet) || !a.authorize(w, r) || !a.enabled(w, r) {
+	if !requireCacheMethod(w, r, http.MethodGet) || !a.authorize(w, r) {
+		return
+	}
+	if _, ok := a.enabled(w, r); !ok {
 		return
 	}
 	if a.srv.warmer == nil {
@@ -414,4 +453,67 @@ func (a *cacheAdminAPI) handleWarmupStatus(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeCacheOK(w, r, st)
+}
+
+// ===== 配置热更新（§6.10；B-6.10-1/B-6.10-2） =====
+
+// handleConfigCacheReload POST /config/cache/reload：重读配置并热更新缓存引擎（§6.10）。
+// 语义（all-or-nothing）：重建失败/结构性维度变更 → 不切换、返回 409，旧引擎继续服务。
+// 结构性维度变更（embedder/backend/容量/redis/key_format/scope/semantic 启用）需滚动重启
+// （errors.Is(err, cacheengine.ErrReloadRestartRequired) → restart_required=true）。
+// mode=off 属运营端点禁行（与既有 CACHE_DISABLED 口径一致）。
+func (a *cacheAdminAPI) handleConfigCacheReload(w http.ResponseWriter, r *http.Request) {
+	if !requireCacheMethod(w, r, http.MethodPost) || !a.authorize(w, r) {
+		return
+	}
+	// 重读配置来源：CACHE_CONFIG_PATH（空 → 默认 mode=off）→ 环境变量覆盖。
+	cfg := cacheengine.DefaultConfig()
+	if p := os.Getenv("CACHE_CONFIG_PATH"); p != "" {
+		c, err := cacheengine.LoadConfig(p)
+		if err != nil {
+			writeCacheErr(w, r, http.StatusConflict, "CACHE_RELOAD_FAILED", "配置加载失败: "+err.Error())
+			return
+		}
+		cfg = c
+	}
+	if err := cacheengine.ApplyEnv(&cfg); err != nil {
+		writeCacheErr(w, r, http.StatusConflict, "CACHE_RELOAD_FAILED", "环境变量覆盖失败: "+err.Error())
+		return
+	}
+	cs := a.srv.cacheState()
+	if cs == nil || cs.engine == nil || cs.engine.Stats().Mode == string(cacheengine.ModeOff) {
+		writeCacheErr(w, r, http.StatusConflict, "CACHE_DISABLED", "缓存未启用（mode=off 或引擎未装配）")
+		return
+	}
+	eng, err := cs.engine.Rebuild(cfg)
+	if err != nil {
+		if errors.Is(err, cacheengine.ErrReloadRestartRequired) {
+			// 结构性维度变更：需滚动重启；回传 restart_required 与差异详情。
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(cacheAPIResponse{
+				OK: false,
+				Data: map[string]any{
+					"applied":          false,
+					"restart_required": true,
+					"details":          err.Error(),
+				},
+				Error:     &cacheAPIError{Code: "CACHE_RELOAD_RESTART_REQUIRED", Message: err.Error()},
+				RequestID: cacheReqID(r),
+			})
+			return
+		}
+		// 配置校验失败：不切换（all-or-nothing），旧引擎继续服务。
+		writeCacheErr(w, r, http.StatusConflict, "CACHE_RELOAD_FAILED", err.Error())
+		return
+	}
+	newSt := newCacheState(&cfg, eng)
+	a.srv.cacheRT.Store(newSt) // §6.10：原子切换（单请求内一致）
+	writeCacheOK(w, r, map[string]any{
+		"applied":          true,
+		"restart_required": false,
+		"mode":             newSt.mode,
+		"backend":          a.backendName(),
+		"diffs":            []string{}, // 可热更维度即时生效（结构性差异在 rebuild 失败分支已拒绝）
+	})
 }

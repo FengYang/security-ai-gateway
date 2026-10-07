@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -210,13 +209,9 @@ type teeServer struct {
 	weightProvider  LayerWeightProvider    // 层权重提供器（掩码像计算）
 	route           *RouteConfig           // 双路线路由配置
 	tokenizer       Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
-	cache           model.SemanticCache      // GF.4.1 精确缓存（P0-2：legacy 兜底；仅 cacheEngine==nil 时使用）
-	cacheEngine     cacheengine.CacheEngine  // P0-2 原生语义缓存引擎（命中/回填 + /metrics；nil = 未装配）
-	cacheConfig     *cacheengine.CacheConfig // E4：/cache/* 与 /config/cache 的配置快照来源
+	cache           model.SemanticCache      // GF.4.1 精确缓存（P0-2：legacy 兜底；仅原生引擎未生效时使用）
+	cacheRT         atomic.Pointer[cacheState] // P0-2 B2 + §6.10：缓存运行时快照（原子切换，请求内一致）
 	warmer          cacheengine.CacheWarmer  // E4-B：预热器（§6.7；nil = 未装配）
-	cacheEnabled    bool                     // P0-2 B2：原生缓存是否生效（mode != off）；false 时零开销
-	cacheMode       string                   // P0-2 §9.1 #20：缓存运行模式（TTFT 标签）
-	cacheReplay     cacheReplayConfig        // P0-2 B2：§6.12 回放节拍参数快照
 	billing         *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
 	meterToken      string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
 	reconciler      *reconciler            // S5 判据 6：审计-计量对账器（/reconcile 快照数据源）
@@ -1402,10 +1397,16 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	var cacheNegative *cacheengine.NegativePayload
 	var cacheStoreCtx *cacheengine.StoreContext
 	replaySegments := 0 // §9.1 #22：命中回放分片数（0 = 单块/降级）
-	if s.cacheEngine != nil && s.cacheEnabled {
+	// §6.10：单请求内缓存快照只取一次（reload 原子切换，保证请求内看到同一版本）。
+	st := s.cacheState()
+	cacheMode := ""
+	if st != nil {
+		cacheMode = st.mode // §9.1 #20：TTFT 标签（随快照传入流式出口，请求内一致）
+	}
+	if st != nil && st.engine != nil && st.enabled {
 		lctx := buildCacheLookupContext(tenant, engType, req.Model, txHash,
 			inputText.String(), int(req.MaxNewTokens), req.Stream, s.policyVersion())
-		lr := s.cacheEngine.Lookup(lctx)
+		lr := st.engine.Lookup(lctx)
 		// §7.3：抖动注入基准 = 结果就绪时刻 + Jitter（hit/miss 同分布，J-1）。
 		cacheReleaseAt = time.Now().Add(lr.Jitter)
 		switch {
@@ -1418,8 +1419,8 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 			replaySegments = len(lr.Entry.Segments)
 			eng = &segmentReplayEngine{
 				text: lr.Entry.Text, segs: lr.Entry.Segments, releaseAt: cacheReleaseAt,
-				minGap: s.cacheReplay.minGap, maxGap: s.cacheReplay.maxGap,
-				rec: s.cacheEngine, // §9.1 #11：抖动注入量指标
+				minGap: st.replay.minGap, maxGap: st.replay.maxGap,
+				rec: st.engine, // §9.1 #11：抖动注入量指标
 			}
 		}
 		sc := cacheengine.StoreContext{LookupContext: lctx}
@@ -1435,7 +1436,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	// 未命中：包装真实引擎采集流式分片（§6.12 写入侧），供回填使用。
 	var capture *segmentCapturingEngine
 	if cacheStoreCtx != nil && !cacheHit {
-		capture = newSegmentCapturingEngine(eng, cacheReleaseAt, s.cacheEngine)
+		capture = newSegmentCapturingEngine(eng, cacheReleaseAt, st.engine)
 		eng = capture
 	}
 	log.Printf("[tee] infer(text) tenant=%s request=%s engine=%s stream=%v msgs=%d cache_hit=%v",
@@ -1458,7 +1459,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	cacheReplayMode := ""
 	if cacheHit && cacheNegative == nil {
 		switch {
-		case s.cacheEngine == nil:
+		case st == nil || st.engine == nil:
 			cacheReplayMode = "single" // legacy 单块回放
 		case !req.Stream:
 			cacheReplayMode = "single"
@@ -1469,10 +1470,10 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		}
 	}
 	streamErr := s.streamTextInfer(w, sess, eng, genReq, &agg, tenant, req.RequestID, &out,
-		denialFinish, reqStart, cacheLabel)
+		denialFinish, reqStart, cacheLabel, cacheMode)
 	if streamErr != nil {
-		if cacheReplayMode != "" && s.cacheEngine != nil {
-			s.cacheEngine.RecordReplay(cacheReplayMode, "error") // §9.1 #22
+		if cacheReplayMode != "" && st != nil && st.engine != nil {
+			st.engine.RecordReplay(cacheReplayMode, "error") // §9.1 #22
 		}
 		// X-3：输出侧整流拦截优先于引擎 error 判定——按实际下发回冲（block+genErr 同此）。
 		if out.Blocked {
@@ -1509,16 +1510,16 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	}
 	// X-3：正常收尾（genErr=nil）但输出侧在 Process/Finish 整流拦截 → 按实际下发回冲。
 	if out.Blocked {
-		if cacheReplayMode != "" && s.cacheEngine != nil {
-			s.cacheEngine.RecordReplay(cacheReplayMode, "ok") // §9.1 #22（回放完成，内容随后被拦）
+		if cacheReplayMode != "" && st != nil && st.engine != nil {
+			st.engine.RecordReplay(cacheReplayMode, "ok") // §9.1 #22（回放完成，内容随后被拦）
 		}
 		s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
 			s.countTokens(inputText.String()), out, isRetry)
 		return
 	}
 	// §9.1 #22：回放成功。
-	if cacheReplayMode != "" && s.cacheEngine != nil {
-		s.cacheEngine.RecordReplay(cacheReplayMode, "ok")
+	if cacheReplayMode != "" && st != nil && st.engine != nil {
+		st.engine.RecordReplay(cacheReplayMode, "ok")
 	}
 	// R1（§7.3.1 / §4.5）：负向命中拒答的计费与审计——**计配额不计费**（交付 token=0，
 	// 输入预占保留不回冲），审计 cache_negative_hit（与命中路径同签名，CacheHit=true）。
@@ -1541,7 +1542,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 			// 写前审查门禁（§7.1）：输出侧已放行（未阻塞）才写；分片随条目写入（§6.12）。
 			sc := *cacheStoreCtx
 			sc.Writable = !out.Blocked
-			s.cacheEngine.Store(sc, cacheengine.InferResult{
+			st.engine.Store(sc, cacheengine.InferResult{
 				Text:      agg.String(),
 				TokensIn:  s.countTokens(inputText.String()),
 				TokensOut: s.countTokens(agg.String()),
@@ -1636,7 +1637,7 @@ func (s *teeServer) newRequestOutputGuard(tenant, requestID string) (*outputGuar
 func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	eng model.Engine, genReq model.GenerateRequest, agg *strings.Builder,
 	tenant, requestID string, out *streamOutcome, denialFinish string,
-	reqStart time.Time, cacheLabel string) error {
+	reqStart time.Time, cacheLabel, cacheMode string) error {
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1696,7 +1697,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 			emittedBuilder.WriteString(delta)
 			if !ttftRecorded {
 				ttftRecorded = true
-				s.metrics.ObserveTTFT(s.cacheMode, cacheLabel, time.Since(reqStart).Seconds())
+				s.metrics.ObserveTTFT(cacheMode, cacheLabel, time.Since(reqStart).Seconds())
 			}
 		}
 		return writeChunk(delta, finish, nil, label)
@@ -2896,8 +2897,8 @@ func (s *teeServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	s.metrics.render(w, s.audit.len())
 	// P0-2：缓存指标仅在 mode!=off 时追加，保证默认关闭时 /metrics 输出逐字节不变。
-	if s.cacheEngine != nil && s.cacheEngine.Stats().Mode != string(cacheengine.ModeOff) {
-		s.cacheEngine.RenderPrometheus(w)
+	if st := s.cacheState(); st != nil && st.engine != nil && st.engine.Stats().Mode != string(cacheengine.ModeOff) {
+		st.engine.RenderPrometheus(w)
 	}
 }
 
@@ -3763,42 +3764,8 @@ func main() {
 		audit = newAuditChainWithTSA(tsa)
 	}
 
-	// P0-2 语义缓存：默认 mode=off（与现网逐字节一致）；经 legacyAdapter 复用既有 Get/Put 接线点。
-	cacheCfg := cacheengine.DefaultConfig()
-	if p := os.Getenv("CACHE_CONFIG_PATH"); p != "" {
-		if c, err := cacheengine.LoadConfig(p); err != nil {
-			log.Printf("[tee] 缓存配置加载失败，回退默认（mode=off）：%v", err)
-		} else {
-			cacheCfg = c
-		}
-	}
-	if err := cacheengine.ApplyEnv(&cacheCfg); err != nil {
-		log.Printf("[tee] 缓存环境变量覆盖失败，回退默认（mode=off）：%v", err)
-		cacheCfg = cacheengine.DefaultConfig()
-	}
-	// 启动期维度探针：语义启用时校验 sidecar 维度；失败按 §6.9/B-7.6-1 降级为精确缓存。
-	if cacheCfg.Semantic.Enabled && (cacheCfg.Mode == cacheengine.ModeSemantic || cacheCfg.Mode == cacheengine.ModeFull) {
-		probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		emb, err := cacheengine.NewSidecarEmbedderFromConfig(cacheCfg.Semantic.Embedder)
-		if err == nil {
-			err = cacheengine.VerifyEmbedderDim(probeCtx, emb, cacheCfg.Semantic.Embedder.Dim)
-		}
-		cancel()
-		if err != nil {
-			log.Printf("[tee] 语义缓存探针失败，降级为精确缓存（mode=exact）：%v", err)
-			cacheCfg.Mode = cacheengine.ModeExact
-			cacheCfg.Semantic.Enabled = false
-		}
-	}
-	// P5：语义装配（embedder + 向量索引 + SemanticStore）。失败即按 §6.9/B-7.6-1 降级为精确缓存。
-	var cacheOpts []cacheengine.EngineOption
-	if store, err := cacheengine.BuildSemanticStoreFromConfig(context.Background(), &cacheCfg); err != nil {
-		log.Printf("[tee] 语义存储装配失败，禁用语义缓存：%v", err)
-		cacheCfg.Semantic.Enabled = false
-	} else if store != nil {
-		cacheOpts = append(cacheOpts, cacheengine.WithSemanticStore(store))
-	}
-	cacheEng := cacheengine.NewCacheEngine(cacheCfg, cacheOpts...)
+	// P0-2 语义缓存 + §6.10：启动期装配运行时快照（默认 mode=off，与现网逐字节一致）。
+	cacheSt := buildCacheState()
 
 	srv := &teeServer{
 		km: km, kSig: kSig, attest: *attestToken,
@@ -3820,12 +3787,7 @@ func main() {
 		weightProvider:    NewMockWeightProvider(32),
 		route:             routeCfg,
 		tokenizer:         nil,                       // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
-		cache:             cacheengine.NewLegacyAdapter(cacheEng), // P0-2：legacy 兜底（仅 cacheEngine==nil 时使用）
-		cacheEngine:       cacheEng,                                // P0-2 B2：原生语义缓存（命中/回填）+ /metrics
-		cacheConfig:       &cacheCfg,                               // E4：/cache/* 管理 API 的配置快照
-		cacheEnabled:      cacheCfg.Mode != cacheengine.ModeOff,    // P0-2 B2：mode=off → 不进原生路径（零开销）
-		cacheMode:         string(cacheCfg.Mode),                   // P0-2 §9.1 #20：TTFT 标签
-		cacheReplay:       cacheReplayConfig{minGap: cacheCfg.Stream.MinGap.D(), maxGap: cacheCfg.Stream.MaxGap.D()}, // P0-2 B2：§6.12 节拍快照
+		cache:             cacheengine.NewLegacyAdapter(cacheSt.engine), // P0-2：legacy 兜底（仅原生引擎未生效时使用）
 		usage:             make(map[string]*usageRecord),
 		quota:             make(map[string]quotaSpec),
 		quotaDefault:      *tokenQuota,
@@ -3839,10 +3801,12 @@ func main() {
 		metrics:           newMetrics(),
 		disposition:       nilDisposition{}, // S4-4：默认永远放行；SaaS 构建由 initTenantDisposition 替换
 	}
+	// P0-2 §6.10：发布运行时快照（原子切换，请求内一致）。
+	srv.cacheRT.Store(cacheSt)
 	// P0-2 §9.1 #16 / B-7.5-1：审计链写入失败 → 缓存指标（不阻塞缓存写入）
-	audit.SetWriteFailureHook(cacheEng.RecordAuditFailure)
+	audit.SetWriteFailureHook(cacheSt.engine.RecordAuditFailure)
 	// E4-B：预热器装配（§6.7）。warmup.enabled=false 时 Run 返回 ErrWarmupDisabled（API 映射 CACHE_DISABLED）。
-	srv.warmer = cacheengine.NewFileWarmer(&cacheCfg, cacheEng, srv.warmupInfer,
+	srv.warmer = cacheengine.NewFileWarmer(cacheSt.config, cacheSt.engine, srv.warmupInfer,
 		cacheengine.WithWarmAudit(func(action string, fields map[string]any) {
 			log.Printf("[tee] %s %v", action, fields)
 			srv.audit.append(AuditEvent{Action: action, Result: fmt.Sprint(fields["status"])})

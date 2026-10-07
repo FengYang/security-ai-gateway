@@ -32,7 +32,8 @@ func cacheAPITestCfg(mode cacheengine.CacheMode) cacheengine.CacheConfig {
 func newCacheAPITest(mode cacheengine.CacheMode) (*http.ServeMux, *teeServer, cacheengine.CacheEngine) {
 	cfg := cacheAPITestCfg(mode)
 	eng := cacheengine.NewCacheEngine(cfg)
-	srv := &teeServer{cacheEngine: eng, cacheConfig: &cfg, adminToken: cacheTestAdminToken}
+	srv := &teeServer{adminToken: cacheTestAdminToken}
+	srv.cacheRT.Store(newCacheState(&cfg, eng))
 	mux := http.NewServeMux()
 	srv.registerCacheAPIRoutes(mux)
 	return mux, srv, eng
@@ -298,8 +299,9 @@ func fakeWarmInfer(_ context.Context, it cacheengine.WarmItem) (cacheengine.Stor
 }
 
 func newWarmupTestServer(cfg cacheengine.CacheConfig, eng cacheengine.CacheEngine, infer cacheengine.WarmInferFunc) *http.ServeMux {
-	srv := &teeServer{cacheEngine: eng, cacheConfig: &cfg, adminToken: cacheTestAdminToken,
+	srv := &teeServer{adminToken: cacheTestAdminToken,
 		warmer: cacheengine.NewFileWarmer(&cfg, eng, infer)}
+	srv.cacheRT.Store(newCacheState(&cfg, eng))
 	mux := http.NewServeMux()
 	srv.registerCacheAPIRoutes(mux)
 	return mux

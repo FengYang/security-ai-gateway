@@ -213,7 +213,7 @@ func TestTextInferCacheNegativeHitDenial(t *testing.T) {
 	// 预置负向条目（与请求同键材质；Stage=guardrail 命中 OnlyFor 白名单）
 	lctx := buildCacheLookupContext("default", protocol.EngineTypeTEEGPU, "mock",
 		sha256hex([]byte(text)), text, 32, true, srv.policyVersion())
-	out := srv.cacheEngine.Store(cacheengine.StoreContext{LookupContext: lctx, Writable: true},
+	out := srv.cacheState().engine.Store(cacheengine.StoreContext{LookupContext: lctx, Writable: true},
 		cacheengine.InferResult{Finish: "stop", Negative: &cacheengine.NegativePayload{
 			Reason: "prompt_injection", Stage: "guardrail",
 			PolicyVer: srv.policyVersion(), GuardVer: cacheGuardVerDefault,
@@ -314,11 +314,8 @@ func newNativeCacheServer(t *testing.T) (*teeServer, *httptest.Server) {
 	cfg.Stream.MinGap = cacheengine.Duration(1 * time.Millisecond)
 	cfg.Stream.MaxGap = cacheengine.Duration(5 * time.Millisecond)
 
-	srv.cacheEngine = cacheengine.NewCacheEngine(cfg)
-	srv.cacheEnabled = true
-	srv.cacheMode = string(cfg.Mode) // §9.1 #20：TTFT 标签
-	srv.cache = nil                  // 排除 legacy 路径，确保走原生
-	srv.cacheReplay = cacheReplayConfig{minGap: time.Millisecond, maxGap: 5 * time.Millisecond}
+	srv.cacheRT.Store(newCacheState(&cfg, cacheengine.NewCacheEngine(cfg))) // §6.10：原生引擎快照（mode=exact）
+	srv.cache = nil                                                         // 排除 legacy 路径，确保走原生
 	return srv, ts
 }
 

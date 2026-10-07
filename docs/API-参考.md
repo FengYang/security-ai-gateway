@@ -178,6 +178,7 @@ MVP 兼容：`POST /attest`（空 body）返回旧版握手确认（`{"status":"
 | POST | `/cache/feedback` | 误命中反馈上报；返回 `{request_id,verdict,duplicate}` |
 | GET | `/cache/inspect/{key_hash}` | 条目检视（**仅元数据，不含文本**，I-6） |
 | GET | `/config/cache` | 缓存配置只读快照 `{configured,config}`（`mode=off` 时仍可读） |
+| POST | `/config/cache/reload` | **配置热更新**（§6.10）：重读 `CACHE_CONFIG_PATH` + 环境覆盖并热更；返回 `{applied,restart_required,mode,backend,diffs}`。结构性维度变更（embedder/`vector.backend`/`max_entries`/`redis.*`/`key_format`/`scope`）→ `409 CACHE_RELOAD_RESTART_REQUIRED`（`restart_required=true`，**不切换**）；校验失败 → `409 CACHE_RELOAD_FAILED`；`mode=off` → `409 CACHE_DISABLED` |
 
 **错误码**：
 
