@@ -82,7 +82,7 @@ func TestMetricsProducers(t *testing.T) {
 	SetChainBroken(true)
 	IncPull("ok")
 	IncPricingMissing("m1")
-	IncFreeze()
+	IncFreeze("reconcile_diff", "critical")
 	IncExport("csv", "ok")
 	IncSignatureVerify("valid")
 	IncAssocVerify("pass")
@@ -114,6 +114,11 @@ func TestMetricsProducers(t *testing.T) {
 		if !strings.Contains(out, name) {
 			t.Errorf("metric %s not rendered:\n%s", name, out)
 		}
+	}
+	// MET-004：#14 必带 kind/severity 标签（§9.1；供 §10.4 REC-2b 按标签检索）。
+	// 只断言标签组合（DefaultMetrics 为进程级共享，计数值受前序用例影响，不断言具体值）。
+	if !strings.Contains(out, `gateway_admin_billing_freeze_total{kind="reconcile_diff",severity="critical"}`) {
+		t.Errorf("freeze_total 缺 kind/severity 标签:\n%s", out)
 	}
 }
 

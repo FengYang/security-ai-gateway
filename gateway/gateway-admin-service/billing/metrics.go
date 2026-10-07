@@ -356,8 +356,11 @@ func SetQuotaRemainingRatio(tenant string, ratio float64) {
 		map[string]string{"tenant": tenant}, ratio)
 }
 
-// IncFreeze 冻结计数（#14）。
-func IncFreeze() { DefaultMetrics.IncCounter("gateway_admin_billing_freeze_total", nil, 1) }
+// IncFreeze 冻结计数（#14；标签 kind=冻结原因 / severity）。
+func IncFreeze(kind, severity string) {
+	DefaultMetrics.IncCounter("gateway_admin_billing_freeze_total",
+		map[string]string{"kind": kind, "severity": severity}, 1)
+}
 
 // SetFrozen 租户冻结状态（#24；1=冻结 / 0=解冻）。
 // 生产者：FreezeController.Freeze/Unfreeze（状态变更即置）＋ AnomalyDetector.SyncFrozenGauge（重启后回填）。
