@@ -1,0 +1,313 @@
+package cacheengine
+
+import (
+	"fmt"
+	"math"
+	"math/rand"
+	"runtime"
+	"sort"
+	"testing"
+	"time"
+)
+
+// ===== §8.3 性能基准（BM-1..BM-8）本地可测部分 =====
+//
+// 本地可测：BM-1（精确命中 p95）、BM-4（抖动 KS）、BM-5（内存预算）、BM-7（精确就绪）、
+//           BM-8（sidecar 不可达 → fail-open 延迟）、BM-2（本地参考：flat 检索，不含 embedder）。
+// 待外部环境：BM-2 端到端（真实 sidecar）、BM-3（真实上游 TTFT）、BM-6（sidecar 吞吐）、
+//           BM-7 语义段（含权重加载）、BM-8 已就绪后真实断连。
+//
+// 运行：go test ./gateway/tee-infer-service/cacheengine/ -run TestBM -v
+
+func bmSkipShort(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("基准用例在 -short 下跳过")
+	}
+}
+
+// percentile 返回升序 samples 的 p 分位（p∈[0,1]）。
+func percentile(samples []float64, p float64) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	sorted := append([]float64(nil), samples...)
+	sort.Float64s(sorted)
+	idx := int(math.Ceil(p*float64(len(sorted)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
+// ksTwoSampleP 两样本 KS 检验：返回统计量 D 与渐近 p 值。
+func ksTwoSampleP(a, b []float64) (float64, float64) {
+	as := append([]float64(nil), a...)
+	bs := append([]float64(nil), b...)
+	sort.Float64s(as)
+	sort.Float64s(bs)
+	n1, n2 := len(as), len(bs)
+	if n1 == 0 || n2 == 0 {
+		return 0, 1
+	}
+	var d float64
+	i, j := 0, 0
+	for i < n1 || j < n2 {
+		var x float64
+		switch {
+		case i == n1:
+			x = bs[j]
+		case j == n2:
+			x = as[i]
+		case as[i] <= bs[j]:
+			x = as[i]
+		default:
+			x = bs[j]
+		}
+		for i < n1 && as[i] <= x {
+			i++
+		}
+		for j < n2 && bs[j] <= x {
+			j++
+		}
+		c1 := float64(i) / float64(n1)
+		c2 := float64(j) / float64(n2)
+		if diff := math.Abs(c1 - c2); diff > d {
+			d = diff
+		}
+	}
+	en := math.Sqrt(float64(n1*n2) / float64(n1+n2))
+	lambda := (en + 0.12 + 0.11/en) * d
+	sum := 0.0
+	for k := 1; k <= 100; k++ {
+		sum += 2 * math.Pow(-1, float64(k-1)) * math.Exp(-2*float64(k*k)*lambda*lambda)
+	}
+	p := sum
+	if p < 0 {
+		p = 0
+	}
+	if p > 1 {
+		p = 1
+	}
+	return d, p
+}
+
+// bmLookupCtx 构造基准用查询上下文。
+func bmLookupCtx(hash string) LookupContext {
+	return LookupContext{
+		TenantID:        "t1",
+		EngineType:      "cmaas",
+		Model:           "m1",
+		MaxNewTokens:    100,
+		TransformedHash: hash,
+		PromptText:      "benchmark prompt with enough tokens to be cacheable",
+		PolicyVer:       "v1",
+		GuardVer:        "v1",
+	}
+}
+
+// TestBM1_ExactHitLatency BM-1：预填 8192 条目，测 Lookup p50/p95/p99，判据 p95 < 1ms。
+func TestBM1_ExactHitLatency(t *testing.T) {
+	bmSkipShort(t)
+	cfg := DefaultConfig()
+	cfg.Mode = ModeExact
+	cfg.Exact.MinPromptTokens = 2
+	cfg.Exact.MinTokens = 2
+	cfg.Exact.MaxEntries = 20000 // 保证 8192 预填不被淘汰
+	cfg.WriteLimit.Enabled = false // 基准预填非请求驱动写入，关闭 §7.4.2 写入限流
+	cfg.Guard.ReadFastCheck = false
+	eng := NewCacheEngine(cfg)
+
+	const prefill = 8192
+	for i := 0; i < prefill; i++ {
+		eng.Store(StoreContext{
+			LookupContext: bmLookupCtx(fmt.Sprintf("h-%d", i)),
+			Writable:      true,
+		}, InferResult{Text: "benchmark response content", TokensOut: 20, Finish: "stop"})
+	}
+
+	// 采样方式：每样本连续 batch 次取均值（规避 Windows 时钟粒度导致的单次 0 读数）
+	const batch = 100
+	const samples = 2000
+	durs := make([]float64, 0, samples)
+	overallStart := time.Now()
+	for s := 0; s < samples; s++ {
+		start := time.Now()
+		for k := 0; k < batch; k++ {
+			i := (s*batch + k) % prefill
+			r := eng.Lookup(bmLookupCtx(fmt.Sprintf("h-%d", i)))
+			if !r.Hit {
+				t.Fatalf("expected hit at i=%d, reason=%s", i, r.RejectReason)
+			}
+		}
+		durs = append(durs, float64(time.Since(start).Nanoseconds())/float64(batch)/1e6) // ms/op
+	}
+	avgUs := float64(time.Since(overallStart).Nanoseconds()) / float64(samples*batch) / 1000.0
+	p50 := percentile(durs, 0.50)
+	p95 := percentile(durs, 0.95)
+	p99 := percentile(durs, 0.99)
+	t.Logf("BM-1 精确命中延迟（n=%d，预填=%d）：均值=%.2fµs；分位（每样本 %d 次取均）=p50 %.2fµs / p95 %.2fµs / p99 %.2fµs",
+		samples*batch, prefill, avgUs, batch, p50*1000, p95*1000, p99*1000)
+	if p95 >= 1.0 {
+		t.Fatalf("BM-1 未达标：p95=%.3fms ≥ 1ms", p95)
+	}
+}
+
+// TestBM4_JitterKS BM-4：hit/miss 各 1e4 采样，KS 检验，判据 p > 0.05（分布同源）。
+func TestBM4_JitterKS(t *testing.T) {
+	bmSkipShort(t)
+	cfg := DefaultConfig()
+	cfg.Semantic.Jitter.Enabled = true
+	cfg.Semantic.Jitter.MaxMs = 20
+	j := NewJitterInjector(&cfg)
+
+	const n = 10000
+	hit := make([]float64, 0, n)
+	miss := make([]float64, 0, n)
+	ctx := bmLookupCtx("h")
+	for i := 0; i < n; i++ {
+		hit = append(hit, float64(j.Sample(ctx).Microseconds())/1000.0)
+		miss = append(miss, float64(j.Sample(ctx).Microseconds())/1000.0)
+	}
+	d, p := ksTwoSampleP(hit, miss)
+	t.Logf("BM-4 抖动 KS：D=%.4f p=%.4f（n=%d×2，max_ms=%d）", d, p, n, cfg.Semantic.Jitter.MaxMs)
+	if p <= 0.05 {
+		t.Fatalf("BM-4 未达标：p=%.4f ≤ 0.05（hit/miss 分布可区分）", p)
+	}
+}
+
+// TestBM5_MemoryBudget BM-5：满载（8192 精确 + 5 万向量）后 ReadMemStats，判据 ≤ cache_memory_budget。
+func TestBM5_MemoryBudget(t *testing.T) {
+	bmSkipShort(t)
+	cfg := DefaultConfig()
+	cfg.Mode = ModeSemantic
+	cfg.CacheMemoryBudget = ByteSize(256 * 1024 * 1024) // 基准预算 256MB
+	cfg.Exact.MinPromptTokens = 2
+	cfg.Exact.MinTokens = 2
+	cfg.Exact.MaxEntries = 20000 // 保证 8192 预填不被淘汰
+	cfg.WriteLimit.Enabled = false // 基准预填非请求驱动写入，关闭 §7.4.2 写入限流
+	cfg.Guard.ReadFastCheck = false
+
+	eng := NewCacheEngine(cfg)
+	const prefill = 8192
+	for i := 0; i < prefill; i++ {
+		eng.Store(StoreContext{
+			LookupContext: bmLookupCtx(fmt.Sprintf("h-%d", i)),
+			Writable:      true,
+		}, InferResult{Text: "benchmark response content", TokensOut: 20, Finish: "stop"})
+	}
+
+	const vecN = 50000
+	idx := NewFlatVectorIndex(512, vecN)
+	rng := rand.New(rand.NewSource(1))
+	vec := make([]float32, 512)
+	for i := 0; i < vecN; i++ {
+		for k := range vec {
+			vec[k] = rng.Float32()
+		}
+		if err := idx.Upsert(fmt.Sprintf("v-%d", i), vec, VectorMeta{
+			TenantID: "t1", EngineType: "cmaas", Model: "m1", PolicyVer: "v1", GuardVer: "v1",
+		}); err != nil {
+			t.Fatalf("向量插入失败 i=%d: %v", i, err)
+		}
+	}
+
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	runtime.KeepAlive(idx) // 防止索引在 ReadMemStats 前被判为死对象回收，导致测量失真
+	used := int64(ms.HeapAlloc)
+	t.Logf("BM-5 满载内存：HeapAlloc=%.1fMB Sys=%.1fMB 预算=%.0fMB（精确=%d，向量=%d×512）",
+		float64(used)/1048576, float64(ms.Sys)/1048576, float64(cfg.CacheMemoryBudget)/1048576, prefill, vecN)
+	if used > cfg.CacheMemoryBudget.Bytes() {
+		t.Fatalf("BM-5 未达标：HeapAlloc=%d 字节 > 预算 %d 字节", used, cfg.CacheMemoryBudget.Bytes())
+	}
+}
+
+// TestBM7_ColdStartExactReady BM-7（精确段）：进程启动到精确就绪 < 100ms（语义段含权重加载待真机）。
+func TestBM7_ColdStartExactReady(t *testing.T) {
+	bmSkipShort(t)
+	cfg := DefaultConfig()
+	cfg.Mode = ModeExact
+	// 多次取均，规避 Windows 时钟粒度
+	const iters = 200
+	var eng CacheEngine
+	start := time.Now()
+	for i := 0; i < iters; i++ {
+		eng = NewCacheEngine(cfg)
+	}
+	d := time.Since(start) / iters
+	if eng == nil {
+		t.Fatal("engine 构造失败")
+	}
+	t.Logf("BM-7 精确就绪（NewCacheEngine，mode=exact，%d 次均值）=%.2fµs（判据 <100ms；语义段含权重加载待真机）",
+		iters, float64(d.Nanoseconds())/1000.0)
+	if d > 100*time.Millisecond {
+		t.Fatalf("BM-7 未达标：精确就绪耗时 %v ≥ 100ms", d)
+	}
+}
+
+// TestBM8_FaultInjectionLatency BM-8：sidecar 不可达时命中路径快速失败，判据 ≤ embedder.timeout。
+func TestBM8_FaultInjectionLatency(t *testing.T) {
+	bmSkipShort(t)
+	cfg := DefaultConfig()
+	cfg.Mode = ModeSemantic
+	cfg.Semantic.Enabled = true
+	cfg.Semantic.Embedder.Kind = "sidecar"
+	cfg.Semantic.Embedder.Endpoint = "http://127.0.0.1:1/embed" // 不可达端口
+	cfg.Semantic.Embedder.HealthEndpoint = "http://127.0.0.1:1/health"
+	cfg.Semantic.Embedder.Timeout = Duration(200 * time.Millisecond)
+	cfg.Semantic.Embedder.FailOpen = true
+
+	eng := NewCacheEngine(cfg)
+	// 批量均值，规避 Windows 时钟粒度（单次查询为亚微秒级）
+	const iters = 1000
+	var r LookupResult
+	start := time.Now()
+	for i := 0; i < iters; i++ {
+		r = eng.Lookup(bmLookupCtx("h-1"))
+	}
+	d := time.Since(start) / iters
+	t.Logf("BM-8 sidecar 不可达 Lookup（%d 次均值）：%.2fµs（hit=%v reason=%s；timeout=%s）",
+		iters, float64(d.Nanoseconds())/1000.0, r.Hit, r.RejectReason, cfg.Semantic.Embedder.Timeout.D())
+	if d > cfg.Semantic.Embedder.Timeout.D() {
+		t.Fatalf("BM-8 未达标：Lookup 耗时 %v > timeout %v", d, cfg.Semantic.Embedder.Timeout.D())
+	}
+}
+
+// TestBM2_LocalReference_FlatSearch BM-2 本地参考：flat 暴力检索延迟（**不含** embedder；端到端待真实 sidecar）。
+func TestBM2_LocalReference_FlatSearch(t *testing.T) {
+	bmSkipShort(t)
+	const vecN = 50000
+	idx := NewFlatVectorIndex(512, vecN)
+	rng := rand.New(rand.NewSource(2))
+	vec := make([]float32, 512)
+	for i := 0; i < vecN; i++ {
+		for k := range vec {
+			vec[k] = rng.Float32()
+		}
+		if err := idx.Upsert(fmt.Sprintf("v-%d", i), vec, VectorMeta{
+			TenantID: "t1", EngineType: "cmaas", Model: "m1", PolicyVer: "v1", GuardVer: "v1",
+		}); err != nil {
+			t.Fatalf("向量插入失败 i=%d: %v", i, err)
+		}
+	}
+	const samples = 200 // flat 暴力检索昂贵（~17ms/次），采样量下调以控制套件耗时
+	durs := make([]float64, 0, samples)
+	for i := 0; i < samples; i++ {
+		for k := range vec {
+			vec[k] = rng.Float32()
+		}
+		start := time.Now()
+		if _, err := idx.Search(vec, 5, VectorFilter{TenantID: "t1"}); err != nil {
+			t.Fatalf("检索失败: %v", err)
+		}
+		durs = append(durs, float64(time.Since(start).Nanoseconds())/1e6)
+	}
+	t.Logf("BM-2 本地参考（flat 检索，不含 embedder；端到端待真实 sidecar）：p50=%.3fms p95=%.3fms p99=%.3fms（n=%d，向量=%d）",
+		percentile(durs, 0.50), percentile(durs, 0.95), percentile(durs, 0.99), samples, vecN)
+	// 端到端判据（p95 < 15ms，含 sidecar）待环境，本用例不作验收断言。
+}

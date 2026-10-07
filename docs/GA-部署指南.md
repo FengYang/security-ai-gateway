@@ -827,6 +827,7 @@ kubectl rollout history deployment/tee-infer-service -n otpmask
 | GF3.2 真机 TDX 密态 SSE 端到端验收 | [GA-GF3.2-真机TDX验收操作单.md](GA-GF3.2-真机TDX验收操作单.md) | 对齐改造成果的真机验收步骤 |
 | GF5 真机验收（R1-A/B/C） | [GF5-真机验收模板.md](GF5-真机验收模板.md) | 性能决策门 / C-MaaS 验证 / 规格 |
 | TEE 虚拟机验证准备包 | [GA-TEE虚拟机验证准备包.md](GA-TEE虚拟机验证准备包.md) | 租用 TEE 云主机后的验证清单与判据 |
+| P0-2 语义缓存性能基准（BM-1..BM-8） | [GA-AI网关能力补齐-性能基准报告.md](GA-AI网关能力补齐-性能基准报告.md) | 基准方法与实测（本地实测 + 待真机分账） |
 
 ---
 
