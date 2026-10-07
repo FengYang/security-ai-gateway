@@ -28,6 +28,9 @@ type CacheEngine interface {
 	// RecordReplay 记录命中回放（§9.1 #22；mode ∈ {single,segmented,degraded_single}，
 	// result ∈ {ok,error,canceled}）。供主链回放出口发射。
 	RecordReplay(mode, result string)
+	// RecordAuditFailure 记录审计链写入失败（§9.1 #16 / B-7.5-1）；
+	// 由主链在审计链写入失败回调中调用（不阻塞缓存写入）。
+	RecordAuditFailure()
 	Close() error
 }
 
@@ -732,6 +735,11 @@ func (e *engine) RecordJitter(path string, d time.Duration) {
 // RecordReplay 记录命中回放（§9.1 #22；主链回放出口唯一发射入口）。
 func (e *engine) RecordReplay(mode, result string) {
 	e.stats.observeReplay(mode, result)
+}
+
+// RecordAuditFailure 记录审计链写入失败（§9.1 #16 / B-7.5-1；唯一发射入口）。
+func (e *engine) RecordAuditFailure() {
+	e.stats.observeAuditFailure()
 }
 
 // deleteByModel 按模型删除精确缓存条目（§6.8.1 按模型失效）。

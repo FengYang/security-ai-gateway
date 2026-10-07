@@ -126,9 +126,10 @@ type statsCollector struct {
 	semanticRejC  labelCounter // key: reason
 	redisErrC     labelCounter // key: op
 
-	// 无标签计数（§9.1 #29 embed 超时 / #30 维度不匹配）
+	// 无标签计数（§9.1 #29 embed 超时 / #30 维度不匹配 / #16 审计写入失败）
 	embedTimeout     uint64
 	embedDimMismatch uint64
+	auditFail        uint64
 
 	// 带标签计数（§9.1 #22 回放 / #23 请求合并 / #35 条目损坏）
 	replayC        labelCounter // key: mode|result
@@ -258,6 +259,12 @@ func (s *statsCollector) observeEmbedDimMismatch() { atomic.AddUint64(&s.embedDi
 func (s *statsCollector) embedDimMismatchCount() uint64 {
 	return atomic.LoadUint64(&s.embedDimMismatch)
 }
+
+// observeAuditFailure 记录审计链写入失败（§9.1 #16 / B-7.5-1）。
+func (s *statsCollector) observeAuditFailure() { atomic.AddUint64(&s.auditFail, 1) }
+
+// auditFailCount 读取审计写入失败累计（§9.1 #16）。
+func (s *statsCollector) auditFailCount() uint64 { return atomic.LoadUint64(&s.auditFail) }
 
 // observeVectorError 记录向量索引操作错误（§9.1 #31）。
 func (s *statsCollector) observeVectorError(op string) { s.vectorErrC.inc(op) }

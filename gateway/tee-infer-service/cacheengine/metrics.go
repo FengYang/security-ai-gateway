@@ -115,6 +115,10 @@ func (e *engine) RenderPrometheus(w io.Writer) {
 		"条目损坏次数（reason=integrity_mismatch|segments_mismatch）",
 		e.stats.entryCorruptC.snapshot(), []string{"reason"})
 
+	// #16 audit_fail_total（§7.5 B-7.5-1：审计链写入失败，不阻塞缓存写入）
+	fmt.Fprintf(w, "# HELP otpmask_cache_audit_fail_total 审计链写入失败次数（B-7.5-1；不阻塞缓存写入）\n# TYPE otpmask_cache_audit_fail_total counter\n")
+	fmt.Fprintf(w, "otpmask_cache_audit_fail_total %d\n", e.stats.auditFailCount())
+
 	// #3 entries{store}
 	fmt.Fprintf(w, "# HELP otpmask_cache_entries 当前缓存条目数（按 store）\n# TYPE otpmask_cache_entries gauge\n")
 	fmt.Fprintf(w, "otpmask_cache_entries{store=\"exact\"} %d\n", s.ExactEntries)

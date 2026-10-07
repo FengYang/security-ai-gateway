@@ -203,6 +203,7 @@ tee otpmask_ttft_seconds conditional
 tee otpmask_cache_replay_total conditional
 tee otpmask_cache_singleflight_total conditional
 tee otpmask_cache_entry_corrupt_total conditional
+tee otpmask_cache_audit_fail_total conditional
 tee otpmask_cache_entries conditional
 tee otpmask_cache_evictions_total conditional
 tee otpmask_cache_read_fast_check_block_total conditional

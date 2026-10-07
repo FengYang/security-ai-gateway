@@ -134,7 +134,13 @@ type auditChain struct {
 	// S5：本进程实例标识（构造时生成，写入每条事件的 instance_id 证据字段）。
 	// 只读，构造后不再变更。
 	instanceID string
+	// P0-2 §9.1 #16 / B-7.5-1：审计链写入失败回调（不阻塞缓存写入）。
+	// 启动期一次性设置（SetWriteFailureHook），此后只读。
+	onWriteFail func()
 }
+
+// SetWriteFailureHook 设置审计链写入失败回调（启动期调用；P0-2 §9.1 #16）。
+func (c *auditChain) SetWriteFailureHook(fn func()) { c.onWriteFail = fn }
 
 // newInstanceID 生成本进程实例标识（"inst-" + 8 hex）。
 func newInstanceID() string { return "inst-" + randHex(8) }
@@ -222,8 +228,11 @@ func (c *auditChain) append(e AuditEvent) AuditEvent {
 	if c.file != nil {
 		line, _ := json.Marshal(e)
 		if _, err := c.file.Write(append(line, '\n')); err != nil {
-			// WORM 写入失败：告警日志（审计完整性受损，不应静默忽略）
+			// WORM 写入失败：告警日志（审计完整性受损，不应静默忽略）+ 指标回调（§9.1 #16）
 			log.Printf("[audit] WORM 写入失败（审计完整性受损）: %v", err)
+			if c.onWriteFail != nil {
+				c.onWriteFail()
+			}
 		}
 	}
 	c.events = append(c.events, e)

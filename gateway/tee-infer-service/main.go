@@ -3829,6 +3829,8 @@ func main() {
 		metrics:           newMetrics(),
 		disposition:       nilDisposition{}, // S4-4：默认永远放行；SaaS 构建由 initTenantDisposition 替换
 	}
+	// P0-2 §9.1 #16 / B-7.5-1：审计链写入失败 → 缓存指标（不阻塞缓存写入）
+	audit.SetWriteFailureHook(cacheEng.RecordAuditFailure)
 	// P0-4 §10.1：跨源 cryptop 指标绑定（须在 srv.metrics 初始化后）
 	srv.metrics.SetCryptopCompatMode("mask_bridge", *cryptoMaskPRG == "bridge")
 	setEnclaveDualReadHook(srv.metrics.IncEnclaveDualRead)

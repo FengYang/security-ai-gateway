@@ -221,6 +221,7 @@ func TestRenderPrometheus_ReplaySingleflightCorrupt(t *testing.T) {
 	eng.RecordReplay("segmented", "ok")
 	eng.stats.observeSingleflight("leader")
 	eng.stats.observeEntryCorrupt("integrity_mismatch")
+	eng.RecordAuditFailure() // §9.1 #16
 
 	var buf bytes.Buffer
 	eng.RenderPrometheus(&buf)
@@ -229,6 +230,7 @@ func TestRenderPrometheus_ReplaySingleflightCorrupt(t *testing.T) {
 		`otpmask_cache_replay_total{mode="segmented",result="ok"} 1`,
 		`otpmask_cache_singleflight_total{result="leader"} 1`,
 		`otpmask_cache_entry_corrupt_total{reason="integrity_mismatch"} 1`,
+		"otpmask_cache_audit_fail_total 1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("缺指标：%s\n%s", want, out)
