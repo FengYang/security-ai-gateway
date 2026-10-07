@@ -44,7 +44,11 @@ type engine struct {
 	nowFn   nowFunc
 	closed  atomic.Bool
 
-	invCancelMu sync.Mutex       // 保护 invCancel
+	readOnly  atomic.Bool  // 高水位只读态（§6.9.2）
+	estBytes  atomic.Int64 // 估算内存占用（§9.1 #24）
+	lastNowMs atomic.Int64 // 上次观测时钟（§6.9.1 回拨检测）
+
+	invCancelMu sync.Mutex         // 保护 invCancel
 	invCancel   context.CancelFunc // 失效广播消费的取消函数（nil = 未启动）
 }
 
@@ -435,6 +439,11 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 	}
 	if e.cfg.Mode == ModeOff {
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "disabled"}
+	}
+	// §6.9.2：高水位只读态 → 停写（已存在条目仍可读）。
+	if e.readOnly.Load() {
+		e.stats.observeDisabled("readonly")
+		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "readonly"}
 	}
 
 	// 写前审查门禁

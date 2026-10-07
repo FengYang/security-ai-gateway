@@ -40,6 +40,23 @@ func (e *engine) RenderPrometheus(w io.Writer) {
 		"查询耗时超观测阈值的次数（仅观测，不中断；B-6.11-3）",
 		e.stats.slowLookupSnapshot(), []string{"kind"})
 
+	// #24 estimated_bytes / #25 readonly（§6.9）
+	fmt.Fprintf(w, "# HELP otpmask_cache_estimated_bytes 估算内存占用（字节；§5.6）\n# TYPE otpmask_cache_estimated_bytes gauge\n")
+	fmt.Fprintf(w, "otpmask_cache_estimated_bytes %d\n", e.estBytes.Load())
+	ro := 0
+	if e.readOnly.Load() {
+		ro = 1
+	}
+	fmt.Fprintf(w, "# HELP otpmask_cache_readonly 只读态 0/1（高水位；§6.9.2）\n# TYPE otpmask_cache_readonly gauge\n")
+	fmt.Fprintf(w, "otpmask_cache_readonly %d\n", ro)
+
+	// #26 disabled_total{reason} / #27 clock_skew_total（§6.9）
+	writeCacheCounter(w, "otpmask_cache_disabled_total",
+		"缓存写入被整体拒绝的次数（按原因；§6.9）",
+		e.stats.disabledSnapshot(), []string{"reason"})
+	fmt.Fprintf(w, "# HELP otpmask_cache_clock_skew_total 时钟回拨检测次数（§6.9.1）\n# TYPE otpmask_cache_clock_skew_total counter\n")
+	fmt.Fprintf(w, "otpmask_cache_clock_skew_total %d\n", e.stats.clockSkewCount())
+
 	// #8 读时快审阻断计数
 	fmt.Fprintf(w, "# HELP otpmask_cache_read_fast_check_block_total 读时快审阻断次数（命中但被 L1 快审拦下）\n# TYPE otpmask_cache_read_fast_check_block_total counter\n")
 	fmt.Fprintf(w, "otpmask_cache_read_fast_check_block_total %d\n", s.FastCheckBlocks)

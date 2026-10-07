@@ -90,6 +90,11 @@ type statsCollector struct {
 	// 慢查询观测（B-6.11-3）：kind -> count
 	slowMu      sync.Mutex
 	slowLookups map[string]uint64
+
+	// 运行状态观测（§6.9）
+	disabledMu  sync.Mutex
+	disabled    map[string]uint64 // reason -> count（§9.1 #26）
+	clockSkew   uint64            // 时钟回拨次数（§9.1 #27）
 }
 
 func newStatsCollector() *statsCollector {
@@ -97,6 +102,7 @@ func newStatsCollector() *statsCollector {
 		lookups:     make(map[string]map[string]uint64),
 		durs:        make(map[string]*durationHistogram),
 		slowLookups: make(map[string]uint64),
+		disabled:    make(map[string]uint64),
 	}
 }
 
@@ -199,6 +205,34 @@ func (s *statsCollector) slowLookupSnapshot() map[string]uint64 {
 		out[k] = v
 	}
 	return out
+}
+
+// observeDisabled 记录一次"因整体关闭/只读被拒"（§9.1 #26 disabled_total{reason}）。
+func (s *statsCollector) observeDisabled(reason string) {
+	s.disabledMu.Lock()
+	s.disabled[reason]++
+	s.disabledMu.Unlock()
+}
+
+// disabledSnapshot 返回 disabled_total 快照（供指标渲染）。
+func (s *statsCollector) disabledSnapshot() map[string]uint64 {
+	s.disabledMu.Lock()
+	defer s.disabledMu.Unlock()
+	out := make(map[string]uint64, len(s.disabled))
+	for k, v := range s.disabled {
+		out[k] = v
+	}
+	return out
+}
+
+// observeClockSkew 记录一次时钟回拨（§9.1 #27）。
+func (s *statsCollector) observeClockSkew() {
+	atomic.AddUint64(&s.clockSkew, 1)
+}
+
+// clockSkewCount 读取时钟回拨计数。
+func (s *statsCollector) clockSkewCount() uint64 {
+	return atomic.LoadUint64(&s.clockSkew)
 }
 
 // fillSnapshot 填充统计快照。
