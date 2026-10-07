@@ -86,12 +86,17 @@ type statsCollector struct {
 	streamDegraded     uint64
 	singleflightTotal  uint64
 	panicTotal         uint64
+
+	// 慢查询观测（B-6.11-3）：kind -> count
+	slowMu      sync.Mutex
+	slowLookups map[string]uint64
 }
 
 func newStatsCollector() *statsCollector {
 	return &statsCollector{
-		lookups: make(map[string]map[string]uint64),
-		durs:    make(map[string]*durationHistogram),
+		lookups:     make(map[string]map[string]uint64),
+		durs:        make(map[string]*durationHistogram),
+		slowLookups: make(map[string]uint64),
 	}
 }
 
@@ -176,6 +181,24 @@ func (s *statsCollector) observePanic() {
 // panicCount 读取 panic 计数（供指标渲染）。
 func (s *statsCollector) panicCount() uint64 {
 	return atomic.LoadUint64(&s.panicTotal)
+}
+
+// observeSlowLookup 记录一次耗时超阈值的查询（B-6.11-3：仅观测，不中断）。
+func (s *statsCollector) observeSlowLookup(kind string) {
+	s.slowMu.Lock()
+	s.slowLookups[kind]++
+	s.slowMu.Unlock()
+}
+
+// slowLookupSnapshot 返回慢查询计数快照（供指标渲染）。
+func (s *statsCollector) slowLookupSnapshot() map[string]uint64 {
+	s.slowMu.Lock()
+	defer s.slowMu.Unlock()
+	out := make(map[string]uint64, len(s.slowLookups))
+	for k, v := range s.slowLookups {
+		out[k] = v
+	}
+	return out
 }
 
 // fillSnapshot 填充统计快照。

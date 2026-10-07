@@ -183,3 +183,4 @@ tee otpmask_cache_read_fast_check_block_total conditional
 tee otpmask_cache_semantic_false_positive_total conditional
 tee otpmask_cache_panic_total conditional
 tee otpmask_cache_saved_tokens_total conditional
+tee otpmask_cache_slow_lookup_total conditional

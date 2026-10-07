@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -42,6 +43,9 @@ type engine struct {
 	feedback FeedbackDetector
 	nowFn   nowFunc
 	closed  atomic.Bool
+
+	invCancelMu sync.Mutex       // 保护 invCancel
+	invCancel   context.CancelFunc // 失效广播消费的取消函数（nil = 未启动）
 }
 
 // EngineOption 引擎选项（用于可选依赖注入）。
@@ -149,11 +153,21 @@ func NewCacheEngine(cfg CacheConfig, opts ...EngineOption) CacheEngine {
 
 // Lookup 查询缓存。
 // 顺序：① 请求级开关 → ② 场景分类 → ③ 可缓存性判定 → ④ 精确 → ⑤ 负向 → ⑥ 语义
-func (e *engine) Lookup(ctx LookupContext) LookupResult {
+func (e *engine) Lookup(ctx LookupContext) (res LookupResult) {
+	start := time.Now()
+	// §6.11#9 / B-6.11-1：缓存模块 panic 必须在 Engine 边界 recover 并转 miss，绝不拖垮推理主链。
+	defer func() {
+		if r := recover(); r != nil {
+			e.stats.observePanic()
+			res = LookupResult{Hit: false, Kind: "miss", RejectReason: "panic"}
+		}
+		if time.Since(start) > slowLookupThreshold {
+			e.stats.observeSlowLookup("overall") // B-6.11-3：仅观测，不中断
+		}
+	}()
 	if e.closed.Load() {
 		return LookupResult{Hit: false, Kind: "miss", RejectReason: "closed"}
 	}
-	start := time.Now()
 
 	// 0. 请求级开关（全局 mode + 租户策略）
 	if e.cfg.Mode == ModeOff || tenantPolicy(e.cfg, ctx.TenantID) == PolicyOff {
@@ -408,7 +422,14 @@ func negativeFromScan(ctx LookupContext, v ScanVerdict) *Entry {
 
 // Store 写入缓存。
 // 仅当 ctx.Writable 为真（写前审查通过）时才真正落库。
-func (e *engine) Store(ctx StoreContext, res InferResult) StoreOutcome {
+func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
+	// §6.11#9：写入路径同样 panic 隔离（转 skipped，不拖垮主链）。
+	defer func() {
+		if r := recover(); r != nil {
+			e.stats.observePanic()
+			out = StoreOutcome{Stored: false, Layer: "skipped", Skipped: "panic"}
+		}
+	}()
 	if e.closed.Load() {
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "closed"}
 	}
@@ -655,9 +676,19 @@ func (e *engine) Stats() StatsSnapshot {
 	return snap
 }
 
-// Close 关闭引擎。
+// Close 优雅关闭（B-6.11-4）：置关闭标志、停止失效广播消费、释放 L1 连接池。
+// 不阻塞在途请求（在途请求读到 closed 后按 miss 返回）。
 func (e *engine) Close() error {
 	e.closed.Store(true)
+	e.invCancelMu.Lock()
+	if e.invCancel != nil {
+		e.invCancel()
+		e.invCancel = nil
+	}
+	e.invCancelMu.Unlock()
+	if e.l1 != nil {
+		return e.l1.Close()
+	}
 	return nil
 }
 

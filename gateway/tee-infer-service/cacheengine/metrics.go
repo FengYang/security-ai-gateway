@@ -35,6 +35,11 @@ func (e *engine) RenderPrometheus(w io.Writer) {
 	fmt.Fprintf(w, "# HELP otpmask_cache_panic_total 缓存模块 panic 被 recover 的次数\n# TYPE otpmask_cache_panic_total counter\n")
 	fmt.Fprintf(w, "otpmask_cache_panic_total %d\n", e.stats.panicCount())
 
+	// #13 slow_lookup_total{kind}（B-6.11-3）
+	writeCacheCounter(w, "otpmask_cache_slow_lookup_total",
+		"查询耗时超观测阈值的次数（仅观测，不中断；B-6.11-3）",
+		e.stats.slowLookupSnapshot(), []string{"kind"})
+
 	// #8 读时快审阻断计数
 	fmt.Fprintf(w, "# HELP otpmask_cache_read_fast_check_block_total 读时快审阻断次数（命中但被 L1 快审拦下）\n# TYPE otpmask_cache_read_fast_check_block_total counter\n")
 	fmt.Fprintf(w, "otpmask_cache_read_fast_check_block_total %d\n", s.FastCheckBlocks)
