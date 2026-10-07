@@ -223,3 +223,14 @@ drill:
 	DRILL_PERF_CMD="$${DRILL_PERF_CMD:-}" \
 	DRILL_OUT="$${DRILL_OUT:-deploy/drill-runs}" \
 	bash scripts/cryptop-drill.sh
+
+# cache-canary —— P0-2 §12 缓存灰度：放量门禁校验 + 证据 + 回滚指引（G3）。
+# 偏差：灰度配置下发热更新未接线，本目标只做门禁/证据/回滚指引，不下发配置。
+#   make cache-canary ARGS="--stage G-2"        # 校验阶段门禁（需 CACHE_METRICS_URL）
+#   make cache-canary ARGS="--rollback --to G-1" # 回滚动作指引
+.PHONY: cache-canary
+cache-canary:
+	@CACHE_METRICS_URL="$${CACHE_METRICS_URL:-}" \
+	CACHE_CANARY_OUT="$${CACHE_CANARY_OUT:-deploy/cache-canary-runs}" \
+	EXACT_P95_BUDGET_MS="$${EXACT_P95_BUDGET_MS:-1}" \
+	bash scripts/cache-canary.sh $${ARGS:-}
