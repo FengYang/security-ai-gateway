@@ -26,36 +26,96 @@ func (s *BillingService) SetMeteringSource(src PullSource, lookback time.Duratio
 	s.syncMode = syncMode
 }
 
-// pullOnce 单次增量拉取 [now-lookback, now) 并入账（S-1，§6.1.1）。
+// daySeg 一个 UTC+8 自然日切分段（左闭右开）。
+type daySeg struct {
+	day  string
+	from int64
+	to   int64
+}
+
+// daySegments 把 [from, to) 按 UTC+8 自然日切分为**非重叠**段（★ BUG-007）。
+// 每段归属其自然日，使账本归日与 tee-infer /usage 的按日查询同口径。
+// 解析失败时不切分（保守单段），归属日回退为窗口结束日。
+func daySegments(from, to int64) []daySeg {
+	if to <= from {
+		return nil
+	}
+	var segs []daySeg
+	cur := from
+	for cur < to {
+		day := dayOfNs(cur)
+		_, nextStart, err := dayRangeNs(day, day) // [dayStart, nextDayStart)
+		if err != nil {
+			return []daySeg{{day: dayOfNs(to), from: from, to: to}}
+		}
+		segTo := nextStart
+		if segTo > to {
+			segTo = to
+		}
+		segs = append(segs, daySeg{day: day, from: cur, to: segTo})
+		cur = segTo
+	}
+	return segs
+}
+
+// pullRange 拉取并入账 [from, to)（★ BUG-001 非重叠 + ★ BUG-007 按日切分）。
 //
-// 时钟回拨（B-6.1-3）：`now < 上次轮询时刻` → 记指标 #17 并跳过本轮（防"负区间"）。
-// 拉取/入账失败 → 记指标 #5 `error`；**游标为滑动窗口 `now-lookback`，不因失败而丢失数据**
-// （下轮重拉同区间，`event_key` 幂等去重 B-6.1-8）。成功入账的 #5 `ok` 由 `IngestWindow` 发射。
+// 逐日段：独立 Pull → 标注归属日 → IngestWindow（单写者门控/幂等不变）；
+// 段成功即推进内存游标与持久化水位；任一段失败即返回错误（**不越过失败段**，无丢账）。
+func (s *BillingService) pullRange(ctx context.Context, from, to int64) error {
+	for _, seg := range daySegments(from, to) {
+		win, err := s.source.Pull(ctx, seg.from, seg.to)
+		if err != nil {
+			return err
+		}
+		if win != nil {
+			win.Day = seg.day // ★ BUG-007：显式归属日
+			if _, err := s.IngestWindow(ctx, win, s.syncMode); err != nil {
+				return err
+			}
+		}
+		s.lastPollNs = seg.to
+		if err := s.store.Ledger().SetPollWatermark(seg.to); err != nil {
+			log.Printf("[billing] 拉取水位持久化失败（内存游标已推进至 %d）：%v", seg.to, err)
+		}
+	}
+	return nil
+}
+
+// pullOnce 单次增量拉取并入账（S-1，§6.1.1）。
+//
+// ★ BUG-001 修复：改为**游标式非重叠窗口** [cursor, now)，彻底消除“滑动窗口重叠 → 重复入账”。
+//   - 游标三级回退：内存 lastPollNs → 持久化水位 PollWatermark → now-lookback（仅首次部署）；
+//   - 仅当拉取**且**入账成功（或空窗口）才推进游标；失败不推进（下轮覆盖同区间，无丢账无重复）；
+//   - 时钟回拨（B-6.1-3）：`now < cursor` → 记 #17 并重同步游标、跳过本轮。
 func (s *BillingService) pullOnce(ctx context.Context) {
 	if s.source == nil {
 		return
 	}
+	s.pollMu.Lock()
+	defer s.pollMu.Unlock()
+
 	now := s.now()
-	if now < s.lastPollNs {
+	if now < s.lastPollNs { // 时钟回拨（B-6.1-3）
 		IncClockSkew() // 指标 #17（唯一生产者）
 		s.lastPollNs = now
 		return
 	}
-	s.lastPollNs = now
-
-	win, err := s.source.Pull(ctx, now-int64(s.pullLookback), now)
-	if err != nil {
-		IncPull("error") // 不推进游标（下轮重拉，幂等）
-		log.Printf("[billing] S-1 拉取失败：%v", err)
-		return
+	from := s.lastPollNs
+	if from <= 0 { // 重启恢复：持久化水位（= 上轮成功窗口结束，天然无重叠）
+		if ns, err := s.store.Ledger().PollWatermark(); err == nil {
+			from = ns
+		}
 	}
-	if win == nil {
-		IncPull("ok")
-		return
+	if from <= 0 { // 首次部署：一次性回溯 lookback
+		from = now - int64(s.pullLookback)
 	}
-	if _, err := s.IngestWindow(ctx, win, s.syncMode); err != nil {
-		IncPull("error")
-		log.Printf("[billing] S-1 入账失败：%v", err)
+	if from >= now { // 保证半开区间 [from,now) 非空
+		from = now - int64(time.Second)
+	}
+	if err := s.pullRange(ctx, from, now); err != nil {
+		IncPull("error") // ★ 不越过失败段（游标保持）
+		log.Printf("[billing] S-1 拉取/入账失败（游标保持）：%v", err)
 		return
 	}
 	IncPull("ok") // 指标 #5（本方法为该指标唯一生产者）

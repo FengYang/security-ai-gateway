@@ -21,17 +21,26 @@ func TestMarkRepulledOnce(t *testing.T) {
 	}
 }
 
-// 回补重拉：加宽窗口重拉并入账（幂等同常规拉取）
-func TestRepullWindowed_Ingests(t *testing.T) {
+// 回补重拉：从未入账尾段重拉并入账（★ BUG-001：不再用加宽窗口，避免覆盖已入账区间）
+func TestPullRange_Ingests(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
 	svc := newTestBillingService(s, nil)
 	svc.SetMeteringSource(&fakePullSource{win: pullWindow("pull-repull")}, time.Hour, SyncModePull)
 
-	svc.repullWindowed(context.Background(), 2*time.Hour)
+	if err := svc.pullRange(context.Background(), 0, int64(time.Hour)); err != nil {
+		t.Fatalf("pullRange err: %v", err)
+	}
 	entries, _ := s.Ledger().Range(LedgerQuery{TenantID: "t1"})
 	if len(entries) != 1 {
-		t.Fatalf("ledger entries = %d, want 1 (repull ingested)", len(entries))
+		t.Fatalf("ledger entries = %d, want 1 (range ingested)", len(entries))
+	}
+	// 游标与水位推进到区间末端
+	if svc.lastPollNs != int64(time.Hour) {
+		t.Errorf("cursor = %d, want %d", svc.lastPollNs, int64(time.Hour))
+	}
+	if ns, _ := s.Ledger().PollWatermark(); ns != int64(time.Hour) {
+		t.Errorf("watermark = %d, want %d", ns, int64(time.Hour))
 	}
 }
 

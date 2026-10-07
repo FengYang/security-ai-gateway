@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS billing_ledger_head (
   id          INTEGER PRIMARY KEY CHECK (id = 1),
   seq         INTEGER NOT NULL DEFAULT 0,
   entry_hash  TEXT    NOT NULL DEFAULT '',
-  updated_at  INTEGER NOT NULL DEFAULT 0
+  updated_at  INTEGER NOT NULL DEFAULT 0,
+  poll_end_ns INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO billing_ledger_head (id, seq, entry_hash, updated_at) VALUES (1, 0, '', 0);
 `
@@ -118,6 +119,16 @@ func ensureLedgerHashAlgColumn(db *sql.DB) error {
 	_, err := db.Exec(`ALTER TABLE billing_ledger ADD COLUMN hash_alg TEXT NOT NULL DEFAULT ''`)
 	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("billing: migrate ledger hash_alg: %w", err)
+	}
+	return nil
+}
+
+// ensurePollWatermarkColumn 为既有库补 `poll_end_ns` 列（★ BUG-001：拉取水位持久化）。
+// 新库由 DDL 建列 ⇒ 此处必报 "duplicate column name"（幂等吞掉）。
+func ensurePollWatermarkColumn(db *sql.DB) error {
+	_, err := db.Exec(`ALTER TABLE billing_ledger_head ADD COLUMN poll_end_ns INTEGER NOT NULL DEFAULT 0`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("billing: migrate poll_end_ns: %w", err)
 	}
 	return nil
 }
@@ -153,6 +164,11 @@ func OpenSQLiteStore(dsn string, wal bool) (Store, error) {
 	}
 	// 迁移：为既有库补 `hash_alg` 列（P0-4 §5.4.3 B-5.4-1）
 	if err := ensureLedgerHashAlgColumn(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// 迁移：为既有库补 `poll_end_ns` 列（★ BUG-001：拉取水位持久化）
+	if err := ensurePollWatermarkColumn(db); err != nil {
 		db.Close()
 		return nil, err
 	}

@@ -29,9 +29,10 @@ type BillingService struct {
 
 	// S-1 增量拉取（§6.1.1）
 	source       PullSource    // nil = 不拉取
-	pullLookback time.Duration // 重叠回补窗口（R-7）
+	pullLookback time.Duration // 首次部署回溯窗口（R-7）
 	syncMode     string        // 账本单写者（A-12/R-30）
-	lastPollNs   int64         // 上次轮询时刻（时钟回拨保护 B-6.1-3）
+	lastPollNs   int64         // 拉取游标 = 上轮成功窗口结束（★ BUG-001 非重叠；时钟回拨保护 B-6.1-3）
+	pollMu       sync.Mutex    // 串行化 S-1 拉取与对账回补，保护 lastPollNs
 
 	// 对账回补（§6.12.3）：(tenant,day) 进程内幂等，避免同 warning 反复触发
 	repullMu sync.Mutex

@@ -20,6 +20,11 @@ type LedgerStore interface {
 	Head() (LedgerHead, error)
 	// ReproduceHead 重放 period 内条目，判定链尾 == want（账单锚定校验，§7.3）。
 	ReproduceHead(tenant, period, want string) bool
+	// PollWatermark 返回拉取水位（上轮成功窗口的结束时刻，UTC ns；0 = 未初始化）。
+	// ★ BUG-001：供进程重启后恢复**非重叠**拉取游标（避免回溯 lookback 造成重复入账）。
+	PollWatermark() (int64, error)
+	// SetPollWatermark 持久化拉取水位（每成功拉取一段即推进）。
+	SetPollWatermark(ns int64) error
 }
 
 // ---------- SQLite 实现 ----------
@@ -261,4 +266,21 @@ func (s *sqliteLedgerStore) ReproduceHead(tenant, period, want string) bool {
 	}
 	_ = lastSeq
 	return lastHash == want
+}
+
+// PollWatermark 读取拉取水位（★ BUG-001）。
+func (s *sqliteLedgerStore) PollWatermark() (int64, error) {
+	var ns int64
+	if err := s.db.QueryRow(`SELECT poll_end_ns FROM billing_ledger_head WHERE id = 1`).Scan(&ns); err != nil {
+		return 0, fmt.Errorf("billing: get poll watermark: %w", err)
+	}
+	return ns, nil
+}
+
+// SetPollWatermark 持久化拉取水位（★ BUG-001：成功入账后推进，供重启恢复游标）。
+func (s *sqliteLedgerStore) SetPollWatermark(ns int64) error {
+	if _, err := s.db.Exec(`UPDATE billing_ledger_head SET poll_end_ns = ? WHERE id = 1`, ns); err != nil {
+		return fmt.Errorf("billing: set poll watermark: %w", err)
+	}
+	return nil
 }

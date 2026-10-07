@@ -49,9 +49,12 @@ func AggToEntries(win *UsageWindow) []LedgerEntry {
 		return nil
 	}
 
-	// 按窗口结束日算 day（P0 简化：假设窗口 ≤ 24h，落在结束日；
-	// 真实生产中拉取间隔远小于 1 天，此简化成立。若跨日由下一轮拉取覆盖）
-	day := dayOfNs(win.ToNs)
+	// ★ BUG-007：优先使用窗口**显式标注**的归属日（拉取已按 UTC+8 自然日切分）；
+	// 未标注时回退“窗口结束日”（push 事件级窗口 / 兼容旧调用；窗口 ≤ 24h 时成立）。
+	day := win.Day
+	if day == "" {
+		day = dayOfNs(win.ToNs)
+	}
 	nowNs := time.Now().UnixNano()
 
 	var entries []LedgerEntry

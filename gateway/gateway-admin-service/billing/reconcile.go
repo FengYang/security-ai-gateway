@@ -153,45 +153,40 @@ func dayRangeNs(dayFrom, dayTo string) (int64, int64, error) {
 
 // ---------- 对账回补重拉（§6.12.3 软分支，指标 #20） ----------
 
-// onReconcileWarning L2 软分支（0<ratio≤alertRatio）→ 非阻塞排一次"重叠窗口回补"重拉（§6.12.3）。
+// onReconcileWarning L2 软分支（0<ratio≤alertRatio）→ 非阻塞排一次“未入账尾段”回补重拉（§6.12.3）。
 //
-// 窗口加宽为 2×pull_lookback（仅本次，回补迟到数据）；入账幂等由 `event_key` 兜底（§6.3.4）。
+// ★ BUG-001：原“加宽窗口 [now-2×lookback, now)”会覆盖**已入账区间** → 重复入账；
+// 现改为从**游标**起重拉未入账尾段 [cursor, now)（游标由 `pullRange` 逐段推进，天然非重叠）。
 // 幂等：同 (tenant,day) 进程内**仅一次**（同 warning 不反复触发）。指标 #20 `auto_repull_total`
-// 的**唯一生产者**。未注入拉取源 / lookback 非法时 no-op。
+// 的**唯一生产者**。未注入拉取源 / 无可回补区间时 no-op。
 func (s *BillingService) onReconcileWarning(tenant, day string) {
-	if s.source == nil || s.pullLookback <= 0 {
+	if s.source == nil {
 		return
 	}
 	if !s.markRepulledOnce(tenant, day) {
 		return // 同 (tenant,day) 已排过回补
 	}
-	widen := 2 * s.pullLookback // 窗口加倍（仅本次）
 	go func() {
 		defer IncAutoRepull() // 指标 #20
+		s.pollMu.Lock()
+		defer s.pollMu.Unlock()
+		now := s.now()
+		from := s.lastPollNs
+		if from <= 0 { // 进程重启：从持久化水位续拉
+			if ns, err := s.store.Ledger().PollWatermark(); err == nil {
+				from = ns
+			}
+		}
+		if from <= 0 || from >= now {
+			return // 无可回补区间 → no-op
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		s.repullWindowed(ctx, widen)
+		if err := s.pullRange(ctx, from, now); err != nil {
+			IncPull("error")
+			log.Printf("[billing] 对账回补重拉失败：%v", err)
+		}
 	}()
-}
-
-// repullWindowed 以加宽窗口重拉并入账（回补；与常规拉取同 `event_key`，不重复入账）。
-func (s *BillingService) repullWindowed(ctx context.Context, widen time.Duration) {
-	now := s.now()
-	win, err := s.source.Pull(ctx, now-int64(widen), now)
-	if err != nil {
-		IncPull("error")
-		log.Printf("[billing] 对账回补重拉失败：%v", err)
-		return
-	}
-	if win == nil {
-		return
-	}
-	if _, err := s.IngestWindow(ctx, win, s.syncMode); err != nil {
-		IncPull("error")
-		log.Printf("[billing] 对账回补入账失败：%v", err)
-		return
-	}
-	IncPull("ok")
 }
 
 // markRepulledOnce 幂等标记 (tenant,day) 回补已排；返回 true = 首次。
