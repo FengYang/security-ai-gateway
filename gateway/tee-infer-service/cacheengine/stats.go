@@ -32,6 +32,11 @@ var lookupDurationBuckets = []float64{
 	0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0,
 }
 
+// jitterBuckets 抖动注入量直方图桶（秒），覆盖 §7.3 默认 max_ms=20ms 量级。
+var jitterBuckets = []float64{
+	0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1,
+}
+
 // durationHistogram 简易 Prometheus 直方图（固定桶 + sum/count）。
 type durationHistogram struct {
 	mu      sync.Mutex
@@ -95,6 +100,10 @@ type statsCollector struct {
 	disabledMu  sync.Mutex
 	disabled    map[string]uint64 // reason -> count（§9.1 #26）
 	clockSkew   uint64            // 时钟回拨次数（§9.1 #27）
+
+	// 抖动注入量直方图（§9.1 #11）：path(hit|miss) -> histogram
+	jitterMu sync.Mutex
+	jitters  map[string]*durationHistogram
 }
 
 func newStatsCollector() *statsCollector {
@@ -103,6 +112,7 @@ func newStatsCollector() *statsCollector {
 		durs:        make(map[string]*durationHistogram),
 		slowLookups: make(map[string]uint64),
 		disabled:    make(map[string]uint64),
+		jitters:     make(map[string]*durationHistogram),
 	}
 }
 
@@ -139,6 +149,33 @@ func (s *statsCollector) observeLookupDuration(kind string, d time.Duration) {
 	}
 	s.durMu.Unlock()
 	h.observe(d)
+}
+
+// observeJitter 记录一次抖动注入量（§9.1 #11；path∈{hit,miss}）。
+// 非法 path 兜底为 miss（避免污染契约）。
+func (s *statsCollector) observeJitter(path string, d time.Duration) {
+	if path != "hit" && path != "miss" {
+		path = "miss"
+	}
+	s.jitterMu.Lock()
+	h := s.jitters[path]
+	if h == nil {
+		h = newDurationHistogram(jitterBuckets)
+		s.jitters[path] = h
+	}
+	s.jitterMu.Unlock()
+	h.observe(d)
+}
+
+// jitterSnapshot 返回各 path 直方图的只读快照（供渲染，避免持锁）。
+func (s *statsCollector) jitterSnapshot() map[string]*durationHistogram {
+	s.jitterMu.Lock()
+	defer s.jitterMu.Unlock()
+	out := make(map[string]*durationHistogram, len(s.jitters))
+	for k, v := range s.jitters {
+		out[k] = v
+	}
+	return out
 }
 
 // observeStore 记录一次写入。

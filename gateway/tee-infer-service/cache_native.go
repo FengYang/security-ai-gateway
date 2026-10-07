@@ -49,13 +49,23 @@ func buildCacheLookupContext(tenant, engType, modelName, txHash, promptText stri
 	}
 }
 
-// waitUntilRelease 首片/首字节前的抖动等待（§7.3.1 注入侧）。
-// 命中与未命中共用同一注入点，保证两侧同分布（J-1）；releaseAt 已过 → 自然 no-op（B-7.3-6）。
-// 仅在缓存生效（mode != off）时才会带非零抖动。
-func waitUntilRelease(releaseAt time.Time) {
-	if d := time.Until(releaseAt); d > 0 {
-		time.Sleep(d)
+// jitterRecorder 抖动注入量记录器（§9.1 #11）；cacheengine.CacheEngine 满足之，nil 安全。
+type jitterRecorder interface {
+	RecordJitter(path string, d time.Duration)
+}
+
+// waitUntilRelease 首片/首字节前的抖动等待 + 指标发射（§7.3.1 注入侧 / §9.1 #11）。
+// 命中与未命中共用同一注入点，保证两侧同分布（J-1）；releaseAt 已过 → 自然 no-op（B-7.3-6），
+// 且**仅在实际发生注入时**记录指标。仅在缓存生效（mode != off）时才会带非零抖动。
+func waitUntilRelease(rec jitterRecorder, path string, releaseAt time.Time) {
+	d := time.Until(releaseAt)
+	if d <= 0 {
+		return
 	}
+	if rec != nil {
+		rec.RecordJitter(path, d)
+	}
+	time.Sleep(d)
 }
 
 // clampDuration 把回放节拍钳制到 [lo, hi]（§6.12.3，防"精确复刻"成侧信道）。
@@ -82,14 +92,16 @@ func clampDuration(d, lo, hi time.Duration) time.Duration {
 type segmentCapturingEngine struct {
 	inner     model.Engine
 	releaseAt time.Time
+	rec       jitterRecorder
 	first     bool
 	start     time.Time
 	segs      []cacheengine.Segment
 }
 
-// newSegmentCapturingEngine 构造分片采集包装器；releaseAt 为 miss 路径抖动释放时刻。
-func newSegmentCapturingEngine(inner model.Engine, releaseAt time.Time) *segmentCapturingEngine {
-	return &segmentCapturingEngine{inner: inner, releaseAt: releaseAt, first: true}
+// newSegmentCapturingEngine 构造分片采集包装器；releaseAt 为 miss 路径抖动释放时刻，
+// rec 为抖动指标记录器（可 nil）。
+func newSegmentCapturingEngine(inner model.Engine, releaseAt time.Time, rec jitterRecorder) *segmentCapturingEngine {
+	return &segmentCapturingEngine{inner: inner, releaseAt: releaseAt, rec: rec, first: true}
 }
 
 // Predict 透传内层引擎。
@@ -101,7 +113,7 @@ func (e *segmentCapturingEngine) Generate(req model.GenerateRequest, onDelta fun
 		if e.first {
 			e.first = false
 			// §7.3：miss 路径首字节前同样等待 releaseAt（通常已过 = no-op，防"快速未命中"漏网）。
-			waitUntilRelease(e.releaseAt)
+			waitUntilRelease(e.rec, "miss", e.releaseAt)
 			e.start = time.Now()
 		}
 		e.segs = append(e.segs, cacheengine.Segment{Text: d, At: time.Since(e.start)})
@@ -134,6 +146,7 @@ type segmentReplayEngine struct {
 	releaseAt time.Time
 	minGap    time.Duration
 	maxGap    time.Duration
+	rec       jitterRecorder
 }
 
 // Predict vectors 路径不支持（缓存仅用于 text 路径），返回 -1。
@@ -141,7 +154,7 @@ func (segmentReplayEngine) Predict([]float64) int { return -1 }
 
 // Generate 首段即回（§6.12.3）：首片发出前等待至 releaseAt；无分片则整段单块回放。
 func (r *segmentReplayEngine) Generate(_ model.GenerateRequest, onDelta func(string) error) error {
-	waitUntilRelease(r.releaseAt)
+	waitUntilRelease(r.rec, "hit", r.releaseAt)
 	if len(r.segs) == 0 {
 		if r.text == "" {
 			return nil

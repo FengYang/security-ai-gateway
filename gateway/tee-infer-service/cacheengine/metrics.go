@@ -21,6 +21,9 @@ func (e *engine) RenderPrometheus(w io.Writer) {
 	// #2 lookup_duration_seconds（histogram，按 kind）
 	e.renderLookupDuration(w)
 
+	// #11 jitter_seconds（histogram，按 path=hit|miss；§7.3）
+	e.renderJitter(w)
+
 	// #3 entries{store}
 	fmt.Fprintf(w, "# HELP otpmask_cache_entries 当前缓存条目数（按 store）\n# TYPE otpmask_cache_entries gauge\n")
 	fmt.Fprintf(w, "otpmask_cache_entries{store=\"exact\"} %d\n", s.ExactEntries)
@@ -117,6 +120,47 @@ func (e *engine) renderLookupDuration(w io.Writer) {
 		fmt.Fprintf(w, "otpmask_cache_lookup_duration_seconds_bucket{kind=%q,le=\"+Inf\"} %d\n", k, s.total)
 		fmt.Fprintf(w, "otpmask_cache_lookup_duration_seconds_sum{kind=%q} %g\n", k, s.sum)
 		fmt.Fprintf(w, "otpmask_cache_lookup_duration_seconds_count{kind=%q} %d\n", k, s.total)
+	}
+}
+
+// renderJitter 输出抖动注入量直方图（§9.1 #11，按 path 分组：hit|miss）。
+func (e *engine) renderJitter(w io.Writer) {
+	type hsnap struct {
+		buckets []float64
+		counts  []uint64
+		sum     float64
+		total   uint64
+	}
+
+	snaps := make(map[string]hsnap, 2)
+	for k, h := range e.stats.jitterSnapshot() {
+		h.mu.Lock()
+		b := make([]float64, len(h.buckets))
+		copy(b, h.buckets)
+		c := make([]uint64, len(h.counts))
+		copy(c, h.counts)
+		snaps[k] = hsnap{buckets: b, counts: c, sum: h.sum, total: h.total}
+		h.mu.Unlock()
+	}
+	if len(snaps) == 0 {
+		return
+	}
+
+	fmt.Fprintf(w, "# HELP otpmask_cache_jitter_seconds 抖动注入量（秒，按 path=hit|miss）\n# TYPE otpmask_cache_jitter_seconds histogram\n")
+	paths := make([]string, 0, len(snaps))
+	for k := range snaps {
+		paths = append(paths, k)
+	}
+	sort.Strings(paths)
+	for _, k := range paths {
+		s := snaps[k]
+		for i, b := range s.buckets {
+			fmt.Fprintf(w, "otpmask_cache_jitter_seconds_bucket{path=%q,le=%q} %d\n",
+				k, strconv.FormatFloat(b, 'g', -1, 64), s.counts[i])
+		}
+		fmt.Fprintf(w, "otpmask_cache_jitter_seconds_bucket{path=%q,le=\"+Inf\"} %d\n", k, s.total)
+		fmt.Fprintf(w, "otpmask_cache_jitter_seconds_sum{path=%q} %g\n", k, s.sum)
+		fmt.Fprintf(w, "otpmask_cache_jitter_seconds_count{path=%q} %d\n", k, s.total)
 	}
 }
 

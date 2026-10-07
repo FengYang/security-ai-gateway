@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRenderPrometheus 测试 Prometheus 指标渲染。
@@ -87,6 +88,28 @@ func TestRenderPrometheus(t *testing.T) {
 		!strings.Contains(output, "otpmask_cache_lookup_duration_seconds_sum") ||
 		!strings.Contains(output, "otpmask_cache_lookup_duration_seconds_bucket") {
 		t.Error("output missing lookup duration histogram series")
+	}
+}
+
+// TestRenderPrometheus_Jitter 抖动注入量直方图渲染（§9.1 #11；path=hit|miss）。
+func TestRenderPrometheus_Jitter(t *testing.T) {
+	cfg := testConfig()
+	eng := NewCacheEngine(cfg).(*engine)
+	eng.RecordJitter("hit", 3*time.Millisecond)
+	eng.RecordJitter("miss", 1*time.Millisecond)
+
+	var buf bytes.Buffer
+	eng.RenderPrometheus(&buf)
+	out := buf.String()
+	for _, want := range []string{
+		"otpmask_cache_jitter_seconds_bucket",
+		"otpmask_cache_jitter_seconds_sum",
+		`otpmask_cache_jitter_seconds_count{path="hit"} 1`,
+		`otpmask_cache_jitter_seconds_count{path="miss"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("jitter 指标渲染缺失：%s\n%s", want, out)
+		}
 	}
 }
 

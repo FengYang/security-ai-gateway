@@ -93,7 +93,7 @@ func (f *fakeDeltaEngine) LastKeyFingerprint() string { return f.fp }
 
 func TestSegmentCapturingEngine_RecordsSegmentsAndForwardsFP(t *testing.T) {
 	inner := &fakeDeltaEngine{deltas: []string{"x", "y", "z"}, fp: "kf-1"}
-	c := newSegmentCapturingEngine(inner, time.Now())
+	c := newSegmentCapturingEngine(inner, time.Now(), nil)
 
 	var got []string
 	if err := c.Generate(model.GenerateRequest{}, func(d string) error {
@@ -114,6 +114,116 @@ func TestSegmentCapturingEngine_RecordsSegmentsAndForwardsFP(t *testing.T) {
 	// 可选方法必须显式转发（否则审计 KeyFP 归因丢失）
 	if c.LastKeyFingerprint() != "kf-1" {
 		t.Fatalf("LastKeyFingerprint 未转发：%q", c.LastKeyFingerprint())
+	}
+}
+
+// ===== 单元：抖动注入量指标发射（§9.1 #11）=====
+
+type fakeJitterRec struct {
+	paths []string
+	total time.Duration
+}
+
+func (f *fakeJitterRec) RecordJitter(path string, d time.Duration) {
+	f.paths = append(f.paths, path)
+	f.total += d
+}
+
+func TestSegmentReplayEngine_RecordsJitterHit(t *testing.T) {
+	rec := &fakeJitterRec{}
+	r := &segmentReplayEngine{text: "x", releaseAt: time.Now().Add(5 * time.Millisecond), rec: rec}
+	if err := r.Generate(model.GenerateRequest{}, func(string) error { return nil }); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(rec.paths) != 1 || rec.paths[0] != "hit" {
+		t.Fatalf("抖动 path 应为 [hit]，got %v", rec.paths)
+	}
+	if rec.total <= 0 {
+		t.Fatal("应记录正抖动量")
+	}
+}
+
+func TestSegmentCapturingEngine_RecordsJitterMiss(t *testing.T) {
+	rec := &fakeJitterRec{}
+	c := newSegmentCapturingEngine(&fakeDeltaEngine{deltas: []string{"a"}},
+		time.Now().Add(5*time.Millisecond), rec)
+	if err := c.Generate(model.GenerateRequest{}, func(string) error { return nil }); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(rec.paths) != 1 || rec.paths[0] != "miss" {
+		t.Fatalf("抖动 path 应为 [miss]，got %v", rec.paths)
+	}
+}
+
+// TestTextInferCacheNegativeHitDenial R1（§7.3.1/§4.5）：负向缓存命中 → 拒答分流
+// （仅终止帧 finish=content_filter、无内容；审计 cache_negative_hit；计配额不计费）。
+func TestTextInferCacheNegativeHitDenial(t *testing.T) {
+	srv, ts := newNativeCacheServer(t)
+	const text = "负向命中拒答测试内容"
+
+	// 预置负向条目（与请求同键材质；Stage=guardrail 命中 OnlyFor 白名单）
+	lctx := buildCacheLookupContext("default", protocol.EngineTypeTEEGPU, "mock",
+		sha256hex([]byte(text)), text, 32, true, srv.policyVersion())
+	out := srv.cacheEngine.Store(cacheengine.StoreContext{LookupContext: lctx, Writable: true},
+		cacheengine.InferResult{Finish: "stop", Negative: &cacheengine.NegativePayload{
+			Reason: "prompt_injection", Stage: "guardrail",
+			PolicyVer: srv.policyVersion(), GuardVer: cacheGuardVerDefault,
+		}})
+	if !out.Stored {
+		t.Fatalf("预置负向条目失败：%+v", out)
+	}
+
+	sess, ksig, kenc := setupTestSession(t, ts)
+	hr := buildTextInferRequest(t, ts.URL+"/v1/infer", sess, ksig, kenc, text, protocol.EngineTypeTEEGPU, true, 1)
+	resp, err := http.DefaultClient.Do(hr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := mustReadAll(t, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("负向命中应 200（SSE 拒答帧），got %d", resp.StatusCode)
+	}
+
+	got, finish := decodeTextSSE(t, body, sess, kenc) // 同时断言 [DONE] 与 s2c counter 严格递增
+	if got != "" {
+		t.Fatalf("负向拒答不得下发内容，got %q", got)
+	}
+	if finish != "content_filter" {
+		t.Fatalf("终止帧应为 content_filter，got %q", finish)
+	}
+
+	// 审计 cache_negative_hit（CacheHit=true，Result=拒答原因）
+	found := false
+	for _, e := range srv.audit.query("") {
+		if e.Action != "cache_negative_hit" {
+			continue
+		}
+		found = true
+		if !e.CacheHit {
+			t.Fatal("cache_negative_hit 应带 cache_hit=true")
+		}
+		if e.Result != "prompt_injection" {
+			t.Fatalf("审计 Result=%q，want prompt_injection", e.Result)
+		}
+	}
+	if !found {
+		t.Fatal("审计缺 cache_negative_hit 事件")
+	}
+
+	// 计配额不计费：请求数 +1、交付 token=0；输入预占保留（不回冲）
+	rec := srv.usage["default"]
+	if rec == nil {
+		t.Fatal("用量记录缺失")
+	}
+	if rec.Requests != 1 {
+		t.Fatalf("请求数应为 1，got %d", rec.Requests)
+	}
+	if rec.TokensOut != 0 {
+		t.Fatalf("负向命中不计费（tokens_out 应为 0），got %d", rec.TokensOut)
+	}
+	if rec.TokensIn != srv.countTokens(text) {
+		t.Fatalf("输入配额应保留（计配额），got %d want %d", rec.TokensIn, srv.countTokens(text))
 	}
 }
 

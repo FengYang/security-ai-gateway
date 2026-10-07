@@ -22,6 +22,9 @@ type CacheEngine interface {
 	Stats() StatsSnapshot
 	// RenderPrometheus 以 Prometheus 文本格式输出缓存指标（§9.1）。
 	RenderPrometheus(w io.Writer)
+	// RecordJitter 记录抖动注入量（§9.1 #11；path ∈ {hit,miss}）。
+	// 供主链注入点（§7.3.1 waitUntil）在**实际发生注入**时发射。
+	RecordJitter(path string, d time.Duration)
 	Close() error
 }
 
@@ -652,6 +655,11 @@ func (e *engine) Invalidate(sel InvalidateSelector) (int, error) {
 
 	e.stats.observeInvalidate("selective", count)
 	return count, nil
+}
+
+// RecordJitter 记录抖动注入量（§9.1 #11；主链注入点唯一发射入口）。
+func (e *engine) RecordJitter(path string, d time.Duration) {
+	e.stats.observeJitter(path, d)
 }
 
 // deleteByModel 按模型删除精确缓存条目（§6.8.1 按模型失效）。

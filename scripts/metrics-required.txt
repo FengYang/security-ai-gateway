@@ -177,6 +177,7 @@ admin gateway_admin_billing_ledger_error_total conditional
 # GA-AI ... --P0--语义缓存.md §9.1 (#1/#2/#3/#4/#7/#8/#12/#14).
 tee otpmask_cache_lookups_total conditional
 tee otpmask_cache_lookup_duration_seconds conditional
+tee otpmask_cache_jitter_seconds conditional
 tee otpmask_cache_entries conditional
 tee otpmask_cache_evictions_total conditional
 tee otpmask_cache_read_fast_check_block_total conditional

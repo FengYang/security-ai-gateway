@@ -1395,6 +1395,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	var cacheKey string
 	var cacheHit bool
 	var cacheReleaseAt time.Time
+	var cacheNegative *cacheengine.NegativePayload
 	var cacheStoreCtx *cacheengine.StoreContext
 	if s.cacheEngine != nil && s.cacheEnabled {
 		lctx := buildCacheLookupContext(tenant, engType, req.Model, txHash,
@@ -1402,12 +1403,17 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		lr := s.cacheEngine.Lookup(lctx)
 		// §7.3：抖动注入基准 = 结果就绪时刻 + Jitter（hit/miss 同分布，J-1）。
 		cacheReleaseAt = time.Now().Add(lr.Jitter)
-		// B2 决策 D-a：负向命中按 miss 处理（fail-open）——Entry 无正文，严禁当正向文本回放。
-		if lr.Hit && !lr.IsNegative() && lr.Entry != nil {
+		switch {
+		case lr.IsNegative() && lr.Entry != nil:
+			// R1（§7.3.1）：负向命中 → 拒答分流（Entry 无正文，严禁当正向文本回放）。
+			cacheHit = true
+			cacheNegative = lr.Entry.Negative
+		case lr.Hit && lr.Entry != nil:
 			cacheHit = true
 			eng = &segmentReplayEngine{
 				text: lr.Entry.Text, segs: lr.Entry.Segments, releaseAt: cacheReleaseAt,
 				minGap: s.cacheReplay.minGap, maxGap: s.cacheReplay.maxGap,
+				rec: s.cacheEngine, // §9.1 #11：抖动注入量指标
 			}
 		}
 		sc := cacheengine.StoreContext{LookupContext: lctx}
@@ -1423,7 +1429,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	// 未命中：包装真实引擎采集流式分片（§6.12 写入侧），供回填使用。
 	var capture *segmentCapturingEngine
 	if cacheStoreCtx != nil && !cacheHit {
-		capture = newSegmentCapturingEngine(eng, cacheReleaseAt)
+		capture = newSegmentCapturingEngine(eng, cacheReleaseAt, s.cacheEngine)
 		eng = capture
 	}
 	log.Printf("[tee] infer(text) tenant=%s request=%s engine=%s stream=%v msgs=%d cache_hit=%v",
@@ -1432,7 +1438,12 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	// 统一 SSE 信封流输出（seq 严格递增 + finish 分片）；stream=false 语义为单分片聚合。
 	var agg strings.Builder
 	var out streamOutcome
-	if serr := s.streamTextInfer(w, sess, eng, genReq, &agg, tenant, req.RequestID, &out); serr != nil {
+	// R1（§7.3.1）：负向命中 → 走拒答分流（仅终止帧 finish=content_filter，无内容）。
+	denialFinish := ""
+	if cacheNegative != nil {
+		denialFinish = "content_filter"
+	}
+	if serr := s.streamTextInfer(w, sess, eng, genReq, &agg, tenant, req.RequestID, &out, denialFinish); serr != nil {
 		// X-3：输出侧整流拦截优先于引擎 error 判定——按实际下发回冲（block+genErr 同此）。
 		if out.Blocked {
 			s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
@@ -1470,6 +1481,21 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	if out.Blocked {
 		s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
 			s.countTokens(inputText.String()), out, isRetry)
+		return
+	}
+	// R1（§7.3.1 / §4.5）：负向命中拒答的计费与审计——**计配额不计费**（交付 token=0，
+	// 输入预占保留不回冲），审计 cache_negative_hit（与命中路径同签名，CacheHit=true）。
+	if cacheNegative != nil {
+		s.recordUsage(tenant, 0, 0, false) // 请求数 +1，交付 token=0
+		ev := s.audit.append(AuditEvent{
+			TenantID: tenant, RequestID: req.RequestID, Action: "cache_negative_hit",
+			Result:     cacheNegative.Reason,
+			PayloadSHA: payloadSHA, HashAlg: hashAlgTag(),
+			EngineType: engType, Model: req.Model, TransformedHash: txHash,
+			CacheHit: true, MeteringMode: s.meteringMode(), IsRetry: isRetry,
+		})
+		go s.billing.notify(ev)
+		s.metrics.incRequest(tenant, "ok")
 		return
 	}
 	// 未命中回填缓存（命中路径不重复回填）。
@@ -1545,7 +1571,7 @@ type streamOutcome struct {
 // mode=off 时 og=nil，走原路径，行为与现网逐字节一致。
 func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	eng model.Engine, genReq model.GenerateRequest, agg *strings.Builder,
-	tenant, requestID string, out *streamOutcome) error {
+	tenant, requestID string, out *streamOutcome, denialFinish string) error {
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1562,6 +1588,21 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 			return err
 		}
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", hex.EncodeToString(sealed)); err != nil {
+			return err
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	}
+	// P0-2 R1（§7.3.1）：负向缓存命中拒答分流——不进入引擎/审查管线，仅发终止帧
+	// finish=content_filter + [DONE]（与非命中路径拒答逐字段一致，无内容泄漏）。
+	// 计费口径由调用方处置（计配额不计费，§4.5）。
+	if denialFinish != "" {
+		if err := writeChunk("", denialFinish, nil, nil); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
 			return err
 		}
 		if flusher != nil {
