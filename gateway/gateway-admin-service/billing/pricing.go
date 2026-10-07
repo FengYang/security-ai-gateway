@@ -70,19 +70,32 @@ func LoadPriceTable(path string) (*PriceTable, error) {
 			return nil, fmt.Errorf("billing: price table model %q: %w", mk, err)
 		}
 	}
+	// 默认档（model 未命中时使用）同样必须持有合法且非空的阶梯（★ BUG-004）。
+	if tbl.Defaults != nil {
+		if tbl.Defaults.InCoef <= 0 {
+			tbl.Defaults.InCoef = 1.0
+		}
+		if tbl.Defaults.OutCoef <= 0 {
+			tbl.Defaults.OutCoef = 1.0
+		}
+		if err := validateTiers(tbl.Defaults.Tiers); err != nil {
+			return nil, fmt.Errorf("billing: price table defaults: %w", err)
+		}
+	}
 	return &tbl, nil
 }
 
 // validateTiers 校验阶梯并归一为规范顺序（有限档升序在前，∞ 档在最后）。
 //
 // 规则（B-6.5-3/4）：
+//   - **空阶梯 → 拒绝**（★ BUG-004 fail-closed：无任何单价来源，若放过将静默按 0 金额计价）；
 //   - UpToTokens=0 表示顶档（+∞），必须**恰好一个**且位于最后（覆盖全部用量）；
 //   - 有限档 UpToTokens 必须 > 0 且严格递增；
 //   - 缺失 ∞ 档 → 拒绝（存在未覆盖区间）。
 // 校验后原地重排 tiers 为规范顺序。
 func validateTiers(tiers []Tier) error {
 	if len(tiers) == 0 {
-		return nil // 空 = 单档全量（由调用方以默认档处理）
+		return fmt.Errorf("tiers must not be empty (no price source; fail-closed)")
 	}
 	var finite []Tier
 	var inf *Tier

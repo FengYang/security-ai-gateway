@@ -63,6 +63,26 @@ func TestLoadPriceTable_BadTiers(t *testing.T) {
 	}
 }
 
+// BUG-004：空阶梯（模型侧）→ 拒载（fail-closed），避免静默按 0 金额计价
+func TestLoadPriceTable_EmptyTiersRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.json")
+	os.WriteFile(path, []byte(`{"version":"v1","models":{"m":{"in_coef":1,"out_coef":1,"tiers":[]}}}`), 0o644)
+	if _, err := LoadPriceTable(path); err == nil {
+		t.Error("expected error for empty tiers (BUG-004 fail-closed)")
+	}
+}
+
+// BUG-004：空阶梯（defaults 侧）→ 拒载
+func TestLoadPriceTable_DefaultsEmptyTiersRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.json")
+	os.WriteFile(path, []byte(`{"version":"v1","models":{},"defaults":{"tiers":[]}}`), 0o644)
+	if _, err := LoadPriceTable(path); err == nil {
+		t.Error("expected error for empty defaults.tiers (BUG-004 fail-closed)")
+	}
+}
+
 func TestLoadPriceTable_DefaultCoefApplied(t *testing.T) {
 	// coef 缺省（0）→ 归一为 1.0（R-14 缺省）
 	dir := t.TempDir()
