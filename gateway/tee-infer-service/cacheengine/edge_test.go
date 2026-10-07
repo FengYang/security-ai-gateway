@@ -12,7 +12,7 @@ func TestConcurrent_LookupStore(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Mode = ModeExact
 	cfg.Exact.MaxEntries = 1000
-	cfg.Exact.MaxEntryBytes = 1024
+	cfg.Exact.MaxEntryBytes = ByteSize(1024)
 	cfg.Exact.MinPromptTokens = 2
 	cfg.Exact.MinTokens = 2
 	cfg.Guard.ReadFastCheck = false
@@ -193,7 +193,7 @@ func TestEdge_EmptyPrompt(t *testing.T) {
 func TestEdge_VeryLongResponse(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Mode = ModeExact
-	cfg.Exact.MaxEntryBytes = 100
+	cfg.Exact.MaxEntryBytes = ByteSize(100)
 	cfg.Exact.MinPromptTokens = 2
 	cfg.Exact.MinTokens = 2
 	eng := NewCacheEngine(cfg)

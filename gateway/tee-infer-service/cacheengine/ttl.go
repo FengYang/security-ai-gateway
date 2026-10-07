@@ -19,7 +19,7 @@ func (r *TTLResolver) TTLFor(ctx StoreContext) time.Duration {
 	if r.cfg == nil {
 		return 3600 * time.Second
 	}
-	def := r.cfg.Exact.TTL
+	def := r.cfg.Exact.TTL.D()
 
 	var cands []time.Duration
 	add := func(v time.Duration, ok bool) {

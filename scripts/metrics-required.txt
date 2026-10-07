@@ -168,3 +168,20 @@ admin gateway_admin_billing_auto_repull_total conditional
 admin gateway_admin_billing_plan_expiring_total conditional
 admin gateway_admin_billing_assoc_verify_total conditional
 admin gateway_admin_billing_ledger_error_total conditional
+
+# ---- P0-2 semantic cache (tee-infer cacheengine; opt-in via CACHE_MODE != off) ----
+# All conditional for now: the cache engine is an opt-in module and is NOT yet wired
+# into tee-infer /metrics (that is the next stage, P2). Until the wiring lands these
+# series are absent even when tee-infer is reachable, so absence must NOT be a failure
+# (same rationale as the P0-3 billing block above). The metric set here maps 1:1 to the
+# design of record: GA-AI ... --P0--语义缓存.md §9.1 (#1/#2/#3/#4/#7/#8/#12/#14).
+# TODO(P2): after cache metrics are rendered by tee-infer /metrics, promote the
+# always-rendered families (entries / evictions_total / panic_total) to `required`.
+tee otpmask_cache_lookups_total conditional
+tee otpmask_cache_lookup_duration_seconds conditional
+tee otpmask_cache_entries conditional
+tee otpmask_cache_evictions_total conditional
+tee otpmask_cache_read_fast_check_block_total conditional
+tee otpmask_cache_semantic_false_positive_total conditional
+tee otpmask_cache_panic_total conditional
+tee otpmask_cache_saved_tokens_total conditional

@@ -46,11 +46,11 @@ func (r *entryReplayer) Replay(entry *Entry, stream bool) []Segment {
 		}
 		gap := s.At - prev
 		if r.cfg != nil && r.cfg.Stream.Enabled {
-			if gap < r.cfg.Stream.MinGap {
-				gap = r.cfg.Stream.MinGap
+			if gap < r.cfg.Stream.MinGap.D() {
+				gap = r.cfg.Stream.MinGap.D()
 			}
-			if gap > r.cfg.Stream.MaxGap {
-				gap = r.cfg.Stream.MaxGap
+			if gap > r.cfg.Stream.MaxGap.D() {
+				gap = r.cfg.Stream.MaxGap.D()
 			}
 		}
 		at := prev + gap
@@ -83,7 +83,7 @@ func segmentsFor(ctx StoreContext, res InferResult, cfg *CacheConfig) []Segment 
 	var total int
 	for _, s := range res.Segments {
 		total += len(s.Text)
-		if total > cfg.Exact.MaxEntryBytes {
+		if total > int(cfg.Exact.MaxEntryBytes.Bytes()) {
 			return nil
 		}
 	}

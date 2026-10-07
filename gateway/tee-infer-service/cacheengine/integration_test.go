@@ -335,7 +335,7 @@ func TestIntegration_StatsMetrics(t *testing.T) {
 	// 包含关键指标
 	checks := []string{
 		"otpmask_cache_lookups_total",
-		"otpmask_cache_exact_entries",
+		"otpmask_cache_entries",
 		"otpmask_cache_evictions_total",
 	}
 	for _, name := range checks {

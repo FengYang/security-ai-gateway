@@ -203,8 +203,8 @@ func TestTTLFor_Default(t *testing.T) {
 	}
 
 	ttl := resolver.TTLFor(ctx)
-	if ttl != cfg.Exact.TTL {
-		t.Fatalf("expected default TTL %v, got %v", cfg.Exact.TTL, ttl)
+	if ttl != cfg.Exact.TTL.D() {
+		t.Fatalf("expected default TTL %v, got %v", cfg.Exact.TTL.D(), ttl)
 	}
 }
 

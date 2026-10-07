@@ -11,7 +11,7 @@ import (
 func TestSingleFlight_Basic(t *testing.T) {
 	cfg := SingleFlightConfig{
 		Enabled:       true,
-		MaxWait:       3 * time.Second,
+		MaxWait:       Duration(3 * time.Second),
 		FailurePolicy: "independent",
 	}
 	sf := NewSingleFlight(cfg)
@@ -55,7 +55,7 @@ func TestSingleFlight_Basic(t *testing.T) {
 
 // TestSingleFlight_DifferentKeys 不同 key 不合并。
 func TestSingleFlight_DifferentKeys(t *testing.T) {
-	cfg := SingleFlightConfig{Enabled: true, MaxWait: time.Second}
+	cfg := SingleFlightConfig{Enabled: true, MaxWait: Duration(time.Second)}
 	sf := NewSingleFlight(cfg)
 
 	var execCount int32
@@ -82,7 +82,7 @@ func TestSingleFlight_DifferentKeys(t *testing.T) {
 
 // TestSingleFlight_Disabled 关闭时行为（仍然能工作，只是不合并——这里接口不区分，Do 始终可用）。
 func TestSingleFlight_Disabled(t *testing.T) {
-	cfg := SingleFlightConfig{Enabled: false, MaxWait: time.Second}
+	cfg := SingleFlightConfig{Enabled: false, MaxWait: Duration(time.Second)}
 	sf := NewSingleFlight(cfg)
 
 	count := 0

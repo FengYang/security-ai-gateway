@@ -1,185 +1,293 @@
 package cacheengine
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
+// Duration 是支持 JSON 字符串表示的时间长度（如 "5s"、"200ms"，对齐详设 §4.2）
+// 或整数（纳秒）的类型。用于配置文件中的人类可读写法。
+type Duration time.Duration
+
+// D 返回标准库 time.Duration。
+func (d Duration) D() time.Duration { return time.Duration(d) }
+
+// String 返回 Go 时长字符串（如 "5s"）。
+func (d Duration) String() string { return time.Duration(d).String() }
+
+// UnmarshalJSON 接受字符串（Go 时长语法，如 "5s"）或整数（纳秒）。
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "null" || s == `""` {
+		*d = 0
+		return nil
+	}
+	if len(s) >= 2 && s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return fmt.Errorf("duration: %w", err)
+		}
+		v, err := time.ParseDuration(str)
+		if err != nil {
+			return fmt.Errorf("duration %q: %w", str, err)
+		}
+		*d = Duration(v)
+		return nil
+	}
+	var n int64
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("duration: %w", err)
+	}
+	*d = Duration(n)
+	return nil
+}
+
+// MarshalJSON 以 Go 时长字符串输出（如 "5s"）。
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+// ByteSize 是支持 JSON 字符串（"256MB"、"64KB"）或整数（字节）的容量类型。
+type ByteSize int64
+
+// Bytes 返回字节数。
+func (b ByteSize) Bytes() int64 { return int64(b) }
+
+// UnmarshalJSON 接受容量字符串（"256MB"/"64KB"/"1GB"/"512B"）或整数（字节）。
+func (b *ByteSize) UnmarshalJSON(raw []byte) error {
+	s := strings.TrimSpace(string(raw))
+	if s == "null" || s == `""` {
+		*b = 0
+		return nil
+	}
+	if len(s) >= 2 && s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(raw, &str); err != nil {
+			return fmt.Errorf("bytesize: %w", err)
+		}
+		v, err := parseByteSize(str)
+		if err != nil {
+			return err
+		}
+		*b = ByteSize(v)
+		return nil
+	}
+	var n int64
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return fmt.Errorf("bytesize: %w", err)
+	}
+	*b = ByteSize(n)
+	return nil
+}
+
+// MarshalJSON 以整数字节输出。
+func (b ByteSize) MarshalJSON() ([]byte, error) {
+	return json.Marshal(int64(b))
+}
+
+// parseByteSize 解析 "256MB"/"64KB"/"1GB"/"512B"/"1024" 等容量字符串。
+func parseByteSize(s string) (int64, error) {
+	t := strings.ToUpper(strings.TrimSpace(s))
+	if t == "" {
+		return 0, fmt.Errorf("bytesize: empty")
+	}
+	mult := int64(1)
+	switch {
+	case strings.HasSuffix(t, "KB"):
+		mult, t = 1024, strings.TrimSuffix(t, "KB")
+	case strings.HasSuffix(t, "MB"):
+		mult, t = 1024*1024, strings.TrimSuffix(t, "MB")
+	case strings.HasSuffix(t, "GB"):
+		mult, t = 1024*1024*1024, strings.TrimSuffix(t, "GB")
+	case strings.HasSuffix(t, "B"):
+		mult, t = 1, strings.TrimSuffix(t, "B")
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("bytesize %q: %w", s, err)
+	}
+	return n * mult, nil
+}
+
 // CacheConfig 缓存完整配置。
-// 对应设计文档 §4.2 的 YAML schema。
+// 字段语义对齐设计文档 §4.2 的配置 schema；实现采用 JSON 加载（见 loader.go），
+// 时间/容量字段支持 "5s"/"200ms"、"256MB" 等人类可读写法（等价于 §4.2 的 YAML 表示）。
 type CacheConfig struct {
-	Mode                       CacheMode         `yaml:"mode"`
-	Scope                      string            `yaml:"scope"`
-	PolicyVersion              string            `yaml:"policy_version"`
-	InvalidatePropagateInterval time.Duration   `yaml:"invalidate_propagate_interval"`
-	CacheMemoryBudget          int64             `yaml:"cache_memory_budget"` // bytes
-	KeyFormat                  string            `yaml:"key_format"`
+	Mode                       CacheMode         `json:"mode"`
+	Scope                      string            `json:"scope"`
+	PolicyVersion              string            `json:"policy_version"`
+	InvalidatePropagateInterval Duration              `json:"invalidate_propagate_interval"`
+	CacheMemoryBudget          ByteSize              `json:"cache_memory_budget"` // 支持 "256MB" 或整数（字节）
+	KeyFormat                  string                `json:"key_format"`
 
-	Memory   MemoryConfig   `yaml:"memory"`
-	Exact    ExactConfig    `yaml:"exact"`
-	Negative NegativeConfig `yaml:"negative"`
-	Semantic SemanticConfig `yaml:"semantic"`
-	Redis    RedisConfig    `yaml:"redis"`
-	Warmup   WarmupConfig   `yaml:"warmup"`
-	Guard    GuardConfig    `yaml:"guard"`
-	Gray     GrayConfig     `yaml:"gray"`
+	Memory   MemoryConfig   `json:"memory"`
+	Exact    ExactConfig    `json:"exact"`
+	Negative NegativeConfig `json:"negative"`
+	Semantic SemanticConfig `json:"semantic"`
+	Redis    RedisConfig    `json:"redis"`
+	Warmup   WarmupConfig   `json:"warmup"`
+	Guard    GuardConfig    `json:"guard"`
+	Gray     GrayConfig     `json:"gray"`
 
-	SingleFlight SingleFlightConfig `yaml:"singleflight"`
-	Stream       StreamConfig       `yaml:"stream"`
-	Cacheability CacheabilityConfig `yaml:"cacheability"`
-	TTLPolicy    TTLPolicyConfig    `yaml:"ttl_policy"`
+	SingleFlight SingleFlightConfig `json:"singleflight"`
+	Stream       StreamConfig       `json:"stream"`
+	Cacheability CacheabilityConfig `json:"cacheability"`
+	TTLPolicy    TTLPolicyConfig    `json:"ttl_policy"`
 }
 
 // MemoryConfig 内存水位与清理配置。
 type MemoryConfig struct {
-	WatermarkHigh   float64       `yaml:"watermark_high"`
-	WatermarkLow    float64       `yaml:"watermark_low"`
-	CleanupInterval time.Duration `yaml:"cleanup_interval"`
-	CleanupBatch    int           `yaml:"cleanup_batch"`
+	WatermarkHigh   float64  `json:"watermark_high"`
+	WatermarkLow    float64  `json:"watermark_low"`
+	CleanupInterval Duration `json:"cleanup_interval"`
+	CleanupBatch    int      `json:"cleanup_batch"`
 }
 
 // ExactConfig 精确缓存配置。
 type ExactConfig struct {
-	Enabled        bool          `yaml:"enabled"`
-	TTL            time.Duration `yaml:"ttl"`
-	MaxEntries     int           `yaml:"max_entries"`
-	MaxEntryBytes  int           `yaml:"max_entry_bytes"`
-	MinTokens      int           `yaml:"min_tokens"`
-	MinPromptTokens int          `yaml:"min_prompt_tokens"`
+	Enabled         bool     `json:"enabled"`
+	TTL             Duration `json:"ttl"`
+	MaxEntries      int      `json:"max_entries"`
+	MaxEntryBytes   ByteSize `json:"max_entry_bytes"`
+	MinTokens       int      `json:"min_tokens"`
+	MinPromptTokens int      `json:"min_prompt_tokens"`
 }
 
 // NegativeConfig 负向缓存配置。
 type NegativeConfig struct {
-	Enabled    bool          `yaml:"enabled"`
-	TTL        time.Duration `yaml:"ttl"`
-	MaxEntries int           `yaml:"max_entries"`
-	OnlyFor    []string      `yaml:"only_for"`
+	Enabled    bool     `json:"enabled"`
+	TTL        Duration `json:"ttl"`
+	MaxEntries int      `json:"max_entries"`
+	OnlyFor    []string `json:"only_for"`
 }
 
 // SemanticConfig 语义缓存配置。
 type SemanticConfig struct {
-	Enabled  bool             `yaml:"enabled"`
-	Embedder EmbedderConfig   `yaml:"embedder"`
-	Vector   VectorConfig     `yaml:"vector"`
-	Threshold ThresholdConfig  `yaml:"threshold"`
-	SceneHint SceneHintConfig  `yaml:"scene_hint"`
-	Jitter    JitterConfig    `yaml:"jitter"`
+	Enabled  bool             `json:"enabled"`
+	Embedder EmbedderConfig   `json:"embedder"`
+	Vector   VectorConfig     `json:"vector"`
+	Threshold ThresholdConfig  `json:"threshold"`
+	SceneHint SceneHintConfig  `json:"scene_hint"`
+	Jitter    JitterConfig    `json:"jitter"`
 }
 
 // EmbedderConfig embedding 配置。
 type EmbedderConfig struct {
-	Kind      string        `yaml:"kind"` // sidecar | stub
-	Endpoint  string        `yaml:"endpoint"`
-	ModelID   string        `yaml:"model_id"`
-	Dim       int           `yaml:"dim"`
-	Timeout   time.Duration `yaml:"timeout"`
-	BatchMax  int           `yaml:"batch_max"`
-	FailOpen  bool          `yaml:"fail_open"`
+	Kind      string   `json:"kind"` // sidecar | stub
+	Endpoint  string   `json:"endpoint"`
+	ModelID   string   `json:"model_id"`
+	Dim       int      `json:"dim"`
+	Timeout   Duration `json:"timeout"`
+	BatchMax  int      `json:"batch_max"`
+	FailOpen  bool     `json:"fail_open"`
 }
 
 // VectorConfig 向量索引配置。
 type VectorConfig struct {
-	Backend        string            `yaml:"backend"` // flat | hnsw | redis-vss
-	FlatMaxEntries int              `yaml:"flat_max_entries"`
-	TopK           int               `yaml:"top_k"`
-	TenantPolicy   map[string]string `yaml:"tenant_policy"` // off | exact_only
+	Backend        string            `json:"backend"` // flat | hnsw | redis-vss
+	FlatMaxEntries int              `json:"flat_max_entries"`
+	TopK           int               `json:"top_k"`
+	TenantPolicy   map[string]string `json:"tenant_policy"` // off | exact_only
 }
 
 // ThresholdConfig 相似度阈值配置（场景化）。
 type ThresholdConfig struct {
-	Factual          float64    `yaml:"factual"`
-	General          float64    `yaml:"general"`
-	Code             float64    `yaml:"math"`
-	Math             float64    `yaml:"code"`
-	StrictFingerprint []string   `yaml:"strict_fingerprint"`
+	Factual          float64    `json:"factual"`
+	General          float64    `json:"general"`
+	Code             float64    `json:"code"`
+	Math             float64    `json:"math"`
+	StrictFingerprint []string   `json:"strict_fingerprint"`
 }
 
 // SceneHintConfig 场景提示配置。
 type SceneHintConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled bool `json:"enabled"`
 }
 
 // JitterConfig 侧信道抖动配置。
 type JitterConfig struct {
-	Enabled             bool `yaml:"enabled"`
-	MaxMs               int  `yaml:"max_ms"`
-	HitOnlyCompensation bool `yaml:"hit_only_compensation"`
+	Enabled             bool `json:"enabled"`
+	MaxMs               int  `json:"max_ms"`
+	HitOnlyCompensation bool `json:"hit_only_compensation"`
 }
 
 // RedisConfig Redis 配置（形态 B/C）。
 type RedisConfig struct {
-	Enabled      bool          `yaml:"enabled"`
-	Addr         string        `yaml:"addr"`
-	DB           int           `yaml:"db"`
-	PasswordRef  string        `yaml:"password_ref"`
-	TrustedCIDR  []string      `yaml:"trusted_cidr"`
-	KeyPrefix    string        `yaml:"key_prefix"`
-	TTLSlack     time.Duration `yaml:"ttl_slack"`
-	PoolSize     int           `yaml:"pool_size"`
-	PoolTimeout  time.Duration `yaml:"pool_timeout"`
-	DialTimeout  time.Duration `yaml:"dial_timeout"`
-	ReadTimeout  time.Duration `yaml:"read_timeout"`
-	WriteTimeout time.Duration `yaml:"write_timeout"`
-	MaxRetries   int           `yaml:"max_retries"`
+	Enabled      bool          `json:"enabled"`
+	Addr         string        `json:"addr"`
+	DB           int           `json:"db"`
+	PasswordRef  string        `json:"password_ref"`
+	TrustedCIDR  []string      `json:"trusted_cidr"`
+	KeyPrefix    string        `json:"key_prefix"`
+	TTLSlack     Duration   `json:"ttl_slack"`
+	PoolSize     int        `json:"pool_size"`
+	PoolTimeout  Duration   `json:"pool_timeout"`
+	DialTimeout  Duration   `json:"dial_timeout"`
+	ReadTimeout  Duration   `json:"read_timeout"`
+	WriteTimeout Duration   `json:"write_timeout"`
+	MaxRetries   int           `json:"max_retries"`
 }
 
 // WarmupConfig 预热配置。
 type WarmupConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	Source       string `yaml:"source"`
-	File         string `yaml:"file"`
-	Trigger      string `yaml:"trigger"`
-	DailyAt      string `yaml:"daily_at"`
-	MaxItems     int    `yaml:"max_items"`
-	BudgetExempt bool   `yaml:"budget_exempt"`
+	Enabled      bool   `json:"enabled"`
+	Source       string `json:"source"`
+	File         string `json:"file"`
+	Trigger      string `json:"trigger"`
+	DailyAt      string `json:"daily_at"`
+	MaxItems     int    `json:"max_items"`
+	BudgetExempt bool   `json:"budget_exempt"`
 }
 
 // GuardConfig 缓存安全配置。
 type GuardConfig struct {
-	ReadFastCheck       bool   `yaml:"read_fast_check"`
-	ReadFastCheckAction string `yaml:"read_fast_check_action"` // treat_as_miss | block
-	WriteRequiresOutGuard bool `yaml:"write_requires_out_guard"`
+	ReadFastCheck       bool   `json:"read_fast_check"`
+	ReadFastCheckAction string `json:"read_fast_check_action"` // treat_as_miss | block
+	WriteRequiresOutGuard bool `json:"write_requires_out_guard"`
 }
 
 // GrayConfig 灰度配置。
 type GrayConfig struct {
-	Enabled        bool     `yaml:"enabled"`
-	CanaryTenants  []string `yaml:"canary_tenants"`
-	CanaryScenes   []string `yaml:"canary_scenes"`
-	CanaryModels   []string `yaml:"canary_models"`
-	TrafficPercent int      `yaml:"traffic_percent"`
-	WriteOnly      bool     `yaml:"write_only"`
+	Enabled        bool     `json:"enabled"`
+	CanaryTenants  []string `json:"canary_tenants"`
+	CanaryScenes   []string `json:"canary_scenes"`
+	CanaryModels   []string `json:"canary_models"`
+	TrafficPercent int      `json:"traffic_percent"`
+	WriteOnly      bool     `json:"write_only"`
 }
 
 // SingleFlightConfig 请求合并配置。
 type SingleFlightConfig struct {
-	Enabled       bool          `yaml:"enabled"`
-	MaxWait       time.Duration `yaml:"max_wait"`
-	FailurePolicy string        `yaml:"failure_policy"` // independent | propagate
+	Enabled       bool     `json:"enabled"`
+	MaxWait       Duration `json:"max_wait"`
+	FailurePolicy string   `json:"failure_policy"` // independent | propagate
 }
 
 // StreamConfig 流式分段缓存配置。
 type StreamConfig struct {
-	Enabled     bool          `yaml:"enabled"`
-	MaxSegments int           `yaml:"max_segments"`
-	MinGap      time.Duration `yaml:"min_gap"`
-	MaxGap      time.Duration `yaml:"max_gap"`
+	Enabled     bool     `json:"enabled"`
+	MaxSegments int      `json:"max_segments"`
+	MinGap      Duration `json:"min_gap"`
+	MaxGap      Duration `json:"max_gap"`
 }
 
 // CacheabilityConfig 可缓存性配置。
 type CacheabilityConfig struct {
-	MultiTurn            bool     `yaml:"multi_turn"`
-	BypassHeader         string   `yaml:"bypass_header"`
-	TimeSensitiveScenes  []string `yaml:"time_sensitive_scenes"`
-	DisabledScenes       []string `yaml:"disabled_scenes"`
+	MultiTurn            bool     `json:"multi_turn"`
+	BypassHeader         string   `json:"bypass_header"`
+	TimeSensitiveScenes  []string `json:"time_sensitive_scenes"`
+	DisabledScenes       []string `json:"disabled_scenes"`
 }
 
 // TTLPolicyConfig TTL 维度覆盖配置。
 type TTLPolicyConfig struct {
-	Resolution string            `yaml:"resolution"` // specific_first | min
-	ByTenant   map[string]string `yaml:"by_tenant"`  // duration string
-	ByModel    map[string]string `yaml:"by_model"`
-	ByScene    map[string]string `yaml:"by_scene"`
+	Resolution string            `json:"resolution"` // specific_first | min
+	ByTenant   map[string]string `json:"by_tenant"`  // duration string
+	ByModel    map[string]string `json:"by_model"`
+	ByScene    map[string]string `json:"by_scene"`
 }
 
 // DefaultConfig 返回默认配置（mode=off，与现网逐字节一致）。
@@ -188,26 +296,26 @@ func DefaultConfig() CacheConfig {
 		Mode:                       ModeOff,
 		Scope:                      "per_tenant",
 		PolicyVersion:              "1",
-		InvalidatePropagateInterval: 5 * time.Second,
-		CacheMemoryBudget:          512 * 1024 * 1024, // 512MB（§5.6 推荐：缓存结构 + 预留，一期精确+二期向量）
+		InvalidatePropagateInterval: Duration(5 * time.Second),
+		CacheMemoryBudget:          ByteSize(512 * 1024 * 1024), // 512MB（§5.6 推荐：缓存结构 + 预留，一期精确+二期向量）
 		KeyFormat:                  "v2",
 		Memory: MemoryConfig{
 			WatermarkHigh:   0.9,
 			WatermarkLow:    0.8,
-			CleanupInterval: 60 * time.Second,
+			CleanupInterval: Duration(60 * time.Second),
 			CleanupBatch:    1000,
 		},
 		Exact: ExactConfig{
-			Enabled:        true,
-			TTL:            3600 * time.Second,
-			MaxEntries:     8192,
-			MaxEntryBytes:  65536,
-			MinTokens:      4,
+			Enabled:         true,
+			TTL:             Duration(3600 * time.Second),
+			MaxEntries:      8192,
+			MaxEntryBytes:   ByteSize(65536),
+			MinTokens:       4,
 			MinPromptTokens: 8,
 		},
 		Negative: NegativeConfig{
 			Enabled:    true,
-			TTL:        60 * time.Second,
+			TTL:        Duration(60 * time.Second),
 			MaxEntries: 4096,
 			OnlyFor:    []string{"guardrail", "output_guard"},
 		},
@@ -218,7 +326,7 @@ func DefaultConfig() CacheConfig {
 				Endpoint:  "http://127.0.0.1:18081",
 				ModelID:   "bge-small-zh-v1.5",
 				Dim:       512,
-				Timeout:   200 * time.Millisecond,
+				Timeout:   Duration(200 * time.Millisecond),
 				BatchMax:  8,
 				FailOpen:  true,
 			},
@@ -247,12 +355,12 @@ func DefaultConfig() CacheConfig {
 			Addr:         "redis-address:6379",
 			DB:           3,
 			KeyPrefix:    "og:c:1:",
-			TTLSlack:     300 * time.Second,
+			TTLSlack:     Duration(300 * time.Second),
 			PoolSize:     32,
-			PoolTimeout:  100 * time.Millisecond,
-			DialTimeout:  200 * time.Millisecond,
-			ReadTimeout:  150 * time.Millisecond,
-			WriteTimeout: 500 * time.Millisecond,
+			PoolTimeout:  Duration(100 * time.Millisecond),
+			DialTimeout:  Duration(200 * time.Millisecond),
+			ReadTimeout:  Duration(150 * time.Millisecond),
+			WriteTimeout: Duration(500 * time.Millisecond),
 			MaxRetries:   2,
 		},
 		Warmup: WarmupConfig{
@@ -272,14 +380,14 @@ func DefaultConfig() CacheConfig {
 		},
 		SingleFlight: SingleFlightConfig{
 			Enabled:       true,
-			MaxWait:       3 * time.Second,
+			MaxWait:       Duration(3 * time.Second),
 			FailurePolicy: "independent",
 		},
 		Stream: StreamConfig{
 			Enabled:     true,
 			MaxSegments: 512,
-			MinGap:      8 * time.Millisecond,
-			MaxGap:      400 * time.Millisecond,
+			MinGap:      Duration(8 * time.Millisecond),
+			MaxGap:      Duration(400 * time.Millisecond),
 		},
 		Cacheability: CacheabilityConfig{
 			MultiTurn:    false,
@@ -325,21 +433,21 @@ func (c CacheConfig) Validate() []error {
 	}
 
 	// 规则 5：ttl >= 1s；negative.ttl <= exact.ttl
-	if c.Exact.TTL < time.Second {
+	if c.Exact.TTL.D() < time.Second {
 		errs = append(errs, fmt.Errorf("rule 5: exact.ttl must be >= 1s"))
 	}
-	if c.Negative.TTL < time.Second {
+	if c.Negative.TTL.D() < time.Second {
 		errs = append(errs, fmt.Errorf("rule 5: negative.ttl must be >= 1s"))
 	}
-	if c.Negative.TTL > c.Exact.TTL {
+	if c.Negative.TTL.D() > c.Exact.TTL.D() {
 		errs = append(errs, fmt.Errorf("rule 5: negative.ttl must be <= exact.ttl"))
 	}
 
 	// 规则 6：max_entries × max_entry_bytes <= cache_memory_budget
-	memBudget := int64(c.Exact.MaxEntries) * int64(c.Exact.MaxEntryBytes)
-	if memBudget > c.CacheMemoryBudget {
+	memBudget := int64(c.Exact.MaxEntries) * c.Exact.MaxEntryBytes.Bytes()
+	if memBudget > c.CacheMemoryBudget.Bytes() {
 		errs = append(errs, fmt.Errorf("rule 6: exact.max_entries × max_entry_bytes (%d) > cache_memory_budget (%d)",
-			memBudget, c.CacheMemoryBudget))
+			memBudget, c.CacheMemoryBudget.Bytes()))
 	}
 
 	// 规则 13：semantic.enabled 时 scope 必须为 per_tenant

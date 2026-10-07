@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"sync/atomic"
+	"time"
 )
 
 // CacheEngine 缓存编排入口（§4.1.1）。
@@ -15,6 +17,8 @@ type CacheEngine interface {
 	Store(ctx StoreContext, res InferResult) StoreOutcome
 	Invalidate(sel InvalidateSelector) (int, error)
 	Stats() StatsSnapshot
+	// RenderPrometheus 以 Prometheus 文本格式输出缓存指标（§9.1）。
+	RenderPrometheus(w io.Writer)
 	Close() error
 }
 
@@ -113,7 +117,7 @@ func NewCacheEngine(cfg CacheConfig, opts ...EngineOption) CacheEngine {
 		e.stats = newStatsCollector()
 	}
 	if e.exact == nil && e.cfg.Exact.Enabled {
-		e.exact = NewLRUExactStore(e.cfg.Exact.MaxEntries, e.cfg.Exact.MaxEntryBytes)
+		e.exact = NewLRUExactStore(e.cfg.Exact.MaxEntries, int(e.cfg.Exact.MaxEntryBytes.Bytes()))
 	}
 	if e.neg == nil && e.cfg.Negative.Enabled {
 		e.neg = NewLRUNegativeStore(e.cfg.Negative.MaxEntries)
@@ -142,10 +146,11 @@ func (e *engine) Lookup(ctx LookupContext) LookupResult {
 	if e.closed.Load() {
 		return LookupResult{Hit: false, Kind: "miss", RejectReason: "closed"}
 	}
+	start := time.Now()
 
 	// 0. 请求级开关（全局 mode + 租户策略）
 	if e.cfg.Mode == ModeOff || tenantPolicy(e.cfg, ctx.TenantID) == PolicyOff {
-		e.stats.observeLookup("precheck", "disabled")
+		e.observePrecheck("disabled", start)
 		return LookupResult{
 			Hit:          false,
 			Kind:         "miss",
@@ -156,7 +161,7 @@ func (e *engine) Lookup(ctx LookupContext) LookupResult {
 
 	// 灰度写只读（write_only）
 	if e.canary.Enabled() && e.canary.WriteOnly() {
-		e.stats.observeLookup("precheck", "canary_write_only")
+		e.observePrecheck("disabled", start)
 		return LookupResult{
 			Hit:          false,
 			Kind:         "miss",
@@ -167,7 +172,7 @@ func (e *engine) Lookup(ctx LookupContext) LookupResult {
 
 	// 灰度流量控制
 	if e.canary.Enabled() && !e.canary.Allowed(ctx) {
-		e.stats.observeLookup("precheck", "canary_skip")
+		e.observePrecheck("disabled", start)
 		return LookupResult{
 			Hit:          false,
 			Kind:         "miss",
@@ -181,7 +186,7 @@ func (e *engine) Lookup(ctx LookupContext) LookupResult {
 
 	// 2. 可缓存性判定
 	if d := e.cache.Cacheable(&ctx); !d.Cacheable {
-		e.stats.observeLookup("precheck", "not_cacheable")
+		e.observePrecheck("not_cacheable", start)
 		return LookupResult{
 			Hit:           false,
 			Kind:          "miss",
@@ -203,10 +208,21 @@ func (e *engine) Lookup(ctx LookupContext) LookupResult {
 	return e.doLookup(ctx)
 }
 
+// observePrecheck 记录 precheck 阶段结果与耗时（指标契约：result 须在枚举内）。
+func (e *engine) observePrecheck(result string, start time.Time) {
+	e.stats.observeLookup("precheck", result)
+	e.stats.observeLookupDuration("precheck", time.Since(start))
+}
+
 // doLookup 实际查询（不含 single-flight）。
-func (e *engine) doLookup(ctx LookupContext) LookupResult {
+func (e *engine) doLookup(ctx LookupContext) (res LookupResult) {
+	start := time.Now()
+	deepest := "precheck"
+	defer func() { e.stats.observeLookupDuration(deepest, time.Since(start)) }()
+
 	// 3. L1 精确
 	if e.exact != nil && e.cfg.Exact.Enabled {
+		deepest = "exact"
 		key := e.exactKey(ctx)
 		if entry, ok := e.exact.Get(key); ok {
 			if !EntryUsable(entry, ctx.GuardVer, ctx.PolicyVer, e.nowFn()) {
@@ -220,6 +236,7 @@ func (e *engine) doLookup(ctx LookupContext) LookupResult {
 
 	// 4. 负向缓存
 	if e.neg != nil && e.cfg.Negative.Enabled {
+		deepest = "negative"
 		nkey := e.negKey(ctx)
 		if p, ok := e.neg.Get(nkey); ok &&
 			p.PolicyVer == ctx.PolicyVer && p.GuardVer == ctx.GuardVer {
@@ -230,6 +247,7 @@ func (e *engine) doLookup(ctx LookupContext) LookupResult {
 
 	// 5. L2 语义（二期）
 	if e.sem != nil && e.sem.Enabled(ctx.TenantID) {
+		deepest = "semantic"
 		hit, entryID, sim, sceneStr, th, reason := e.sem.Lookup(ctx)
 		if hit && e.exact != nil {
 			// 从 ExactStore 取正文
@@ -241,8 +259,8 @@ func (e *engine) doLookup(ctx LookupContext) LookupResult {
 					rfp := ExtractEntities(entry.Text)
 					fpTh := e.fingerprintThreshold(sceneStr)
 					if !qfp.Compatible(rfp, fpTh) {
-						// 实体不兼容 → 不命中
-						e.stats.observeLookup("semantic", "fingerprint_miss")
+						// 实体不兼容 → 不命中（指标枚举归一化为 miss，详见 §9.1 #34/#37）
+						e.stats.observeLookup("semantic", "miss")
 						return LookupResult{
 							Hit:          false,
 							Kind:         "miss",
@@ -265,9 +283,9 @@ func (e *engine) doLookup(ctx LookupContext) LookupResult {
 				e.exact.Delete(entryID)
 			}
 			_ = e.sem.Delete(entryID)
-			e.stats.observeLookup("semantic", "entry_evicted")
+			e.stats.observeLookup("semantic", "miss") // 枚举归一化（原 entry_evicted）
 		} else if hit {
-			e.stats.observeLookup("semantic", "no_exact_store")
+			e.stats.observeLookup("semantic", "miss") // 枚举归一化（原 no_exact_store）
 		} else {
 			e.stats.observeLookup("semantic", "miss")
 			_ = reason
@@ -386,7 +404,7 @@ func (e *engine) Store(ctx StoreContext, res InferResult) StoreOutcome {
 	if res.Negative != nil && e.neg != nil && e.cfg.Negative.Enabled {
 		if e.shouldWriteNegative(res.Negative) {
 			nkey := e.negKey(ctx.LookupContext)
-			e.neg.Put(nkey, res.Negative, e.cfg.Negative.TTL)
+			e.neg.Put(nkey, res.Negative, e.cfg.Negative.TTL.D())
 			e.stats.observeStore("negative")
 			return StoreOutcome{Stored: true, Layer: "negative"}
 		}
@@ -405,7 +423,7 @@ func (e *engine) Store(ctx StoreContext, res InferResult) StoreOutcome {
 	if res.TokensOut < e.cfg.Exact.MinTokens {
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "too_short"}
 	}
-	if len(res.Text) > e.cfg.Exact.MaxEntryBytes {
+	if int64(len(res.Text)) > e.cfg.Exact.MaxEntryBytes.Bytes() {
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "too_long"}
 	}
 
@@ -495,7 +513,7 @@ func (e *engine) Invalidate(sel InvalidateSelector) (int, error) {
 		// 全量清空：重建 store
 		if e.exact != nil {
 			count += e.exact.Len()
-			e.exact = NewLRUExactStore(e.cfg.Exact.MaxEntries, e.cfg.Exact.MaxEntryBytes)
+			e.exact = NewLRUExactStore(e.cfg.Exact.MaxEntries, int(e.cfg.Exact.MaxEntryBytes.Bytes()))
 		}
 		if e.neg != nil {
 			count += e.neg.Len()

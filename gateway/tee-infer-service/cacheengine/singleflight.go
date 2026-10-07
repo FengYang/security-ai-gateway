@@ -31,8 +31,8 @@ type sfCall struct {
 
 // NewSingleFlight 构造请求合并器。
 func NewSingleFlight(cfg SingleFlightConfig) SingleFlight {
-	if cfg.MaxWait <= 0 {
-		cfg.MaxWait = 3 * time.Second
+	if cfg.MaxWait.D() <= 0 {
+		cfg.MaxWait = Duration(3 * time.Second)
 	}
 	if cfg.FailurePolicy == "" {
 		cfg.FailurePolicy = "independent"

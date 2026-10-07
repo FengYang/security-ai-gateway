@@ -105,7 +105,7 @@ func (s *semanticStore) Lookup(ctx LookupContext) (bool, string, float64, string
 	th := s.sceneThreshold(scene)
 
 	// 计算 query 向量（按安全域选择 embedder）
-	ctx2, cancel := context.WithTimeout(context.Background(), s.cfg.Semantic.Embedder.Timeout)
+	ctx2, cancel := context.WithTimeout(context.Background(), s.cfg.Semantic.Embedder.Timeout.D())
 	defer cancel()
 
 	emb := s.embedderForLevel(ctx.SecurityLevel)
@@ -151,7 +151,7 @@ func (s *semanticStore) Store(entryID string, text string, meta VectorMeta) erro
 		return fmt.Errorf("empty text")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Semantic.Embedder.Timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Semantic.Embedder.Timeout.D())
 	defer cancel()
 
 	vec, err := emb.Embed(ctx, text)

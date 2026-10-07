@@ -31,8 +31,8 @@ func TestReplay_SingleBlock(t *testing.T) {
 func TestReplay_StreamWithPacedGaps(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Stream.Enabled = true
-	cfg.Stream.MinGap = 5 * time.Millisecond
-	cfg.Stream.MaxGap = 100 * time.Millisecond
+	cfg.Stream.MinGap = Duration(5 * time.Millisecond)
+	cfg.Stream.MaxGap = Duration(100 * time.Millisecond)
 
 	r := NewReplayer(&cfg)
 

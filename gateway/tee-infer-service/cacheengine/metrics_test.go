@@ -50,10 +50,10 @@ func TestRenderPrometheus(t *testing.T) {
 	// 验证关键指标存在
 	checks := []string{
 		"otpmask_cache_lookups_total",
-		"otpmask_cache_exact_entries",
-		"otpmask_cache_negative_entries",
-		"otpmask_cache_vector_entries",
+		"otpmask_cache_lookup_duration_seconds",
+		"otpmask_cache_entries",
 		"otpmask_cache_evictions_total",
+		"otpmask_cache_panic_total",
 		"otpmask_cache_read_fast_check_block_total",
 		"otpmask_cache_saved_tokens_total",
 		"otpmask_cache_mode",
@@ -76,5 +76,53 @@ func TestRenderPrometheus(t *testing.T) {
 	// 验证 mode 标签
 	if !strings.Contains(output, `mode="exact"`) {
 		t.Error("output missing mode=exact label")
+	}
+
+	// 条目数按 store 标签输出（详设 §9.1 #3）
+	if !strings.Contains(output, `otpmask_cache_entries{store="exact"}`) {
+		t.Error("output missing otpmask_cache_entries{store=\"exact\"}")
+	}
+	// 查询耗时直方图存在 _count/_sum/_bucket（详设 §9.1 #2）
+	if !strings.Contains(output, "otpmask_cache_lookup_duration_seconds_count") ||
+		!strings.Contains(output, "otpmask_cache_lookup_duration_seconds_sum") ||
+		!strings.Contains(output, "otpmask_cache_lookup_duration_seconds_bucket") {
+		t.Error("output missing lookup duration histogram series")
+	}
+}
+
+// TestObserveLookup_InvalidKindPanics 非法 kind 标签必须 panic（§9.1 硬约束）。
+func TestObserveLookup_InvalidKindPanics(t *testing.T) {
+	s := newStatsCollector()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic on invalid lookup kind")
+		}
+	}()
+	s.observeLookup("bogus", "hit")
+}
+
+// TestObserveLookup_InvalidResultPanics 非法 result 标签必须 panic（§9.1 硬约束）。
+func TestObserveLookup_InvalidResultPanics(t *testing.T) {
+	s := newStatsCollector()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic on invalid lookup result")
+		}
+	}()
+	s.observeLookup("exact", "bogus")
+}
+
+// TestObserveLookup_ValidEnums 合法枚举不 panic 且计数正确。
+func TestObserveLookup_ValidEnums(t *testing.T) {
+	s := newStatsCollector()
+	for _, kind := range []string{"precheck", "exact", "negative", "semantic"} {
+		for _, result := range []string{"hit", "miss", "disabled", "not_cacheable", "fastcheck_miss"} {
+			s.observeLookup(kind, result)
+		}
+	}
+	var snap StatsSnapshot
+	s.fillSnapshot(&snap)
+	if len(snap.Lookups) != 20 {
+		t.Fatalf("expected 20 lookup series, got %d", len(snap.Lookups))
 	}
 }
