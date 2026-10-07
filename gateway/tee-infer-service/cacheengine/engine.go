@@ -1,6 +1,7 @@
 package cacheengine
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -36,6 +37,7 @@ type engine struct {
 	scanner FastScanner
 	jitter  JitterInjector
 	canary  CanaryController
+	l1      RedisBackend // 形态 B/C 的 Redis 密文 L1（nil = 仅进程内 L0）
 	stats   *statsCollector
 	feedback FeedbackDetector
 	nowFn   nowFunc
@@ -78,6 +80,11 @@ func WithFeedbackDetector(f FeedbackDetector) EngineOption {
 // WithCanaryController 注入灰度控制器。
 func WithCanaryController(c CanaryController) EngineOption {
 	return func(e *engine) { e.canary = c }
+}
+
+// WithRedisBackend 注入 Redis 密文 L1（形态 B/C，§5.3）；nil = 仅进程内 L0。
+func WithRedisBackend(b RedisBackend) EngineOption {
+	return func(e *engine) { e.l1 = b }
 }
 
 // NewCacheEngine 构造缓存引擎。
@@ -220,7 +227,7 @@ func (e *engine) doLookup(ctx LookupContext) (res LookupResult) {
 	deepest := "precheck"
 	defer func() { e.stats.observeLookupDuration(deepest, time.Since(start)) }()
 
-	// 3. L1 精确
+	// 3. L0 精确（进程内）
 	if e.exact != nil && e.cfg.Exact.Enabled {
 		deepest = "exact"
 		key := e.exactKey(ctx)
@@ -232,6 +239,15 @@ func (e *engine) doLookup(ctx LookupContext) (res LookupResult) {
 			}
 		}
 		e.stats.observeLookup("exact", "miss")
+		// L1 读穿（形态 B/C，§5.3）：密文在 TEE 内解封后回填 L0（L0 仅热点，淘汰不联动删 L1）。
+		if e.l1 != nil {
+			if entry, _, hit, err := e.l1.Get(context.Background(), KindExact, key); err == nil && hit {
+				if EntryUsable(entry, ctx.GuardVer, ctx.PolicyVer, e.nowFn()) {
+					e.exact.Put(key, entry)
+					return e.finishHit(ctx, entry, KindExact, 1.0, 1.0)
+				}
+			}
+		}
 	}
 
 	// 4. 负向缓存
@@ -243,6 +259,17 @@ func (e *engine) doLookup(ctx LookupContext) (res LookupResult) {
 			return e.finishNegative(ctx, p)
 		}
 		e.stats.observeLookup("negative", "miss")
+		// 负向 L1 读穿（形态 B/C）。
+		if e.l1 != nil {
+			if entry, _, hit, err := e.l1.Get(context.Background(), KindNegative, nkey); err == nil && hit &&
+				entry.Negative != nil {
+				p := entry.Negative
+				if p.PolicyVer == ctx.PolicyVer && p.GuardVer == ctx.GuardVer {
+					e.neg.Put(nkey, p, e.cfg.Negative.TTL.D())
+					return e.finishNegative(ctx, p)
+				}
+			}
+		}
 	}
 
 	// 5. L2 语义（二期）
@@ -404,8 +431,19 @@ func (e *engine) Store(ctx StoreContext, res InferResult) StoreOutcome {
 	if res.Negative != nil && e.neg != nil && e.cfg.Negative.Enabled {
 		if e.shouldWriteNegative(res.Negative) {
 			nkey := e.negKey(ctx.LookupContext)
-			e.neg.Put(nkey, res.Negative, e.cfg.Negative.TTL.D())
+			negTTL := e.cfg.Negative.TTL.D()
+			e.neg.Put(nkey, res.Negative, negTTL)
 			e.stats.observeStore("negative")
+			if e.l1 != nil {
+				expireAt := unixMs(e.nowFn) + negTTL.Milliseconds()
+				ne := &Entry{Kind: KindNegative, TenantID: ctx.TenantID, Negative: res.Negative,
+					ExpireAt: expireAt, PolicyVer: ctx.PolicyVer, GuardVer: ctx.GuardVer}
+				meta := MetaRec{Tenant: ctx.TenantID, ExpireAt: expireAt,
+					PolicyVer: ctx.PolicyVer, GuardVer: ctx.GuardVer, Model: ctx.Model}
+				if err := e.l1.Put(context.Background(), KindNegative, nkey, ne, meta, negTTL); err != nil {
+					_ = err // fail-open
+				}
+			}
 			return StoreOutcome{Stored: true, Layer: "negative"}
 		}
 	}
@@ -460,6 +498,14 @@ func (e *engine) Store(ctx StoreContext, res InferResult) StoreOutcome {
 	if e.exact != nil && e.cfg.Exact.Enabled {
 		e.exact.Put(key, entry)
 		e.stats.observeStore("exact")
+		// L1 写穿（形态 B/C）：Redis TTL = 内存 TTL + ttl_slack（由 backend 施加）。
+		if e.l1 != nil {
+			meta := MetaRec{Tenant: ctx.TenantID, ExpireAt: entry.ExpireAt,
+				PolicyVer: ctx.PolicyVer, GuardVer: ctx.GuardVer, Model: ctx.Model}
+			if err := e.l1.Put(context.Background(), KindExact, key, entry, meta, ttl); err != nil {
+				_ = err // fail-open：L1 写失败降级为仅 L0（§6.9）
+			}
+		}
 	}
 
 	// 写语义层（二期）
@@ -541,6 +587,34 @@ func (e *engine) Invalidate(sel InvalidateSelector) (int, error) {
 	// 按 model：遍历删除（精确层）
 	if sel.Model != "" && e.exact != nil {
 		count += e.deleteByModel(sel.Model)
+	}
+
+	// L1 失效（形态 B/C，§6.8）：删除 Redis 侧密文并广播给其它副本。
+	if e.l1 != nil {
+		ctx := context.Background()
+		switch {
+		case sel.All:
+			// 全量清理由 Redis 侧运维（DB/前缀级）承担，这里仅广播。
+		case sel.KeyHash != "":
+			_, _ = e.l1.Delete(ctx, KindExact, sel.KeyHash)
+			_, _ = e.l1.Delete(ctx, KindNegative, sel.KeyHash)
+		case sel.TenantID != "":
+			_, _ = e.l1.DeleteByTenant(ctx, sel.TenantID)
+		case sel.Model != "":
+			_, _ = e.l1.DeleteByModel(ctx, sel.Model)
+		}
+		ev := InvalidateEvent{Op: "key", Target: sel.KeyHash}
+		switch {
+		case sel.All:
+			ev = InvalidateEvent{Op: "all"}
+		case sel.TenantID != "":
+			ev = InvalidateEvent{Op: "tenant", Target: sel.TenantID}
+		case sel.Model != "":
+			ev = InvalidateEvent{Op: "model", Target: sel.Model}
+		}
+		if err := e.l1.Publish(ctx, ev); err != nil {
+			_ = err // fail-open：广播失败不影响本地失效（§6.8.3）
+		}
 	}
 
 	e.stats.observeInvalidate("selective", count)
