@@ -213,6 +213,7 @@ type teeServer struct {
 	cache           model.SemanticCache      // GF.4.1 精确缓存（P0-2：legacy 兜底；仅 cacheEngine==nil 时使用）
 	cacheEngine     cacheengine.CacheEngine  // P0-2 原生语义缓存引擎（命中/回填 + /metrics；nil = 未装配）
 	cacheConfig     *cacheengine.CacheConfig // E4：/cache/* 与 /config/cache 的配置快照来源
+	warmer          cacheengine.CacheWarmer  // E4-B：预热器（§6.7；nil = 未装配）
 	cacheEnabled    bool                     // P0-2 B2：原生缓存是否生效（mode != off）；false 时零开销
 	cacheMode       string                   // P0-2 §9.1 #20：缓存运行模式（TTFT 标签）
 	cacheReplay     cacheReplayConfig        // P0-2 B2：§6.12 回放节拍参数快照
@@ -1600,6 +1601,33 @@ type streamOutcome struct {
 	EmittedTokens int    // 实际下发（客户端实付）token；不含被拦内容与标识帧
 }
 
+// newRequestOutputGuard 构造请求级输出侧审查管线（§2.3 I1）。
+// mode=off/空 → 返回 (nil, nil)，调用侧走原路径（零行为变化）；非法模式返回错误（fail-closed）。
+// 主链（streamTextInfer）与预热（warmupInfer）共用此构造，避免两处参数漂移。
+func (s *teeServer) newRequestOutputGuard(tenant, requestID string) (*outputGuard, error) {
+	// OG-18：mask 改写开关 + PII 正则（仅 lexiconRegistry 有正则，fallback guardrail 无则不改写）。
+	var maskRes []*regexp.Regexp
+	if reg, ok := s.l1Classifier().(*lexiconRegistry); ok {
+		maskRes = reg.CategoryRegexps("A4-06")
+	}
+	// S3-2：按当前策略派生判定单元（请求级构造，切换对新请求真实生效），
+	// 以启动缓冲参数为基底仅覆盖 Unit（P-UNIT 随 P-STRATEGY 联动）。
+	strategy := s.currentOutputGuardStrategy()
+	disabled := s.currentDisabledCategories()
+	reqParams := s.outputGuardParams
+	reqParams.Unit = unitForStrategy(strategy)
+	return newOutputGuard(outputGuardConfig{
+		Mode:          s.currentOutputGuardMode(),
+		PolicyVersion: s.policyVersion(),
+		Strategy:      strategy,
+		Params:        reqParams,
+		Cascade:       s.outputGuardCascade, // OG-13：级联参数（槽位/并发阀/超时/预演开关）
+		MaskEnabled:   s.outputGuardMaskEnabled,
+		MaskRegexps:   maskRes,
+	}, withCategoryGate(s.l1Classifier(), disabled), withCategoryGate(s.outputGuardL2, disabled),
+		s.metrics, s.audit, tenant, requestID)
+}
+
 // streamTextInfer 流式生成并逐块写出加密 SSE（seq 严格递增；finish 分片终止）。
 // 返回非 nil = 流式失败（调用方审计；error 分片已尽力写出）。
 //
@@ -1647,28 +1675,8 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		}
 		return nil
 	}
-	// I1：构造审查管线（mode=off 返回 nil → 下方走原路径，零行为变化）。
-	// OG-18：mask 改写开关 + PII 正则（仅 lexiconRegistry 有正则，fallback guardrail 无则不改写）。
-	var maskRes []*regexp.Regexp
-	if reg, ok := s.l1Classifier().(*lexiconRegistry); ok {
-		maskRes = reg.CategoryRegexps("A4-06")
-	}
-	// S3-2：按当前策略派生判定单元（请求级构造，切换对新请求真实生效），
-	// 以启动缓冲参数为基底仅覆盖 Unit（P-UNIT 随 P-STRATEGY 联动）。
-	strategy := s.currentOutputGuardStrategy()
-	disabled := s.currentDisabledCategories()
-	reqParams := s.outputGuardParams
-	reqParams.Unit = unitForStrategy(strategy)
-	og, ogErr := newOutputGuard(outputGuardConfig{
-		Mode:          s.currentOutputGuardMode(),
-		PolicyVersion: s.policyVersion(),
-		Strategy:      strategy,
-		Params:        reqParams,
-		Cascade:       s.outputGuardCascade, // OG-13：级联参数（槽位/并发阀/超时/预演开关）
-		MaskEnabled:   s.outputGuardMaskEnabled,
-		MaskRegexps:   maskRes,
-	}, withCategoryGate(s.l1Classifier(), disabled), withCategoryGate(s.outputGuardL2, disabled),
-		s.metrics, s.audit, tenant, requestID)
+	// I1：构造请求级输出侧审查管线（mode=off 返回 nil → 下方走原路径，零行为变化）。
+	og, ogErr := s.newRequestOutputGuard(tenant, requestID)
 	if ogErr != nil {
 		return ogErr // fail-closed：模式非法不得静默放行（启动期已校验，此处兜底）
 	}
@@ -3833,6 +3841,12 @@ func main() {
 	}
 	// P0-2 §9.1 #16 / B-7.5-1：审计链写入失败 → 缓存指标（不阻塞缓存写入）
 	audit.SetWriteFailureHook(cacheEng.RecordAuditFailure)
+	// E4-B：预热器装配（§6.7）。warmup.enabled=false 时 Run 返回 ErrWarmupDisabled（API 映射 CACHE_DISABLED）。
+	srv.warmer = cacheengine.NewFileWarmer(&cacheCfg, cacheEng, srv.warmupInfer,
+		cacheengine.WithWarmAudit(func(action string, fields map[string]any) {
+			log.Printf("[tee] %s %v", action, fields)
+			srv.audit.append(AuditEvent{Action: action, Result: fmt.Sprint(fields["status"])})
+		}))
 	// P0-4 §10.1：跨源 cryptop 指标绑定（须在 srv.metrics 初始化后）
 	srv.metrics.SetCryptopCompatMode("mask_bridge", *cryptoMaskPRG == "bridge")
 	setEnclaveDualReadHook(srv.metrics.IncEnclaveDualRead)

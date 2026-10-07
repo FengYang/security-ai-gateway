@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 
 	"security-ai-gateway/gateway/tee-infer-service/cacheengine"
+	"security-ai-gateway/gateway/tee-infer-service/model"
+	"security-ai-gateway/protocol/go"
 )
 
 // ===== §4.3 管理 API：/cache/*（E4 批次 A：8 端点；warmup 两2端点归后续） =====
@@ -50,6 +55,9 @@ func (s *teeServer) registerCacheAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/cache/inspect/", api.handleInspect)
 	mux.HandleFunc("/cache/feedback", api.handleFeedback)
 	mux.HandleFunc("/config/cache", api.handleConfigSnapshot)
+	// E4-B：预热端点（§4.3 #6/#7）
+	mux.HandleFunc("/cache/warmup", api.handleWarmupTrigger)
+	mux.HandleFunc("/cache/warmup/", api.handleWarmupStatus)
 }
 
 // ===== 信封与鉴权 =====
@@ -288,4 +296,122 @@ func (a *cacheAdminAPI) handleConfigSnapshot(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeCacheOK(w, r, map[string]any{"configured": true, "config": a.srv.cacheConfig})
+}
+
+// ===== 预热端点（E4-B；§4.3 #6/#7） =====
+
+// warmupInfer 预热推理回调（§6.7.3）：与真实请求同源构造 ctx → 推理 → 输出侧审查 → 写前门禁结论。
+// 口径（E4-B 决策）：按 §6.7.3 字面（推理 + 输出侧审查 + 写前门禁）；**不计配额、不做输入侧 Guardrail/PII**
+// （预热清单为可信离线内容，§6.7.1）——偏差登记；配额（B-6.7-3）归后续。
+func (s *teeServer) warmupInfer(ctx context.Context, it cacheengine.WarmItem) (cacheengine.StoreContext, cacheengine.InferResult, error) {
+	engType, eng, err := s.resolveEngineWithFailover(it.Tenant, it.Model, protocol.EngineTypeTEEGPU)
+	if err != nil {
+		return cacheengine.StoreContext{}, cacheengine.InferResult{}, err
+	}
+	tx := sha256hex([]byte(it.Prompt))
+	lctx := buildCacheLookupContext(it.Tenant, engType, it.Model, tx, it.Prompt, it.MaxNewTokens, false, s.policyVersion())
+
+	maxTok := it.MaxNewTokens
+	if maxTok < 0 {
+		maxTok = 0 // 0 = 引擎缺省
+	}
+	genReq := model.GenerateRequest{
+		Model:     it.Model,
+		Messages:  []model.ChatMessage{{Role: "user", Content: it.Prompt}},
+		MaxTokens: uint32(maxTok),
+	}
+	if _, isCMAAS := eng.(*model.CmaasEngine); isCMAAS {
+		genReq.Model = "" // 与主链一致：cmaas 上游模型名由引擎缺省回退
+	}
+	var agg strings.Builder
+	if err := eng.Generate(genReq, func(d string) error { agg.WriteString(d); return nil }); err != nil {
+		return cacheengine.StoreContext{}, cacheengine.InferResult{}, err
+	}
+
+	// 输出侧审查（写前门禁依据）；mode=off 时 og=nil → writable=true（零行为变化）
+	writable := true
+	og, ogErr := s.newRequestOutputGuard(it.Tenant, "warmup")
+	if ogErr != nil {
+		return cacheengine.StoreContext{}, cacheengine.InferResult{}, ogErr
+	}
+	if og != nil {
+		noop := func(delta, finish string) error { return nil }
+		if err := og.Process(agg.String(), noop); err != nil {
+			writable = false
+		}
+		if err := og.Finish(noop); err != nil {
+			writable = false
+		}
+		if blocked, _ := og.BlockInfo(); blocked {
+			writable = false
+		}
+		og.Close()
+	}
+	sc := cacheengine.StoreContext{LookupContext: lctx, Writable: writable}
+	res := cacheengine.InferResult{Text: agg.String(), TokensOut: s.countTokens(agg.String()), Finish: "stop"}
+	return sc, res, nil
+}
+
+// handleWarmupTrigger POST /cache/warmup（§4.3 #6；体 {reset:bool} 可空）。
+func (a *cacheAdminAPI) handleWarmupTrigger(w http.ResponseWriter, r *http.Request) {
+	if !requireCacheMethod(w, r, http.MethodPost) || !a.authorize(w, r) || !a.enabled(w, r) {
+		return
+	}
+	cfg := a.srv.cacheConfig
+	if a.srv.warmer == nil || cfg == nil || !cfg.Warmup.Enabled {
+		writeCacheErr(w, r, http.StatusConflict, "CACHE_DISABLED", "预热未启用（warmup.enabled=false 或未装配）")
+		return
+	}
+	var body struct {
+		Reset bool `json:"reset"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&body) // 体可空
+
+	f, err := os.Open(cfg.Warmup.File)
+	if err != nil {
+		writeCacheErr(w, r, http.StatusBadRequest, "CACHE_INVALID_ARG", "预热文件不可读: "+err.Error())
+		return
+	}
+	defer f.Close()
+	items, err := cacheengine.LoadWarmItems(f)
+	if err != nil {
+		writeCacheErr(w, r, http.StatusBadRequest, "CACHE_INVALID_ARG", err.Error()) // 含行号（B-6.7-4）
+		return
+	}
+
+	id, err := a.srv.warmer.Run(items, body.Reset)
+	switch {
+	case errors.Is(err, cacheengine.ErrWarmupBusy):
+		writeCacheErr(w, r, http.StatusConflict, "CACHE_WARMUP_BUSY", "已有活跃预热任务")
+		return
+	case errors.Is(err, cacheengine.ErrWarmupDisabled):
+		writeCacheErr(w, r, http.StatusConflict, "CACHE_DISABLED", "预热未启用")
+		return
+	case err != nil:
+		writeCacheErr(w, r, http.StatusBadRequest, "CACHE_INVALID_ARG", err.Error())
+		return
+	}
+	writeCacheOK(w, r, map[string]any{"task_id": id, "total": len(items)})
+}
+
+// handleWarmupStatus GET /cache/warmup/{task_id}（§4.3 #7）。
+func (a *cacheAdminAPI) handleWarmupStatus(w http.ResponseWriter, r *http.Request) {
+	if !requireCacheMethod(w, r, http.MethodGet) || !a.authorize(w, r) || !a.enabled(w, r) {
+		return
+	}
+	if a.srv.warmer == nil {
+		writeCacheErr(w, r, http.StatusConflict, "CACHE_DISABLED", "预热未装配")
+		return
+	}
+	id, ok := pathSuffix(r, "/cache/warmup/")
+	if !ok {
+		writeCacheErr(w, r, http.StatusBadRequest, "CACHE_INVALID_ARG", "task_id 必填")
+		return
+	}
+	st := a.srv.warmer.Status()
+	if st.ID != id {
+		writeCacheErr(w, r, http.StatusNotFound, "CACHE_NOT_FOUND", "task_id 不存在或已过期")
+		return
+	}
+	writeCacheOK(w, r, st)
 }

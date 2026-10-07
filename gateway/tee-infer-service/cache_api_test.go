@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"security-ai-gateway/gateway/tee-infer-service/cacheengine"
 )
@@ -262,5 +266,133 @@ func TestCacheAPI_FeedbackNoteTruncated(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), long) {
 		t.Fatal("note 不应回显（仅内存态、截断）")
+	}
+}
+
+// ===== E4-B：预热端点（§4.3 #6/#7） =====
+
+// warmupTestCfg 构造含临时预热清单文件的配置。
+func warmupTestCfg(t *testing.T) cacheengine.CacheConfig {
+	t.Helper()
+	cfg := cacheAPITestCfg(cacheengine.ModeExact)
+	path := filepath.Join(t.TempDir(), "warmup.jsonl")
+	content := "{\"tenant\":\"t1\",\"model\":\"m1\",\"prompt\":\"warm prompt one\",\"max_new_tokens\":32}\n" +
+		"{\"tenant\":\"t1\",\"model\":\"m1\",\"prompt\":\"warm prompt two\",\"max_new_tokens\":32}\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("写预热清单: %v", err)
+	}
+	cfg.Warmup = cacheengine.WarmupConfig{Enabled: true, Source: "file", File: path, MaxItems: 100}
+	return cfg
+}
+
+// fakeWarmInfer 测试用预热推理回调（绕过真实引擎，构造同源 ctx）。
+func fakeWarmInfer(_ context.Context, it cacheengine.WarmItem) (cacheengine.StoreContext, cacheengine.InferResult, error) {
+	sc := cacheengine.StoreContext{
+		LookupContext: cacheengine.LookupContext{
+			TenantID: it.Tenant, EngineType: "cmaas", Model: it.Model, MaxNewTokens: it.MaxNewTokens,
+			TransformedHash: "wh-" + it.Prompt, PromptText: it.Prompt, PolicyVer: "1", GuardVer: "v1",
+		},
+		Writable: true,
+	}
+	return sc, cacheengine.InferResult{Text: "answer for " + it.Prompt, TokensOut: 5, Finish: "stop"}, nil
+}
+
+func newWarmupTestServer(cfg cacheengine.CacheConfig, eng cacheengine.CacheEngine, infer cacheengine.WarmInferFunc) *http.ServeMux {
+	srv := &teeServer{cacheEngine: eng, cacheConfig: &cfg, adminToken: cacheTestAdminToken,
+		warmer: cacheengine.NewFileWarmer(&cfg, eng, infer)}
+	mux := http.NewServeMux()
+	srv.registerCacheAPIRoutes(mux)
+	return mux
+}
+
+// TestCacheAPI_WarmupTriggerAndStatus POST 触发 → 返回 task_id；GET 查询进度；未知 id → 404。
+func TestCacheAPI_WarmupTriggerAndStatus(t *testing.T) {
+	cfg := warmupTestCfg(t)
+	eng := cacheengine.NewCacheEngine(cfg)
+	mux := newWarmupTestServer(cfg, eng, fakeWarmInfer)
+
+	w := cacheAPIReq(mux, http.MethodPost, "/cache/warmup", "", true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("触发 status=%d body=%s", w.Code, w.Body.String())
+	}
+	env := decodeEnvelope(t, w)
+	id, _ := env.Data["task_id"].(string)
+	if id == "" {
+		t.Fatalf("应返回 task_id：%+v", env)
+	}
+
+	// 轮询至任务结束
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sw := cacheAPIReq(mux, http.MethodGet, "/cache/warmup/"+id, "", true)
+		if sw.Code != http.StatusOK {
+			t.Fatalf("查询 status=%d body=%s", sw.Code, sw.Body.String())
+		}
+		senv := decodeEnvelope(t, sw)
+		if senv.Data["status"] != "running" {
+			if senv.Data["succeeded"].(float64) != 2 {
+				t.Fatalf("预热应成功 2 条：%+v", senv.Data)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("预热未在限时内结束")
+}
+
+// TestCacheAPI_WarmupDisabled warmup.enabled=false → 409 CACHE_DISABLED（B-6.7-9）。
+func TestCacheAPI_WarmupDisabled(t *testing.T) {
+	cfg := warmupTestCfg(t)
+	cfg.Warmup.Enabled = false
+	eng := cacheengine.NewCacheEngine(cfg)
+	mux := newWarmupTestServer(cfg, eng, fakeWarmInfer)
+
+	w := cacheAPIReq(mux, http.MethodPost, "/cache/warmup", "", true)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d want 409", w.Code)
+	}
+	if env := decodeEnvelope(t, w); env.Error == nil || env.Error.Code != "CACHE_DISABLED" {
+		t.Fatalf("错误码应为 CACHE_DISABLED：%+v", env)
+	}
+}
+
+// TestCacheAPI_WarmupBusy 并发触发 → 409 CACHE_WARMUP_BUSY（B-6.7-1）。
+func TestCacheAPI_WarmupBusy(t *testing.T) {
+	cfg := warmupTestCfg(t)
+	eng := cacheengine.NewCacheEngine(cfg)
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	blocking := func(ctx context.Context, it cacheengine.WarmItem) (cacheengine.StoreContext, cacheengine.InferResult, error) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return fakeWarmInfer(ctx, it)
+	}
+	mux := newWarmupTestServer(cfg, eng, blocking)
+
+	if w := cacheAPIReq(mux, http.MethodPost, "/cache/warmup", "", true); w.Code != http.StatusOK {
+		t.Fatalf("首次触发应 200，实际 %d body=%s", w.Code, w.Body.String())
+	}
+	<-started
+	w := cacheAPIReq(mux, http.MethodPost, "/cache/warmup", "", true)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("并发触发应 409，实际 %d", w.Code)
+	}
+	if env := decodeEnvelope(t, w); env.Error == nil || env.Error.Code != "CACHE_WARMUP_BUSY" {
+		t.Fatalf("错误码应为 CACHE_WARMUP_BUSY：%+v", env)
+	}
+	close(release)
+}
+
+// TestCacheAPI_WarmupStatusNotFound 未知 task_id → 404 CACHE_NOT_FOUND。
+func TestCacheAPI_WarmupStatusNotFound(t *testing.T) {
+	cfg := warmupTestCfg(t)
+	eng := cacheengine.NewCacheEngine(cfg)
+	mux := newWarmupTestServer(cfg, eng, fakeWarmInfer)
+
+	if w := cacheAPIReq(mux, http.MethodGet, "/cache/warmup/nope", "", true); w.Code != http.StatusNotFound {
+		t.Fatalf("未知 task 应 404，实际 %d", w.Code)
 	}
 }
