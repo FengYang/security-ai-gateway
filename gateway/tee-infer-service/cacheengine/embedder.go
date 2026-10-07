@@ -4,12 +4,34 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
 )
+
+// embedding 侧车错误哨兵（供 §9.1 #17/#28/#29/#30 指标分类，不改变既有错误语义）。
+var (
+	ErrEmbedUnavailable = errors.New("cache: embedder unavailable")
+	ErrEmbedTimeout     = errors.New("cache: embedder timeout")
+	ErrEmbedInvalid     = errors.New("cache: embedder invalid response")
+	ErrEmbedDimMismatch = errors.New("cache: embedder dim mismatch")
+)
+
+// isTimeoutErr 判定网络/上下文超时。
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
 
 // Embedder 向量编码器接口（§3.4）。
 // 实现：sidecar（HTTP 调用 TEE 内 embedding sidecar）/ stub（测试用）。
@@ -140,7 +162,7 @@ type embedResponse struct {
 // Embed 调用 sidecar 生成向量。
 func (s *sidecarEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	if text == "" {
-		return nil, fmt.Errorf("embedder: empty text")
+		return nil, fmt.Errorf("%w: empty text", ErrEmbedInvalid)
 	}
 
 	reqBody := embedRequest{
@@ -160,28 +182,31 @@ func (s *sidecarEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("embedder: request: %w", err)
+		if isTimeoutErr(err) {
+			return nil, fmt.Errorf("%w: request: %v", ErrEmbedTimeout, err)
+		}
+		return nil, fmt.Errorf("%w: request: %v", ErrEmbedUnavailable, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("embedder: status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("%w: status %d: %s", ErrEmbedUnavailable, resp.StatusCode, string(body))
 	}
 
 	var out embedResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("embedder: decode: %w", err)
+		return nil, fmt.Errorf("%w: decode: %v", ErrEmbedInvalid, err)
 	}
 	if out.Error != "" {
-		return nil, fmt.Errorf("embedder: %s", out.Error)
+		return nil, fmt.Errorf("%w: %s", ErrEmbedInvalid, out.Error)
 	}
 	if len(out.Data) == 0 || len(out.Data[0].Embedding) == 0 {
-		return nil, fmt.Errorf("embedder: empty embedding")
+		return nil, fmt.Errorf("%w: empty embedding", ErrEmbedInvalid)
 	}
 	if len(out.Data[0].Embedding) != s.cfg.Dim {
-		return nil, fmt.Errorf("embedder: dim mismatch: got %d, expected %d",
-			len(out.Data[0].Embedding), s.cfg.Dim)
+		return nil, fmt.Errorf("%w: got %d, expected %d",
+			ErrEmbedDimMismatch, len(out.Data[0].Embedding), s.cfg.Dim)
 	}
 	return out.Data[0].Embedding, nil
 }

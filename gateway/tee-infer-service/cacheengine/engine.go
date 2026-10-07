@@ -154,6 +154,11 @@ func NewCacheEngine(cfg CacheConfig, opts ...EngineOption) CacheEngine {
 		// 生产环境通过 WithSemanticStore 注入真正实现
 	}
 
+	// §9.1 指标接线：把 stats 门面注入语义存储（Redis 侧指标在 engine 调用点发射）。
+	if ss, ok := e.sem.(*semanticStore); ok {
+		ss.stats = e.stats
+	}
+
 	return e
 }
 
@@ -268,7 +273,10 @@ func (e *engine) doLookup(ctx LookupContext) (res LookupResult) {
 		e.stats.observeLookup("exact", "miss")
 		// L1 读穿（形态 B/C，§5.3）：密文在 TEE 内解封后回填 L0（L0 仅热点，淘汰不联动删 L1）。
 		if e.l1 != nil {
-			if entry, _, hit, err := e.l1.Get(context.Background(), KindExact, key); err == nil && hit {
+			entry, _, hit, gerr := e.l1.Get(context.Background(), KindExact, key)
+			if gerr != nil {
+				e.stats.observeRedisError("get") // §9.1 #19
+			} else if hit {
 				if EntryUsable(entry, ctx.GuardVer, ctx.PolicyVer, e.nowFn()) {
 					e.exact.Put(key, entry)
 					return e.finishHit(ctx, entry, KindExact, 1.0, 1.0)
@@ -288,8 +296,10 @@ func (e *engine) doLookup(ctx LookupContext) (res LookupResult) {
 		e.stats.observeLookup("negative", "miss")
 		// 负向 L1 读穿（形态 B/C）。
 		if e.l1 != nil {
-			if entry, _, hit, err := e.l1.Get(context.Background(), KindNegative, nkey); err == nil && hit &&
-				entry.Negative != nil {
+			entry, _, hit, gerr := e.l1.Get(context.Background(), KindNegative, nkey)
+			if gerr != nil {
+				e.stats.observeRedisError("get") // §9.1 #19
+			} else if hit && entry.Negative != nil {
 				p := entry.Negative
 				if p.PolicyVer == ctx.PolicyVer && p.GuardVer == ctx.GuardVer {
 					e.neg.Put(nkey, p, e.cfg.Negative.TTL.D())
@@ -314,7 +324,8 @@ func (e *engine) doLookup(ctx LookupContext) (res LookupResult) {
 					fpTh := e.fingerprintThreshold(sceneStr)
 					if !qfp.Compatible(rfp, fpTh) {
 						// 实体不兼容 → 不命中（指标枚举归一化为 miss，详见 §9.1 #34/#37）
-						e.stats.observeFingerprintReject(sceneStr) // §9.1 #34
+						e.stats.observeFingerprintReject(sceneStr)   // §9.1 #34
+						e.stats.observeSemanticReject("fingerprint") // §9.1 #37
 						e.stats.observeLookup("semantic", "miss")
 						return LookupResult{
 							Hit:          false,
@@ -485,7 +496,7 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 				meta := MetaRec{Tenant: ctx.TenantID, ExpireAt: expireAt,
 					PolicyVer: ctx.PolicyVer, GuardVer: ctx.GuardVer, Model: ctx.Model}
 				if err := e.l1.Put(context.Background(), KindNegative, nkey, ne, meta, negTTL); err != nil {
-					_ = err // fail-open
+					e.stats.observeRedisError("put") // §9.1 #19（fail-open）
 				}
 			}
 			return StoreOutcome{Stored: true, Layer: "negative"}
@@ -554,7 +565,7 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 			meta := MetaRec{Tenant: ctx.TenantID, ExpireAt: entry.ExpireAt,
 				PolicyVer: ctx.PolicyVer, GuardVer: ctx.GuardVer, Model: ctx.Model}
 			if err := e.l1.Put(context.Background(), KindExact, key, entry, meta, ttl); err != nil {
-				_ = err // fail-open：L1 写失败降级为仅 L0（§6.9）
+				e.stats.observeRedisError("put") // §9.1 #19（fail-open：L1 写失败降级为仅 L0，§6.9）
 			}
 		}
 	}
@@ -645,12 +656,20 @@ func (e *engine) Invalidate(sel InvalidateSelector) (int, error) {
 		case sel.All:
 			// 全量清理由 Redis 侧运维（DB/前缀级）承担，这里仅广播。
 		case sel.KeyHash != "":
-			_, _ = e.l1.Delete(ctx, KindExact, sel.KeyHash)
-			_, _ = e.l1.Delete(ctx, KindNegative, sel.KeyHash)
+			if _, err := e.l1.Delete(ctx, KindExact, sel.KeyHash); err != nil {
+				e.stats.observeRedisError("delete") // §9.1 #19
+			}
+			if _, err := e.l1.Delete(ctx, KindNegative, sel.KeyHash); err != nil {
+				e.stats.observeRedisError("delete") // §9.1 #19
+			}
 		case sel.TenantID != "":
-			_, _ = e.l1.DeleteByTenant(ctx, sel.TenantID)
+			if _, err := e.l1.DeleteByTenant(ctx, sel.TenantID); err != nil {
+				e.stats.observeRedisError("delete_by_tenant") // §9.1 #19
+			}
 		case sel.Model != "":
-			_, _ = e.l1.DeleteByModel(ctx, sel.Model)
+			if _, err := e.l1.DeleteByModel(ctx, sel.Model); err != nil {
+				e.stats.observeRedisError("delete_by_model") // §9.1 #19
+			}
 		}
 		ev := InvalidateEvent{Op: "key", Target: sel.KeyHash}
 		switch {
@@ -662,7 +681,7 @@ func (e *engine) Invalidate(sel InvalidateSelector) (int, error) {
 			ev = InvalidateEvent{Op: "model", Target: sel.Model}
 		}
 		if err := e.l1.Publish(ctx, ev); err != nil {
-			_ = err // fail-open：广播失败不影响本地失效（§6.8.3）
+			e.stats.observeRedisError("publish") // §9.1 #19（fail-open：广播失败不影响本地失效，§6.8.3）
 		}
 	}
 

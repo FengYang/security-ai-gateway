@@ -179,6 +179,40 @@ func TestRenderPrometheus_R3BStreamSceneNegative(t *testing.T) {
 	}
 }
 
+// TestRenderPrometheus_EmbedVectorRedis R3-B②（§9.1 #17/#19/#28/#29/#30/#31/#37/#39）。
+func TestRenderPrometheus_EmbedVectorRedis(t *testing.T) {
+	cfg := testConfig()
+	eng := NewCacheEngine(cfg).(*engine)
+	st := eng.stats
+
+	st.observeEmbedInvalid("empty")
+	st.observeEmbedderError("unreachable")
+	st.observeEmbedTimeout()
+	st.observeEmbedDimMismatch()
+	st.observeVectorError("search")
+	st.observeSemanticReject("threshold")
+	st.observeRedisError("get")
+	st.observeExtraDuration("embed", 2*time.Millisecond)
+
+	var buf bytes.Buffer
+	eng.RenderPrometheus(&buf)
+	out := buf.String()
+	for _, want := range []string{
+		`otpmask_cache_embed_invalid_total{reason="empty"} 1`,
+		`otpmask_cache_embedder_errors_total{reason="unreachable"} 1`,
+		"otpmask_cache_embed_timeout_total 1",
+		"otpmask_cache_embedder_dim_mismatch_total 1",
+		`otpmask_cache_vector_errors_total{op="search"} 1`,
+		`otpmask_cache_semantic_reject_total{reason="threshold"} 1`,
+		`otpmask_cache_redis_errors_total{op="get"} 1`,
+		"otpmask_cache_embed_duration_seconds_count 1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("缺指标：%s\n%s", want, out)
+		}
+	}
+}
+
 // TestObserveLookup_InvalidKindPanics 非法 kind 标签必须 panic（§9.1 硬约束）。
 func TestObserveLookup_InvalidKindPanics(t *testing.T) {
 	s := newStatsCollector()

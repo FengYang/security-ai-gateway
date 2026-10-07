@@ -57,6 +57,49 @@ func (e *engine) RenderPrometheus(w io.Writer) {
 		"负向缓存写入次数（result=ok|stage_excluded）",
 		e.stats.negativeStoreC.snapshot(), []string{"result"})
 
+	// #17 embed_invalid_total{reason}（embedding 无效）
+	writeCacheCounter(w, "otpmask_cache_embed_invalid_total",
+		"embedding 无效次数（reason=empty|bad_response）",
+		e.stats.embedInvalidC.snapshot(), []string{"reason"})
+
+	// #19 redis_errors_total{op}（形态 B/C Redis 操作错误）
+	writeCacheCounter(w, "otpmask_cache_redis_errors_total",
+		"Redis 操作错误次数（op=get|put|delete|delete_by_tenant|delete_by_model|publish|subscribe）",
+		e.stats.redisErrC.snapshot(), []string{"op"})
+
+	// #28 embedder_errors_total{reason}
+	writeCacheCounter(w, "otpmask_cache_embedder_errors_total",
+		"embedding 侧车错误次数（reason=unreachable|timeout|bad_response）",
+		e.stats.embedderErrC.snapshot(), []string{"reason"})
+
+	// #29 embed_timeout_total
+	fmt.Fprintf(w, "# HELP otpmask_cache_embed_timeout_total embedding 侧车超时次数\n# TYPE otpmask_cache_embed_timeout_total counter\n")
+	fmt.Fprintf(w, "otpmask_cache_embed_timeout_total %d\n", e.stats.embedTimeoutCount())
+
+	// #30 embedder_dim_mismatch_total
+	fmt.Fprintf(w, "# HELP otpmask_cache_embedder_dim_mismatch_total 向量维度不匹配次数\n# TYPE otpmask_cache_embedder_dim_mismatch_total counter\n")
+	fmt.Fprintf(w, "otpmask_cache_embedder_dim_mismatch_total %d\n", e.stats.embedDimMismatchCount())
+
+	// #31 vector_errors_total{op}
+	writeCacheCounter(w, "otpmask_cache_vector_errors_total",
+		"向量索引操作错误次数（op=upsert|search|delete）",
+		e.stats.vectorErrC.snapshot(), []string{"op"})
+
+	// #32 vector_capacity_ratio（gauge；向量条目数 / flat_max_entries）
+	if e.sem != nil && e.cfg.Semantic.Vector.FlatMaxEntries > 0 {
+		ratio := float64(e.sem.Size()) / float64(e.cfg.Semantic.Vector.FlatMaxEntries)
+		fmt.Fprintf(w, "# HELP otpmask_cache_vector_capacity_ratio 向量容量占用率（条目数/上限）\n# TYPE otpmask_cache_vector_capacity_ratio gauge\n")
+		fmt.Fprintf(w, "otpmask_cache_vector_capacity_ratio %g\n", ratio)
+	}
+
+	// #37 semantic_reject_total{reason}
+	writeCacheCounter(w, "otpmask_cache_semantic_reject_total",
+		"语义候选被拒次数（reason=threshold|fingerprint）",
+		e.stats.semanticRejC.snapshot(), []string{"reason"})
+
+	// #39 embed_duration_seconds（histogram）
+	e.renderExtraDuration(w, "embed", "otpmask_cache_embed_duration_seconds", "embedding 侧车调用耗时（秒）")
+
 	// #3 entries{store}
 	fmt.Fprintf(w, "# HELP otpmask_cache_entries 当前缓存条目数（按 store）\n# TYPE otpmask_cache_entries gauge\n")
 	fmt.Fprintf(w, "otpmask_cache_entries{store=\"exact\"} %d\n", s.ExactEntries)

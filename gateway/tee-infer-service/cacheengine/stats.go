@@ -114,10 +114,21 @@ type statsCollector struct {
 	extraDur   map[string]*durationHistogram
 
 	// 带标签计数（§9.1 #21 流式降级 / #33 场景 / #34 指纹拒绝 / #38 负向写入）
-	streamDegradedC  labelCounter // key: reason
-	sceneC           labelCounter // key: scene|source
-	fingerprintRejC  labelCounter // key: scene
-	negativeStoreC   labelCounter // key: result
+	streamDegradedC labelCounter // key: reason
+	sceneC          labelCounter // key: scene|source
+	fingerprintRejC labelCounter // key: scene
+	negativeStoreC  labelCounter // key: result
+
+	// 带标签计数（§9.1 #17 embed 无效 / #19 Redis 错误 / #28 embedder 错误 / #31 向量错误 / #37 语义拒绝）
+	embedInvalidC labelCounter // key: reason
+	embedderErrC  labelCounter // key: reason
+	vectorErrC    labelCounter // key: op
+	semanticRejC  labelCounter // key: reason
+	redisErrC     labelCounter // key: op
+
+	// 无标签计数（§9.1 #29 embed 超时 / #30 维度不匹配）
+	embedTimeout     uint64
+	embedDimMismatch uint64
 }
 
 // labelCounter 带标签计数（key 为标签按序以 "|" 拼接），可选枚举校验。
@@ -160,6 +171,14 @@ var (
 	validScenes               = map[string]struct{}{
 		"factual": {}, "general": {}, "code": {}, "math": {},
 	}
+	validEmbedInvalidReasons  = map[string]struct{}{"empty": {}, "bad_response": {}}
+	validEmbedderErrReasons   = map[string]struct{}{"unreachable": {}, "timeout": {}, "bad_response": {}}
+	validVectorOps            = map[string]struct{}{"upsert": {}, "search": {}, "delete": {}}
+	validSemanticRejectReason = map[string]struct{}{"threshold": {}, "fingerprint": {}}
+	validRedisOps             = map[string]struct{}{
+		"get": {}, "put": {}, "delete": {}, "delete_by_tenant": {},
+		"delete_by_model": {}, "publish": {}, "subscribe": {},
+	}
 )
 
 // validWriteRejectedReasons §9.1 #5 写入被拒 reason 枚举（发射时硬校验）。
@@ -180,8 +199,42 @@ func newStatsCollector() *statsCollector {
 		streamDegradedC: labelCounter{valid: validStreamDegradedReasons},
 		fingerprintRejC: labelCounter{valid: validScenes},
 		negativeStoreC:  labelCounter{valid: validNegativeStoreResults},
+		embedInvalidC:   labelCounter{valid: validEmbedInvalidReasons},
+		embedderErrC:    labelCounter{valid: validEmbedderErrReasons},
+		vectorErrC:      labelCounter{valid: validVectorOps},
+		semanticRejC:    labelCounter{valid: validSemanticRejectReason},
+		redisErrC:       labelCounter{valid: validRedisOps},
 	}
 }
+
+// observeEmbedInvalid 记录 embedding 无效（§9.1 #17）。
+func (s *statsCollector) observeEmbedInvalid(reason string) { s.embedInvalidC.inc(reason) }
+
+// observeEmbedderError 记录 embedding 侧车错误（§9.1 #28）。
+func (s *statsCollector) observeEmbedderError(reason string) { s.embedderErrC.inc(reason) }
+
+// observeEmbedTimeout 记录 embedding 超时（§9.1 #29）。
+func (s *statsCollector) observeEmbedTimeout() { atomic.AddUint64(&s.embedTimeout, 1) }
+
+// embedTimeoutCount 读取 embedding 超时累计（§9.1 #29）。
+func (s *statsCollector) embedTimeoutCount() uint64 { return atomic.LoadUint64(&s.embedTimeout) }
+
+// observeEmbedDimMismatch 记录向量维度不匹配（§9.1 #30）。
+func (s *statsCollector) observeEmbedDimMismatch() { atomic.AddUint64(&s.embedDimMismatch, 1) }
+
+// embedDimMismatchCount 读取维度不匹配累计（§9.1 #30）。
+func (s *statsCollector) embedDimMismatchCount() uint64 {
+	return atomic.LoadUint64(&s.embedDimMismatch)
+}
+
+// observeVectorError 记录向量索引操作错误（§9.1 #31）。
+func (s *statsCollector) observeVectorError(op string) { s.vectorErrC.inc(op) }
+
+// observeSemanticReject 记录语义候选被拒（§9.1 #37；reason=threshold|fingerprint）。
+func (s *statsCollector) observeSemanticReject(reason string) { s.semanticRejC.inc(reason) }
+
+// observeRedisError 记录 Redis 操作错误（§9.1 #19）。
+func (s *statsCollector) observeRedisError(op string) { s.redisErrC.inc(op) }
 
 // observeStreamDegraded 记录流式分片缓存降级（§9.1 #21）。
 func (s *statsCollector) observeStreamDegraded(reason string) { s.streamDegradedC.inc(reason) }

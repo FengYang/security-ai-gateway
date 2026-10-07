@@ -2,7 +2,10 @@ package cacheengine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 )
 
 // SemanticStore 语义缓存存储层（§4.1.3 / §5.3）。
@@ -40,11 +43,50 @@ type SemanticStore interface {
 
 // semanticStore 语义缓存实现。
 type semanticStore struct {
-	cfg           *CacheConfig
-	embedder      Embedder // 明文域 embedder
+	cfg            *CacheConfig
+	embedder       Embedder // 明文域 embedder
 	secureEmbedder Embedder // 密态域 embedder（可选，nil 表示密态降级用明文）
-	index         VectorIndex
-	nowFn         nowFunc
+	index          VectorIndex
+	nowFn          nowFunc
+	stats          *statsCollector // §9.1 指标发射（由 engine 在注入后接线；nil = 不发射）
+}
+
+// classifyEmbedError 按哨兵把 embed 错误归类到 §9.1 #17/#28/#29/#30。
+func (s *semanticStore) classifyEmbedError(err error) {
+	if s.stats == nil || err == nil {
+		return
+	}
+	switch {
+	case errors.Is(err, ErrEmbedTimeout):
+		s.stats.observeEmbedTimeout()          // #29
+		s.stats.observeEmbedderError("timeout") // #28
+	case errors.Is(err, ErrEmbedDimMismatch):
+		s.stats.observeEmbedDimMismatch() // #30
+	case errors.Is(err, ErrEmbedUnavailable):
+		s.stats.observeEmbedderError("unreachable") // #28
+	case errors.Is(err, ErrEmbedInvalid):
+		s.stats.observeEmbedderError("bad_response") // #28
+		if strings.Contains(err.Error(), "empty") {
+			s.stats.observeEmbedInvalid("empty") // #17
+		} else {
+			s.stats.observeEmbedInvalid("bad_response") // #17
+		}
+	default:
+		s.stats.observeEmbedderError("unreachable")
+	}
+}
+
+// embedOnce 调用 embedder 并记录耗时（§9.1 #39）与错误分类（#17/#28/#29/#30）。
+func (s *semanticStore) embedOnce(ctx context.Context, emb Embedder, text string) ([]float32, error) {
+	start := time.Now()
+	vec, err := emb.Embed(ctx, text)
+	if s.stats != nil {
+		s.stats.observeExtraDuration("embed", time.Since(start)) // #39
+	}
+	if err != nil {
+		s.classifyEmbedError(err)
+	}
+	return vec, err
 }
 
 // NewSemanticStore 构造语义缓存存储。
@@ -109,7 +151,7 @@ func (s *semanticStore) Lookup(ctx LookupContext) (bool, string, float64, string
 	defer cancel()
 
 	emb := s.embedderForLevel(ctx.SecurityLevel)
-	vec, err := emb.Embed(ctx2, ctx.PromptText)
+	vec, err := s.embedOnce(ctx2, emb, ctx.PromptText)
 	if err != nil {
 		return false, "", 0, scene, th, "embed_error"
 	}
@@ -125,13 +167,22 @@ func (s *semanticStore) Lookup(ctx LookupContext) (bool, string, float64, string
 	}
 
 	hits, err := s.index.Search(vec, s.cfg.Semantic.Vector.TopK, filter)
-	if err != nil || len(hits) == 0 {
+	if err != nil {
+		if s.stats != nil {
+			s.stats.observeVectorError("search") // §9.1 #31
+		}
+		return false, "", 0, scene, th, "no_candidates"
+	}
+	if len(hits) == 0 {
 		return false, "", 0, scene, th, "no_candidates"
 	}
 
 	// 取第一个超过阈值的候选（已按相似度降序）
 	best := hits[0]
 	if best.Similarity < th {
+		if s.stats != nil {
+			s.stats.observeSemanticReject("threshold") // §9.1 #37
+		}
 		return false, best.EntryID, best.Similarity, scene, th, "below_threshold"
 	}
 
@@ -154,12 +205,18 @@ func (s *semanticStore) Store(entryID string, text string, meta VectorMeta) erro
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Semantic.Embedder.Timeout.D())
 	defer cancel()
 
-	vec, err := emb.Embed(ctx, text)
+	vec, err := s.embedOnce(ctx, emb, text)
 	if err != nil {
 		return fmt.Errorf("embed response: %w", err)
 	}
 
-	return s.index.Upsert(entryID, vec, meta)
+	if err := s.index.Upsert(entryID, vec, meta); err != nil {
+		if s.stats != nil {
+			s.stats.observeVectorError("upsert") // §9.1 #31
+		}
+		return err
+	}
+	return nil
 }
 
 // embedderForLevel 根据安全等级返回对应的 embedder。
@@ -172,7 +229,11 @@ func (s *semanticStore) embedderForLevel(level SecurityLevel) Embedder {
 
 // Delete 删除指定 entry 的向量索引。
 func (s *semanticStore) Delete(entryID string) error {
-	return s.index.Delete(entryID)
+	err := s.index.Delete(entryID)
+	if err != nil && s.stats != nil {
+		s.stats.observeVectorError("delete") // §9.1 #31
+	}
+	return err
 }
 
 // Invalidate 失效语义缓存。

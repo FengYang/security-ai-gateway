@@ -53,7 +53,9 @@ func (e *engine) StartInvalidation(ctx context.Context) error {
 
 	go func() {
 		// 订阅退出（ctx 取消/连接断开）即结束，不重试（§6.11#5）。
-		_ = e.l1.Subscribe(ctx, func(ev InvalidateEvent) { e.applyInvalidation(ev) })
+		if serr := e.l1.Subscribe(ctx, func(ev InvalidateEvent) { e.applyInvalidation(ev) }); serr != nil {
+			e.stats.observeRedisError("subscribe") // §9.1 #19
+		}
 	}()
 	return nil
 }
