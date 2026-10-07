@@ -142,6 +142,9 @@ type statsCollector struct {
 	replayC        labelCounter // key: mode|result
 	singleflightC  labelCounter // key: result
 	entryCorruptC  labelCounter // key: reason
+
+	// 带标签计数（§9.1 #36 灰度）：key: stage|result
+	canaryC labelCounter
 }
 
 // labelCounter 带标签计数（key 为标签按序以 ":" 拼接，与 metrics.writeCacheCounter 约定一致），可选枚举校验。
@@ -199,6 +202,8 @@ var (
 		"integrity_mismatch": {}, "segments_mismatch": {},
 	}
 	validReplayKeys = map[string]struct{}{} // 由 init 填充（mode×result 组合）
+	// validCanaryKeys §9.1 #36 灰度 stage×result 组合（由 init 填充）。
+	validCanaryKeys = map[string]struct{}{}
 	// validWarmupResults §9.1 #18 预热条目 result 枚举。
 	validWarmupResults = map[string]struct{}{"ok": {}, "fail": {}}
 )
@@ -207,6 +212,11 @@ func init() {
 	for _, m := range []string{"single", "segmented", "degraded_single"} {
 		for _, r := range []string{"ok", "error", "canceled"} {
 			validReplayKeys[m+":"+r] = struct{}{}
+		}
+	}
+	for _, st := range []string{"G-0", "G-1", "G-2", "G-3", "G-4", "G-5"} {
+		for _, r := range []string{"allow", "skip", "write_only"} {
+			validCanaryKeys[st+":"+r] = struct{}{}
 		}
 	}
 }
@@ -238,6 +248,7 @@ func newStatsCollector() *statsCollector {
 		singleflightC:   labelCounter{valid: validSingleflightResults},
 		entryCorruptC:   labelCounter{valid: validEntryCorruptReasons},
 		warmupItemsC:    labelCounter{valid: validWarmupResults},
+		canaryC:         labelCounter{valid: validCanaryKeys},
 	}
 }
 
@@ -299,6 +310,9 @@ func (s *statsCollector) observeNegativeStore(result string) { s.negativeStoreC.
 
 // observeWarmupItem 记录预热条目结果（§9.1 #18；result ∈ {ok,fail}）。
 func (s *statsCollector) observeWarmupItem(result string) { s.warmupItemsC.inc(result) }
+
+// observeCanary 记录灰度判定（§9.1 #36；stage ∈ {G-0..G-5}，result ∈ {allow,skip,write_only}）。
+func (s *statsCollector) observeCanary(stage, result string) { s.canaryC.inc(stage + ":" + result) }
 
 // observeLookup 记录一次查询结果。
 // kind ∈ {precheck,exact,negative,semantic}；result ∈ {hit,miss,disabled,not_cacheable,fastcheck_miss}。

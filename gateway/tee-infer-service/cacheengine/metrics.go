@@ -134,6 +134,11 @@ func (e *engine) RenderPrometheus(w io.Writer) {
 		"条目损坏次数（reason=integrity_mismatch|segments_mismatch）",
 		e.stats.entryCorruptC.snapshot(), []string{"reason"})
 
+	// #36 canary_total{stage,result}（§12 灰度放量/回滚）
+	writeCacheCounter(w, "otpmask_cache_canary_total",
+		"灰度判定次数（stage=G-0..G-5；result=allow|skip|write_only；§12）",
+		e.stats.canaryC.snapshot(), []string{"stage", "result"})
+
 	// #16 audit_fail_total（§7.5 B-7.5-1：审计链写入失败，不阻塞缓存写入）
 	fmt.Fprintf(w, "# HELP otpmask_cache_audit_fail_total 审计链写入失败次数（B-7.5-1；不阻塞缓存写入）\n# TYPE otpmask_cache_audit_fail_total counter\n")
 	fmt.Fprintf(w, "otpmask_cache_audit_fail_total %d\n", e.stats.auditFailCount())

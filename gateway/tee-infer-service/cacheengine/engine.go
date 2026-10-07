@@ -210,33 +210,29 @@ func (e *engine) Lookup(ctx LookupContext) (res LookupResult) {
 		}
 	}
 
-	// 灰度写只读（write_only）
-	if e.canary.Enabled() && e.canary.WriteOnly() {
-		e.observePrecheck("disabled", start)
-		return LookupResult{
-			Hit:          false,
-			Kind:         "miss",
-			RejectReason: "canary_write_only",
-			Jitter:       e.jitter.Sample(ctx),
-		}
-	}
-
-	// 灰度流量控制
-	if e.canary.Enabled() && !e.canary.Allowed(ctx) {
-		e.observePrecheck("disabled", start)
-		return LookupResult{
-			Hit:          false,
-			Kind:         "miss",
-			RejectReason: "canary_skip",
-			Jitter:       e.jitter.Sample(ctx),
-		}
-	}
-
-	// 1. 场景分类（必须先于可缓存性判定）
+	// 1. 场景分类（§6.1.2：必须先于可缓存性判定；§12.4 灰度需 scene 维度）
 	ctx.Scene = e.scene.Classify(ctx.PromptText)
 	e.stats.observeScene(string(ctx.Scene), "rule") // §9.1 #33：场景分类计数（source=rule）
 
-	// 2. 可缓存性判定
+	// 2. 灰度（§12.4）：G-0 影子（只写不读）/ 范围外（跳过）
+	if e.canary.Enabled() {
+		stage := e.canary.Stage()
+		allow, writeOnly := e.canary.Allow(ctx.TenantID, ctx.Scene, ctx.Model)
+		switch {
+		case writeOnly:
+			e.stats.observeCanary(stage, "write_only") // §9.1 #36
+			e.observePrecheck("disabled", start)
+			return LookupResult{Hit: false, Kind: "miss", RejectReason: "canary_write_only", Jitter: e.jitter.Sample(ctx)}
+		case !allow:
+			e.stats.observeCanary(stage, "skip") // §9.1 #36
+			e.observePrecheck("disabled", start)
+			return LookupResult{Hit: false, Kind: "miss", RejectReason: "canary_skip", Jitter: e.jitter.Sample(ctx)}
+		default:
+			e.stats.observeCanary(stage, "allow") // §9.1 #36
+		}
+	}
+
+	// 3. 可缓存性判定
 	if d := e.cache.Cacheable(&ctx); !d.Cacheable {
 		e.observePrecheck("not_cacheable", start)
 		return LookupResult{
@@ -516,6 +512,17 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "readonly"}
 	}
 
+	// 场景分类（§6.1.2 / §12.4 灰度需 scene 维度）
+	ctx.Scene = e.scene.Classify(ctx.PromptText)
+	e.stats.observeScene(string(ctx.Scene), "rule") // §9.1 #33：场景分类计数（source=rule）
+
+	// §12.4 写入侧同源判定：灰度范围外不写（G-0 影子 write_only 仍写）。
+	if e.canary.Enabled() {
+		if allow, _ := e.canary.Allow(ctx.TenantID, ctx.Scene, ctx.Model); !allow {
+			return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "canary_skip"}
+		}
+	}
+
 	// 写前审查门禁
 	if !ctx.Writable && e.cfg.Guard.WriteRequiresOutGuard {
 		e.stats.observeWriteRejected("not_writable") // §9.1 #5
@@ -523,8 +530,6 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 	}
 
 	// 可缓存性判定（写入侧重新判定）
-	ctx.Scene = e.scene.Classify(ctx.PromptText)
-	e.stats.observeScene(string(ctx.Scene), "rule") // §9.1 #33：场景分类计数（source=rule）
 	if d := e.cache.Cacheable(&ctx.LookupContext); !d.Cacheable {
 		e.stats.observeWriteRejected("not_cacheable") // §9.1 #5
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "not_cacheable:" + d.Reason}

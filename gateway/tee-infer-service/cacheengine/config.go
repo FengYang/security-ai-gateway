@@ -265,6 +265,7 @@ type WriteLimitConfig struct {
 // GrayConfig 灰度配置。
 type GrayConfig struct {
 	Enabled        bool     `json:"enabled"`
+	Stage          string   `json:"stage"` // 灰度阶段 G-0..G-5（§12.2；用于 #36 指标/审计）
 	CanaryTenants  []string `json:"canary_tenants"`
 	CanaryScenes   []string `json:"canary_scenes"`
 	CanaryModels   []string `json:"canary_models"`
@@ -391,6 +392,7 @@ func DefaultConfig() CacheConfig {
 		},
 		Gray: GrayConfig{
 			Enabled:        false,
+			Stage:          "G-0",
 			TrafficPercent: 0,
 		},
 		WriteLimit: WriteLimitConfig{
@@ -497,6 +499,15 @@ func (c CacheConfig) Validate() []error {
 		errs = append(errs, fmt.Errorf("rule 15: multi_turn=true requires mode=exact"))
 	}
 
+	// 规则 22：灰度（§12）。白名单元素须为已知租户/场景/模型（控制面校验，引擎侧无租户注册表）；
+	// 此处校验阶段枚举与流量百分比。
+	if !validGrayStage(c.Gray.Stage) {
+		errs = append(errs, fmt.Errorf("rule 22: gray.stage must be one of G-0..G-5"))
+	}
+	if c.Gray.TrafficPercent < 0 || c.Gray.TrafficPercent > 100 {
+		errs = append(errs, fmt.Errorf("rule 22: gray.traffic_percent must be in [0,100]"))
+	}
+
 	// 规则 23：内存水位
 	if c.Memory.WatermarkHigh <= 0 || c.Memory.WatermarkHigh > 1 {
 		errs = append(errs, fmt.Errorf("rule 23: memory.watermark_high must be in (0, 1]"))
@@ -527,4 +538,16 @@ func (c CacheConfig) Validate() []error {
 	}
 
 	return errs
+}
+
+// validGrayStage 校验灰度阶段枚举（§12.2）。空值视为缺省 G-0。
+func validGrayStage(s string) bool {
+	if s == "" {
+		return true
+	}
+	switch s {
+	case "G-0", "G-1", "G-2", "G-3", "G-4", "G-5":
+		return true
+	}
+	return false
 }

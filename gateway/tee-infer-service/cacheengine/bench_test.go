@@ -269,12 +269,11 @@ func BenchmarkCanary_Allowed(b *testing.B) {
 	cfg.Gray.CanaryTenants = []string{"t1", "t2", "t3"}
 
 	c := NewConfigCanaryController(&cfg)
-	ctx := LookupContext{TenantID: "t1"}
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		c.Allowed(ctx)
+		c.Allow("t1", SceneGeneral, "m1")
 	}
 }
 
@@ -285,11 +284,10 @@ func BenchmarkCanary_Traffic(b *testing.B) {
 	cfg.Gray.TrafficPercent = 30
 
 	c := NewConfigCanaryController(&cfg)
-	ctx := LookupContext{TenantID: "benchmark-tenant-id-for-perf-test"}
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		c.Allowed(ctx)
+		c.Allow("benchmark-tenant-id-for-perf-test", SceneGeneral, "m1")
 	}
 }
