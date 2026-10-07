@@ -213,6 +213,7 @@ type teeServer struct {
 	cache           model.SemanticCache      // GF.4.1 精确缓存（P0-2：legacy 兜底；仅 cacheEngine==nil 时使用）
 	cacheEngine     cacheengine.CacheEngine  // P0-2 原生语义缓存引擎（命中/回填 + /metrics；nil = 未装配）
 	cacheEnabled    bool                     // P0-2 B2：原生缓存是否生效（mode != off）；false 时零开销
+	cacheMode       string                   // P0-2 §9.1 #20：缓存运行模式（TTFT 标签）
 	cacheReplay     cacheReplayConfig        // P0-2 B2：§6.12 回放节拍参数快照
 	billing         *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
 	meterToken      string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
@@ -1299,6 +1300,7 @@ func (r replayEngine) Generate(_ model.GenerateRequest, onDelta func(string) err
 // fail-closed：text 载荷仅限证明会话信封通道（token 模式无信封，拒绝）。
 func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	tenant string, req *protocol.InferenceRequest, payloadSHA string, isRetry bool) {
+	reqStart := time.Now() // P0-2 §9.1 #20：TTFT 基准（请求进入时刻）
 	if sess == nil {
 		s.denyAndAudit(tenant, req.RequestID, "text_without_session", payloadSHA)
 		http.Error(w, "text 载荷须在证明会话信封内（fail-closed）", http.StatusBadRequest)
@@ -1445,6 +1447,11 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	if cacheNegative != nil {
 		denialFinish = "content_filter"
 	}
+	// §9.1 #20：TTFT 的 cache 标签（hit|miss）。
+	cacheLabel := "miss"
+	if cacheHit {
+		cacheLabel = "hit"
+	}
 	// §9.1 #22：命中回放模式（native=分段/single/degraded_single；legacy=single）。
 	cacheReplayMode := ""
 	if cacheHit && cacheNegative == nil {
@@ -1459,7 +1466,8 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 			cacheReplayMode = "segmented"
 		}
 	}
-	streamErr := s.streamTextInfer(w, sess, eng, genReq, &agg, tenant, req.RequestID, &out, denialFinish)
+	streamErr := s.streamTextInfer(w, sess, eng, genReq, &agg, tenant, req.RequestID, &out,
+		denialFinish, reqStart, cacheLabel)
 	if streamErr != nil {
 		if cacheReplayMode != "" && s.cacheEngine != nil {
 			s.cacheEngine.RecordReplay(cacheReplayMode, "error") // §9.1 #22
@@ -1598,7 +1606,8 @@ type streamOutcome struct {
 // mode=off 时 og=nil，走原路径，行为与现网逐字节一致。
 func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	eng model.Engine, genReq model.GenerateRequest, agg *strings.Builder,
-	tenant, requestID string, out *streamOutcome, denialFinish string) error {
+	tenant, requestID string, out *streamOutcome, denialFinish string,
+	reqStart time.Time, cacheLabel string) error {
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1672,9 +1681,14 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	// emitAccounting 发射记账统一出口：count=true 计入 emittedBuilder（内容帧），
 	// count=false 不计（B1 标识帧——标识文本不进 tokens_out / filtered_tokens 口径）。
 	// 不旁路 writeChunk：seq 唯一分配点，标识帧经它发射天然 seq 连续。
+	ttftRecorded := false // P0-2 §9.1 #20：首个内容帧只记一次 TTFT
 	emitAccounting := func(delta, finish string, count bool, label *chunkLabelMeta) error {
 		if count && finish == "" && delta != "" {
 			emittedBuilder.WriteString(delta)
+			if !ttftRecorded {
+				ttftRecorded = true
+				s.metrics.ObserveTTFT(s.cacheMode, cacheLabel, time.Since(reqStart).Seconds())
+			}
 		}
 		return writeChunk(delta, finish, nil, label)
 	}
@@ -3800,6 +3814,7 @@ func main() {
 		cache:             cacheengine.NewLegacyAdapter(cacheEng), // P0-2：legacy 兜底（仅 cacheEngine==nil 时使用）
 		cacheEngine:       cacheEng,                                // P0-2 B2：原生语义缓存（命中/回填）+ /metrics
 		cacheEnabled:      cacheCfg.Mode != cacheengine.ModeOff,    // P0-2 B2：mode=off → 不进原生路径（零开销）
+		cacheMode:         string(cacheCfg.Mode),                   // P0-2 §9.1 #20：TTFT 标签
 		cacheReplay:       cacheReplayConfig{minGap: cacheCfg.Stream.MinGap.D(), maxGap: cacheCfg.Stream.MaxGap.D()}, // P0-2 B2：§6.12 节拍快照
 		usage:             make(map[string]*usageRecord),
 		quota:             make(map[string]quotaSpec),

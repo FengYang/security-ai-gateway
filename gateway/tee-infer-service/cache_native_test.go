@@ -228,6 +228,28 @@ func TestTextInferCacheNegativeHitDenial(t *testing.T) {
 	}
 }
 
+// TestTextInferTTFTRecorded §9.1 #20 / M4：流式请求首个内容帧后记录 TTFT（mode|cache）。
+func TestTextInferTTFTRecorded(t *testing.T) {
+	srv, ts := newNativeCacheServer(t)
+	sess, ksig, kenc := setupTestSession(t, ts)
+	hr := buildTextInferRequest(t, ts.URL+"/v1/infer", sess, ksig, kenc, "ttft 测试内容", protocol.EngineTypeTEEGPU, true, 1)
+	resp, err := http.DefaultClient.Do(hr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := mustReadAll(t, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("推理应 200，got %d", resp.StatusCode)
+	}
+	_, _ = decodeTextSSE(t, body, sess, kenc)
+
+	metrics := fetchMetrics(t, srv)
+	if !strings.Contains(metrics, `otpmask_ttft_seconds_count{mode="exact",cache="miss"} 1`) {
+		t.Fatalf("应记录 TTFT（mode=exact|cache=miss），/metrics:\n%s", metrics)
+	}
+}
+
 // ===== 集成：原生命中（I-2/I-5/I-6/I-8）=====
 
 // newNativeCacheServer 在 newM9Server 基础上启用原生语义缓存（mode=exact），并移除 legacy 兜底。
@@ -246,7 +268,8 @@ func newNativeCacheServer(t *testing.T) (*teeServer, *httptest.Server) {
 
 	srv.cacheEngine = cacheengine.NewCacheEngine(cfg)
 	srv.cacheEnabled = true
-	srv.cache = nil // 排除 legacy 路径，确保走原生
+	srv.cacheMode = string(cfg.Mode) // §9.1 #20：TTFT 标签
+	srv.cache = nil                  // 排除 legacy 路径，确保走原生
 	srv.cacheReplay = cacheReplayConfig{minGap: time.Millisecond, maxGap: 5 * time.Millisecond}
 	return srv, ts
 }

@@ -111,6 +111,9 @@ type otpmaskMetrics struct {
 	enclaveDualReads int64
 	// P0-4 §10.1 #15 跨源兼容模式：当前 mask_prg 是否 bridge（0/1 gauge）。
 	cryptopCompatMode map[string]int64
+	// P0-2 §9.1 #20：TTFT 首帧时延（histogram，按 mode|cache=hit|miss；M4）
+	ttftMu sync.Mutex
+	ttft   map[string]*histogram
 }
 
 func newMetrics() *otpmaskMetrics {
@@ -144,6 +147,7 @@ func newMetrics() *otpmaskMetrics {
 		ogDegraded:         make(map[string]int64),
 		ogLatencyMs:        newHistogram(latencyMsBuckets),
 		ogFirstFrameDelay:  newHistogram(firstFrameDelayBuckets),
+		ttft:               make(map[string]*histogram),
 		ogL2Call:           make(map[string]int64),
 		ogL2OnlyHit:        make(map[string]int64),
 		ogL2DurationSec:    newHistogram(l2DurationSecBuckets),
@@ -483,6 +487,8 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	writeHistogram(w, "otpmask_output_guard_latency_ms", "单请求输出侧审查总延迟（毫秒）", m.ogLatencyMs, "")
 	// histogram：首帧延迟增量（M2 启用后才有样本）
 	writeHistogram(w, "otpmask_output_guard_first_frame_delay_seconds", "输出侧审查引入的首帧延迟增量（秒）", m.ogFirstFrameDelay, "")
+	// P0-2 §9.1 #20：TTFT（mode|cache=hit|miss）
+	m.renderTTFT(w)
 	if m.ogMode != "" {
 		fmt.Fprintf(w, "# HELP otpmask_output_guard_mode 当前输出侧内容审查运行模式（1=当前模式）\n# TYPE otpmask_output_guard_mode gauge\n")
 		fmt.Fprintf(w, "otpmask_output_guard_mode{mode=%q} 1\n", m.ogMode)
@@ -581,6 +587,66 @@ func labelPairs(labels, values []string) string {
 		out += fmt.Sprintf("%s=%q", l, values[i])
 	}
 	return out
+}
+
+// ObserveTTFT 记录一次 TTFT（秒；§9.1 #20 / M4）。
+// mode = 缓存运行模式（off|exact|semantic|full）；cache = hit|miss（非 hit 一律归 miss）。
+func (m *otpmaskMetrics) ObserveTTFT(mode, cache string, seconds float64) {
+	if mode == "" {
+		mode = "off"
+	}
+	if cache != "hit" {
+		cache = "miss"
+	}
+	key := mode + "|" + cache
+	m.ttftMu.Lock()
+	h := m.ttft[key]
+	if h == nil {
+		h = newHistogram(ttftBuckets)
+		m.ttft[key] = h
+	}
+	h.observe(seconds)
+	m.ttftMu.Unlock()
+}
+
+// ttftBuckets TTFT 桶（秒），覆盖缓存命中（毫秒级）到未命中（数十秒）。
+var ttftBuckets = []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30}
+
+// renderTTFT 渲染 TTFT（§9.1 #20）；无样本时不输出。
+func (m *otpmaskMetrics) renderTTFT(w io.Writer) {
+	m.ttftMu.Lock()
+	keys := make([]string, 0, len(m.ttft))
+	for k := range m.ttft {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	m.ttftMu.Unlock()
+	if len(keys) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "# HELP otpmask_ttft_seconds 首帧时延（秒，按缓存模式与 cache=hit|miss）\n# TYPE otpmask_ttft_seconds histogram\n")
+	for _, k := range keys {
+		parts := strings.SplitN(k, "|", 2)
+		mode, cache := parts[0], "miss"
+		if len(parts) == 2 {
+			cache = parts[1]
+		}
+		m.ttftMu.Lock()
+		h := m.ttft[k]
+		m.ttftMu.Unlock()
+		if h == nil {
+			continue
+		}
+		labels := fmt.Sprintf("mode=%q,cache=%q", mode, cache)
+		var cum int64
+		for i, b := range h.upperBounds {
+			cum += h.buckets[i]
+			fmt.Fprintf(w, "otpmask_ttft_seconds_bucket{%s,le=\"%g\"} %d\n", labels, b, cum)
+		}
+		fmt.Fprintf(w, "otpmask_ttft_seconds_bucket{%s,le=\"+Inf\"} %d\n", labels, h.count)
+		fmt.Fprintf(w, "otpmask_ttft_seconds_sum{%s} %g\n", labels, h.sum)
+		fmt.Fprintf(w, "otpmask_ttft_seconds_count{%s} %d\n", labels, h.count)
+	}
 }
 
 // ---- histogram（手写桶，零依赖）----
