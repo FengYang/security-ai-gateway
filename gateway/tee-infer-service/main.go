@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"security-ai-gateway/cipher/mask"
+	"security-ai-gateway/gateway/tee-infer-service/cacheengine"
 	"security-ai-gateway/gateway/tee-infer-service/model"
 	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/internal/memzero"
@@ -208,7 +209,8 @@ type teeServer struct {
 	weightProvider  LayerWeightProvider    // 层权重提供器（掩码像计算）
 	route           *RouteConfig           // 双路线路由配置
 	tokenizer       Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
-	cache           model.SemanticCache    // GF.4.1 精确缓存（演示实现；nil = 关闭）
+	cache           model.SemanticCache      // GF.4.1 精确缓存（P0-2：经 legacyAdapter 适配；默认 mode=off 时为 no-op）
+	cacheEngine     cacheengine.CacheEngine  // P0-2 语义缓存引擎（/metrics 渲染用；nil = 未启用）
 	billing         *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
 	meterToken      string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
 	reconciler      *reconciler            // S5 判据 6：审计-计量对账器（/reconcile 快照数据源）
@@ -2762,6 +2764,10 @@ func (s *teeServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	s.metrics.render(w, s.audit.len())
+	// P0-2：缓存指标仅在 mode!=off 时追加，保证默认关闭时 /metrics 输出逐字节不变。
+	if s.cacheEngine != nil && s.cacheEngine.Stats().Mode != string(cacheengine.ModeOff) {
+		s.cacheEngine.RenderPrometheus(w)
+	}
 }
 
 // usageView 用量查询响应视图（含配额信息，P1；S3b 起含窗口配额；S5 起含影子配置与计数；
@@ -3626,6 +3632,21 @@ func main() {
 		audit = newAuditChainWithTSA(tsa)
 	}
 
+	// P0-2 语义缓存：默认 mode=off（与现网逐字节一致）；经 legacyAdapter 复用既有 Get/Put 接线点。
+	cacheCfg := cacheengine.DefaultConfig()
+	if p := os.Getenv("CACHE_CONFIG_PATH"); p != "" {
+		if c, err := cacheengine.LoadConfig(p); err != nil {
+			log.Printf("[tee] 缓存配置加载失败，回退默认（mode=off）：%v", err)
+		} else {
+			cacheCfg = c
+		}
+	}
+	if err := cacheengine.ApplyEnv(&cacheCfg); err != nil {
+		log.Printf("[tee] 缓存环境变量覆盖失败，回退默认（mode=off）：%v", err)
+		cacheCfg = cacheengine.DefaultConfig()
+	}
+	cacheEng := cacheengine.NewCacheEngine(cacheCfg)
+
 	srv := &teeServer{
 		km: km, kSig: kSig, attest: *attestToken,
 		enclave:           encl,
@@ -3646,7 +3667,8 @@ func main() {
 		weightProvider:    NewMockWeightProvider(32),
 		route:             routeCfg,
 		tokenizer:         nil,                       // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
-		cache:             model.NewExactCache(1024), // GF.4.1：精确缓存演示（LRU 1024）；真机替换为语义缓存
+		cache:             cacheengine.NewLegacyAdapter(cacheEng), // P0-2：默认 mode=off → Get 恒 miss / Put no-op（零行为变化）
+		cacheEngine:       cacheEng,                                // P0-2：/metrics 渲染与后续原生接口迁移入口
 		usage:             make(map[string]*usageRecord),
 		quota:             make(map[string]quotaSpec),
 		quotaDefault:      *tokenQuota,
