@@ -39,14 +39,48 @@ type SidecarEmbedderConfig struct {
 }
 
 // DefaultSidecarConfig 返回默认 sidecar 配置。
+// 单一来源：完全由 DefaultConfig() 的 semantic.embedder 派生，
+// 避免与配置文件并存两套互相矛盾的默认值（历史上曾出现 8088/1024 与 18081/512 不一致）。
 func DefaultSidecarConfig() SidecarEmbedderConfig {
+	return sidecarConfigFromEmbedder(DefaultConfig().Semantic.Embedder)
+}
+
+// sidecarConfigFromEmbedder 将配置中的 embedder 段转换为 sidecar 客户端配置。
+func sidecarConfigFromEmbedder(e EmbedderConfig) SidecarEmbedderConfig {
 	return SidecarEmbedderConfig{
-		URL:      "http://127.0.0.1:8088/embed",
-		Model:    "bge-large-zh-v1.5",
-		Dim:      1024,
-		Timeout:  500 * time.Millisecond,
-		MaxConns: 32,
+		URL:            e.Endpoint,
+		HealthURL:      e.HealthEndpoint,
+		Model:          e.ModelID,
+		Dim:            e.Dim,
+		Timeout:        e.Timeout.D(),
+		MaxConns:       32,
+		MaxBatchTokens: e.BatchMax,
 	}
+}
+
+// NewSidecarEmbedderFromConfig 按配置构造 sidecar 编码器（唯一来源入口）。
+func NewSidecarEmbedderFromConfig(e EmbedderConfig) (Embedder, error) {
+	return NewSidecarEmbedder(sidecarConfigFromEmbedder(e))
+}
+
+// probeText 维度探针固定文本（无语义要求，仅用于触发一次真实 embed）。
+const probeText = "cache-embedder-dim-probe"
+
+// VerifyEmbedderDim 启动期维度探针（§6.9 就绪检查）。
+// 用固定文本调用一次 embed，断言返回维度与 expectedDim 一致；
+// 失败（不可用/超时/维度不符）时调用方应使语义缓存降级（§6.9 / B-7.6-1），不阻断推理主链。
+func VerifyEmbedderDim(ctx context.Context, emb Embedder, expectedDim int) error {
+	if emb == nil {
+		return fmt.Errorf("embedder is nil")
+	}
+	vec, err := emb.Embed(ctx, probeText)
+	if err != nil {
+		return fmt.Errorf("embed probe: %w", err)
+	}
+	if len(vec) != expectedDim {
+		return fmt.Errorf("embedder dim mismatch: probe got %d, config expects %d", len(vec), expectedDim)
+	}
+	return nil
 }
 
 // sidecarEmbedder HTTP 调用 TEE 内 embedding sidecar。

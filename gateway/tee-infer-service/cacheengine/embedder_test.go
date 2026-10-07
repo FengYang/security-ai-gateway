@@ -125,3 +125,41 @@ func TestSidecarEmbedder_Embed_DimMismatch(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// TestDefaultSidecarConfig_SingleSource 默认值单一来源：完全派生自 DefaultConfig 的 embedder 段。
+func TestDefaultSidecarConfig_SingleSource(t *testing.T) {
+	e := DefaultConfig().Semantic.Embedder
+	sc := DefaultSidecarConfig()
+	if sc.URL != e.Endpoint {
+		t.Errorf("URL = %q, want %q", sc.URL, e.Endpoint)
+	}
+	if sc.HealthURL != e.HealthEndpoint {
+		t.Errorf("HealthURL = %q, want %q", sc.HealthURL, e.HealthEndpoint)
+	}
+	if sc.Model != e.ModelID {
+		t.Errorf("Model = %q, want %q", sc.Model, e.ModelID)
+	}
+	if sc.Dim != e.Dim {
+		t.Errorf("Dim = %d, want %d", sc.Dim, e.Dim)
+	}
+	if sc.Timeout != e.Timeout.D() {
+		t.Errorf("Timeout = %v, want %v", sc.Timeout, e.Timeout.D())
+	}
+}
+
+// TestVerifyEmbedderDim 启动期维度探针：一致通过；不一致 / nil / 不可用均失败。
+func TestVerifyEmbedderDim(t *testing.T) {
+	emb := NewDeterministicEmbedder(8)
+	if err := VerifyEmbedderDim(context.Background(), emb, 8); err != nil {
+		t.Fatalf("expected pass, got %v", err)
+	}
+	if err := VerifyEmbedderDim(context.Background(), emb, 16); err == nil {
+		t.Fatal("expected dim mismatch error")
+	}
+	if err := VerifyEmbedderDim(context.Background(), nil, 8); err == nil {
+		t.Fatal("expected error for nil embedder")
+	}
+	if err := VerifyEmbedderDim(context.Background(), NewStubEmbedder(8), 8); err == nil {
+		t.Fatal("expected error for unavailable (stub) embedder")
+	}
+}

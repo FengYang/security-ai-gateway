@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -3644,6 +3645,20 @@ func main() {
 	if err := cacheengine.ApplyEnv(&cacheCfg); err != nil {
 		log.Printf("[tee] 缓存环境变量覆盖失败，回退默认（mode=off）：%v", err)
 		cacheCfg = cacheengine.DefaultConfig()
+	}
+	// 启动期维度探针：语义启用时校验 sidecar 维度；失败按 §6.9/B-7.6-1 降级为精确缓存。
+	if cacheCfg.Semantic.Enabled && (cacheCfg.Mode == cacheengine.ModeSemantic || cacheCfg.Mode == cacheengine.ModeFull) {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		emb, err := cacheengine.NewSidecarEmbedderFromConfig(cacheCfg.Semantic.Embedder)
+		if err == nil {
+			err = cacheengine.VerifyEmbedderDim(probeCtx, emb, cacheCfg.Semantic.Embedder.Dim)
+		}
+		cancel()
+		if err != nil {
+			log.Printf("[tee] 语义缓存探针失败，降级为精确缓存（mode=exact）：%v", err)
+			cacheCfg.Mode = cacheengine.ModeExact
+			cacheCfg.Semantic.Enabled = false
+		}
 	}
 	cacheEng := cacheengine.NewCacheEngine(cacheCfg)
 

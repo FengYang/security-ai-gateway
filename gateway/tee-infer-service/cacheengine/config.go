@@ -176,13 +176,14 @@ type SemanticConfig struct {
 
 // EmbedderConfig embedding 配置。
 type EmbedderConfig struct {
-	Kind      string   `json:"kind"` // sidecar | stub
-	Endpoint  string   `json:"endpoint"`
-	ModelID   string   `json:"model_id"`
-	Dim       int      `json:"dim"`
-	Timeout   Duration `json:"timeout"`
-	BatchMax  int      `json:"batch_max"`
-	FailOpen  bool     `json:"fail_open"`
+	Kind           string   `json:"kind"` // sidecar | stub
+	Endpoint       string   `json:"endpoint"`
+	HealthEndpoint string   `json:"health_endpoint"` // 探活端点（留空则由 Endpoint 推导 host/health）
+	ModelID        string   `json:"model_id"`
+	Dim            int      `json:"dim"`
+	Timeout        Duration `json:"timeout"`
+	BatchMax       int      `json:"batch_max"`
+	FailOpen       bool     `json:"fail_open"`
 }
 
 // VectorConfig 向量索引配置。
@@ -322,13 +323,14 @@ func DefaultConfig() CacheConfig {
 		Semantic: SemanticConfig{
 			Enabled: false,
 			Embedder: EmbedderConfig{
-				Kind:      "sidecar",
-				Endpoint:  "http://127.0.0.1:18081",
-				ModelID:   "bge-small-zh-v1.5",
-				Dim:       512,
-				Timeout:   Duration(200 * time.Millisecond),
-				BatchMax:  8,
-				FailOpen:  true,
+				Kind:           "sidecar",
+				Endpoint:       "http://127.0.0.1:18081/embed",  // §4.2 端点(18081) + /embed 路径
+				HealthEndpoint: "http://127.0.0.1:18081/health", // 探活端点（与 /embed 同源，不再拼接 /embed/health）
+				ModelID:        "bge-small-zh-v1.5",
+				Dim:            512,
+				Timeout:        Duration(200 * time.Millisecond),
+				BatchMax:       8,
+				FailOpen:       true,
 			},
 			Vector: VectorConfig{
 				Backend:        "flat",

@@ -3,6 +3,9 @@ package cacheengine
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
+	"strconv"
 )
 
 // ===== 密态路径 embedder =====
@@ -18,15 +21,37 @@ type SecureSidecarEmbedderConfig struct {
 	TimeoutMs int  // 超时毫秒
 }
 
-// DefaultSecureEmbedderConfig 默认密态 embedder 配置。
+// DefaultSecureEmbedderConfig 返回密态 embedder 默认配置。
+// 单一来源：维度/超时与明文 embedder 保持一致（维度不一致则无法共用向量索引）；
+// 端点与模型按部署约定由明文默认值派生（端口 +1、模型后缀 "-secure"），
+// 上线时应由部署配置显式覆盖。
 func DefaultSecureEmbedderConfig() SecureSidecarEmbedderConfig {
+	plain := DefaultConfig().Semantic.Embedder
 	return SecureSidecarEmbedderConfig{
 		Enabled:   false,
-		URL:       "http://127.0.0.1:8089/embed",
-		Model:     "bge-large-zh-v1.5-secure",
-		Dim:       1024,
-		TimeoutMs: 500,
+		URL:       shiftPort(plain.Endpoint, 1),
+		Model:     plain.ModelID + "-secure",
+		Dim:       plain.Dim,
+		TimeoutMs: int(plain.Timeout.D().Milliseconds()),
 	}
+}
+
+// shiftPort 将 URL 的端口号加 delta；无端口或不可解析时原样返回。
+func shiftPort(rawURL string, delta int) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	port := u.Port()
+	if port == "" {
+		return rawURL
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return rawURL
+	}
+	u.Host = net.JoinHostPort(u.Hostname(), strconv.Itoa(n+delta))
+	return u.String()
 }
 
 // dualEmbedder 双路 embedder：根据 SecurityLevel 选择明文或密态 embedder。
