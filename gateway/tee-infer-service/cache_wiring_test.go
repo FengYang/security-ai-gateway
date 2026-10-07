@@ -35,6 +35,26 @@ func TestHandleMetrics_CacheGating(t *testing.T) {
 	}
 }
 
+// TestHandleMetrics_ModeOffByteIdentical S-7：默认关闭（mode=off）时，
+// /metrics 输出必须与"未装配缓存引擎"的现网基线**逐字节一致**（不只是"不含 otpmask_cache_"）。
+func TestHandleMetrics_ModeOffByteIdentical(t *testing.T) {
+	baselineSrv := &teeServer{ // 现网基线：cacheEngine == nil
+		audit:   newAuditChainWithTSA(nil),
+		metrics: newMetrics(),
+	}
+	offSrv := &teeServer{
+		audit:       newAuditChainWithTSA(nil),
+		metrics:     newMetrics(),
+		cacheEngine: cacheengine.NewCacheEngine(cacheengine.DefaultConfig()), // mode=off（默认）
+	}
+
+	baseline := fetchMetrics(t, baselineSrv)
+	off := fetchMetrics(t, offSrv)
+	if baseline != off {
+		t.Fatalf("mode=off 的 /metrics 必须与现网基线逐字节一致（baseline=%d 字节，off=%d 字节）", len(baseline), len(off))
+	}
+}
+
 // fetchMetrics 通过最小 mux 抓取 /metrics 响应体。
 func fetchMetrics(t *testing.T, s *teeServer) string {
 	t.Helper()

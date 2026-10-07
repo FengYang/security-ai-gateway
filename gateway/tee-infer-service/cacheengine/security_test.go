@@ -1,6 +1,9 @@
 package cacheengine
 
 import (
+	"math"
+	"math/rand"
+	"sort"
 	"testing"
 	"time"
 )
@@ -306,5 +309,140 @@ func TestWriteRequiresOutGuard(t *testing.T) {
 	r := eng.Lookup(ctx.LookupContext)
 	if r.Hit {
 		t.Fatal("expected miss when store was rejected")
+	}
+}
+
+// ===== S-5：侧信道抖动分布同源（§7.3.2 / T-7.3-1 · T-7.3-2） =====
+
+// TestJitter_HitMissDistributionsIndistinguishable 引擎级校验 J-1：
+// 命中路径与未命中路径的抖动采样必须来自同一分布（两样本 KS 检验 p>0.05）。
+func TestJitter_HitMissDistributionsIndistinguishable(t *testing.T) {
+	cfg := testConfig()
+	cfg.Mode = ModeExact
+	cfg.Semantic.Jitter.Enabled = true
+	cfg.Semantic.Jitter.MaxMs = 20
+	eng := NewCacheEngine(cfg).(*engine)
+
+	// 确定性抖动源（同一入口、同一均匀分布）：避免统计检验因随机种子偶发失败
+	eng.jitter = &uniformJitter{cfg: &cfg, enabled: true, maxMs: 20, rng: rand.New(rand.NewSource(20261007))}
+
+	hitCtx := LookupContext{
+		TenantID: "t1", EngineType: "cmaas", Model: "m1", MaxNewTokens: 100,
+		TransformedHash: "s5-hit", PromptText: "long enough prompt for exact cache",
+		PolicyVer: "1", GuardVer: "v1",
+	}
+	missCtx := hitCtx
+	missCtx.TransformedHash = "s5-miss"
+
+	if out := eng.Store(StoreContext{LookupContext: hitCtx, Writable: true},
+		InferResult{Text: "answer", TokensOut: 10, Finish: "stop"}); !out.Stored {
+		t.Fatalf("precondition: store failed: %+v", out)
+	}
+
+	const n = 4000
+	hit := make([]float64, 0, n)
+	miss := make([]float64, 0, n)
+	for i := 0; i < n; i++ {
+		rh := eng.Lookup(hitCtx)
+		if !rh.Hit {
+			t.Fatalf("expected hit at %d, reason=%s", i, rh.RejectReason)
+		}
+		hit = append(hit, float64(rh.Jitter))
+
+		rm := eng.Lookup(missCtx)
+		if rm.Hit {
+			t.Fatalf("expected miss at %d", i)
+		}
+		miss = append(miss, float64(rm.Jitter))
+	}
+
+	// 两侧都必须真实采样（落在 [0, maxMs] 带内且非常量）
+	for name, s := range map[string][]float64{"hit": hit, "miss": miss} {
+		if !withinBand(s, 0, float64(20*time.Millisecond)) || distinctCount(s) < 2 {
+			t.Fatalf("%s 抖动采样不在期望带内或恒定（表明该路径未采样）", name)
+		}
+	}
+
+	d := ksStatistic(hit, miss)
+	p := ksPValue(d, n, n)
+	if p <= 0.05 {
+		t.Fatalf("hit/miss 抖动分布可区分：D=%.4f p=%.4f（要求 p>0.05）", d, p)
+	}
+}
+
+func withinBand(xs []float64, lo, hi float64) bool {
+	for _, x := range xs {
+		if x < lo || x > hi {
+			return false
+		}
+	}
+	return true
+}
+
+func distinctCount(xs []float64) int {
+	m := make(map[float64]struct{}, len(xs))
+	for _, x := range xs {
+		m[x] = struct{}{}
+	}
+	return len(m)
+}
+
+// ksStatistic 两样本 Kolmogorov–Smirnov 统计量 D = max|F1(x) − F2(x)|。
+func ksStatistic(a, b []float64) float64 {
+	sa := append([]float64(nil), a...)
+	sb := append([]float64(nil), b...)
+	sort.Float64s(sa)
+	sort.Float64s(sb)
+
+	n, m := len(sa), len(sb)
+	var d float64
+	i, j := 0, 0
+	for i < n || j < m {
+		var x float64
+		switch {
+		case i >= n:
+			x = sb[j]
+		case j >= m:
+			x = sa[i]
+		case sa[i] <= sb[j]:
+			x = sa[i]
+		default:
+			x = sb[j]
+		}
+		for i < n && sa[i] <= x {
+			i++
+		}
+		for j < m && sb[j] <= x {
+			j++
+		}
+		if diff := math.Abs(float64(i)/float64(n) - float64(j)/float64(m)); diff > d {
+			d = diff
+		}
+	}
+	return d
+}
+
+// ksPValue 两样本 KS 检验的渐近 p 值（Kolmogorov 分布 Q(λ)）。
+func ksPValue(d float64, n1, n2 int) float64 {
+	if d <= 0 {
+		return 1
+	}
+	ne := float64(n1*n2) / float64(n1+n2)
+	lambda := d * math.Sqrt(ne)
+	sum := 0.0
+	for k := 1; k <= 100; k++ {
+		term := 2 * math.Pow(-1, float64(k-1)) * math.Exp(-2*float64(k*k)*lambda*lambda)
+		sum += term
+		if math.Abs(term) < 1e-12 {
+			break
+		}
+	}
+	switch {
+	case sum < 0:
+		return 0
+	case sum > 1:
+		return 1
+	default:
+		return sum
 	}
 }
