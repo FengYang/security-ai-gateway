@@ -24,6 +24,19 @@ func (e *engine) RenderPrometheus(w io.Writer) {
 	// #11 jitter_seconds（histogram，按 path=hit|miss；§7.3）
 	e.renderJitter(w)
 
+	// #5 write_rejected_total{reason}（§6.3.2 写入被拒）
+	writeCacheCounter(w, "otpmask_cache_write_rejected_total",
+		"缓存写入被拒次数（按原因：too_large|too_short|not_stop|not_writable|not_cacheable|would_reject）",
+		e.stats.writeRejectedSnapshot(), []string{"reason"})
+
+	// #9 read_fast_check_error_total（快审分类器不可用，fail-closed）
+	fmt.Fprintf(w, "# HELP otpmask_cache_read_fast_check_error_total 读时快审分类器不可用次数（fail-closed）\n# TYPE otpmask_cache_read_fast_check_error_total counter\n")
+	fmt.Fprintf(w, "otpmask_cache_read_fast_check_error_total %d\n", e.stats.fastCheckErrorCount())
+
+	// #10 read_fast_check_duration_seconds（histogram）
+	e.renderExtraDuration(w, "read_fast_check",
+		"otpmask_cache_read_fast_check_duration_seconds", "读时快审耗时（秒）")
+
 	// #3 entries{store}
 	fmt.Fprintf(w, "# HELP otpmask_cache_entries 当前缓存条目数（按 store）\n# TYPE otpmask_cache_entries gauge\n")
 	fmt.Fprintf(w, "otpmask_cache_entries{store=\"exact\"} %d\n", s.ExactEntries)
@@ -162,6 +175,27 @@ func (e *engine) renderJitter(w io.Writer) {
 		fmt.Fprintf(w, "otpmask_cache_jitter_seconds_sum{path=%q} %g\n", k, s.sum)
 		fmt.Fprintf(w, "otpmask_cache_jitter_seconds_count{path=%q} %d\n", k, s.total)
 	}
+}
+
+// renderExtraDuration 渲染附加耗时直方图（§9.1 #10 快审 / #39 embed）；无样本时不输出。
+func (e *engine) renderExtraDuration(w io.Writer, key, metric, help string) {
+	h := e.stats.extraDurSnapshot()[key]
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	b := append([]float64(nil), h.buckets...)
+	c := append([]uint64(nil), h.counts...)
+	sum, total := h.sum, h.total
+	h.mu.Unlock()
+
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s histogram\n", metric, help, metric)
+	for i, bv := range b {
+		fmt.Fprintf(w, "%s_bucket{le=%q} %d\n", metric, strconv.FormatFloat(bv, 'g', -1, 64), c[i])
+	}
+	fmt.Fprintf(w, "%s_bucket{le=\"+Inf\"} %d\n", metric, total)
+	fmt.Fprintf(w, "%s_sum %g\n", metric, sum)
+	fmt.Fprintf(w, "%s_count %d\n", metric, total)
 }
 
 // writeCacheCounter 输出 counter 类型指标（仿 metrics.go writeCounter 风格）。

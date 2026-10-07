@@ -1,6 +1,9 @@
 package cacheengine
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // ErrClassifierUnavailable 分类器不可用哨兵错误。
 var ErrClassifierUnavailable = errors.New("cache: classifier unavailable")
@@ -40,8 +43,10 @@ func (e *engine) readFastCheck(entry *Entry, guardVer string) (bool, string, Sca
 		return true, "", ScanVerdict{Allow: true}
 	}
 
-	// 调用扫描器
+	// 调用扫描器（§9.1 #10：快审耗时直方图）
+	start := time.Now()
 	v, err := e.scanner.Scan(entry.Text)
+	e.stats.observeExtraDuration("read_fast_check", time.Since(start))
 	if err != nil {
 		// 分类器不可用 → fail-closed（当作未命中，同时记错误）
 		e.stats.observeReadFastCheck("error")

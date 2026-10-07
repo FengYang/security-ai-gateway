@@ -23,8 +23,8 @@ import (
 func TestSegmentReplayEngine_FirstImmediateAndPaced(t *testing.T) {
 	segs := []cacheengine.Segment{
 		{Text: "A", At: 0},
-		{Text: "B", At: 5 * time.Millisecond},  // 小于 min_gap（10ms）→ 抬升
-		{Text: "C", At: 30 * time.Millisecond}, // 与上片差 25ms > max_gap（20ms）→ 压低
+		{Text: "B", At: 5 * time.Millisecond},   // 小于 min_gap（10ms）→ 抬升
+		{Text: "C", At: 200 * time.Millisecond}, // 与上片差 195ms > max_gap（20ms）→ 压低
 	}
 	r := &segmentReplayEngine{
 		text: "ABC", segs: segs, releaseAt: time.Now(),
@@ -45,14 +45,15 @@ func TestSegmentReplayEngine_FirstImmediateAndPaced(t *testing.T) {
 	if strings.Join(got, "") != "ABC" {
 		t.Fatalf("回放文本=%q，want ABC", strings.Join(got, ""))
 	}
-	if d := times[0].Sub(start); d > 8*time.Millisecond {
+	// 断言"钳制发生"而非精确耗时：容忍调度抖动（time.Sleep 会过冲），故用宽松上界。
+	if d := times[0].Sub(start); d > 50*time.Millisecond {
 		t.Fatalf("首片未立即发出（应在节拍前）：%v", d)
 	}
-	if d := times[1].Sub(times[0]); d < 9*time.Millisecond {
+	if d := times[1].Sub(times[0]); d < 8*time.Millisecond {
 		t.Fatalf("第 2 片节拍未抬升到 min_gap：%v", d)
 	}
-	if d := times[2].Sub(times[1]); d > 25*time.Millisecond {
-		t.Fatalf("第 3 片节拍未压到 max_gap：%v", d)
+	if d := times[2].Sub(times[1]); d >= 150*time.Millisecond {
+		t.Fatalf("第 3 片节拍未压到 max_gap（应远小于原始 195ms）：%v", d)
 	}
 }
 

@@ -113,6 +113,37 @@ func TestRenderPrometheus_Jitter(t *testing.T) {
 	}
 }
 
+// TestRenderPrometheus_WriteRejectedAndFastCheck R3（§9.1 #5 写入被拒 / #9 快审错误 / #10 快审耗时）。
+func TestRenderPrometheus_WriteRejectedAndFastCheck(t *testing.T) {
+	cfg := testConfig()
+	cfg.Guard.ReadFastCheck = true
+	eng := NewCacheEngine(cfg)
+	e := eng.(*engine)
+
+	// #5：TokensOut < MinTokens → too_short
+	ctx := LookupContext{TenantID: "t1", EngineType: "cmaas", Model: "m1", MaxNewTokens: 100,
+		TransformedHash: "h1", PromptText: "long enough prompt", PolicyVer: "1", GuardVer: "v1"}
+	eng.Store(StoreContext{LookupContext: ctx, Writable: true},
+		InferResult{Text: "x", TokensOut: 0, Finish: "stop"})
+
+	// #9/#10：分类器不可用 → error + 耗时观测
+	e.scanner = &mockScanner{avail: false}
+	_, _, _ = e.readFastCheck(&Entry{Text: "cached text", GuardVer: "v1", Kind: KindExact}, "v1")
+
+	var buf bytes.Buffer
+	eng.RenderPrometheus(&buf)
+	out := buf.String()
+	for _, want := range []string{
+		`otpmask_cache_write_rejected_total{reason="too_short"} 1`,
+		"otpmask_cache_read_fast_check_error_total 1",
+		"otpmask_cache_read_fast_check_duration_seconds_count 1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("缺指标：%s\n%s", want, out)
+		}
+	}
+}
+
 // TestObserveLookup_InvalidKindPanics 非法 kind 标签必须 panic（§9.1 硬约束）。
 func TestObserveLookup_InvalidKindPanics(t *testing.T) {
 	s := newStatsCollector()

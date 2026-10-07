@@ -456,12 +456,14 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 
 	// 写前审查门禁
 	if !ctx.Writable && e.cfg.Guard.WriteRequiresOutGuard {
+		e.stats.observeWriteRejected("not_writable") // §9.1 #5
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "not_writable"}
 	}
 
 	// 可缓存性判定（写入侧重新判定）
 	ctx.Scene = e.scene.Classify(ctx.PromptText)
 	if d := e.cache.Cacheable(&ctx.LookupContext); !d.Cacheable {
+		e.stats.observeWriteRejected("not_cacheable") // §9.1 #5
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "not_cacheable:" + d.Reason}
 	}
 
@@ -494,12 +496,15 @@ func (e *engine) Store(ctx StoreContext, res InferResult) (out StoreOutcome) {
 
 	// 正向写入前置检查
 	if res.Finish != "stop" {
+		e.stats.observeWriteRejected("not_stop") // §9.1 #5
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "finish_not_stop"}
 	}
 	if res.TokensOut < e.cfg.Exact.MinTokens {
+		e.stats.observeWriteRejected("too_short") // §9.1 #5
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "too_short"}
 	}
 	if int64(len(res.Text)) > e.cfg.Exact.MaxEntryBytes.Bytes() {
+		e.stats.observeWriteRejected("too_large") // §9.1 #5
 		return StoreOutcome{Stored: false, Layer: "skipped", Skipped: "too_long"}
 	}
 

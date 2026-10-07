@@ -104,15 +104,31 @@ type statsCollector struct {
 	// 抖动注入量直方图（§9.1 #11）：path(hit|miss) -> histogram
 	jitterMu sync.Mutex
 	jitters  map[string]*durationHistogram
+
+	// 写入被拒（§9.1 #5）：reason -> count
+	writeRejMu    sync.Mutex
+	writeRejected map[string]uint64
+
+	// 附加耗时直方图（§9.1 #10 快审 / #39 embed 等）：shortName -> histogram
+	extraDurMu sync.Mutex
+	extraDur   map[string]*durationHistogram
+}
+
+// validWriteRejectedReasons §9.1 #5 写入被拒 reason 枚举（发射时硬校验）。
+var validWriteRejectedReasons = map[string]struct{}{
+	"too_large": {}, "too_short": {}, "not_stop": {},
+	"not_writable": {}, "not_cacheable": {}, "would_reject": {},
 }
 
 func newStatsCollector() *statsCollector {
 	return &statsCollector{
-		lookups:     make(map[string]map[string]uint64),
-		durs:        make(map[string]*durationHistogram),
-		slowLookups: make(map[string]uint64),
-		disabled:    make(map[string]uint64),
-		jitters:     make(map[string]*durationHistogram),
+		lookups:       make(map[string]map[string]uint64),
+		durs:          make(map[string]*durationHistogram),
+		slowLookups:   make(map[string]uint64),
+		disabled:      make(map[string]uint64),
+		jitters:       make(map[string]*durationHistogram),
+		writeRejected: make(map[string]uint64),
+		extraDur:      make(map[string]*durationHistogram),
 	}
 }
 
@@ -173,6 +189,56 @@ func (s *statsCollector) jitterSnapshot() map[string]*durationHistogram {
 	defer s.jitterMu.Unlock()
 	out := make(map[string]*durationHistogram, len(s.jitters))
 	for k, v := range s.jitters {
+		out[k] = v
+	}
+	return out
+}
+
+// observeWriteRejected 记录一次写入被拒（§9.1 #5）。非法 reason 即 panic（枚举硬约束）。
+func (s *statsCollector) observeWriteRejected(reason string) {
+	if _, ok := validWriteRejectedReasons[reason]; !ok {
+		panic(fmt.Sprintf("cacheengine: invalid write_rejected reason=%q", reason))
+	}
+	s.writeRejMu.Lock()
+	s.writeRejected[reason]++
+	s.writeRejMu.Unlock()
+}
+
+// writeRejectedSnapshot 返回写入被拒计数的只读快照。
+func (s *statsCollector) writeRejectedSnapshot() map[string]uint64 {
+	s.writeRejMu.Lock()
+	defer s.writeRejMu.Unlock()
+	out := make(map[string]uint64, len(s.writeRejected))
+	for k, v := range s.writeRejected {
+		out[k] = v
+	}
+	return out
+}
+
+// fastCheckErrorCount 读时快审分类器不可用累计次数（§9.1 #9）。
+func (s *statsCollector) fastCheckErrorCount() uint64 {
+	return atomic.LoadUint64(&s.fastCheckErrors)
+}
+
+// observeExtraDuration 记录附加耗时直方图（§9.1 #10 快审 / #39 embed）；
+// name 为指标短名（如 "read_fast_check" / "embed"）。
+func (s *statsCollector) observeExtraDuration(name string, d time.Duration) {
+	s.extraDurMu.Lock()
+	h := s.extraDur[name]
+	if h == nil {
+		h = newDurationHistogram(lookupDurationBuckets)
+		s.extraDur[name] = h
+	}
+	s.extraDurMu.Unlock()
+	h.observe(d)
+}
+
+// extraDurSnapshot 返回附加耗时直方图快照。
+func (s *statsCollector) extraDurSnapshot() map[string]*durationHistogram {
+	s.extraDurMu.Lock()
+	defer s.extraDurMu.Unlock()
+	out := make(map[string]*durationHistogram, len(s.extraDur))
+	for k, v := range s.extraDur {
 		out[k] = v
 	}
 	return out
