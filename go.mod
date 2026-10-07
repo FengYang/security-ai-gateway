@@ -8,12 +8,14 @@ require (
 	github.com/higress-group/proxy-wasm-go-sdk v0.0.0-20260525073613-662ed045bf0b
 	github.com/higress-group/wasm-go v1.1.2
 	github.com/pkoukk/tiktoken-go v0.1.8
+	github.com/redis/go-redis/v9 v9.23.0
 	github.com/tidwall/gjson v1.19.0
 	google.golang.org/grpc v1.83.2
 	modernc.org/sqlite v1.60.1
 )
 
 require (
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dlclark/regexp2 v1.10.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/go-configfs-tsm v0.2.2 // indirect
@@ -26,6 +28,7 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/resp v0.1.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
+	go.uber.org/atomic v1.12.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
