@@ -210,8 +210,10 @@ type teeServer struct {
 	weightProvider  LayerWeightProvider    // 层权重提供器（掩码像计算）
 	route           *RouteConfig           // 双路线路由配置
 	tokenizer       Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
-	cache           model.SemanticCache      // GF.4.1 精确缓存（P0-2：经 legacyAdapter 适配；默认 mode=off 时为 no-op）
-	cacheEngine     cacheengine.CacheEngine  // P0-2 语义缓存引擎（/metrics 渲染用；nil = 未启用）
+	cache           model.SemanticCache      // GF.4.1 精确缓存（P0-2：legacy 兜底；仅 cacheEngine==nil 时使用）
+	cacheEngine     cacheengine.CacheEngine  // P0-2 原生语义缓存引擎（命中/回填 + /metrics；nil = 未装配）
+	cacheEnabled    bool                     // P0-2 B2：原生缓存是否生效（mode != off）；false 时零开销
+	cacheReplay     cacheReplayConfig        // P0-2 B2：§6.12 回放节拍参数快照
 	billing         *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
 	meterToken      string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
 	reconciler      *reconciler            // S5 判据 6：审计-计量对账器（/reconcile 快照数据源）
@@ -1388,17 +1390,41 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	if _, isCMAAS := eng.(*model.CmaasEngine); isCMAAS {
 		genReq.Model = ""
 	}
-	// GF.4.1 精确缓存（演示）：键 = 租户+引擎+模型+参数+transformed_hash 哈希，
-	// 命中则跳过真实引擎推理，以缓存文本回放（replayEngine，不产出半截明文）。
+	// P0-2 B2：原生语义缓存查询为首选；未装配 cacheEngine 时走 legacy 兜底（GF.4.1 精确缓存）。
+	// 命中则跳过真实引擎推理，以缓存回放（原生：§6.12 分段 paced；legacy：单块），不产出半截明文。
 	var cacheKey string
 	var cacheHit bool
-	if s.cache != nil {
+	var cacheReleaseAt time.Time
+	var cacheStoreCtx *cacheengine.StoreContext
+	if s.cacheEngine != nil && s.cacheEnabled {
+		lctx := buildCacheLookupContext(tenant, engType, req.Model, txHash,
+			inputText.String(), int(req.MaxNewTokens), req.Stream, s.policyVersion())
+		lr := s.cacheEngine.Lookup(lctx)
+		// §7.3：抖动注入基准 = 结果就绪时刻 + Jitter（hit/miss 同分布，J-1）。
+		cacheReleaseAt = time.Now().Add(lr.Jitter)
+		// B2 决策 D-a：负向命中按 miss 处理（fail-open）——Entry 无正文，严禁当正向文本回放。
+		if lr.Hit && !lr.IsNegative() && lr.Entry != nil {
+			cacheHit = true
+			eng = &segmentReplayEngine{
+				text: lr.Entry.Text, segs: lr.Entry.Segments, releaseAt: cacheReleaseAt,
+				minGap: s.cacheReplay.minGap, maxGap: s.cacheReplay.maxGap,
+			}
+		}
+		sc := cacheengine.StoreContext{LookupContext: lctx}
+		cacheStoreCtx = &sc
+	} else if s.cache != nil {
 		cacheKey = sha256hex([]byte(fmt.Sprintf("%s|%s|%s|%d|%s",
 			tenant, engType, req.Model, req.MaxNewTokens, txHash)))
 		if cached, ok := s.cache.Get(cacheKey); ok {
 			cacheHit = true
 			eng = replayEngine{text: cached}
 		}
+	}
+	// 未命中：包装真实引擎采集流式分片（§6.12 写入侧），供回填使用。
+	var capture *segmentCapturingEngine
+	if cacheStoreCtx != nil && !cacheHit {
+		capture = newSegmentCapturingEngine(eng, cacheReleaseAt)
+		eng = capture
 	}
 	log.Printf("[tee] infer(text) tenant=%s request=%s engine=%s stream=%v msgs=%d cache_hit=%v",
 		tenant, req.RequestID, engType, req.Stream, len(msgs), cacheHit)
@@ -1447,8 +1473,21 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		return
 	}
 	// 未命中回填缓存（命中路径不重复回填）。
-	if s.cache != nil && !cacheHit {
-		s.cache.Put(cacheKey, agg.String())
+	if !cacheHit {
+		if cacheStoreCtx != nil {
+			// 写前审查门禁（§7.1）：输出侧已放行（未阻塞）才写；分片随条目写入（§6.12）。
+			sc := *cacheStoreCtx
+			sc.Writable = !out.Blocked
+			s.cacheEngine.Store(sc, cacheengine.InferResult{
+				Text:      agg.String(),
+				TokensIn:  s.countTokens(inputText.String()),
+				TokensOut: s.countTokens(agg.String()),
+				Finish:    "stop",
+				Segments:  capture.segments(),
+			})
+		} else if s.cache != nil {
+			s.cache.Put(cacheKey, agg.String())
+		}
 	}
 
 	// M9-2/M9-3：计量 + 审计 + 指标（过渡口径见 estimateTokensCJK；输入已在配额预占计入，仅补记输出）
@@ -3690,8 +3729,10 @@ func main() {
 		weightProvider:    NewMockWeightProvider(32),
 		route:             routeCfg,
 		tokenizer:         nil,                       // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
-		cache:             cacheengine.NewLegacyAdapter(cacheEng), // P0-2：默认 mode=off → Get 恒 miss / Put no-op（零行为变化）
-		cacheEngine:       cacheEng,                                // P0-2：/metrics 渲染与后续原生接口迁移入口
+		cache:             cacheengine.NewLegacyAdapter(cacheEng), // P0-2：legacy 兜底（仅 cacheEngine==nil 时使用）
+		cacheEngine:       cacheEng,                                // P0-2 B2：原生语义缓存（命中/回填）+ /metrics
+		cacheEnabled:      cacheCfg.Mode != cacheengine.ModeOff,    // P0-2 B2：mode=off → 不进原生路径（零开销）
+		cacheReplay:       cacheReplayConfig{minGap: cacheCfg.Stream.MinGap.D(), maxGap: cacheCfg.Stream.MaxGap.D()}, // P0-2 B2：§6.12 节拍快照
 		usage:             make(map[string]*usageRecord),
 		quota:             make(map[string]quotaSpec),
 		quotaDefault:      *tokenQuota,
