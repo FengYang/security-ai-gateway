@@ -411,14 +411,14 @@ func IncAssocVerify(result string) {
 		map[string]string{"result": result}, 1)
 }
 
-// IncBillingRequests 计费 API 请求（#1；method/code）。
-func IncBillingRequests(method, code string) {
+// IncBillingRequests 计费 API 请求（#1；path,code）。
+func IncBillingRequests(path, code string) {
 	DefaultMetrics.IncCounter("gateway_admin_billing_requests_total",
-		map[string]string{"method": method, "code": code}, 1)
+		map[string]string{"path": path, "code": code}, 1)
 }
 
-// ObserveAPI 查询 API 耗时（#9；route）。
-func ObserveAPI(route string, seconds float64) {
+// ObserveAPI 查询 API 耗时（#9；path，M5）。
+func ObserveAPI(path string, seconds float64) {
 	DefaultMetrics.ObserveHistogram("gateway_admin_billing_api_duration_seconds",
-		map[string]string{"route": route}, seconds)
+		map[string]string{"path": path}, seconds)
 }

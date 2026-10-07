@@ -289,17 +289,42 @@ func (s *billingStatus) Write(b []byte) (int, error) {
 	return s.ResponseWriter.Write(b)
 }
 
-// withMetrics 计费 API 请求计数（指标 #1；method/code）。
+// withMetrics 计费 API 观测：请求计数（#1；path,code）+ 查询耗时（#9；path，M5）。
+//
+// ★ MET-001/002：标签统一为 `path`（低基数路由模板），与详设 §9.1 契约一致；
+// 同时**接通 #9 `billing_api_duration_seconds` 生产者**（此前 `ObserveAPI` 无调用点 → M5 不可观测）。
 func (h *billingHandler) withMetrics(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		rec := &billingStatus{ResponseWriter: w}
 		next(rec, r)
 		code := rec.code
 		if code == 0 {
 			code = http.StatusOK
 		}
-		billing.IncBillingRequests(r.Method, strconv.Itoa(code))
+		route := billingRouteLabel(r.URL.Path)
+		billing.IncBillingRequests(route, strconv.Itoa(code)) // 指标 #1
+		billing.ObserveAPI(route, time.Since(start).Seconds()) // 指标 #9
 	}
+}
+
+// billingRouteLabel 把 /billing 请求路径归一为**低基数**路由标签
+// （避免 `/bills/{id}` 含真实账单 id 造成指标基数爆炸）。
+func billingRouteLabel(p string) string {
+	rest := strings.TrimPrefix(p, billingAPIBase)
+	switch rest {
+	case "/plans", "/subscription", "/bills", "/ledger", "/close-daily",
+		"/close-monthly", "/freeze", "/unfreeze", "/verify-chain", "/events":
+		return rest
+	}
+	if strings.HasPrefix(rest, "/bills/") {
+		parts := strings.Split(strings.TrimPrefix(rest, "/bills/"), "/")
+		if len(parts) >= 2 && parts[1] != "" {
+			return "/bills/{id}/" + parts[1] // /verify | /export
+		}
+		return "/bills/{id}"
+	}
+	return rest
 }
 
 // ---------- 套餐 ----------

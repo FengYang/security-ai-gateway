@@ -410,6 +410,24 @@ func TestBillingEventsWebhook_HMACAlgCompat(t *testing.T) {
 	}
 }
 
+// MET-001/002：#1 标签为 path/code；#9 由 HTTP 中间件生产（path 标签，M5 可观测）。
+func TestBillingAPI_MetricsProducerWiring(t *testing.T) {
+	env := newBillingTestEnv(t)
+	tok := testSignToken(t, testSecret, claims{
+		Sub: testAdminUser, Role: roleAdmin, Iss: defaultIssuer, Aud: defaultAudience,
+	})
+	if code := billingGet(t, env, tok, billingAPIBase+"/plans"); code != http.StatusOK {
+		t.Fatalf("GET /plans = %d, want 200", code)
+	}
+	out := renderAdminMetrics()
+	if !strings.Contains(out, `gateway_admin_billing_api_duration_seconds_count{path="/plans"}`) {
+		t.Errorf("指标 #9 未由中间件生产（path 标签）:\n%s", out)
+	}
+	if !strings.Contains(out, `gateway_admin_billing_requests_total{code="200",path="/plans"}`) {
+		t.Errorf("指标 #1 标签应为 path/code:\n%s", out)
+	}
+}
+
 // ---------- 套餐热下发 M6（§6.4.1 2c；P-1 回读确认） ----------
 
 // renderAdminMetrics 渲染进程指标文本（断言 #13 用）。

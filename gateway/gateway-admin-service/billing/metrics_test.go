@@ -94,8 +94,8 @@ func TestMetricsProducers(t *testing.T) {
 	SetReconcileDiff("t1", 0.001)
 	SetPlatformRetryTokens("t1", 100)
 	ObserveClose("daily", 0.1)
-	ObserveAPI("bills", 0.02)
-	IncBillingRequests("GET", "200")
+	ObserveAPI("/bills", 0.02)
+	IncBillingRequests("/bills", "200")
 
 	var buf bytes.Buffer
 	DefaultMetrics.Render(&buf)
