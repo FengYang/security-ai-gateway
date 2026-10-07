@@ -418,27 +418,31 @@ func (s *BillingService) closeOverage(tenant, month string, agg *UsageAgg, tbl *
 	return nil
 }
 
-// buildItems 由 UsageAgg 构造明细行 + 账单总额（唯一取整）。
-// 明细行金额为可读性展示（各自取整）；账单总额 = roundAmount(Σ 亚分)（R-16 唯一取整点）。
+// buildItems 由 UsageAgg 构造明细行 + 账单总额。
+//
+// ★ BUG-003：计价**一律经 RatingEngine**（权威实现，含月累计起点与唯一换算/取整口径），
+// 不再内联 `rateModel`、也不再断言具体类型 `*ratingEngine`（消除两套计价路径与断言失败静默降级）。
+//   - 明细行：对单模型子聚合调用 `RateMu`（亚分、未取整），逐行取整仅作展示（§6.10 展示口径）；
+//   - 账单总额：调用 `RateMonthly`（= roundAmount(RateMu(整周期))，R-16 唯一取整点；honor 配置的舍入法）。
 func (s *BillingService) buildItems(agg *UsageAgg, tbl *PriceTable) ([]BillItem, Amount, error) {
 	if agg == nil || len(agg.ByModel) == 0 {
 		return nil, 0, nil
 	}
+	if s.rating == nil {
+		return nil, 0, fmt.Errorf("billing: rating engine is not configured")
+	}
 	var items []BillItem
-	var totalMu int64
 	for mk, mu := range agg.ByModel {
-		mp, ok := tbl.ModelPriceOf(mk)
-		if !ok {
+		if _, ok := tbl.ModelPriceOf(mk); !ok {
 			return nil, 0, fmt.Errorf("%w: model %q", ErrPricingMissing, mk)
 		}
-		var inBefore, outBefore int64
-		if s.rating != nil {
-			if p, ok := s.rating.(*ratingEngine); ok && p.monthStd != nil {
-				inBefore, outBefore = p.monthStd.MonthStdBefore(agg.TenantID, mk, agg.Period)
-			}
+		// 单模型子聚合：经引擎计价（月累计起点由引擎内部按 period 取，无需外部注入具体类型）
+		sub := &UsageAgg{TenantID: agg.TenantID, Period: agg.Period,
+			ByModel: map[string]*ModelStd{mk: mu}}
+		itemMu, err := s.rating.RateMu(sub, tbl)
+		if err != nil {
+			return nil, 0, err
 		}
-		itemMu := rateModel(mu.StdIn, mu.StdOut, inBefore, outBefore, mp)
-		totalMu += itemMu
 		items = append(items, BillItem{
 			ModelKey:       mk,
 			StandardTokens: mu.StdIn + mu.StdOut,
@@ -448,7 +452,11 @@ func (s *BillingService) buildItems(agg *UsageAgg, tbl *PriceTable) ([]BillItem,
 			Amount:         roundAmount(itemMu, "half_up"),
 		})
 	}
-	return items, roundAmount(totalMu, "half_up"), nil
+	total, err := s.rating.RateMonthly(agg, tbl) // 月结权威入口（唯一取整点）
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
 }
 
 // checkFrozen 冻结判定（§6.10.3）。

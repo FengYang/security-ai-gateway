@@ -99,6 +99,49 @@ func TestCloseDaily_Basic(t *testing.T) {
 	}
 }
 
+// wrapRating 把引擎包装为**非 *ratingEngine** 类型（验证计价不依赖具体类型断言，BUG-003）。
+type wrapRating struct{ inner RatingEngine }
+
+func (w wrapRating) RateMu(u *UsageAgg, t *PriceTable) (int64, error) { return w.inner.RateMu(u, t) }
+func (w wrapRating) Rate(u *UsageAgg, t *PriceTable) (Amount, error)  { return w.inner.Rate(u, t) }
+func (w wrapRating) RateMonthly(u *UsageAgg, t *PriceTable) (Amount, error) {
+	return w.inner.RateMonthly(u, t)
+}
+func (w wrapRating) StandardTokens(i, o int64, mp *ModelPrice) (int64, int64) {
+	return w.inner.StandardTokens(i, o, mp)
+}
+func (w wrapRating) ExtraAmount(u *UsageAgg, p *Plan, t *PriceTable) (int64, error) {
+	return w.inner.ExtraAmount(u, p, t)
+}
+
+// BUG-003 回归锚：注入**非具体类型**的计价引擎时，日结金额仍按“月累计分档”正确。
+// （旧实现经 `s.rating.(*ratingEngine)` 取月累计起点，断言失败即静默丢失起点 → 金额偏高。）
+func TestCloseDaily_NonConcreteRatingEngine(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	// gpt-4o 阶梯 [≤1M: 30/60, ∞: 15/30]（元/千token；见 testPriceTable）
+	// 月初已用 1,000,000 标准 token（跨出第一档），当日再用 500,000
+	seedLedger(t, s, LedgerEntry{
+		TenantID: "t1", ModelKey: "gpt-4o", Day: "2026-09-10",
+		TokensIn: 1_000_000, StdIn: 1_000_000, Requests: 1, EventKey: "e1",
+	})
+	seedLedger(t, s, LedgerEntry{
+		TenantID: "t1", ModelKey: "gpt-4o", Day: "2026-09-15",
+		TokensIn: 500_000, StdIn: 500_000, Requests: 1, EventKey: "e2",
+	})
+	svc := newTestBillingService(s, nil)
+	svc.rating = wrapRating{inner: svc.rating} // 非 *ratingEngine
+
+	bill, err := svc.CloseDaily(context.Background(), "t1", "2026-09-15")
+	if err != nil {
+		t.Fatalf("CloseDaily err: %v", err)
+	}
+	// 当日区间 [1,000,000, 1,500,000) 全在第二档（15 元/千）：500 × 15 = 7500 元 = 750000 分
+	if bill.Total != Amount(750000) {
+		t.Errorf("total = %d 分, want 750000（月累计分档；失败=丢失月起点/依赖类型断言）", bill.Total)
+	}
+}
+
 func TestCloseDaily_Idempotent(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
