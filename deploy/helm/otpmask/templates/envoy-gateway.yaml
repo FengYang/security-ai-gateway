@@ -51,15 +51,16 @@ data:
                   value: 100
                 client_sampling:
                   value: 100
+                # 实测修正（2026-10-08，Envoy 1.27.7）：HCM tracing 的 custom_tags 为
+                # repeated CustomTag（元素字段 `tag`，取值器 request_header 等）；
+                # tenant.id 用 request_header x-tenant-id（Wasm 当前未实现 SetProperty）。
                 custom_tags:
-                  request.id:
-                    request_id: {}
-                  tenant.id:
-                    metadata:
-                      kind:
-                        request: {}
-                      metadata_key:
-                        key: tenant_id
+                  - tag: request.id
+                    request_header:
+                      name: x-request-id
+                  - tag: tenant.id
+                    request_header:
+                      name: x-tenant-id
               {{- end }}
               route_config:
                 name: local_route
@@ -218,7 +219,13 @@ data:
         type: LOGICAL_DNS
         dns_lookup_family: V4_ONLY
         lb_policy: ROUND_ROBIN
-        http2_protocol_options: {}
+        # 实测修正（2026-10-08，Envoy 1.27.7）：http2_protocol_options 已废弃，改用
+        # typed_extension_protocol_options + HttpProtocolOptions.explicit_http_config。
+        typed_extension_protocol_options:
+          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+            explicit_http_config:
+              http2_protocol_options: {}
         load_assignment:
           cluster_name: otel-collector
           endpoints:

@@ -52,18 +52,25 @@ data:
                   value: 100
                 client_sampling:
                   value: 100
-                # 自定义 tags：request.id 来自 Envoy request_id（与审计关联），
-                # tenant.id 来自 Wasm SetProperty 的动态 metadata（供 Collector
-                # 租户 allow-list 匹配用，D-8）。
+                # 自定义 tags：request.id 取 x-request-id（Envoy request_id 扩展，
+                # 与审计关联），tenant.id 取 x-tenant-id（供 Collector 租户
+                # allow-list 匹配，D-8）。
+                #
+                # 实测修正（2026-10-08，higress/gateway:v2.1.5 / Envoy 1.27.7）：
+                # HCM tracing 的 custom_tags 为 **repeated CustomTag**（非 map），
+                # 元素字段为 `tag`（非 map 键、非 `tag_name`）；取值器之一为
+                # `request_header`。原写法（map + `request_id: {}` / `metadata_key`
+                # 缺 `path`）会被 Envoy 配置校验拒绝 → 网关无法启动。
+                # tenant.id 原计划用 Wasm `SetProperty` 动态 metadata，但插件当前
+                # **未实现** SetProperty（见待确认项 5），故改用 request_header
+                # （可用且与 §6.4「从 x-tenant-id 提取」一致）。
                 custom_tags:
-                  request.id:
-                    request_id: {}
-                  tenant.id:
-                    metadata:
-                      kind:
-                        request: {}
-                      metadata_key:
-                        key: tenant_id
+                  - tag: request.id
+                    request_header:
+                      name: x-request-id
+                  - tag: tenant.id
+                    request_header:
+                      name: x-tenant-id
               route_config:
                 name: local_route
                 virtual_hosts:
@@ -274,7 +281,13 @@ data:
         type: LOGICAL_DNS
         dns_lookup_family: V4_ONLY
         lb_policy: ROUND_ROBIN
-        http2_protocol_options: {}
+        # 实测修正（2026-10-08，Envoy 1.27.7）：Cluster.http2_protocol_options 已废弃
+        # （启动告警），改用 typed_extension_protocol_options + HttpProtocolOptions.explicit_http_config。
+        typed_extension_protocol_options:
+          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+            explicit_http_config:
+              http2_protocol_options: {}
         load_assignment:
           cluster_name: otel-collector
           endpoints:

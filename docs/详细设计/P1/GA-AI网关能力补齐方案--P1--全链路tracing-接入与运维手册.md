@@ -114,21 +114,27 @@ POST /v1/adminext/slo
 - [x] CSV 导出防公式注入（`= + - @ \t \r` 前置单引号）。
 - [x] 租户隔离：跨租户/缺省 tenant 的非 admin 访问 → 403（fail-closed）。
 - [x] **本地 Docker 端到端验证通过**（Tempo 2.5.0 + otelcol-contrib 0.112.0，2026-10-08）：合成 OTLP trace 经 Collector → Tempo 回查，白名单外属性（`prompt`/`response`/`content`/`embedding`/自定义键）**全部裁剪、无泄漏**；`http.response.status_code`→`http.status_code` 映射生效；采样语义符合预期（见 §7 备注）。
-- [ ] **待实机验证**：Envoy/Higress 侧镜像与 tracer 编入、`config_dump` 属性清单核对（§6.4 待确认项 1/2/4/5/6）。
+- [x] **Envoy OTel tracer 编入已确认**（2026-10-08）：`higress/gateway:v2.1.5` 与项目实际运行时
+  `otpmask/envoy-gateway:latest` 为**同一 Envoy 构建（1.27.7，commit d411a4f0）**；用真实二进制
+  `envoy -c <cfg> --mode validate` 校验含 `envoy.tracers.opentelemetry` 的配置 → `configuration ... OK`。
+  镜像取自 **阿里云 official registry**（`higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/gateway:v2.1.5`），
+  绕开先前 403 的第三方镜像源（1panel）。
+- [ ] **待实机验证**：Envoy/Higress 侧 `config_dump` 属性清单核对（§6.4 待确认项 2/4/5/6）。
 - [ ] **待实机验证**：性能基线 V-3（`p99(开) ≤ 1.05 × p99(关)`，需真实推理链路 + 压测环境；方法见 §5）。
 
 ## 7. 待实机验证项（不阻塞交付，闭环前不得视为已具备）
 
 | # | 项 | 说明 |
 |---|---|---|
-| 1 | Envoy OTel tracer 编入 | `higress/gateway` 镜像 `envoy --version` + Admin `config_dump` |
+| 1 | ~~Envoy OTel tracer 编入~~ | **已确认**（1.27.7 实测 validates OK，见上）；镜像经阿里云 registry 获取 |
 | 2 | `http.status_code` 键名 | Envoy span 属性键名与 semconv 版本核对（已用 Collector `http.response.status_code` 兼容映射兜底，本地 E2E 已验证映射生效） |
 | 3 | Tempo 分层冻结 | 单实例 30d 保留 + 查询默认 7d 窗口（配置已落地；本地已验证单实例读写） |
-| 4 | Higress `tracing.*` schema | chart 实机核对 |
+| 4 | Higress `tracing.*` schema | chart 实机核对（本项目为自持 Envoy bootstrap，不依赖 Higress 动态 `tracing.*`） |
 | 5 | Wasm 对 traceparent 可见性 | 插件实测 |
 | 6 | Envoy OTel 默认 tags 清单 | 确认无敏感 fields（`http.url` 不带 query） |
 | 7 | Collector 租户 allow-list 热更 | `POST /tracing/tenant` 与 Collector 侧同步的自动化 wiring（allow-list 现为单一事实源 `values: &tenant_allowlist`） |
 | 8 | 性能基线实测 | §5 方法在实机负载下执行并留证 |
+| 9 | **Envoy 配置预存缺陷（非 tracing）** | 用 1.27.7 校验 `deploy/k8s/envoy-gateway.yaml` 时发现**非 tracing** 的预存错误：`RBAC` 过滤器无 `stat_prefix` 字段（应为 `rules_stat_prefix`）；`RetryPolicy` 无 `retry_budget` 字段。二者会阻止网关以 1.27.7 启动，**建议单独立项修复**（超出 P1-2 tracing 范围，未在本批次改动） |
 
 > **备注（2026-10-08 本地 Docker 端到端验证，已闭环部分）**：
 > - **镜像可用**：`grafana/tempo:2.5.0`、`otel/opentelemetry-collector-contrib:0.112.0` 均可拉取；
@@ -142,3 +148,11 @@ POST /v1/adminext/slo
 >   2. `tail_sampling` 无 `http_status_code` policy 类型 → 改 `numeric_attribute`（400–599）；
 >   3. `status_code` policy 需 map（`{status_codes: [ERROR]}`）；
 >   4. 平铺策略会让白名单租户普通 trace 被「保留全部」而绕过 1% 默认采样 → 改为多个顶层 `and` 门控。
+> - **本次实测修正的 Envoy 侧配置缺陷**（`deploy/k8s/envoy-gateway.yaml` 与 Helm 模板；
+>   Envoy 1.27.7 配置校验拒绝 → 网关无法启动）：
+>   1. HCM `tracing.custom_tags` 为 **repeated CustomTag**（元素字段 `tag`），非 map——原写法
+>      （map 键 + `request_id: {}`）被拒 → 改为列表 + `request_header: x-request-id`；
+>   2. `tenant.id` 原用 Wasm `SetProperty` 动态 metadata，但插件**未实现** `SetProperty`
+>      （且 `metadata_key` 缺 `path`）→ 改为 `request_header: x-tenant-id`（可用）；
+>   3. `Cluster.http2_protocol_options` 已废弃（启动告警）→ 改
+>      `typed_extension_protocol_options` + `HttpProtocolOptions.explicit_http_config`。
