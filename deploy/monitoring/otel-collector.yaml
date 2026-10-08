@@ -38,116 +38,99 @@ data:
             #   key_file: /etc/otel/tls/server.key
 
     processors:
-      # 属性白名单裁剪（纵深防御第二道；TEE 内已做第一道，D-4）
+      # 属性白名单裁剪（纵深防御第二道；TEE 内已做第一道，D-4）。
       # 白名单外一律删除，防止 TEE 侧遗漏或数据面默认 tags 带敏感信息。
-      attributes:
-        actions:
-          - key: tenant.id
-            action: keep
-          - key: request.id
-            action: keep
-          - key: model.id
-            action: keep
-          - key: engine.type
-            action: keep
-          - key: cache.hit
-            action: keep
-          - key: cache.mode
-            action: keep
-          - key: tokens.in
-            action: keep
-          - key: tokens.out
-            action: keep
-          - key: result
-            action: keep
-          - key: deny.reason
-            action: keep
-          - key: og.category
-            action: keep
-          - key: og.mode
-            action: keep
-          - key: is.retry
-            action: keep
-          - key: http.status_code
-            action: keep
-          - key: http.response.status_code
-            action: keep
-          - key: ttft.ms
-            action: keep
-          - key: input.digest
-            action: keep
-          - key: output.digest
-            action: keep
-          # —— M3 控制面/管理面 span 属性（§7.4：core.route.change / admin.request）——
-          - key: http.method
-            action: keep
-          - key: http.request.method
-            action: keep
-          - key: http.route
-            action: keep
-          - key: url.path
-            action: keep
-          - key: user.role
-            action: keep
-          - key: route.name
-            action: keep
-          - key: change.type
-            action: keep
-          - key: otlp.library.name
-            action: keep
-          - key: otlp.resource.version
-            action: keep
-          - key: service.name
-            action: keep
-          # —— 白名单上界，以下全删 ——
-          - action: delete
+      #
+      # 实现说明（2026-10-08 本地端到端实测修正）：otelcol-contrib v0.112.0 的
+      # `attributes` processor **不支持 `action: keep`**（以 attributes+keep 配置启动即
+      # 报 `unsupported action "keep"`，Collector 直接退出）。故改用 `transform` +
+      # OTTL `keep_keys` 实现「仅保留白名单」，并顺带在 span 级完成键名兼容映射。
+      transform/whitelist:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            statements:
+              # 仅保留 §6.2 白名单 + §7.4 M3 扩展键；其余（含 prompt/response/content/
+              # embedding 等）一律删除。
+              - keep_keys(attributes, ["tenant.id","request.id","model.id","engine.type","cache.hit","cache.mode","tokens.in","tokens.out","result","deny.reason","og.category","og.mode","is.retry","http.status_code","http.response.status_code","ttft.ms","input.digest","output.digest","http.method","http.request.method","http.route","url.path","user.role","route.name","change.type","otlp.library.name","otlp.resource.version","service.name"])
+              # 兼容键名映射：Envoy OTel tracer 新语义约定用 http.response.status_code，
+              # 而 tail_sampling http_status_code policy 读 http.status_code。
+              - set(attributes["http.status_code"], attributes["http.response.status_code"]) where attributes["http.status_code"] == nil and attributes["http.response.status_code"] != nil
+          # Resource 属性白名单：仅保留 service.name（Tempo rootServiceName 依赖），
+          # 防止 host.*/process.* 等宿主信息外泄。
+          - context: resource
+            statements:
+              - keep_keys(attributes, ["service.name"])
 
-      # 兼容键名映射：Envoy OTel tracer 新语义约定用 http.response.status_code，
-      # 而 tail_sampling http_status_code policy 读 http.status_code。
-      # 同时保留两个键，避免 Collector/查询侧键名不匹配导致错误漏采。
-      resource/ensure_status_code:
-        attributes:
-          - key: http.status_code
-            from_attribute: http.response.status_code
-            action: insert
-
-      # Tail Sampling（D-3 / §3.4 三层策略）
+      # Tail Sampling（D-3 / §3.4）
       # decision_wait 初始 30s（覆盖 LLM 流式长 trace p99），
       # 落地后按实测 trace 时长 p99 校正——过短会在 trace 未闭合时裁决，
       # 导致 status_code 未写入、长错误 trace 仅按 1% 处理而漏采。
+      #
+      # 拓扑修正（2026-10-08 本地 Docker 端到端实测）：
+      #   若把「租户 allow-list」与「错误全采」「默认 1%」**平铺为同级策略**，则
+      #   allow-list 被当作「保留该租户的全部 trace」：实测在默认概率置 0（pct=0）时，
+      #   白名单租户的**普通 trace 仍被落库** —— 1% 默认采样被绕过，与 §3.4
+      #   「99% 在 Collector tail_sampling 丢弃」矛盾。
+      #   故改为：**多个顶层 `and` 策略**（顶层之间即 OR），每个都以租户 allow-list 门控：
+      #     OR( AND(租户,http-err), AND(租户,span-err), AND(租户,默认 1%) )
+      #     ≡ AND(租户∈allow-list, OR(错误全采, 默认 1%))  —— 既「默认拒绝」又「错误全采」。
+      #   实测（allow-list=["t-001"]）：非白名单租户 200/500 均不落库（deny-by-default）；
+      #   白名单普通 trace 在 pct=0 时不落库、pct=100 时落库；白名单 5xx 恒落库（错误全采）。
+      #   备注：`composite`(OR) 不能嵌套在 `and` 内（校验报 `invalid keys: composite`）；
+      #         以顶层 composite 包裹多个 `and` 实测会连白名单租户一并拒绝，故不采用。
       tail_sampling:
         decision_wait: 30s
         num_traces: 100000
         expected_new_traces_per_sec: 1000
         policies:
-          # —— 第 1 层：租户 allow-list（FD-3 / D-8，deny-by-default）——
-          # 不在列表 → 全拒绝；由 POST /v1/adminext/tracing/tenant 热更 values。
-          - name: tenant-allow-list
+          # ① 白名单租户 + HTTP 4xx/5xx（错误全采）
+          - name: tenant-http-err
             type: and
             and:
               and_sub_policy:
-                - name: tenant-attr-match
+                - name: allowlist-http
                   type: string_attribute
                   string_attribute:
                     key: tenant.id
-                    # 空列表 = 全拒绝（安全默认，C-4）；
-                    # 生产按租户灰度开启时追加值。
-                    values: []
-                    # 启用 allow-list（匹配=放行进入后续策略；不匹配=该 policy 拒绝）
-                    invert_match: false
-          # —— 第 2 层：错误全采（L2，优先级最高）——
-          - name: error-policy-http
-            type: http_status_code
-            http_status_code:
-              status_codes: ["4xx", "5xx"]
-          - name: error-policy-span
-            type: status_code
-            status_code: ERROR
-          # —— 第 3 层：默认概率采样（L1 = 1%）——
-          - name: default-probabilistic
-            type: probabilistic
-            probabilistic:
-              sampling_percentage: 1
+                    # —— 单一事实源：租户 allow-list（空 = 全拒绝，C-4）——
+                    # 灰度热更（POST /v1/adminext/tracing/tenant）只需修改此处，
+                    # 另两处经 YAML 锚点引用同一列表。
+                    values: &tenant_allowlist []
+                - name: error-http
+                  type: numeric_attribute
+                  numeric_attribute:
+                    key: http.status_code
+                    min_value: 400
+                    max_value: 599
+          # ② 白名单租户 + OTel span status=ERROR（错误全采）
+          - name: tenant-span-err
+            type: and
+            and:
+              and_sub_policy:
+                - name: allowlist-span
+                  type: string_attribute
+                  string_attribute:
+                    key: tenant.id
+                    values: *tenant_allowlist
+                - name: error-span
+                  type: status_code
+                  status_code:
+                    status_codes: [ERROR]
+          # ③ 白名单租户 + 默认概率（L1 = 1%）
+          - name: tenant-default
+            type: and
+            and:
+              and_sub_policy:
+                - name: allowlist-default
+                  type: string_attribute
+                  string_attribute:
+                    key: tenant.id
+                    values: *tenant_allowlist
+                - name: default-probabilistic
+                  type: probabilistic
+                  probabilistic:
+                    sampling_percentage: 1
 
     exporters:
       # 导出到 Tempo（OTLP/gRPC）
@@ -165,8 +148,7 @@ data:
         traces:
           receivers: [otlp]
           processors:
-            - attributes
-            - resource/ensure_status_code
+            - transform/whitelist
             - tail_sampling
           exporters:
             - otlp/tempo

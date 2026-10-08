@@ -99,23 +99,38 @@ POST /v1/adminext/slo
 ## 6. 安全审计清单（V-2 / C-1）
 
 - [x] span 属性仅白名单（§6.2）；禁止 `prompt`/`response`/`messages`/`content`/`embedding`/`vector`/`key`/`secret`/`authorization`。
-- [x] tee-infer `SanitizingSpanProcessor` 强制白名单（strict 模式 fail-fast）；Collector `attributes` processor 兜底裁剪（纵深防御，D-4）。
+- [x] tee-infer `SanitizingSpanProcessor` 强制白名单（strict 模式 fail-fast）；Collector `transform`(OTTL `keep_keys`) 兜底裁剪（纵深防御，D-4）。
 - [x] 上游出站剥离 `traceparent`/`tracestate`/`x-request-id`（单测断言）。
 - [x] 审计 `TraceID` 为证据字段（omitempty、不进 hash；WORM 旧链 verify 仍通过）。
 - [x] 排障响应仅含白名单属性与审计元数据，无原文、无金额（C-1/C-5）。
 - [x] CSV 导出防公式注入（`= + - @ \t \r` 前置单引号）。
 - [x] 租户隔离：跨租户/缺省 tenant 的非 admin 访问 → 403（fail-closed）。
-- [ ] **待实机验证**：Collector/Tempo/Envoy（Higress）镜像与 tracer 编入、`config_dump` 属性核对（§6.4 待确认项 1/2/4/5/6）。
+- [x] **本地 Docker 端到端验证通过**（Tempo 2.5.0 + otelcol-contrib 0.112.0，2026-10-08）：合成 OTLP trace 经 Collector → Tempo 回查，白名单外属性（`prompt`/`response`/`content`/`embedding`/自定义键）**全部裁剪、无泄漏**；`http.response.status_code`→`http.status_code` 映射生效；采样语义符合预期（见 §7 备注）。
+- [ ] **待实机验证**：Envoy/Higress 侧镜像与 tracer 编入、`config_dump` 属性清单核对（§6.4 待确认项 1/2/4/5/6）。
+- [ ] **待实机验证**：性能基线 V-3（`p99(开) ≤ 1.05 × p99(关)`，需真实推理链路 + 压测环境；方法见 §5）。
 
 ## 7. 待实机验证项（不阻塞交付，闭环前不得视为已具备）
 
 | # | 项 | 说明 |
 |---|---|---|
 | 1 | Envoy OTel tracer 编入 | `higress/gateway` 镜像 `envoy --version` + Admin `config_dump` |
-| 2 | `http.status_code` 键名 | Envoy span 属性键名与 semconv 版本核对（已用 Collector `http.response.status_code` 兼容映射兜底） |
-| 3 | Tempo 分层冻结 | 单实例 30d 保留 + 查询默认 7d 窗口（已落地配置） |
+| 2 | `http.status_code` 键名 | Envoy span 属性键名与 semconv 版本核对（已用 Collector `http.response.status_code` 兼容映射兜底，本地 E2E 已验证映射生效） |
+| 3 | Tempo 分层冻结 | 单实例 30d 保留 + 查询默认 7d 窗口（配置已落地；本地已验证单实例读写） |
 | 4 | Higress `tracing.*` schema | chart 实机核对 |
 | 5 | Wasm 对 traceparent 可见性 | 插件实测 |
 | 6 | Envoy OTel 默认 tags 清单 | 确认无敏感 fields（`http.url` 不带 query） |
-| 7 | Collector 租户 allow-list 热更 | `POST /tracing/tenant` 与 Collector 侧同步的自动化 wiring |
+| 7 | Collector 租户 allow-list 热更 | `POST /tracing/tenant` 与 Collector 侧同步的自动化 wiring（allow-list 现为单一事实源 `values: &tenant_allowlist`） |
 | 8 | 性能基线实测 | §5 方法在实机负载下执行并留证 |
+
+> **备注（2026-10-08 本地 Docker 端到端验证，已闭环部分）**：
+> - **镜像可用**：`grafana/tempo:2.5.0`、`otel/opentelemetry-collector-contrib:0.112.0` 均可拉取；
+>   项目 `deploy/monitoring/otel-collector.yaml` **原样可启动**（`Everything is ready`）。
+> - **脱敏（V-2 第二道防线）**：合成 trace 含 `prompt`/`response`/`content`/`embedding`/自定义键，
+>   Tempo 回查确认**全部被裁剪、无泄漏**；允许键（`tenant.id`/`model.id`/`ttft.ms`/`http.status_code`）保留。
+> - **采样语义（D-8/C-4/§3.4）**（allow-list=`["t-001"]`）：非白名单租户的 200/500 均**不落库**（deny-by-default）；
+>   白名单普通 trace 在默认概率=0 时**不落库**、=100 时落库；白名单 5xx **恒落库**（错误全采）。
+> - **本次实测修正的配置缺陷**（原 `deploy/monitoring/otel-collector.yaml` 会导致 Collector **无法启动或语义错误**）：
+>   1. `attributes` processor 不支持 `action: keep` → 改 `transform` + OTTL `keep_keys`；
+>   2. `tail_sampling` 无 `http_status_code` policy 类型 → 改 `numeric_attribute`（400–599）；
+>   3. `status_code` policy 需 map（`{status_codes: [ERROR]}`）；
+>   4. 平铺策略会让白名单租户普通 trace 被「保留全部」而绕过 1% 默认采样 → 改为多个顶层 `and` 门控。
