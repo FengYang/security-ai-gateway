@@ -113,6 +113,214 @@ data:
       "uid": "otpmask-overview",
       "version": 1
     }
+  otpmask-ai.json: |
+    {
+      "annotations": {"list": []},
+      "editable": true,
+      "graphTooltip": 0,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "s"},
+            "overrides": []
+          },
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "id": 1,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "histogram_quantile(0.50, sum by (le) (rate(otpmask_ttft_seconds_bucket[5m])))", "legendFormat": "p50", "refId": "A"},
+            {"expr": "histogram_quantile(0.95, sum by (le) (rate(otpmask_ttft_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "B"},
+            {"expr": "histogram_quantile(0.99, sum by (le) (rate(otpmask_ttft_seconds_bucket[5m])))", "legendFormat": "p99", "refId": "C"}
+          ],
+          "title": "TTFT 分位（首 token 时延）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "custom": {"fillOpacity": 80}, "unit": "short"},
+            "overrides": []
+          },
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "id": 2,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "sum by (tenant) (rate(otpmask_tokens_in_total[5m]))", "legendFormat": "{{tenant}} in", "refId": "A"},
+            {"expr": "sum by (tenant) (rate(otpmask_tokens_out_total[5m]))", "legendFormat": "{{tenant}} out", "refId": "B"}
+          ],
+          "title": "Token 用量速率（入/出，按租户）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "percentunit", "min": 0, "max": 1},
+            "overrides": []
+          },
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+          "id": 3,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "sum(rate(otpmask_output_guard_blocked_total[5m])) / clamp_min(sum(rate(otpmask_output_guard_requests_total[5m])), 1)", "legendFormat": "输出侧拦截率", "refId": "A"},
+            {"expr": "sum(rate(otpmask_output_guard_would_reject_total[5m])) / clamp_min(sum(rate(otpmask_output_guard_requests_total[5m])), 1)", "legendFormat": "shadow 命中率", "refId": "B"}
+          ],
+          "title": "内容拦截率（输出侧审查）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "percentunit", "min": 0, "max": 1},
+            "overrides": []
+          },
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+          "id": 4,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "sum(rate(otpmask_cache_lookups_total{result=\"hit\"}[5m])) / clamp_min(sum(rate(otpmask_cache_lookups_total{result=~\"hit|miss\"}[5m])), 1)", "legendFormat": "命中率", "refId": "A"}
+          ],
+          "title": "缓存命中率（含语义缓存）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "percentunit", "min": 0, "max": 1},
+            "overrides": []
+          },
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+          "id": 5,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "sum(rate(otpmask_inference_requests_total{result=\"ok\"}[5m])) / clamp_min(sum(rate(otpmask_inference_requests_total[5m])), 1)", "legendFormat": "成功率", "refId": "A"}
+          ],
+          "title": "推理成功率（SLO 可用性口径）",
+          "type": "timeseries"
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["otpmask", "ai"],
+      "templating": {"list": []},
+      "time": {"from": "now-6h", "to": "now"},
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "OTP-Mask AI 看板（TTFT/Token/拦截率/缓存命中）",
+      "uid": "otpmask-ai",
+      "version": 1
+    }
+  otpmask-slo.json: |
+    {
+      "annotations": {"list": []},
+      "editable": true,
+      "graphTooltip": 0,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "thresholds"}, "unit": "percentunit", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.99}, {"color": "green", "value": 0.995}]}},
+            "overrides": []
+          },
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+          "id": 1,
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "area", "textMode": "auto", "orientation": "auto", "justifyMode": "auto"},
+          "targets": [
+            {"expr": "sum(rate(otpmask_inference_requests_total{result=\"ok\"}[30m])) / clamp_min(sum(rate(otpmask_inference_requests_total[30m])), 1)", "legendFormat": "可用性", "refId": "A"}
+          ],
+          "title": "可用性（30m）",
+          "type": "stat"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "thresholds"}, "unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 3}, {"color": "red", "value": 5}]}},
+            "overrides": []
+          },
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+          "id": 2,
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "area", "textMode": "auto", "orientation": "auto", "justifyMode": "auto"},
+          "targets": [
+            {"expr": "histogram_quantile(0.99, sum by (le) (rate(otpmask_ttft_seconds_bucket[30m])))", "legendFormat": "P99 TTFT", "refId": "A"}
+          ],
+          "title": "P99 首 token 时延（30m）",
+          "type": "stat"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "thresholds"}, "unit": "percentunit", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.005}, {"color": "red", "value": 0.01}]}},
+            "overrides": []
+          },
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+          "id": 3,
+          "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "area", "textMode": "auto", "orientation": "auto", "justifyMode": "auto"},
+          "targets": [
+            {"expr": "1 - (sum(rate(otpmask_inference_requests_total{result=\"ok\"}[30m])) / clamp_min(sum(rate(otpmask_inference_requests_total[30m])), 1))", "legendFormat": "错误率", "refId": "A"}
+          ],
+          "title": "错误率（30m）",
+          "type": "stat"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "percentunit", "min": 0},
+            "overrides": []
+          },
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "id": 4,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "clamp_min(0.005 - (1 - (sum(rate(otpmask_inference_requests_total{result=\"ok\"}[1h])) / clamp_min(sum(rate(otpmask_inference_requests_total[1h])), 1))), 0) / 0.005", "legendFormat": "错误预算余量（SLO 99.5%）", "refId": "A"}
+          ],
+          "title": "错误预算余量（1h，SLO=99.5%）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "short", "min": 0},
+            "overrides": [{"matcher": {"id": "byName", "options": "燃尽率"}, "properties": [{"id": "custom.lineStyle", "value": {"dash": [10, 10], "fill": "dash"}}, {"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}]
+          },
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "id": 5,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "(1 - (sum(rate(otpmask_inference_requests_total{result=\"ok\"}[1h])) / clamp_min(sum(rate(otpmask_inference_requests_total[1h])), 1))) / 0.005", "legendFormat": "燃尽率（1h，预算=SLO 99.5%）", "refId": "A"},
+            {"expr": "1", "legendFormat": "燃尽率=1（阈值）", "refId": "B"}
+          ],
+          "title": "错误预算燃尽率（burn rate，1h）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "short"},
+            "overrides": []
+          },
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+          "id": 6,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "sum by (reason) (rate(otpmask_denies_total[5m]))", "legendFormat": "{{reason}}", "refId": "A"}
+          ],
+          "title": "拒绝速率 Top（按原因）",
+          "type": "timeseries"
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["otpmask", "slo"],
+      "templating": {"list": []},
+      "time": {"from": "now-24h", "to": "now"},
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "OTP-Mask SLO 看板（可用性/P99/错误率/错误预算）",
+      "uid": "otpmask-slo",
+      "version": 1
+    }
 ---
 apiVersion: apps/v1
 kind: Deployment
