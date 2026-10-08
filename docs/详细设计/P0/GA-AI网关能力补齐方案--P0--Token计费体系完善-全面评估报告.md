@@ -135,7 +135,7 @@ go test ./gateway/gateway-admin-service/billing -bench . -benchmem → 见 §6
 | 项 | 现状 | 建议 |
 |---|---|---|
 | **T9 管理后台页面** | **只读最小版已交付**（计费中心 `/admin-ext/billing`，前端增量补丁，本机完整构建通过）；写页面/`billing_reader`/页面契约测试待后续 | 详见《…-T9计费页面交付与fork集成说明.md》 |
-| 控制台 fork 基线/重建链漂移 | `baseline.txt`(36aa9c6) ≠ 上游 v2.2.4(f8410432)；既有补丁 2 个 backend 文件失配 → 不可原子应用 | **独立待办**（该说明 §5） |
+| 控制台 fork 基线/重建链漂移 | **已修复（M0）**：baseline 重钉 `f8410432`、删除 2 条过时 hunk + 剔除 `yarn.lock` 副产物；纯净树**原子应用通过** + `fork-patch-check` **PASS** | 详见《…-T9计费页面交付与fork集成说明.md》§5 |
 | S-7 跨版本 | 无 CI 版本校验（本轮补优雅降级用例） | 部署/CI 版本锁（§8.4 R-α） |
 | REC-6 告警 | 仅日志 | 如需告警单批补指标 + §9.3 |
 | M3/M4/M6 生产实测、P-5 | 仅本机基准 | 目标环境复测 |

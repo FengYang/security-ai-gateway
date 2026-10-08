@@ -1,4 +1,5 @@
 # Vendor-fork baseline commit (upstream v2.2.4) for higress-console.
 # First non-comment line = base revision used by scripts/fork-patch-check.ps1
 # and by `git diff <base>..HEAD` to rebuild fork-patches/higress-console/*.patch.
-36aa9c6
+# 2026-10-08 (M0): re-pinned to the current upstream v2.2.4 commit (previous 36aa9c6 was stale).
+f8410432

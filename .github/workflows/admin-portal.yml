@@ -1,7 +1,7 @@
 # admin-portal — Higress 控制台 vendor-fork 可重建性 CI（M1 WP-C-3）
 #
 # 目的：证明 fork 定制可从上游纯净重建，防止补丁随升级漂移不可应用/不可构建。
-# 流程：clone 上游 v2.2.4（=baseline 36aa9c6）→ git apply 定制补丁
+# 流程：clone 上游 v2.2.4（=baseline f8410432）→ git apply 定制补丁
 #       （fork-patches/higress-console/higress-console-custom.patch，由
 #       scripts/fork-patch-check.ps1 生成）→ 后端 mvn compile + 前端 npm build。
 # 触发：fork-patches/** 或相关脚本/本文件变更（push main / PR）；可手动 dispatch。
@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 检出上游基线 v2.2.4（=36aa9c6）
+      - name: 检出上游基线 v2.2.4（=f8410432）
         run: |
           git clone --depth 1 --branch v2.2.4 \
             https://github.com/higress-group/higress-console.git /tmp/higress-console

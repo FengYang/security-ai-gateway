@@ -55,17 +55,22 @@ cd higress-console/frontend && npm ci && npm run build
 `Path .../public/avatar.png is not in cwd`（与页面无关）。以 `subst X: <frontend>` 映射 ASCII 盘符后**构建成功**。
 根因 = 中文路径 + ICE 路径校验，**非本页引入**。
 
-## 5. 独立待办：控制台 fork 基线/重建链漂移（不在 T9 范围）
+## 5. fork 基线/重建链漂移 —— 已修复（M0，2026-10-08）
 
-实测（克隆上游 v2.2.4 后）：
+**原问题**：`baseline.txt`=36aa9c6 ≠ 上游 v2.2.4 当前提交 `f8410432`；既有补丁 2 个 backend 文件失配 → **不可原子应用**（前端部分可）。
 
-1. `baseline.txt` 记录 `36aa9c6`，而**当前**上游 v2.2.4 提交为 `f8410432` → `fork-patch-check.ps1` 的 `base..HEAD` 失效。
-2. 既有补丁**不能原子应用**，仅 2 个 backend 上游文件：
-   - `backend/sdk/.../WasmPluginServiceTest.java`：`patch does not apply`
-   - `backend/sdk/.../resources/plugins/plugin-snapshot.lock.json`：`No such file or directory`
-3. 前端部分可干净应用（`git apply --check --include='frontend/*'` OK）。
+**M0 处置**：
+1. `baseline.txt` 重钉到 `f8410432`；`admin-portal.yml`、`scripts/verify-fork-rebuild.ps1` 同步更新（`$baseRev`）。
+2. 删除 2 条**过时** hunk：上游已自行修复 #761（[WasmPluginServiceTest](file:///c:/Users/Robin/Desktop/%E6%96%B9%E6%A1%88/security-ai-gateway/vendor/higress-console/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/WasmPluginServiceTest.java#L161-L176) 改为**版本无关**断言）；`plugin-snapshot.lock.json` 上游已不存在。对应 `whitelist-upstream.txt` 条目一并移除。
+3. 剔除 `frontend/yarn.lock`（本地 `npm ci` 副产物，非定制点）。
+4. 从 `f8410432` 重定基并重导 `higress-console-custom.patch`（35 文件 / 5051 行）。
 
-**建议（另行立项）**：更新 `baseline.txt` 至上游当前提交；复核上述 2 个"上游缺陷修复"是否已被上游合并（若是则从补丁删减）；恢复补丁**原子可应用**后，再把本增量补丁纳入 `admin-portal.yml` 流水线。
+**验证**：
+- 纯净 `f8410432` 上 `git apply --check` → **原子通过**（此前失败）；
+- `scripts/fork-patch-check.ps1 -BaseRev f8410432` → **PASS**（白名单合规 + 重导出一致）；
+- 前端构建已在**同一前端内容**上验证通过（见 §4）；后端 `mvn compile/test` 由 CI（JDK17）执行（本机无 `mvn/java`）。
+
+> 遗留可选：本增量补丁 `higress-console-billing.patch` 纳入 `admin-portal.yml`（例如按序 apply 两份补丁）——可作为 M1 的一部分。
 
 ## 6. 后续（T9 完整态，未做）
 

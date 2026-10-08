@@ -2100,28 +2100,6 @@ index 6553707..19d0561 100644
              new DefaultLlmProviderHandler(LlmProviderType.GEMINI, "generativelanguage.googleapis.com", 443,
                  V1McpBridge.PROTOCOL_HTTPS),
              new DefaultLlmProviderHandler(LlmProviderType.MISTRAL, "api.mistral.ai", 443, V1McpBridge.PROTOCOL_HTTPS),
-diff --git a/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/WasmPluginServiceTest.java b/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/WasmPluginServiceTest.java
-index 22bf72e..d1b0106 100644
---- a/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/WasmPluginServiceTest.java
-+++ b/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/WasmPluginServiceTest.java
-@@ -161,7 +161,7 @@ public class WasmPluginServiceTest {
-     @Test
-     public void managedPluginUsesOneVersionInOciPluginServerAndBuiltInObject() throws Exception {
-         final String pluginName = "ai-load-balancer";
--        final String version = "2.0.0";
-+        final String version = "2.0.1";
-         service.initialize();
-         WasmPlugin ociPlugin = service.list(null).getData().stream().filter(p -> pluginName.equals(p.getName())).findFirst().get();
-         Assertions.assertEquals(version, ociPlugin.getPluginVersion());
-@@ -172,7 +172,7 @@ public class WasmPluginServiceTest {
-         service.initialize();
-         WasmPlugin serverPlugin = service.list(null).getData().stream().filter(p -> pluginName.equals(p.getName())).findFirst().get();
-         Assertions.assertEquals(version, serverPlugin.getPluginVersion());
--        Assertions.assertEquals("http://plugin-server:8080/plugins/ai-load-balancer/2.0.0/plugin.wasm", serverPlugin.getImageRepository());
-+        Assertions.assertEquals("http://plugin-server:8080/plugins/ai-load-balancer/2.0.1/plugin.wasm", serverPlugin.getImageRepository());
- 
-         when(kubernetesClientService.listWasmPlugin(eq(pluginName), anyString(), anyBoolean())).thenReturn(Collections.emptyList());
-         when(kubernetesClientService.createWasmPlugin(any())).thenAnswer(invocation -> invocation.getArgument(0));
 diff --git a/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImplTest.java b/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImplTest.java
 index 152fe8c..7fe90f7 100644
 --- a/backend/sdk/src/test/java/com/alibaba/higress/sdk/service/ai/LlmProviderServiceImplTest.java
@@ -2152,23 +2130,6 @@ index 152fe8c..7fe90f7 100644
      @Test
      public void addOrUpdate_addOrUpdateAllIsCalledWithInstancesList() {
          when(wasmPluginInstanceService.list(eq(BuiltInPluginName.AI_PROXY), anyBoolean()))
-diff --git a/backend/sdk/src/test/resources/plugins/plugin-snapshot.lock.json b/backend/sdk/src/test/resources/plugins/plugin-snapshot.lock.json
-index af8233c..2b460af 100644
---- a/backend/sdk/src/test/resources/plugins/plugin-snapshot.lock.json
-+++ b/backend/sdk/src/test/resources/plugins/plugin-snapshot.lock.json
-@@ -8,9 +8,9 @@
-   "plugins": {
-     "json-converter": {
-       "resourceDir": "json-converter",
--      "version": "2.0.0",
--      "ociRef": "oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/jsonrpc-converter:2.0.0",
--      "digest": "sha256:147c50aa5f473b4067d0e3b3daabe74cbd4504e0e2eb8813069529a443e2ec2d"
-+      "version": "2.0.1",
-+      "ociRef": "oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/jsonrpc-converter:2.0.1",
-+      "digest": "sha256:c169476e09115062ce717257531407576d42761a7ce1888215a1ae37b5f179a0"
-     }
-   }
- }
 diff --git a/frontend/src/components/AdminExtBadge/index.tsx b/frontend/src/components/AdminExtBadge/index.tsx
 new file mode 100644
 index 0000000..9c5f80a
@@ -2201,7 +2162,7 @@ index 0000000..9c5f80a
 +
 +export default AdminExtBadge;
 diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
-index 1a41985..32f47f6 100644
+index 626465b..14c6204 100644
 --- a/frontend/src/locales/en-US/translation.json
 +++ b/frontend/src/locales/en-US/translation.json
 @@ -22,7 +22,224 @@
@@ -2440,7 +2401,7 @@ index 1a41985..32f47f6 100644
        "moonshot": "Moonshot",
        "ai360": "360 Zhinao",
 diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
-index c148f42..fd8b3d2 100644
+index 5b016dc..07c3f64 100644
 --- a/frontend/src/locales/zh-CN/translation.json
 +++ b/frontend/src/locales/zh-CN/translation.json
 @@ -22,7 +22,224 @@

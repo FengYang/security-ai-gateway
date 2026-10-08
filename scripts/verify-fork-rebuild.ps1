@@ -1,4 +1,4 @@
-﻿# verify-fork-rebuild.ps1 - 本地 clean-room 校验：上游纯净克隆 + 定制补丁 = 可编译/可测试/可构建
+# verify-fork-rebuild.ps1 - 本地 clean-room 校验：上游纯净克隆 + 定制补丁 = 可编译/可测试/可构建
 #
 # 存在理由（= .github/workflows/admin-portal.yml 的本地等价物）：
 #   fork 目录 vendor/higress-console 不入库，入库的唯一交付物是补丁
@@ -12,7 +12,7 @@
 #   expected 2.0.0 / actual 2.0.1）。
 #
 # 流程：
-#   1. 纯净克隆上游 v2.2.4（=baseline 36aa9c6）到 ASCII 临时目录
+#   1. 纯净克隆上游 v2.2.4（=baseline f8410432）到 ASCII 临时目录
 #      （仓库路径含中文"方案"，webpack 会拒绝 not-in-cwd 资源，无法就地构建）
 #   2. git apply 定制补丁 + 打印落地文件清单
 #   3. 后端：mvnw -pl console -am compile 与 test（skip npm/npx/pmd/checkstyle/delombok）
@@ -50,7 +50,7 @@ $nodeDir = Join-Path $forkRoot 'frontend\node'
 $jdkHome = Join-Path $repo '.tools\jdk-17.0.20.1+1'
 $upstreamUrl = 'https://github.com/higress-group/higress-console.git'
 $baseTag = 'v2.2.4'
-$baseRev = '36aa9c6'
+$baseRev = 'f8410432'
 $mvnSkips = @('-Dskip.npm=true', '-Dskip.npx=true', '-Dpmd.skip=true',
     '-Dcheckstyle.skip=true', '-Dlombok.delombok.skip=true')
 
