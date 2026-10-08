@@ -1,0 +1,567 @@
+diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
+index 14c6204..7affdac 100644
+--- a/frontend/src/locales/en-US/translation.json
++++ b/frontend/src/locales/en-US/translation.json
+@@ -29,11 +29,53 @@
+     "adminExtUsage": "Usage Dashboard",
+     "adminExtAccounts": "Accounts & Roles",
+     "adminExtChanges": "High-risk Change Review",
+-    "adminExtVendors": "Vendor Activation & Status"
++    "adminExtVendors": "Vendor Activation & Status",
++    "adminExtBilling": "Billing Center"
+   },
+   "adminExt": {
+     "badge": "Self-developed",
+     "badgeTip": "This page is an OTP-Mask ADMIN-EXT addition, not an upstream Higress feature.",
++    "billing": {
++      "tabBills": "Billing",
++      "tabPlans": "Plans & Subscription",
++      "billsGuide": "Tenant bills (daily/monthly/overage). Amount columns are billing-domain only and shown on this page.",
++      "plansGuide": "Plan definitions and current tenant subscription (read-only).",
++      "billId": "Bill ID",
++      "tenant": "Tenant",
++      "kind": "Kind",
++      "kindAll": "All",
++      "kindDaily": "Daily",
++      "kindMonthly": "Monthly",
++      "kindOverage": "Overage",
++      "period": "Period",
++      "total": "Amount",
++      "status": "Status",
++      "generatedAt": "Generated At",
++      "modelKey": "Model",
++      "standardTokens": "Std Tokens",
++      "tokensIn": "Input Tokens",
++      "tokensOut": "Output Tokens",
++      "retryToks": "Retry Tokens",
++      "amountFen": "Amount (CNY)",
++      "tenantPlaceholder": "Filter by tenant (optional)",
++      "refresh": "Refresh",
++      "empty": "No data",
++      "subscriptionTitle": "Current Subscription",
++      "subTenantPlaceholder": "Tenant (empty = token tenant)",
++      "query": "Query",
++      "effectiveAt": "Effective At",
++      "expiresAt": "Expires At",
++      "noExpiry": "No expiry",
++      "noSubscription": "No active subscription",
++      "plansTitle": "Plans",
++      "planId": "Plan ID",
++      "planName": "Name",
++      "monthlyTokens": "Monthly Tokens",
++      "unlimited": "Unlimited",
++      "concurrency": "Concurrency",
++      "cacheTier": "Cache Tier",
++      "overQuota": "Over-quota"
++    },
+     "security": {
+       "teeStatus": "Confidential Link Status",
+       "refresh": "Refresh",
+diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
+index 07c3f64..0674dc0 100644
+--- a/frontend/src/locales/zh-CN/translation.json
++++ b/frontend/src/locales/zh-CN/translation.json
+@@ -29,11 +29,53 @@
+     "adminExtUsage": "用量看板",
+     "adminExtAccounts": "账号与角色",
+     "adminExtChanges": "高敏变更复核",
+-    "adminExtVendors": "厂商激活与状态"
++    "adminExtVendors": "厂商激活与状态",
++    "adminExtBilling": "计费中心"
+   },
+   "adminExt": {
+     "badge": "自研扩展",
+     "badgeTip": "本页由 OTP-Mask 自研扩展提供（ADMIN-EXT），非 Higress 上游功能。",
++    "billing": {
++      "tabBills": "账单中心",
++      "tabPlans": "套餐与订阅",
++      "billsGuide": "租户账单（日结/月结/超额）。金额列为账单域专有，仅本页展示。",
++      "plansGuide": "套餐定义与当前租户订阅（只读）。",
++      "billId": "账单 ID",
++      "tenant": "租户",
++      "kind": "类型",
++      "kindAll": "全部",
++      "kindDaily": "日结",
++      "kindMonthly": "月结",
++      "kindOverage": "超额",
++      "period": "账期",
++      "total": "金额",
++      "status": "状态",
++      "generatedAt": "生成时间",
++      "modelKey": "模型",
++      "standardTokens": "标准 token",
++      "tokensIn": "输入 token",
++      "tokensOut": "输出 token",
++      "retryToks": "重试 token",
++      "amountFen": "金额（元）",
++      "tenantPlaceholder": "按租户过滤（可选）",
++      "refresh": "刷新",
++      "empty": "暂无数据",
++      "subscriptionTitle": "当前租户订阅",
++      "subTenantPlaceholder": "租户（留空 = 令牌内租户）",
++      "query": "查询",
++      "effectiveAt": "生效时间",
++      "expiresAt": "到期时间",
++      "noExpiry": "不过期",
++      "noSubscription": "无生效订阅",
++      "plansTitle": "套餐列表",
++      "planId": "套餐 ID",
++      "planName": "名称",
++      "monthlyTokens": "月配额（标准 token）",
++      "unlimited": "不限",
++      "concurrency": "并发",
++      "cacheTier": "缓存档",
++      "overQuota": "超额策略"
++    },
+     "security": {
+       "teeStatus": "密态链路状态",
+       "refresh": "刷新",
+diff --git a/frontend/src/pages/_defaultProps.tsx b/frontend/src/pages/_defaultProps.tsx
+index 111d28a..b21ee79 100644
+--- a/frontend/src/pages/_defaultProps.tsx
++++ b/frontend/src/pages/_defaultProps.tsx
+@@ -1,4 +1,5 @@
+ import {
++  AccountBookOutlined,
+   ApiOutlined,
+   AppstoreOutlined,
+   AuditOutlined,
+@@ -100,6 +101,13 @@ export default {
+         path: '/admin-ext/changes',
+         icon: <AuditOutlined />,
+       },
++      {
++        // ADMIN-EXT（自研扩展，vendor-fork 只增不减）：计费中心（P0-3，只读）
++        // 账单/套餐/订阅查询（读端点按令牌 tenant 强隔离；金额列仅本页出现，§3.1.3）。
++        name: 'menu.adminExtBilling',
++        path: '/admin-ext/billing',
++        icon: <AccountBookOutlined />,
++      },
+       {
+         name: 'menu.serviceSources',
+         path: '/service-source',
+diff --git a/frontend/src/pages/admin-ext/billing/index.tsx b/frontend/src/pages/admin-ext/billing/index.tsx
+new file mode 100644
+index 0000000..ccdc261
+--- /dev/null
++++ b/frontend/src/pages/admin-ext/billing/index.tsx
+@@ -0,0 +1,307 @@
++import { ReloadOutlined } from '@ant-design/icons';
++import { PageContainer } from '@ant-design/pro-layout';
++import {
++  Alert,
++  Button,
++  Card,
++  Descriptions,
++  Input,
++  message,
++  Select,
++  Space,
++  Table,
++  TableColumnsType,
++  Tabs,
++  Tag,
++  Typography,
++} from 'antd';
++import { useCallback, useEffect, useMemo, useState } from 'react';
++import { useTranslation } from 'react-i18next';
++import AdminExtBadge from '@/components/AdminExtBadge';
++import {
++  Bill,
++  BillItem,
++  listBills,
++  listPlans,
++  Plan,
++  Subscription,
++  getSubscription,
++} from '@/services/admin-ext-billing';
++
++/**
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：计费中心（P0-3 §4.3.2/§4.3.4，只读）。
++ *
++ * 数据源 = gateway-admin-service `/v1/adminext/billing/*`（账务域）：
++ *  - 账单中心：账单列表 + 明细展开（金额列**仅本页**出现，§3.1.3）；
++ *  - 套餐与订阅：套餐列表 + 当前租户订阅查询。
++ * 只读视图，无写操作（套餐 upsert / 绑定 / 冻结仍由 admin 经 API 完成）。
++ * 金额单位：后端为**分**，此处换算为元展示。
++ */
++
++/** 分 → 元（两位小数）。 */
++const fenToYuan = (fen: number): string => ((fen || 0) / 100).toFixed(2);
++
++/** 纳秒时间戳 → 本地时间串；0 视为未设置。 */
++const fmtNano = (ns: number): string => {
++  if (!ns) {
++    return '-';
++  }
++  const d = new Date(Math.round(ns / 1e6));
++  return d.toLocaleString();
++};
++
++const STATUS_COLORS: Record<string, string> = {
++  issued: 'green',
++  draft: 'blue',
++  frozen: 'red',
++  void: 'default',
++  assoc_mismatch: 'orange',
++};
++
++const KIND_KEYS: Record<string, string> = {
++  daily: 'adminExt.billing.kindDaily',
++  monthly: 'adminExt.billing.kindMonthly',
++  overage: 'adminExt.billing.kindOverage',
++};
++
++const BillingCenterPage: React.FC = () => {
++  const { t } = useTranslation();
++
++  // 账单中心
++  const [bills, setBills] = useState<Bill[]>([]);
++  const [billsLoading, setBillsLoading] = useState(false);
++  const [billsError, setBillsError] = useState<string | null>(null);
++  const [tenantFilter, setTenantFilter] = useState('');
++  const [kindFilter, setKindFilter] = useState<string>('');
++
++  // 套餐与订阅
++  const [plans, setPlans] = useState<Plan[]>([]);
++  const [plansLoading, setPlansLoading] = useState(false);
++  const [plansError, setPlansError] = useState<string | null>(null);
++  const [subTenant, setSubTenant] = useState('');
++  const [subscription, setSubscription] = useState<Subscription | null>(null);
++  const [subQueried, setSubQueried] = useState(false);
++
++  const reloadBills = useCallback(() => {
++    setBillsLoading(true);
++    setBillsError(null);
++    const params: { tenant?: string; kind?: string; limit: number } = { limit: 200 };
++    if (tenantFilter.trim()) {
++      params.tenant = tenantFilter.trim();
++    }
++    if (kindFilter) {
++      params.kind = kindFilter;
++    }
++    listBills(params)
++      .then((resp) => setBills(resp?.bills || []))
++      .catch((e) => setBillsError(String(e)))
++      .finally(() => setBillsLoading(false));
++  }, [tenantFilter, kindFilter]);
++
++  const reloadPlans = useCallback(() => {
++    setPlansLoading(true);
++    setPlansError(null);
++    listPlans()
++      .then((resp) => setPlans(resp?.plans || []))
++      .catch((e) => setPlansError(String(e)))
++      .finally(() => setPlansLoading(false));
++  }, []);
++
++  useEffect(() => {
++    reloadBills();
++  }, [reloadBills]);
++
++  useEffect(() => {
++    reloadPlans();
++  }, [reloadPlans]);
++
++  const querySubscription = useCallback(() => {
++    setSubQueried(true);
++    getSubscription(subTenant.trim() || undefined)
++      .then((resp) => setSubscription(resp?.subscription || null))
++      .catch(() => setSubscription(null));
++  }, [subTenant]);
++
++  const billColumns: TableColumnsType<Bill> = [
++    { title: t('adminExt.billing.billId'), dataIndex: 'id', key: 'id', width: 220, ellipsis: true },
++    { title: t('adminExt.billing.tenant'), dataIndex: 'tenant', key: 'tenant', width: 140, ellipsis: true },
++    {
++      title: t('adminExt.billing.kind'),
++      dataIndex: 'kind',
++      key: 'kind',
++      width: 100,
++      render: (v: string) => <Tag>{t(KIND_KEYS[v] || v)}</Tag>,
++    },
++    { title: t('adminExt.billing.period'), dataIndex: 'period', key: 'period', width: 120 },
++    {
++      title: t('adminExt.billing.total'),
++      dataIndex: 'total',
++      key: 'total',
++      width: 120,
++      align: 'right' as const,
++      render: (v: number, r: Bill) => `${fenToYuan(v)} ${r.currency}`,
++    },
++    {
++      title: t('adminExt.billing.status'),
++      dataIndex: 'status',
++      key: 'status',
++      width: 130,
++      render: (v: string) => <Tag color={STATUS_COLORS[v]}>{v}</Tag>,
++    },
++    {
++      title: t('adminExt.billing.generatedAt'),
++      dataIndex: 'generated_at',
++      key: 'generated_at',
++      width: 180,
++      render: (v: number) => fmtNano(v),
++    },
++  ];
++
++  const itemColumns: TableColumnsType<BillItem> = [
++    { title: t('adminExt.billing.modelKey'), dataIndex: 'model_key', key: 'model_key', render: (v: string) => <Tag>{v}</Tag> },
++    { title: t('adminExt.billing.standardTokens'), dataIndex: 'standard_tokens', key: 'standard_tokens', align: 'right' as const },
++    { title: t('adminExt.billing.tokensIn'), dataIndex: 'tokens_in', key: 'tokens_in', align: 'right' as const },
++    { title: t('adminExt.billing.tokensOut'), dataIndex: 'tokens_out', key: 'tokens_out', align: 'right' as const },
++    { title: t('adminExt.billing.retryToks'), dataIndex: 'retry_toks', key: 'retry_toks', align: 'right' as const },
++    {
++      title: t('adminExt.billing.amountFen'),
++      dataIndex: 'amount',
++      key: 'amount',
++      align: 'right' as const,
++      render: (v: number) => fenToYuan(v),
++    },
++  ];
++
++  const planColumns: TableColumnsType<Plan> = [
++    { title: t('adminExt.billing.planId'), dataIndex: 'id', key: 'id', width: 140 },
++    { title: t('adminExt.billing.planName'), dataIndex: 'name', key: 'name', width: 160 },
++    {
++      title: t('adminExt.billing.monthlyTokens'),
++      dataIndex: 'monthly_tokens',
++      key: 'monthly_tokens',
++      align: 'right' as const,
++      render: (v: number) => (v > 0 ? v.toLocaleString() : t('adminExt.billing.unlimited')),
++    },
++    { title: t('adminExt.billing.concurrency'), dataIndex: 'concurrency', key: 'concurrency', align: 'right' as const, width: 110 },
++    { title: t('adminExt.billing.cacheTier'), dataIndex: 'cache_tier', key: 'cache_tier', width: 110 },
++    {
++      title: t('adminExt.billing.overQuota'),
++      dataIndex: 'over_quota',
++      key: 'over_quota',
++      width: 110,
++      render: (v: string) => <Tag>{v}</Tag>,
++    },
++  ];
++
++  const billsTab = (
++    <>
++      <Alert type="info" showIcon message={t('adminExt.billing.billsGuide')} style={{ marginBottom: 16 }} />
++      {billsError && <Alert type="error" showIcon message={billsError} style={{ marginBottom: 16 }} />}
++      <Space style={{ marginBottom: 16 }}>
++        <Input
++          allowClear
++          style={{ width: 240 }}
++          placeholder={t('adminExt.billing.tenantPlaceholder') as string}
++          value={tenantFilter}
++          onChange={(e) => setTenantFilter(e.target.value)}
++          onPressEnter={reloadBills}
++        />
++        <Select
++          style={{ width: 140 }}
++          value={kindFilter}
++          onChange={(v) => setKindFilter(v)}
++          options={[
++            { value: '', label: t('adminExt.billing.kindAll') },
++            { value: 'daily', label: t('adminExt.billing.kindDaily') },
++            { value: 'monthly', label: t('adminExt.billing.kindMonthly') },
++            { value: 'overage', label: t('adminExt.billing.kindOverage') },
++          ]}
++        />
++        <Button icon={<ReloadOutlined />} onClick={reloadBills} loading={billsLoading}>
++          {t('adminExt.billing.refresh')}
++        </Button>
++      </Space>
++      <Table<Bill>
++        rowKey="id"
++        size="middle"
++        loading={billsLoading}
++        dataSource={bills}
++        columns={billColumns}
++        locale={{ emptyText: t('adminExt.billing.empty') }}
++        pagination={{ pageSize: 20, hideOnSinglePage: true }}
++        expandable={{
++          rowExpandable: (r) => (r.items || []).length > 0,
++          expandedRowRender: (r) => (
++            <Table<BillItem>
++              rowKey="model_key"
++              size="small"
++              pagination={false}
++              dataSource={r.items || []}
++              columns={itemColumns}
++            />
++          ),
++        }}
++      />
++    </>
++  );
++
++  const plansTab = (
++    <>
++      <Alert type="info" showIcon message={t('adminExt.billing.plansGuide')} style={{ marginBottom: 16 }} />
++      {plansError && <Alert type="error" showIcon message={plansError} style={{ marginBottom: 16 }} />}
++      <Card size="small" title={t('adminExt.billing.subscriptionTitle')} style={{ marginBottom: 16 }}>
++        <Space style={{ marginBottom: 12 }}>
++          <Input
++            allowClear
++            style={{ width: 240 }}
++            placeholder={t('adminExt.billing.subTenantPlaceholder') as string}
++            value={subTenant}
++            onChange={(e) => setSubTenant(e.target.value)}
++            onPressEnter={querySubscription}
++          />
++          <Button onClick={querySubscription}>{t('adminExt.billing.query')}</Button>
++        </Space>
++        {subQueried && (
++          subscription ? (
++            <Descriptions size="small" column={1} bordered>
++              <Descriptions.Item label={t('adminExt.billing.tenant')}>{subscription.tenant}</Descriptions.Item>
++              <Descriptions.Item label={t('adminExt.billing.planId')}>{subscription.plan_id}</Descriptions.Item>
++              <Descriptions.Item label={t('adminExt.billing.effectiveAt')}>{fmtNano(subscription.effective_at)}</Descriptions.Item>
++              <Descriptions.Item label={t('adminExt.billing.expiresAt')}>
++                {subscription.expires_at ? fmtNano(subscription.expires_at) : t('adminExt.billing.noExpiry')}
++              </Descriptions.Item>
++            </Descriptions>
++          ) : (
++            <Typography.Text type="secondary">{t('adminExt.billing.noSubscription')}</Typography.Text>
++          )
++        )}
++      </Card>
++      <Card size="small" title={t('adminExt.billing.plansTitle')}>
++        <Table<Plan>
++          rowKey="id"
++          size="middle"
++          loading={plansLoading}
++          dataSource={plans}
++          columns={planColumns}
++          locale={{ emptyText: t('adminExt.billing.empty') }}
++          pagination={false}
++        />
++      </Card>
++    </>
++  );
++
++  return (
++    <PageContainer>
++      <AdminExtBadge />
++      <Tabs
++        defaultActiveKey="bills"
++        items={[
++          { key: 'bills', label: t('adminExt.billing.tabBills'), children: billsTab },
++          { key: 'plans', label: t('adminExt.billing.tabPlans'), children: plansTab },
++        ]}
++      />
++    </PageContainer>
++  );
++};
++
++export default BillingCenterPage;
+diff --git a/frontend/src/services/admin-ext-billing.ts b/frontend/src/services/admin-ext-billing.ts
+new file mode 100644
+index 0000000..b6ecaf7
+--- /dev/null
++++ b/frontend/src/services/admin-ext-billing.ts
+@@ -0,0 +1,106 @@
++import request from './request';
++
++/**
++ * ADMIN-EXT（自研扩展）：计费中心 API 客户端（P0-3 §4.3.2 只读子集）。
++ *
++ * 数据源 = gateway-admin-service `/v1/adminext/billing/*`（账务域）；
++ * 本页为**只读**视图（账单/套餐/订阅查询），不含任何写操作。
++ * 金额单位：后端 Amount 为**分**，展示层换算为元；金额列仅本页出现（§3.1.3）。
++ */
++
++/** 账单明细行（与后端 billing.BillItem JSON 对齐）。 */
++export interface BillItem {
++  model_key: string;
++  standard_tokens: number;
++  tokens_in: number;
++  tokens_out: number;
++  /** 重试 token（平台承担，不计入 amount；M9）。 */
++  retry_toks: number;
++  /** 金额（分）。 */
++  amount: number;
++}
++
++/** 账单（日结/月结/超额）。 */
++export interface Bill {
++  id: string;
++  tenant: string;
++  /** daily | monthly | overage */
++  kind: string;
++  period: string;
++  items?: BillItem[] | null;
++  /** 总额（分）。 */
++  total: number;
++  currency: string;
++  price_version: string;
++  /** draft|frozen|issued|void|assoc_mismatch */
++  status: string;
++  sig?: string;
++  ledger_head?: string;
++  audit_head?: string;
++  generated_at: number;
++}
++
++/** 套餐定义。 */
++export interface QuotaLimit {
++  window?: string;
++  max_tokens: number;
++}
++
++export interface Plan {
++  id: string;
++  name: string;
++  monthly_tokens: number;
++  concurrency: number;
++  cache_tier: string;
++  model_scopes?: string[] | null;
++  over_quota: string;
++  price_id: string;
++  extra_limits?: QuotaLimit[] | null;
++  pay_mode: string;
++  version: number;
++}
++
++/** 租户订阅（当前生效绑定）。 */
++export interface Subscription {
++  tenant: string;
++  plan_id: string;
++  effective_at: number;
++  expires_at: number;
++  bound_by: string;
++  bound_at: number;
++}
++
++const BASE = '/v1/adminext/billing';
++
++export interface BillQuery {
++  tenant?: string;
++  kind?: string;
++  from?: string;
++  to?: string;
++  limit?: number;
++}
++
++/** 账单列表（GET /billing/bills；只读，跨租户隔离由后端强制）。 */
++export const listBills = (params: BillQuery): Promise<{ bills: Bill[] }> => {
++  return request.get<any, { bills: Bill[] }>(`${BASE}/bills`, { params });
++};
++
++/** 账单详情（GET /billing/bills/{id}，含明细）。 */
++export const getBill = (id: string): Promise<Bill> => {
++  return request.get<any, Bill>(`${BASE}/bills/${encodeURIComponent(id)}`);
++};
++
++/** 套餐列表（GET /billing/plans；只读）。 */
++export const listPlans = (): Promise<{ plans: Plan[] }> => {
++  return request.get<any, { plans: Plan[] }>(`${BASE}/plans`);
++};
++
++/** 当前租户套餐（GET /billing/subscription；tenant 缺省时后端按令牌内租户）。 */
++export const getSubscription = (
++  tenant?: string,
++): Promise<{ tenant: string; subscription: Subscription | null }> => {
++  return request.get<any, { tenant: string; subscription: Subscription | null }>(
++    `${BASE}/subscription`,
++    { params: tenant ? { tenant } : undefined },
++  );
++};

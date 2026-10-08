@@ -592,6 +592,7 @@ S-2「独立鉴权域」未实现；配置项语义误导，运维按 R-27 配�
 | 2026-10-08 | 开发/文档（第二轮独立复核改进） | 补 **BUG-008**（`GET /subscription`）、**BUG-009**（明细舍入遵循配置）、**BUG-010**（拉取端点秒对齐）、**BUG-011**（价格表防御）；新增 **P-1..P-5 基准**（`billing/bench_test.go`）与 **S-7 优雅降级用例**；订正 **详设 §9.1 指标登记**（11 项 `required`→`conditional`，与清单逐项一致）并回填本文件详情块状态；新增 **§8 实现现状与开放边界**（T9 页面等登记为开放边界）。`go build`/`go vet`/`go test` 全绿，billing 覆盖 ≥80% |
 | 2026-10-08 | 开发（gofmt 治理闭环） | ① `billing/` 包 + `billing_api.go` 执行 `gofmt -w`（**纯格式、零行为变更**，独立提交，与功能提交隔离）；② 新增 **CI 增量门禁** `scripts/check-gofmt.ps1`（仅校验本次变更 `.go` 文件，避免全仓历史漂移误伤）并接入 `.github/workflows/ci.yml`；③ 回填 §8.1 `QUAL-001` 状态。验证：`gofmt -l` 清零；`build/vet/test` 全绿 |
 | 2026-10-08 | 开发（决策项二：分层容量验收） | 新增 **持久化层基准** `billing/bench_persist_test.go`（file+WAL，P-1..P-5）与 **验收测量** `billing/perf_acceptance_test.go`（`perf` 标签，P-1..P-5/M3/M5/M6）；出品《**PERF-BILLING-性能基准报告**》（对齐 PERF-S2）；回填 §8.1 `TEST-004`/`DOC-007` 与 §8.2/§8.3。实测 **M3/M5/M6 达标**（10 万行 p95=11.3ms；单租户日结 2.5ms；写争用 p99=24.9ms）。TEE/大规模列目标环境复测待办 |
+| 2026-10-08 | 开发（决策项一：T9 计费页面，方案 B/A） | 落地控制台**计费中心（只读）**：新增页面 `admin-ext/billing/index.tsx` + service `admin-ext-billing.ts`，注册菜单与 i18n（白名单文件）；导出**前端增量补丁** `higress-console-billing.patch`。验证：`tsc` 我的文件 0 错误、**完整构建通过**（`build/admin-ext/billing.html` + chunk）。**新发现**：fork 基线与重建链漂移（上游 v2.2.4=f8410432≠baseline 36aa9c6；2 个 backend 文件失配）→ 登记**独立待办**，详见《…-T9计费页面交付与fork集成说明.md》 |
 
 ---
 
@@ -614,6 +615,7 @@ S-2「独立鉴权域」未实现；配置项语义误导，运维按 R-27 配�
 | P0-3-QUAL-001 | P3 | `billing/*.go` 与 `billing_api.go` 存在**既有** gofmt 漂移（struct 字段/尾随注释对齐，非本轮引入；本轮新增行本身 gofmt 干净） | `billing/*.go`、`billing_api.go` | **已修复**：`gofmt -w` **独立格式化提交**（与功能提交隔离）；并加 **CI 增量门禁** `scripts/check-gofmt.ps1`（仅校验变更 `.go` 文件，待全量清零后可放宽为全仓） |
 | P0-3-TEST-004 | P2 | 缺**持久化层**基准与 M3/M5/M6 实测（§8.4/§10.5） | `billing/bench_persist_test.go`、`billing/perf_acceptance_test.go`（`perf` 标签） | `TestPerfAcceptance` 全绿（见 §8.2） |
 | P0-3-DOC-007 | P2 | 无 P0-3 性能基准报告 | 《PERF-BILLING-性能基准报告.md》 | 已出品（对齐 PERF-S2 格式） |
+| P0-3-FEAT-T9 | P1 | T9 管理后台计费页面未实现 | 控制台 fork 增量补丁（页面/service/菜单/i18n） | 本机**完整构建通过**（`billing.html` + chunk）；详见交付说明 |
 
 ### 8.2 性能基准实测（内存 vs 持久化；详见《PERF-BILLING-性能基准报告.md》）
 
@@ -634,7 +636,7 @@ S-2「独立鉴权域」未实现；配置项语义误导，运维按 R-27 配�
 
 | 项 | 现状 | 处置 |
 |---|---|---|
-| **T9 管理后台页面**（套餐/账单/冻结 + 页面级 RBAC） | **未实现**：本仓无前端工程；控制台以 Higress Console 补丁交付且**不含 billing 页面**（`billing_reader` 角色亦未放行） | 经用户裁定**登记为 P0-3 开放边界**，不在本轮实现；如需 UI 须单独立项（§4.3.4/§4.3.5） |
+| **T9 管理后台页面** | **最小可用只读版已交付**：计费中心 `/admin-ext/billing`（账单中心 + 套餐与订阅，只读），经**前端增量补丁** `fork-patches/higress-console/higress-console-billing.patch` 交付，本机**完整构建通过**（`build/admin-ext/billing.html` + chunk 产出）。仍存：写页面（套餐/绑定/冻结）、`billing_reader` 放行、页面契约测试 | 写页面/RBAC/契约测试为后续；fork **基线与重建链漂移**（上游 v2.2.4 已为 f8410432、2 个 backend 文件失配）为**独立待办**——详见《…-T9计费页面交付与fork集成说明.md》§5 |
 | §10.6 S-7 跨版本（旧 tee-infer 不识别 `month`） | 无 CI 版本校验；本轮补**优雅降级**用例 | 版本一致性仍建议由部署/CI 版本锁保障（§8.4 R-α） |
 | REC-6 审计链断裂 | 无专用指标/告警（仅日志） | 保留为已知边界；如需告警可后续单批补指标 + §9.3 规则 |
 | E2E-2 OverQuota 计价差异 | E2E 仅“基础版”，计价差异由单测/集成覆盖 | 已知边界（详设 §10.3 已声明） |
