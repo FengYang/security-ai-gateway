@@ -64,6 +64,36 @@ func newTestBillingService(s Store, reader NetMeteringReader) *BillingService {
 
 // ---------- T-6.6 日结 ----------
 
+// ★ A4：账单明细行取整须遵循配置的舍入法（floor 时明细/总额=1 分，而非硬编码 half_up 的 2 分）。
+func TestBuildItems_HonorsConfiguredRounding(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	// cheap-model：InPer1K=1.0；std_in=15 → 亚分 = 15×1×100 = 1500。
+	// floor → 1500/1000 = 1 分；half_up → (1500+500)/1000 = 2 分。
+	agg := &UsageAgg{TenantID: "t1", Period: "2026-09-15",
+		ByModel: map[string]*ModelStd{"cheap-model": {StdIn: 15}}}
+
+	floorSvc := NewBillingService(s, NewRatingEngine("floor", nil),
+		NewStaticPriceTable(testPriceTable()), nil, s.Freezes())
+	items, total, err := floorSvc.buildItems(agg, testPriceTable())
+	if err != nil {
+		t.Fatalf("buildItems(floor): %v", err)
+	}
+	if len(items) != 1 || items[0].Amount != 1 || total != 1 {
+		t.Fatalf("floor 应明细/总额=1/1，实际 items=%+v total=%d", items, total)
+	}
+
+	halfSvc := NewBillingService(s, NewRatingEngine("half_up", nil),
+		NewStaticPriceTable(testPriceTable()), nil, s.Freezes())
+	items2, total2, err := halfSvc.buildItems(agg, testPriceTable())
+	if err != nil {
+		t.Fatalf("buildItems(half_up): %v", err)
+	}
+	if len(items2) != 1 || items2[0].Amount != 2 || total2 != 2 {
+		t.Fatalf("half_up 应明细/总额=2/2，实际 items=%+v total=%d", items2, total2)
+	}
+}
+
 func TestCloseDaily_Basic(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()

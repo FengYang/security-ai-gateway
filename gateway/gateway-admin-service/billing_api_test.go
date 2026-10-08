@@ -530,6 +530,87 @@ func postSubscription(t *testing.T, srvURL string) int {
 	return resp.StatusCode
 }
 
+// ★ A1：GET /billing/subscription 返回当前租户生效套餐；跨租户 403（§4.3.2/§7.4）。
+func TestBillingGetSubscription(t *testing.T) {
+	env := newBillingTestEnv(t)
+
+	now := time.Now().UnixNano()
+	if err := env.h.store.Plans().Bind(billing.Subscription{
+		TenantID: "t1", PlanID: "free", EffectiveAt: now - int64(time.Hour), BoundBy: "test",
+	}); err != nil {
+		t.Fatalf("预置订阅失败: %v", err)
+	}
+
+	adminTok := testSignToken(t, testSecret, claims{
+		Sub: testAdminUser, Role: roleAdmin, Iss: defaultIssuer, Aud: defaultAudience,
+	})
+	auditorT1 := testSignToken(t, testSecret, claims{
+		Sub: "bob", Role: roleAuditor, Iss: defaultIssuer, Aud: defaultAudience, Tenant: "t1",
+	})
+
+	path := billingAPIBase + "/subscription?tenant=t1"
+	if code := billingGet(t, env, adminTok, path); code != http.StatusOK {
+		t.Fatalf("admin GET 期望 200，实际 %d", code)
+	}
+	if code := billingGet(t, env, auditorT1, path); code != http.StatusOK {
+		t.Fatalf("auditor 自身租户 GET 期望 200，实际 %d", code)
+	}
+	// 跨租户：auditor(t1) 读 t2 → 403（fail-closed）
+	if code := billingGet(t, env, auditorT1, billingAPIBase+"/subscription?tenant=t2"); code != http.StatusForbidden {
+		t.Fatalf("跨租户 GET 期望 403，实际 %d", code)
+	}
+	// 非 admin 且无令牌内 tenant 声明 → 403（不可越权查询）
+	auditorNoTenant := testSignToken(t, testSecret, claims{
+		Sub: "carol", Role: roleAuditor, Iss: defaultIssuer, Aud: defaultAudience,
+	})
+	if code := billingGet(t, env, auditorNoTenant, billingAPIBase+"/subscription?tenant=t1"); code != http.StatusForbidden {
+		t.Fatalf("缺租户声明 GET 期望 403，实际 %d", code)
+	}
+}
+
+// ★ D2 / §10.6 S-7：旧版 tee-infer 不识别 `month` 窗口时的兼容处置。
+// 旧对端对「含 month 的配额下发」返回 400；网关须**优雅降级**——订阅绑定仍成功（200），
+// 不因配额下发失败而报错或回滚（绑定与下发解耦，§6.4.1）。
+func TestBillingSubscription_OldPeerRejectsMonth_DegradesGracefully(t *testing.T) {
+	// 旧对端：POST /usage/quota 见 month 窗口即 400（不识别）
+	tee := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/usage/quota" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		var u billing.QuotaUpdate
+		_ = json.NewDecoder(r.Body).Decode(&u)
+		for _, l := range u.Limits {
+			if l.Window == "month" {
+				http.Error(w, "unsupported window: month", http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer tee.Close()
+
+	h := newBillingM6TestHandler(t, tee.URL, 100*time.Millisecond)
+	// 付费档：MonthlyTokens>0 → 编译出 month 主配额（触发旧对端拒绝）
+	if err := h.store.Plans().PutPlan(&billing.Plan{ID: "p1", Name: "基础", MonthlyTokens: 1000}); err != nil {
+		t.Fatalf("PutPlan: %v", err)
+	}
+	srv := httptest.NewServer(buildAdminMux(testCfg(), nil, nil, nil, nil, nil, nil, nil, h, false))
+	defer srv.Close()
+
+	if code := postSubscription(t, srv.URL); code != http.StatusOK {
+		t.Fatalf("旧对端拒绝 month 时订阅仍应 200（优雅降级），实际 %d", code)
+	}
+	// 绑定已落库（不因配额下发失败回滚）
+	subs, err := h.store.Plans().ListSubscriptions(time.Now().UnixNano())
+	if err != nil {
+		t.Fatalf("ListSubscriptions: %v", err)
+	}
+	if len(subs) == 0 || subs[len(subs)-1].PlanID != "p1" {
+		t.Fatalf("订阅应已绑定 p1，got %+v", subs)
+	}
+}
+
 // 回读命中 → 200；下发限额正确；M6 指标 #13 有样本
 func TestBillingSubscription_M6Confirmed(t *testing.T) {
 	stub := newQuotaStub()

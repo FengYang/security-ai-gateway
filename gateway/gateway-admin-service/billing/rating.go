@@ -73,6 +73,16 @@ func NewRatingEngine(rounding string, monthStd MonthStdProvider) RatingEngine {
 	return &ratingEngine{rounding: rounding, monthStd: monthStd}
 }
 
+// Rounding 返回配置的舍入法（"half_up" | "floor"）。
+// 供展示层（账单明细行）与账单总额取整**同口径**（此前明细行硬编码 half_up，
+// 当配置 floor 时明细行之和会与总额不一致）。
+func (e *ratingEngine) Rounding() string {
+	if e == nil || e.rounding == "" {
+		return "half_up"
+	}
+	return e.rounding
+}
+
 // StandardTokens 标准 token 换算（A-9 唯一入口）。
 // 入账路径唯一调用点；计价路径从账本读锁定值，不调用此函数（A-39）。
 func (e *ratingEngine) StandardTokens(tokensIn, tokensOut int64, mp *ModelPrice) (int64, int64) {
@@ -272,16 +282,13 @@ func rateAtTopTier(stdIn, stdOut int64, mp *ModelPrice) int64 {
 	return mu
 }
 
-// effectiveTiers 返回有效的阶梯列表。空阶梯返回单档（up=0 即 ∞，单价 = 系数档）。
-// 最后一档必须是 up=0（∞）。
+// effectiveTiers 返回模型的有效阶梯列表。
+//
+// 不变量：`Tiers` 必须非空且末档为 ∞（`UpToTokens=0`）——由 `LoadPriceTable` 经
+// `validateTiers` 在**加载期 fail-closed 拒载**保证（★ BUG-004）。此处对空 `Tiers`
+// 返回 nil 仅作**防御**（不回退为"单档全量"、不静默按 0 价）；调用方应先经价格表校验。
 func effectiveTiers(mp *ModelPrice) []Tier {
-	if mp == nil {
-		return nil
-	}
-	if len(mp.Tiers) == 0 {
-		// 空阶梯 = 单档全量（A-24：up<=0 视作 ∞）
-		// 但需要有单价；用系数档（这里默认 0 是不对的，应该用基础单价）
-		// 实际上 Tiers 空时定价模式未定，返回空让上层处理
+	if mp == nil || len(mp.Tiers) == 0 {
 		return nil
 	}
 	return mp.Tiers

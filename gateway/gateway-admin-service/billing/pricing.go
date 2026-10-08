@@ -9,7 +9,8 @@ import (
 
 // ---------- 价格表（§4.1.4 / §5.4 / 附录 D） ----------
 
-// PriceTable 单价表（配置文件 YAML 加载，热加载版本随 Version 字段）。
+// PriceTable 单价表（**JSON** 文件加载，热加载版本随 Version 字段）。
+// 注：结构体保留 yaml tag 以便未来引入 YAML 解析；当前加载器为 JSON（★ DOC-003）。
 type PriceTable struct {
 	Version  string                `json:"version"  yaml:"version"`  // 版本号（账期锁定追溯）
 	Currency string                `json:"currency" yaml:"currency"` // CNY（P0）

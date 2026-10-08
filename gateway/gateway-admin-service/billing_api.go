@@ -7,6 +7,7 @@
 //
 //	GET  /v1/adminext/billing/plans                   套餐列表（读）
 //	POST /v1/adminext/billing/plans                   套餐 upsert（admin）
+//	GET  /v1/adminext/billing/subscription            当前租户套餐（读；自助按 token 内租户）
 //	POST /v1/adminext/billing/subscription            租户绑定套餐（admin）
 //	GET  /v1/adminext/billing/bills                   账单列表（读）
 //	GET  /v1/adminext/billing/bills/{id}              账单详情（读）
@@ -376,11 +377,64 @@ func (h *billingHandler) handlePlans(w http.ResponseWriter, r *http.Request) {
 // ---------- 订阅绑定 ----------
 
 func (h *billingHandler) handleSubscription(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGetSubscription(w, r)
+	case http.MethodPost:
+		h.handleBindSubscription(w, r)
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET/POST")
+	}
+}
+
+// handleGetSubscription GET /v1/adminext/billing/subscription（§4.3.2）：当前租户套餐查询。
+//
+// 角色：读端点（`billing_reader`/`auditor`/`admin`；`billing_reader` 未放行时退用 auditor）。
+// 自助场景：`tenant` 缺省取令牌内 `tenant` 声明；非 admin 跨租户 → 403（§7.4，fail-closed）。
+// 返回当前生效订阅（最新 `effective_at` 且未过期）；无绑定 → `subscription=null`。
+func (h *billingHandler) handleGetSubscription(w http.ResponseWriter, r *http.Request) {
+	if !requireReadAccess(w, r) {
 		return
 	}
+	c := claimsFrom(r.Context())
+	tenant := r.URL.Query().Get("tenant")
+	if tenant == "" && c != nil {
+		tenant = c.Tenant // 自助：按 token 内租户
+	}
+	if !h.tenantAllowed(r, tenant) {
+		writeError(w, http.StatusForbidden, "跨租户访问被拒绝")
+		return
+	}
+	if tenant == "" {
+		writeError(w, http.StatusBadRequest, "tenant 必填（自助会话需令牌内携带 tenant 声明）")
+		return
+	}
+	now := time.Now().UnixNano()
+	subs, err := h.store.Plans().ListSubscriptions(now)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "订阅查询失败")
+		return
+	}
+	var cur *billing.Subscription
+	for i := range subs {
+		s := subs[i]
+		if s.TenantID != tenant {
+			continue
+		}
+		if s.ExpiresAt != 0 && s.ExpiresAt <= now {
+			continue // 已过期
+		}
+		if cur == nil || s.EffectiveAt >= cur.EffectiveAt {
+			cp := s
+			cur = &cp
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tenant": tenant, "subscription": cur})
+}
+
+// handleBindSubscription POST /v1/adminext/billing/subscription（**admin**）：绑定/升降级。
+func (h *billingHandler) handleBindSubscription(w http.ResponseWriter, r *http.Request) {
 	start := time.Now() // ★ A-14：M6 计时起点（套餐变更**受理** → 回读确认）
 	if !requireRole(w, r, "admin") {
 		return

@@ -132,6 +132,10 @@ func (s *BillingService) IngestWindow(ctx context.Context, win *UsageWindow, syn
 	if !CanWrite(syncMode, win.Source) {
 		return 0, nil // 非写者：仅更新实时视图（P0 无持久化视图 → no-op）
 	}
+	if s.prices == nil {
+		// 防御：价格表提供器未注入（正常装配必注入）——返回错误而非 panic。
+		return 0, fmt.Errorf("billing: price table provider is not configured")
+	}
 	tbl := s.prices.Current()
 	entries := AggToEntries(win)
 	if len(entries) == 0 {
@@ -440,6 +444,7 @@ func (s *BillingService) buildItems(agg *UsageAgg, tbl *PriceTable) ([]BillItem,
 	if s.rating == nil {
 		return nil, 0, fmt.Errorf("billing: rating engine is not configured")
 	}
+	mode := s.roundingMode() // ★ A4：明细行与总额取整同口径（此前硬编码 half_up）
 	var items []BillItem
 	for mk, mu := range agg.ByModel {
 		if _, ok := tbl.ModelPriceOf(mk); !ok {
@@ -458,7 +463,7 @@ func (s *BillingService) buildItems(agg *UsageAgg, tbl *PriceTable) ([]BillItem,
 			TokensIn:       mu.TokensIn,
 			TokensOut:      mu.TokensOut,
 			RetryToks:      mu.RetryToks, // 展示"平台承担"（不计入 Amount，M9）
-			Amount:         roundAmount(itemMu, "half_up"),
+			Amount:         roundAmount(itemMu, mode),
 		})
 	}
 	total, err := s.rating.RateMonthly(agg, tbl) // 月结权威入口（唯一取整点）
@@ -466,6 +471,17 @@ func (s *BillingService) buildItems(agg *UsageAgg, tbl *PriceTable) ([]BillItem,
 		return nil, 0, err
 	}
 	return items, total, nil
+}
+
+// roundingMode 返回计价引擎配置的舍入法（默认 half_up）。
+// 经**可选接口**探测，避免依赖具体实现类型（不破坏 RatingEngine 可替换性）。
+func (s *BillingService) roundingMode() string {
+	if r, ok := s.rating.(interface{ Rounding() string }); ok {
+		if m := r.Rounding(); m != "" {
+			return m
+		}
+	}
+	return "half_up"
 }
 
 // checkFrozen 冻结判定（§6.10.3）。

@@ -179,7 +179,7 @@ func TestLedger_StdInStdOutInHash(t *testing.T) {
 
 // ---------- helpers ----------
 
-func openTestStore(t *testing.T) Store {
+func openTestStore(t testing.TB) Store {
 	t.Helper()
 	s, err := OpenSQLiteStore(":memory:", false)
 	if err != nil {

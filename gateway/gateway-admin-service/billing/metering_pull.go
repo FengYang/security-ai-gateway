@@ -88,6 +88,8 @@ func (s *BillingService) pullRange(ctx context.Context, from, to int64) error {
 //   - 游标三级回退：内存 lastPollNs → 持久化水位 PollWatermark → now-lookback（仅首次部署）；
 //   - 仅当拉取**且**入账成功（或空窗口）才推进游标；失败不推进（下轮覆盖同区间，无丢账无重复）；
 //   - 时钟回拨（B-6.1-3）：`now < cursor` → 记 #17 并重同步游标、跳过本轮。
+//   - ★ A6：窗口端点**秒对齐**（tee-infer `/usage` 按秒聚合）——每个"秒桶"仅被拉取一次，
+//     消除同秒重复请求导致的 `event_key` 碰撞（UNIQUE 去重会吞掉该秒迟到事件）。
 func (s *BillingService) pullOnce(ctx context.Context) {
 	if s.source == nil {
 		return
@@ -110,10 +112,15 @@ func (s *BillingService) pullOnce(ctx context.Context) {
 	if from <= 0 { // 首次部署：一次性回溯 lookback
 		from = now - int64(s.pullLookback)
 	}
-	if from >= now { // 保证半开区间 [from,now) 非空
-		from = now - int64(time.Second)
+	// ★ A6：窗口端点对齐到整秒（tee-infer `/usage` 按**秒**聚合 from/to）。
+	// 保证每个"秒桶"只被拉取一次：既消除「同一秒被重复请求 → event_key 相同 →
+	// UNIQUE 去重吞掉该秒内迟到的迟到事件」的漏账隐患，也避免重复入账。
+	from -= from % int64(time.Second)
+	to := now - now%int64(time.Second)
+	if to <= from { // 同一秒内重复触发 → 无新增区间，留待下轮
+		return
 	}
-	if err := s.pullRange(ctx, from, now); err != nil {
+	if err := s.pullRange(ctx, from, to); err != nil {
 		IncPull("error") // ★ 不越过失败段（游标保持）
 		log.Printf("[billing] S-1 拉取/入账失败（游标保持）：%v", err)
 		return

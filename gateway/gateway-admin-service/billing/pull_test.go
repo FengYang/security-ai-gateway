@@ -262,3 +262,28 @@ func TestPullOnce_DaySplitAcrossMidnight(t *testing.T) {
 		t.Fatalf("BUG-007 回归：归日错误，got days=%v entries=%+v", days, entries)
 	}
 }
+
+// ★ A6 回归：同一秒内重复触发**不得重复请求**同一秒窗口。
+// 否则两次拉取的 event_key 相同（pull-{fromSec}-{toSec}），UNIQUE 去重会吞掉该秒内
+// 迟到的迟到事件 → 漏账；秒对齐后每个"秒桶"仅被请求一次。
+func TestPullOnce_SameSecondNoDuplicateRequest(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	svc := newTestBillingService(s, nil)
+	base := fixedMidday()
+	src := &timedPullSource{eventTs: base - int64(time.Minute), tokens: 1000}
+	svc.SetMeteringSource(src, time.Hour, SyncModePull)
+
+	svc.now = func() int64 { return base + int64(200*time.Millisecond) }
+	svc.pullOnce(context.Background()) // 端点对齐到 base → 覆盖事件，入账 1 条
+	svc.now = func() int64 { return base + int64(800*time.Millisecond) }
+	svc.pullOnce(context.Background()) // 与上轮同一秒 → 无新增区间，不请求
+
+	if len(src.froms) != 1 {
+		t.Fatalf("同一秒内重复触发应只请求一次，got %d 次（froms=%v）", len(src.froms), src.froms)
+	}
+	entries, _ := s.Ledger().Range(LedgerQuery{TenantID: "t1"})
+	if len(entries) != 1 {
+		t.Fatalf("ledger entries = %d, want 1", len(entries))
+	}
+}

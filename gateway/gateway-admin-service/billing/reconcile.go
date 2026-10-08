@@ -171,11 +171,15 @@ func (s *BillingService) onReconcileWarning(tenant, day string) {
 		s.pollMu.Lock()
 		defer s.pollMu.Unlock()
 		now := s.now()
+		now -= now % int64(time.Second) // ★ A6：与 pullOnce 同口径（秒对齐）
 		from := s.lastPollNs
 		if from <= 0 { // 进程重启：从持久化水位续拉
 			if ns, err := s.store.Ledger().PollWatermark(); err == nil {
 				from = ns
 			}
+		}
+		if from > 0 {
+			from -= from % int64(time.Second) // ★ A6：秒对齐，避免同一秒重复请求
 		}
 		if from <= 0 || from >= now {
 			return // 无可回补区间 → no-op
