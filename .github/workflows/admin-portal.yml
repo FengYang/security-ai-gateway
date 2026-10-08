@@ -44,6 +44,8 @@ jobs:
         run: |
           git -C /tmp/higress-console apply --verbose \
             "$GITHUB_WORKSPACE/fork-patches/higress-console/higress-console-custom.patch"
+          git -C /tmp/higress-console apply --verbose \
+            "$GITHUB_WORKSPACE/fork-patches/higress-console/higress-console-billing.patch"
           echo "--- applied customization summary ---"
           git -C /tmp/higress-console status --short
 
@@ -77,5 +79,7 @@ jobs:
           cd /tmp/higress-console/frontend/build
           test -f index.html
           test -f security-center.html
+          test -f admin-ext/billing.html
           ls js/p_security-center-index-*.js >/dev/null
-          echo "PASS: security-center page chunk present in build output"
+          ls js/p_admin-ext-billing-index-*.js >/dev/null
+          echo "PASS: security-center + billing page chunks present in build output"

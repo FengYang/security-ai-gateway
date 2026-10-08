@@ -1,8 +1,8 @@
 diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
-index 14c6204..7affdac 100644
+index 14c6204..103b9a3 100644
 --- a/frontend/src/locales/en-US/translation.json
 +++ b/frontend/src/locales/en-US/translation.json
-@@ -29,11 +29,53 @@
+@@ -29,11 +29,78 @@
      "adminExtUsage": "Usage Dashboard",
      "adminExtAccounts": "Accounts & Roles",
      "adminExtChanges": "High-risk Change Review",
@@ -52,16 +52,41 @@ index 14c6204..7affdac 100644
 +      "unlimited": "Unlimited",
 +      "concurrency": "Concurrency",
 +      "cacheTier": "Cache Tier",
-+      "overQuota": "Over-quota"
++      "overQuota": "Over-quota",
++      "actions": "Actions",
++      "edit": "Edit",
++      "newPlan": "New Plan",
++      "editPlan": "Edit Plan",
++      "planSaved": "Plan saved",
++      "planIdRequired": "Plan ID is required",
++      "planNameRequired": "Plan name is required",
++      "bindGuide": "Bind/upgrade subscription (admin): pick tenant and plan; leave valid-days empty = no expiry.",
++      "tenantRequired": "Tenant is required",
++      "planRequired": "Plan is required",
++      "selectPlan": "Select plan",
++      "expiresDays": "Valid days (optional)",
++      "bind": "Bind",
++      "bindOk": "Subscription bound",
++      "tabFreeze": "Freeze",
++      "freezeGuide": "Freeze/unfreeze a tenant (admin). A frozen tenant cannot have bills issued (close is rejected); ingestion is unaffected.",
++      "freezeTitle": "Tenant Freeze",
++      "reasonManual": "Manual",
++      "freezeConfirm": "Freeze this tenant?",
++      "unfreezeConfirm": "Unfreeze this tenant?",
++      "freeze": "Freeze",
++      "unfreeze": "Unfreeze",
++      "freezeTenantRequired": "Tenant is required",
++      "freezeOk": "Frozen",
++      "unfreezeOk": "Unfrozen"
 +    },
      "security": {
        "teeStatus": "Confidential Link Status",
        "refresh": "Refresh",
 diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
-index 07c3f64..0674dc0 100644
+index 07c3f64..7dac46b 100644
 --- a/frontend/src/locales/zh-CN/translation.json
 +++ b/frontend/src/locales/zh-CN/translation.json
-@@ -29,11 +29,53 @@
+@@ -29,11 +29,78 @@
      "adminExtUsage": "用量看板",
      "adminExtAccounts": "账号与角色",
      "adminExtChanges": "高敏变更复核",
@@ -111,7 +136,32 @@ index 07c3f64..0674dc0 100644
 +      "unlimited": "不限",
 +      "concurrency": "并发",
 +      "cacheTier": "缓存档",
-+      "overQuota": "超额策略"
++      "overQuota": "超额策略",
++      "actions": "操作",
++      "edit": "编辑",
++      "newPlan": "新建套餐",
++      "editPlan": "编辑套餐",
++      "planSaved": "套餐已保存",
++      "planIdRequired": "套餐 ID 必填",
++      "planNameRequired": "套餐名称必填",
++      "bindGuide": "绑定/升降级订阅（admin）：选择租户与套餐；有效天数留空 = 不过期。",
++      "tenantRequired": "租户必填",
++      "planRequired": "套餐必选",
++      "selectPlan": "选择套餐",
++      "expiresDays": "有效天数（可选）",
++      "bind": "绑定",
++      "bindOk": "订阅已绑定",
++      "tabFreeze": "冻结管理",
++      "freezeGuide": "冻结/解冻租户（admin）。冻结后该租户账单不可交付（出账被拒），入账不受影响。",
++      "freezeTitle": "租户冻结",
++      "reasonManual": "人工",
++      "freezeConfirm": "确认冻结该租户？",
++      "unfreezeConfirm": "确认解冻该租户？",
++      "freeze": "冻结",
++      "unfreeze": "解冻",
++      "freezeTenantRequired": "请填写租户",
++      "freezeOk": "已冻结",
++      "unfreezeOk": "已解冻"
 +    },
      "security": {
        "teeStatus": "密态链路状态",
@@ -142,10 +192,10 @@ index 111d28a..b21ee79 100644
          path: '/service-source',
 diff --git a/frontend/src/pages/admin-ext/billing/index.tsx b/frontend/src/pages/admin-ext/billing/index.tsx
 new file mode 100644
-index 0000000..ccdc261
+index 0000000..90097c9
 --- /dev/null
 +++ b/frontend/src/pages/admin-ext/billing/index.tsx
-@@ -0,0 +1,307 @@
+@@ -0,0 +1,557 @@
 +import { ReloadOutlined } from '@ant-design/icons';
 +import { PageContainer } from '@ant-design/pro-layout';
 +import {
@@ -153,8 +203,12 @@ index 0000000..ccdc261
 +  Button,
 +  Card,
 +  Descriptions,
++  Form,
 +  Input,
++  InputNumber,
 +  message,
++  Modal,
++  Popconfirm,
 +  Select,
 +  Space,
 +  Table,
@@ -167,22 +221,28 @@ index 0000000..ccdc261
 +import { useTranslation } from 'react-i18next';
 +import AdminExtBadge from '@/components/AdminExtBadge';
 +import {
++  bindSubscription,
 +  Bill,
 +  BillItem,
++  freezeTenant,
++  getSubscription,
 +  listBills,
 +  listPlans,
 +  Plan,
 +  Subscription,
-+  getSubscription,
++  unfreezeTenant,
++  upsertPlan,
 +} from '@/services/admin-ext-billing';
 +
 +/**
-+ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：计费中心（P0-3 §4.3.2/§4.3.4，只读）。
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：计费中心（P0-3 §4.3.2/§4.3.4）。
 + *
 + * 数据源 = gateway-admin-service `/v1/adminext/billing/*`（账务域）：
 + *  - 账单中心：账单列表 + 明细展开（金额列**仅本页**出现，§3.1.3）；
-+ *  - 套餐与订阅：套餐列表 + 当前租户订阅查询。
-+ * 只读视图，无写操作（套餐 upsert / 绑定 / 冻结仍由 admin 经 API 完成）。
++ *  - 套餐与订阅：套餐列表（admin 可新建/编辑）+ 当前租户订阅查询 + 绑定；
++ *  - 冻结管理：冻结/解冻租户（admin）。
++ * 写端点仅 `admin`：前端不做角色隐藏（无身份信息，§4.3.4 D10），以后端 403 为准；
++ * 写动作落审计链（`plan_upsert`/`plan_bind`/`bill_freeze`/`bill_unfreeze`）。
 + * 金额单位：后端为**分**，此处换算为元展示。
 + */
 +
@@ -194,8 +254,7 @@ index 0000000..ccdc261
 +  if (!ns) {
 +    return '-';
 +  }
-+  const d = new Date(Math.round(ns / 1e6));
-+  return d.toLocaleString();
++  return new Date(Math.round(ns / 1e6)).toLocaleString();
 +};
 +
 +const STATUS_COLORS: Record<string, string> = {
@@ -211,6 +270,19 @@ index 0000000..ccdc261
 +  monthly: 'adminExt.billing.kindMonthly',
 +  overage: 'adminExt.billing.kindOverage',
 +};
++
++/** 套餐表单值（id 即 model；over_quota 校验 R-29 由后端强制）。 */
++interface PlanFormValues {
++  id: string;
++  name: string;
++  monthly_tokens: number;
++  concurrency: number;
++  cache_tier: string;
++  over_quota: string;
++}
++
++const CACHE_TIERS = ['none', 'exact', 'semantic'];
++const OVER_QUOTA = ['reject', 'degrade', 'charge'];
 +
 +const BillingCenterPage: React.FC = () => {
 +  const { t } = useTranslation();
@@ -229,6 +301,18 @@ index 0000000..ccdc261
 +  const [subTenant, setSubTenant] = useState('');
 +  const [subscription, setSubscription] = useState<Subscription | null>(null);
 +  const [subQueried, setSubQueried] = useState(false);
++  const [planModalOpen, setPlanModalOpen] = useState(false);
++  const [planEditable, setPlanEditable] = useState(false);
++  const [planSubmitting, setPlanSubmitting] = useState(false);
++  const [planForm] = Form.useForm<PlanFormValues>();
++  const [bindForm] = Form.useForm<{ tenant: string; plan_id: string; expires_days?: number }>();
++  const [binding, setBinding] = useState(false);
++
++  // 冻结管理
++  const [freezeTenantId, setFreezeTenantId] = useState('');
++  const [freezeReason, setFreezeReason] = useState<string>('manual');
++  const [freezing, setFreezing] = useState(false);
++  const [unfreezing, setUnfreezing] = useState(false);
 +
 +  const reloadBills = useCallback(() => {
 +    setBillsLoading(true);
@@ -270,6 +354,148 @@ index 0000000..ccdc261
 +      .catch(() => setSubscription(null));
 +  }, [subTenant]);
 +
++  // ---------- 写：套餐 ----------
++  const openCreatePlan = () => {
++    setPlanEditable(false);
++    planForm.setFieldsValue({
++      id: '',
++      name: '',
++      monthly_tokens: 1000000,
++      concurrency: 5,
++      cache_tier: 'exact',
++      over_quota: 'reject',
++    });
++    setPlanModalOpen(true);
++  };
++
++  const openEditPlan = (p: Plan) => {
++    setPlanEditable(true);
++    planForm.setFieldsValue({
++      id: p.id,
++      name: p.name,
++      monthly_tokens: p.monthly_tokens,
++      concurrency: p.concurrency,
++      cache_tier: p.cache_tier,
++      over_quota: p.over_quota,
++    });
++    setPlanModalOpen(true);
++  };
++
++  const submitPlan = () => {
++    planForm
++      .validateFields()
++      .then((values) => {
++        setPlanSubmitting(true);
++        const payload: Plan = {
++          id: values.id.trim(),
++          name: values.name.trim(),
++          monthly_tokens: values.monthly_tokens || 0,
++          concurrency: values.concurrency || 0,
++          cache_tier: values.cache_tier,
++          over_quota: values.over_quota,
++          price_id: '',
++          pay_mode: 'postpaid',
++          extra_limits: [],
++          model_scopes: [],
++          version: 0,
++        };
++        upsertPlan(payload)
++          .then(() => {
++            message.success(t('adminExt.billing.planSaved'));
++            setPlanModalOpen(false);
++            reloadPlans();
++          })
++          .catch(() => {
++            // 全局拦截器已提示（400 R-29 / 403 越权 / 500）
++          })
++          .finally(() => setPlanSubmitting(false));
++      })
++      .catch(() => undefined);
++  };
++
++  const planColumns: TableColumnsType<Plan> = [
++    { title: t('adminExt.billing.planId'), dataIndex: 'id', key: 'id', width: 140 },
++    { title: t('adminExt.billing.planName'), dataIndex: 'name', key: 'name', width: 150 },
++    {
++      title: t('adminExt.billing.monthlyTokens'),
++      dataIndex: 'monthly_tokens',
++      key: 'monthly_tokens',
++      align: 'right' as const,
++      render: (v: number) => (v > 0 ? v.toLocaleString() : t('adminExt.billing.unlimited')),
++    },
++    { title: t('adminExt.billing.concurrency'), dataIndex: 'concurrency', key: 'concurrency', align: 'right' as const, width: 100 },
++    { title: t('adminExt.billing.cacheTier'), dataIndex: 'cache_tier', key: 'cache_tier', width: 100 },
++    {
++      title: t('adminExt.billing.overQuota'),
++      dataIndex: 'over_quota',
++      key: 'over_quota',
++      width: 100,
++      render: (v: string) => <Tag>{v}</Tag>,
++    },
++    {
++      title: t('adminExt.billing.actions'),
++      key: 'actions',
++      width: 90,
++      render: (_: unknown, r: Plan) => (
++        <Button type="link" size="small" onClick={() => openEditPlan(r)}>
++          {t('adminExt.billing.edit')}
++        </Button>
++      ),
++    },
++  ];
++
++  const submitBind = () => {
++    bindForm
++      .validateFields()
++      .then((values) => {
++        setBinding(true);
++        const days = values.expires_days || 0;
++        const payload = {
++          tenant: values.tenant.trim(),
++          plan_id: values.plan_id,
++          effective_at: 0,
++          expires_at: days > 0 ? Date.now() * 1e6 + days * 86400 * 1e9 : 0,
++        };
++        bindSubscription(payload)
++          .then(() => {
++            message.success(t('adminExt.billing.bindOk'));
++            setSubTenant(values.tenant.trim());
++            querySubscription();
++          })
++          .catch(() => undefined)
++          .finally(() => setBinding(false));
++      })
++      .catch(() => undefined);
++  };
++
++  // ---------- 写：冻结 ----------
++  const doFreeze = () => {
++    const tenant = freezeTenantId.trim();
++    if (!tenant) {
++      message.warning(t('adminExt.billing.freezeTenantRequired'));
++      return;
++    }
++    setFreezing(true);
++    freezeTenant(tenant, freezeReason, 'critical')
++      .then(() => message.success(t('adminExt.billing.freezeOk')))
++      .catch(() => undefined)
++      .finally(() => setFreezing(false));
++  };
++
++  const doUnfreeze = () => {
++    const tenant = freezeTenantId.trim();
++    if (!tenant) {
++      message.warning(t('adminExt.billing.freezeTenantRequired'));
++      return;
++    }
++    setUnfreezing(true);
++    unfreezeTenant(tenant)
++      .then(() => message.success(t('adminExt.billing.unfreezeOk')))
++      .catch(() => undefined)
++      .finally(() => setUnfreezing(false));
++  };
++
++  // ---------- 账单表 ----------
 +  const billColumns: TableColumnsType<Bill> = [
 +    { title: t('adminExt.billing.billId'), dataIndex: 'id', key: 'id', width: 220, ellipsis: true },
 +    { title: t('adminExt.billing.tenant'), dataIndex: 'tenant', key: 'tenant', width: 140, ellipsis: true },
@@ -320,26 +546,7 @@ index 0000000..ccdc261
 +    },
 +  ];
 +
-+  const planColumns: TableColumnsType<Plan> = [
-+    { title: t('adminExt.billing.planId'), dataIndex: 'id', key: 'id', width: 140 },
-+    { title: t('adminExt.billing.planName'), dataIndex: 'name', key: 'name', width: 160 },
-+    {
-+      title: t('adminExt.billing.monthlyTokens'),
-+      dataIndex: 'monthly_tokens',
-+      key: 'monthly_tokens',
-+      align: 'right' as const,
-+      render: (v: number) => (v > 0 ? v.toLocaleString() : t('adminExt.billing.unlimited')),
-+    },
-+    { title: t('adminExt.billing.concurrency'), dataIndex: 'concurrency', key: 'concurrency', align: 'right' as const, width: 110 },
-+    { title: t('adminExt.billing.cacheTier'), dataIndex: 'cache_tier', key: 'cache_tier', width: 110 },
-+    {
-+      title: t('adminExt.billing.overQuota'),
-+      dataIndex: 'over_quota',
-+      key: 'over_quota',
-+      width: 110,
-+      render: (v: string) => <Tag>{v}</Tag>,
-+    },
-+  ];
++  const planOptions = useMemo(() => plans.map((p) => ({ value: p.id, label: `${p.id} (${p.name})` })), [plans]);
 +
 +  const billsTab = (
 +    <>
@@ -397,21 +604,26 @@ index 0000000..ccdc261
 +    <>
 +      <Alert type="info" showIcon message={t('adminExt.billing.plansGuide')} style={{ marginBottom: 16 }} />
 +      {plansError && <Alert type="error" showIcon message={plansError} style={{ marginBottom: 16 }} />}
-+      <Card size="small" title={t('adminExt.billing.subscriptionTitle')} style={{ marginBottom: 16 }}>
++
++      <Card
++        size="small"
++        title={t('adminExt.billing.subscriptionTitle')}
++        style={{ marginBottom: 16 }}
++        extra={<Button onClick={querySubscription}>{t('adminExt.billing.query')}</Button>}
++      >
 +        <Space style={{ marginBottom: 12 }}>
 +          <Input
 +            allowClear
-+            style={{ width: 240 }}
++            style={{ width: 220 }}
 +            placeholder={t('adminExt.billing.subTenantPlaceholder') as string}
 +            value={subTenant}
 +            onChange={(e) => setSubTenant(e.target.value)}
 +            onPressEnter={querySubscription}
 +          />
-+          <Button onClick={querySubscription}>{t('adminExt.billing.query')}</Button>
 +        </Space>
-+        {subQueried && (
-+          subscription ? (
-+            <Descriptions size="small" column={1} bordered>
++        {subQueried &&
++          (subscription ? (
++            <Descriptions size="small" column={1} bordered style={{ marginBottom: 16 }}>
 +              <Descriptions.Item label={t('adminExt.billing.tenant')}>{subscription.tenant}</Descriptions.Item>
 +              <Descriptions.Item label={t('adminExt.billing.planId')}>{subscription.plan_id}</Descriptions.Item>
 +              <Descriptions.Item label={t('adminExt.billing.effectiveAt')}>{fmtNano(subscription.effective_at)}</Descriptions.Item>
@@ -420,11 +632,37 @@ index 0000000..ccdc261
 +              </Descriptions.Item>
 +            </Descriptions>
 +          ) : (
-+            <Typography.Text type="secondary">{t('adminExt.billing.noSubscription')}</Typography.Text>
-+          )
-+        )}
++            <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
++              {t('adminExt.billing.noSubscription')}
++            </Typography.Text>
++          ))}
++
++        <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
++          {t('adminExt.billing.bindGuide')}
++        </Typography.Paragraph>
++        <Form form={bindForm} layout="inline" onFinish={submitBind}>
++          <Form.Item name="tenant" rules={[{ required: true, message: t('adminExt.billing.tenantRequired') as string }]}>
++            <Input style={{ width: 200 }} placeholder={t('adminExt.billing.tenant') as string} />
++          </Form.Item>
++          <Form.Item name="plan_id" rules={[{ required: true, message: t('adminExt.billing.planRequired') as string }]}>
++            <Select
++              style={{ width: 220 }}
++              placeholder={t('adminExt.billing.selectPlan') as string}
++              options={planOptions}
++            />
++          </Form.Item>
++          <Form.Item name="expires_days">
++            <InputNumber min={0} step={1} style={{ width: 160 }} placeholder={t('adminExt.billing.expiresDays') as string} />
++          </Form.Item>
++          <Form.Item>
++            <Button type="primary" htmlType="submit" loading={binding}>
++              {t('adminExt.billing.bind')}
++            </Button>
++          </Form.Item>
++        </Form>
 +      </Card>
-+      <Card size="small" title={t('adminExt.billing.plansTitle')}>
++
++      <Card size="small" title={t('adminExt.billing.plansTitle')} extra={<Button type="primary" onClick={openCreatePlan}>{t('adminExt.billing.newPlan')}</Button>}>
 +        <Table<Plan>
 +          rowKey="id"
 +          size="middle"
@@ -434,6 +672,67 @@ index 0000000..ccdc261
 +          locale={{ emptyText: t('adminExt.billing.empty') }}
 +          pagination={false}
 +        />
++      </Card>
++
++      <Modal
++        title={planEditable ? t('adminExt.billing.editPlan') : t('adminExt.billing.newPlan')}
++        open={planModalOpen}
++        onOk={submitPlan}
++        confirmLoading={planSubmitting}
++        onCancel={() => setPlanModalOpen(false)}
++        destroyOnClose
++      >
++        <Form form={planForm} layout="vertical">
++          <Form.Item name="id" label={t('adminExt.billing.planId')} rules={[{ required: true, message: t('adminExt.billing.planIdRequired') as string }]}>
++            <Input disabled={planEditable} placeholder="free / basic / pro / enterprise" />
++          </Form.Item>
++          <Form.Item name="name" label={t('adminExt.billing.planName')} rules={[{ required: true, message: t('adminExt.billing.planNameRequired') as string }]}>
++            <Input />
++          </Form.Item>
++          <Form.Item name="monthly_tokens" label={t('adminExt.billing.monthlyTokens')}>
++            <InputNumber min={0} step={1000000} style={{ width: '100%' }} />
++          </Form.Item>
++          <Form.Item name="concurrency" label={t('adminExt.billing.concurrency')}>
++            <InputNumber min={0} step={1} style={{ width: '100%' }} />
++          </Form.Item>
++          <Form.Item name="cache_tier" label={t('adminExt.billing.cacheTier')}>
++            <Select options={CACHE_TIERS.map((v) => ({ value: v, label: v }))} />
++          </Form.Item>
++          <Form.Item name="over_quota" label={t('adminExt.billing.overQuota')}>
++            <Select options={OVER_QUOTA.map((v) => ({ value: v, label: v }))} />
++          </Form.Item>
++        </Form>
++      </Modal>
++    </>
++  );
++
++  const freezeTab = (
++    <>
++      <Alert type="info" showIcon message={t('adminExt.billing.freezeGuide')} style={{ marginBottom: 16 }} />
++      <Card size="small" title={t('adminExt.billing.freezeTitle')}>
++        <Space wrap>
++          <Input
++            allowClear
++            style={{ width: 240 }}
++            placeholder={t('adminExt.billing.tenant') as string}
++            value={freezeTenantId}
++            onChange={(e) => setFreezeTenantId(e.target.value)}
++          />
++          <Select
++            style={{ width: 160 }}
++            value={freezeReason}
++            onChange={(v) => setFreezeReason(v)}
++            options={[{ value: 'manual', label: t('adminExt.billing.reasonManual') }]}
++          />
++          <Popconfirm title={t('adminExt.billing.freezeConfirm') as string} onConfirm={doFreeze}>
++            <Button danger loading={freezing}>
++              {t('adminExt.billing.freeze')}
++            </Button>
++          </Popconfirm>
++          <Popconfirm title={t('adminExt.billing.unfreezeConfirm') as string} onConfirm={doUnfreeze}>
++            <Button loading={unfreezing}>{t('adminExt.billing.unfreeze')}</Button>
++          </Popconfirm>
++        </Space>
 +      </Card>
 +    </>
 +  );
@@ -446,6 +745,7 @@ index 0000000..ccdc261
 +        items={[
 +          { key: 'bills', label: t('adminExt.billing.tabBills'), children: billsTab },
 +          { key: 'plans', label: t('adminExt.billing.tabPlans'), children: plansTab },
++          { key: 'freeze', label: t('adminExt.billing.tabFreeze'), children: freezeTab },
 +        ]}
 +      />
 +    </PageContainer>
@@ -455,17 +755,18 @@ index 0000000..ccdc261
 +export default BillingCenterPage;
 diff --git a/frontend/src/services/admin-ext-billing.ts b/frontend/src/services/admin-ext-billing.ts
 new file mode 100644
-index 0000000..b6ecaf7
+index 0000000..a96d8ae
 --- /dev/null
 +++ b/frontend/src/services/admin-ext-billing.ts
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,154 @@
 +import request from './request';
 +
 +/**
-+ * ADMIN-EXT（自研扩展）：计费中心 API 客户端（P0-3 §4.3.2 只读子集）。
++ * ADMIN-EXT（自研扩展）：计费中心 API 客户端（P0-3 §4.3.1/§4.3.2）。
 + *
-+ * 数据源 = gateway-admin-service `/v1/adminext/billing/*`（账务域）；
-+ * 本页为**只读**视图（账单/套餐/订阅查询），不含任何写操作。
++ * 数据源 = gateway-admin-service `/v1/adminext/billing/*`（账务域）。
++ * 读端点按角色放行（`billing_reader`/`auditor`/`admin`，跨租户隔离由后端强制）；
++ * 写端点（套餐/绑定/冻结）仅 `admin`，由后端 `requireRole` 强制并落审计链。
 + * 金额单位：后端 Amount 为**分**，展示层换算为元；金额列仅本页出现（§3.1.3）。
 + */
 +
@@ -501,12 +802,13 @@ index 0000000..b6ecaf7
 +  generated_at: number;
 +}
 +
-+/** 套餐定义。 */
++/** 单维度配额（与后端 billing.QuotaLimit 对齐）。 */
 +export interface QuotaLimit {
 +  window?: string;
 +  max_tokens: number;
 +}
 +
++/** 套餐定义。 */
 +export interface Plan {
 +  id: string;
 +  name: string;
@@ -541,7 +843,9 @@ index 0000000..b6ecaf7
 +  limit?: number;
 +}
 +
-+/** 账单列表（GET /billing/bills；只读，跨租户隔离由后端强制）。 */
++// ---------- 读 ----------
++
++/** 账单列表（GET /billing/bills）。 */
 +export const listBills = (params: BillQuery): Promise<{ bills: Bill[] }> => {
 +  return request.get<any, { bills: Bill[] }>(`${BASE}/bills`, { params });
 +};
@@ -551,7 +855,7 @@ index 0000000..b6ecaf7
 +  return request.get<any, Bill>(`${BASE}/bills/${encodeURIComponent(id)}`);
 +};
 +
-+/** 套餐列表（GET /billing/plans；只读）。 */
++/** 套餐列表（GET /billing/plans）。 */
 +export const listPlans = (): Promise<{ plans: Plan[] }> => {
 +  return request.get<any, { plans: Plan[] }>(`${BASE}/plans`);
 +};
@@ -564,4 +868,48 @@ index 0000000..b6ecaf7
 +    `${BASE}/subscription`,
 +    { params: tenant ? { tenant } : undefined },
 +  );
++};
++
++// ---------- 写（仅 admin；后端 requireRole 强制 + 落审计链） ----------
++
++/** 套餐 upsert（POST /billing/plans → 审计 `plan_upsert`）。 */
++export const upsertPlan = (plan: Plan): Promise<{ ok: boolean; id: string }> => {
++  return request.post<any, { ok: boolean; id: string }>(`${BASE}/plans`, plan);
++};
++
++export interface BindRequest {
++  tenant: string;
++  plan_id: string;
++  /** UTC 纳秒；0/缺省 = 立即生效。 */
++  effective_at?: number;
++  /** UTC 纳秒；0/缺省 = 不过期。 */
++  expires_at?: number;
++}
++
++/** 绑定/升降级订阅（POST /billing/subscription → 审计 `plan_bind`）。 */
++export const bindSubscription = (
++  data: BindRequest,
++): Promise<{ ok: boolean; tenant: string; plan_id: string }> => {
++  return request.post<any, { ok: boolean; tenant: string; plan_id: string }>(
++    `${BASE}/subscription`,
++    data,
++  );
++};
++
++/** 冻结租户（POST /billing/freeze → 审计 `bill_freeze`）。 */
++export const freezeTenant = (
++  tenant: string,
++  reason?: string,
++  severity?: string,
++): Promise<{ ok: boolean; tenant: string }> => {
++  return request.post<any, { ok: boolean; tenant: string }>(`${BASE}/freeze`, {
++    tenant,
++    reason,
++    severity,
++  });
++};
++
++/** 解冻租户（POST /billing/unfreeze → 审计 `bill_unfreeze`）。 */
++export const unfreezeTenant = (tenant: string): Promise<{ ok: boolean; tenant: string }> => {
++  return request.post<any, { ok: boolean; tenant: string }>(`${BASE}/unfreeze`, { tenant });
 +};

@@ -594,6 +594,7 @@ S-2「独立鉴权域」未实现；配置项语义误导，运维按 R-27 配�
 | 2026-10-08 | 开发（决策项二：分层容量验收） | 新增 **持久化层基准** `billing/bench_persist_test.go`（file+WAL，P-1..P-5）与 **验收测量** `billing/perf_acceptance_test.go`（`perf` 标签，P-1..P-5/M3/M5/M6）；出品《**PERF-BILLING-性能基准报告**》（对齐 PERF-S2）；回填 §8.1 `TEST-004`/`DOC-007` 与 §8.2/§8.3。实测 **M3/M5/M6 达标**（10 万行 p95=11.3ms；单租户日结 2.5ms；写争用 p99=24.9ms）。TEE/大规模列目标环境复测待办 |
 | 2026-10-08 | 开发（决策项一：T9 计费页面，方案 B/A） | 落地控制台**计费中心（只读）**：新增页面 `admin-ext/billing/index.tsx` + service `admin-ext-billing.ts`，注册菜单与 i18n（白名单文件）；导出**前端增量补丁** `higress-console-billing.patch`。验证：`tsc` 我的文件 0 错误、**完整构建通过**（`build/admin-ext/billing.html` + chunk）。**新发现**：fork 基线与重建链漂移（上游 v2.2.4=f8410432≠baseline 36aa9c6；2 个 backend 文件失配）→ 登记**独立待办**，详见《…-T9计费页面交付与fork集成说明.md》 |
 | 2026-10-08 | 开发（M0：fork 基线修复） | 修复控制台 fork **基线/重建链漂移**：① `baseline.txt` 重钉 **f8410432**（同步 `admin-portal.yml` + `verify-fork-rebuild.ps1` 的 `$baseRev`）；② 删除 2 条**过时** hunk（上游已自修 #761，`WasmPluginServiceTest` 改版本无关断言；`plugin-snapshot.lock.json` 上游已移除）+ 剔除 `frontend/yarn.lock`（本地 `npm ci` 副产物，非定制点）；③ 从 f8410432 重定基并重导 `higress-console-custom.patch`（35 文件/5051 行）。验证：纯净 f8410432 **原子应用通过**（此前失败）；`fork-patch-check.ps1 -BaseRev f8410432` **PASS**（白名单合规） |
+| 2026-10-08 | 开发（M1：T9 写页面 + 集成） | 计费中心增**写操作**：套餐 upsert / 订阅绑定 / 冻结解冻（service 写接口 + 页面 Modal/Form/Popconfirm + 双语 i18n）；写端点仅 `admin`（后端 `requireRole` 强制 + 落审计链 `plan_upsert`/`plan_bind`/`bill_freeze`/`bill_unfreeze`）。重导 `higress-console-billing.patch`（读+写 / 855 行）；`admin-portal.yml` 与 `verify-fork-rebuild.ps1` 接入**按序 apply 两补丁** + 断言计费页产物。验证：tsc 计费文件 **0 错误**；`npm run build` **成功**（billing.html + chunk）；增量补丁在主补丁基线上**原子应用 OK** |
 
 ---
 
@@ -617,6 +618,7 @@ S-2「独立鉴权域」未实现；配置项语义误导，运维按 R-27 配�
 | P0-3-TEST-004 | P2 | 缺**持久化层**基准与 M3/M5/M6 实测（§8.4/§10.5） | `billing/bench_persist_test.go`、`billing/perf_acceptance_test.go`（`perf` 标签） | `TestPerfAcceptance` 全绿（见 §8.2） |
 | P0-3-DOC-007 | P2 | 无 P0-3 性能基准报告 | 《PERF-BILLING-性能基准报告.md》 | 已出品（对齐 PERF-S2 格式） |
 | P0-3-FEAT-T9 | P1 | T9 管理后台计费页面未实现 | 控制台 fork 增量补丁（页面/service/菜单/i18n） | 本机**完整构建通过**（`billing.html` + chunk）；详见交付说明 |
+| P0-3-FEAT-T9-M1 | P1 | T9 写页面（套餐/绑定/冻结）缺失 | 计费中心写操作 + service 写接口 + 双语 i18n；两补丁接入 `admin-portal.yml`/`verify-fork-rebuild.ps1` | 计费文件 tsc **0 错误**；**完整构建通过**；增量补丁原子应用 OK |
 
 ### 8.2 性能基准实测（内存 vs 持久化；详见《PERF-BILLING-性能基准报告.md》）
 
@@ -637,7 +639,7 @@ S-2「独立鉴权域」未实现；配置项语义误导，运维按 R-27 配�
 
 | 项 | 现状 | 处置 |
 |---|---|---|
-| **T9 管理后台页面** | **最小可用只读版已交付**：计费中心 `/admin-ext/billing`（账单中心 + 套餐与订阅，只读），经**前端增量补丁** `fork-patches/higress-console/higress-console-billing.patch` 交付，本机**完整构建通过**（`build/admin-ext/billing.html` + chunk 产出）。仍存：写页面（套餐/绑定/冻结）、`billing_reader` 放行、页面契约测试 | 写页面/RBAC/契约测试为后续；fork **基线与重建链漂移已由 M0 修复**（baseline→f8410432、删除 2 过时 hunk，纯净原子应用 + 白名单守卫 PASS）——详见《…-T9计费页面交付与fork集成说明.md》§5 |
+| **T9 管理后台页面** | **只读 + 写操作已交付（M0/M1）**：计费中心 `/admin-ext/billing`（账单中心 / 套餐订阅 / 冻结管理）；写操作（套餐 upsert、订阅绑定、冻结解冻）经后端 `admin` 强制 + 落审计链。经**前端增量补丁** `higress-console-billing.patch` 交付（读+写/855 行），本机**完整构建通过**。仍存：`billing_reader` 放行、页面契约测试 | `billing_reader`（M2）与页面契约测试（M3）为后续；fork 基线/重建链漂移已由 M0 修复——详见《…-T9计费页面交付与fork集成说明.md》 |
 | §10.6 S-7 跨版本（旧 tee-infer 不识别 `month`） | 无 CI 版本校验；本轮补**优雅降级**用例 | 版本一致性仍建议由部署/CI 版本锁保障（§8.4 R-α） |
 | REC-6 审计链断裂 | 无专用指标/告警（仅日志） | 保留为已知边界；如需告警可后续单批补指标 + §9.3 规则 |
 | E2E-2 OverQuota 计价差异 | E2E 仅“基础版”，计价差异由单测/集成覆盖 | 已知边界（详设 §10.3 已声明） |

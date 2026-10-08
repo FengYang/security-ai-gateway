@@ -45,6 +45,7 @@ function Step([string]$msg) {
 # ---- 固定输入（相对本脚本定位，勿写死绝对路径）-----------------------------
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $patchFile = Join-Path $repo 'fork-patches\higress-console\higress-console-custom.patch'
+$billingPatchFile = Join-Path $repo 'fork-patches\higress-console\higress-console-billing.patch'
 $forkRoot = Join-Path $repo 'vendor\higress-console'
 $nodeDir = Join-Path $forkRoot 'frontend\node'
 $jdkHome = Join-Path $repo '.tools\jdk-17.0.20.1+1'
@@ -55,7 +56,7 @@ $mvnSkips = @('-Dskip.npm=true', '-Dskip.npx=true', '-Dpmd.skip=true',
     '-Dcheckstyle.skip=true', '-Dlombok.delombok.skip=true')
 
 Step '0. 前置检查'
-foreach ($p in @($patchFile, $forkRoot, $jdkHome)) {
+foreach ($p in @($patchFile, $billingPatchFile, $forkRoot, $jdkHome)) {
     if (-not (Test-Path $p)) { Fail "缺少前置资源: $p" }
 }
 if (-not (Test-Path (Join-Path $nodeDir 'npm.cmd'))) {
@@ -83,6 +84,8 @@ Write-Output "HEAD = $head （与 baseline $baseRev 一致）"
 Step '2. 应用定制补丁'
 git -C $cloneDir apply --verbose $patchFile
 if ($LASTEXITCODE -ne 0) { Fail "补丁应用失败（补丁已随上游漂移，需重导）: $patchFile" }
+git -C $cloneDir apply --verbose $billingPatchFile
+if ($LASTEXITCODE -ne 0) { Fail "计费增量补丁应用失败: $billingPatchFile" }
 Write-Output '--- 补丁落地清单 ---'
 git -C $cloneDir status --short | ForEach-Object { Write-Output $_ }
 
@@ -126,11 +129,11 @@ try {
 # ---- 5. 断言定制已编入产物 -------------------------------------------------
 Step '5. 断言定制已编入产物'
 $out = Join-Path $cloneDir 'frontend\build'
-foreach ($f in @('index.html', 'security-center.html')) {
+foreach ($f in @('index.html', 'security-center.html', 'admin-ext/billing.html')) {
     if (-not (Test-Path (Join-Path $out $f))) { Fail "构建产物缺少 $f（$out）" }
     Write-Output "OK  $f"
 }
-$chunkPatterns = @('p_security-center-index-*.js', 'p_admin-ext-models-*.js')
+$chunkPatterns = @('p_security-center-index-*.js', 'p_admin-ext-models-*.js', 'p_admin-ext-billing-index-*.js')
 # p_admin-ext-models 专项：@ice/plugin-store 会把 **/models/** 当作 store 忽略模式传给路由扫描，
 # 页面目录若命名为 models 会被静默排除（无 chunk、菜单点进去空白），故固化此断言防复发。
 foreach ($pattern in $chunkPatterns) {
