@@ -80,10 +80,9 @@ data:
                       retry_policy:
                         num_retries: {{ $retry.numRetries }}
                         retry_on: "{{ $retry.retryOn }}"
-                        retry_budget:
-                          budget_percent:
-                            value: {{ $retry.budgetPercent }}.0
-                          min_retry_concurrency: 1
+                        # 实测修正（2026-10-08，Envoy 1.27.7）：RetryPolicy **无** retry_budget
+                        # 字段（配置校验拒绝）；重试预算归 Cluster 的
+                        # CircuitBreakers.Thresholds.retry_budget，见下方 tee-infer 簇。
                       {{- end }}
               http_filters:
               - name: envoy.filters.http.buffer
@@ -125,6 +124,18 @@ data:
       clusters:
       - name: tee-infer
         connect_timeout: 30s
+        {{- $retryBudget := .Values.envoy.streamRetry }}
+        {{- if and $retryBudget.enabled (gt $retryBudget.numRetries 0) }}
+        # P2-1 重试预算（实测修正 2026-10-08，Envoy 1.27.7）：retry_budget 属
+        # CircuitBreakers.Thresholds（此前误置于 route.retry_policy，会致配置校验失败）。
+        circuit_breakers:
+          thresholds:
+          - priority: DEFAULT
+            retry_budget:
+              budget_percent:
+                value: {{ $retryBudget.budgetPercent }}.0
+              min_retry_concurrency: 1
+        {{- end }}
         # P2f：Envoy 承担主动健康检查（方案 §6.3.10，裁决 A：插件侧仅被动 EWMA，
         # 主动探测由 Envoy 完成；插件 routeengine.HealthChecker 保留纯逻辑库＋单测，不接线调度）。
         # 探测路径必须用 /healthz/live（纯进程存活，恒 200）；**切勿改为 /healthz**——它带

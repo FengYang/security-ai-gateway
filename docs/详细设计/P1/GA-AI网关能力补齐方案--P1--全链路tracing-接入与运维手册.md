@@ -134,7 +134,7 @@ POST /v1/adminext/slo
 | 6 | Envoy OTel 默认 tags 清单 | 确认无敏感 fields（`http.url` 不带 query） |
 | 7 | Collector 租户 allow-list 热更 | `POST /tracing/tenant` 与 Collector 侧同步的自动化 wiring（allow-list 现为单一事实源 `values: &tenant_allowlist`） |
 | 8 | 性能基线实测 | §5 方法在实机负载下执行并留证 |
-| 9 | **Envoy 配置预存缺陷（非 tracing）** | 用 1.27.7 校验 `deploy/k8s/envoy-gateway.yaml` 时发现**非 tracing** 的预存错误：`RBAC` 过滤器无 `stat_prefix` 字段（应为 `rules_stat_prefix`）；`RetryPolicy` 无 `retry_budget` 字段。二者会阻止网关以 1.27.7 启动，**建议单独立项修复**（超出 P1-2 tracing 范围，未在本批次改动） |
+| 9 | ~~Envoy 配置预存缺陷（非 tracing）~~ | **已修复并实测校验通过**：RBAC 过滤器移除已废弃的 `stat_prefix`（1.27 仅存 `shadow_rules_stat_prefix`）；`retry_budget` 由 `route.retry_policy` 迁至 `Cluster.CircuitBreakers.Thresholds`。k8s 与 Helm（渲染后）均 `envoy --mode validate` **OK**（去 wasm 过滤器；Wasm VM 在 validate 模式不可运行属已知限制） |
 
 > **备注（2026-10-08 本地 Docker 端到端验证，已闭环部分）**：
 > - **镜像可用**：`grafana/tempo:2.5.0`、`otel/opentelemetry-collector-contrib:0.112.0` 均可拉取；
