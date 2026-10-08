@@ -648,8 +648,14 @@ var pendingVectorsPlain bool
 var requestWantsSSE bool
 
 // handleTextRequest 文本请求主入口：quote 优先，token 兼容，遇证伪/解密失败一律 fail-closed。
+// P1-2 FD-1：request_id 取值优先级（统一型方案）：
+//
+//	① 请求头 X-Request-Id（Envoy 生成或客户端传入，优先沿用不覆盖）
+//	② newRequestID() 自生成 UUID v4（仅当请求头缺失时回退）
+//
+// 保证响应头 ID = 审计 ID = 面板查询键三者一致。
 func handleTextRequest(ctx wrapper.HttpContext, config PluginConfig, req *textRequest, log logs.Log) types.Action {
-	requestID := newRequestID()
+	requestID := getOrGenRequestID()
 	pendingRequestID = requestID
 	pendingVectorsPlain = false
 
@@ -1301,7 +1307,19 @@ func toProtocolVectors(vecs [][]uint64) []protocol.CipherVector {
 	return out
 }
 
-// newRequestID 生成请求 ID（MVP：纳秒时间戳 hex；生产由网关统一分配）。
+// getOrGenRequestID 按 FD-1 统一型方案取值：
+// ① 优先取 Envoy X-Request-Id 请求头（与数据面/面板查询键一致）；
+// ② 缺失时回退到自生成 ID（纳秒时间戳 hex，8 字节 = 16 hex）。
+func getOrGenRequestID() string {
+	if id, err := proxywasm.GetHttpRequestHeader(hdrRequestID); err == nil && id != "" {
+		return id
+	}
+	return newRequestID()
+}
+
+// newRequestID 生成请求 ID（纳秒时间戳 hex，8 字节 = 16 hex；
+// 与 Envoy X-Request-Id 格式兼容——16 hex UUID 风格）。
+// 仅当 X-Request-Id 请求头缺失时作为回退使用（FD-1）。
 func newRequestID() string {
 	ts := time.Now().UnixNano()
 	return hex.EncodeToString([]byte{

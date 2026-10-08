@@ -31,6 +31,39 @@ data:
               scheme_header_transformation:
                 scheme_to_overwrite: https
               stat_prefix: ingress_http
+              # P1-2：全链路 tracing（D-1，Envoy 原生 OTel tracer）。
+              # 默认关闭（tracing_enabled: "false"），由部署环境变量或
+              # ConfigMap 覆盖开启；关闭时 HCM tracing 块仍存在但生成的
+              # span 为 zero overhead 空实现（Envoy NoOp tracer）不影响性能。
+              # 根采样 100% 保证全量入 Collector，实际采样由 Collector
+              # tail_sampling 执行（D-3，§3.4）。
+              tracing:
+                provider:
+                  name: envoy.tracers.opentelemetry
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                    grpc_service:
+                      envoy_grpc:
+                        cluster_name: otel-collector
+                    service_name: envoy-gateway
+                random_sampling:
+                  value: 100
+                overall_sampling:
+                  value: 100
+                client_sampling:
+                  value: 100
+                # 自定义 tags：request.id 来自 Envoy request_id（与审计关联），
+                # tenant.id 来自 Wasm SetProperty 的动态 metadata（供 Collector
+                # 租户 allow-list 匹配用，D-8）。
+                custom_tags:
+                  request.id:
+                    request_id: {}
+                  tenant.id:
+                    metadata:
+                      kind:
+                        request: {}
+                      metadata_key:
+                        key: tenant_id
               route_config:
                 name: local_route
                 virtual_hosts:
@@ -233,6 +266,24 @@ data:
                   socket_address:
                     address: 127.0.0.1
                     port_value: 19097
+      # P1-2：OTel Collector 集群（tracer 出口，D-1）。
+      # 单实例部署时直连 otel-collector:4317；HA 两层拓扑时指
+      # 向转发层（loadbalancingexporter），采样层对调用方透明。
+      - name: otel-collector
+        connect_timeout: 5s
+        type: LOGICAL_DNS
+        dns_lookup_family: V4_ONLY
+        lb_policy: ROUND_ROBIN
+        http2_protocol_options: {}
+        load_assignment:
+          cluster_name: otel-collector
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: otel-collector
+                    port_value: 4317
 ---
 # cryptopsvc 静态测试密钥（与插件 KeyRef 命名一致）。
 # ⚠️ 下列为开发演示值（intl 32B hex）；生产由部署流水线替换为 K8s Secret 注入。

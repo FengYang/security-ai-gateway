@@ -96,3 +96,13 @@ pdb:
 
 # Prometheus 抓取注解（应用 /metrics）
 metricsAnnotations: true
+
+# P1-2：全链路 tracing（D-1/D-3/D-8）
+# 默认关闭（C-4 安全默认；关闭=现网零变化）。
+# 开启后 Envoy 原生 OTel tracer 生效，span 100% 入 Collector，
+# 实际采样由 Collector tail_sampling 执行（L1=1% / L2=错误全采 / L3=动态）。
+tracing:
+  enabled: false
+  # Collector 地址（单实例：otel-collector:4317；HA：转发层 loadbalancingexporter）
+  collectorHost: otel-collector
+  collectorPort: 4317

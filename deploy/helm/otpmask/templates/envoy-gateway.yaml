@@ -31,6 +31,36 @@ data:
               scheme_header_transformation:
                 scheme_to_overwrite: https
               stat_prefix: ingress_http
+              # P1-2：全链路 tracing（D-1，Envoy 原生 OTel tracer）。
+              # 由 .Values.tracing.enabled 控制（默认 false，关闭=现网零变化，C-4）。
+              # 根采样 100% 保证全量入 Collector，实际采样由 Collector
+              # tail_sampling 执行（D-3，§3.4）。
+              {{- if .Values.tracing.enabled }}
+              tracing:
+                provider:
+                  name: envoy.tracers.opentelemetry
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                    grpc_service:
+                      envoy_grpc:
+                        cluster_name: otel-collector
+                    service_name: envoy-gateway
+                random_sampling:
+                  value: 100
+                overall_sampling:
+                  value: 100
+                client_sampling:
+                  value: 100
+                custom_tags:
+                  request.id:
+                    request_id: {}
+                  tenant.id:
+                    metadata:
+                      kind:
+                        request: {}
+                      metadata_key:
+                        key: tenant_id
+              {{- end }}
               route_config:
                 name: local_route
                 virtual_hosts:
@@ -180,6 +210,24 @@ data:
                   socket_address:
                     address: 127.0.0.1
                     port_value: {{ .Values.cryptop.port }}
+      {{- end }}
+      {{- if .Values.tracing.enabled }}
+      # P1-2：OTel Collector 集群（tracer 出口，D-1）。
+      - name: otel-collector
+        connect_timeout: 5s
+        type: LOGICAL_DNS
+        dns_lookup_family: V4_ONLY
+        lb_policy: ROUND_ROBIN
+        http2_protocol_options: {}
+        load_assignment:
+          cluster_name: otel-collector
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: {{ .Values.tracing.collectorHost }}
+                    port_value: {{ .Values.tracing.collectorPort }}
       {{- end }}
 ---
 apiVersion: apps/v1
