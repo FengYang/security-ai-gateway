@@ -27,6 +27,20 @@ type ChatMessage struct {
 	Content string `json:"content"`
 }
 
+// upstreamHTTPTransport 上游模型出站 HTTP 传输。
+// 默认 http.DefaultTransport（行为与现网逐字节一致）；tee-infer 在 tracing
+// 初始化后经 SetUpstreamTransport 注入剥离追踪头的传输（§6.4 安全约束：
+// traceparent/tracestate/x-request-id 不外泄至上游模型厂商）。
+var upstreamHTTPTransport http.RoundTripper = http.DefaultTransport
+
+// SetUpstreamTransport 设置上游模型出站传输（tee-infer 启动期调用一次；
+// nil 时忽略，退回默认传输）。
+func SetUpstreamTransport(t http.RoundTripper) {
+	if t != nil {
+		upstreamHTTPTransport = t
+	}
+}
+
 // GenerateRequest text 载荷生成请求（明文域）。
 type GenerateRequest struct {
 	Model     string        // 模型名（vLLM served-model-name / C-MaaS 模型 code）
@@ -86,7 +100,8 @@ func NewRemoteEngine(baseURL string) *RemoteEngine {
 	return &RemoteEngine{
 		baseURL: baseURL,
 		// 流式整体超时：单请求完整生成窗口（含逐块读，非空闲超时）
-		client: &http.Client{Timeout: 120 * time.Second},
+		// Transport：剥离追踪头的上游传输（§6.4；默认 http.DefaultTransport）。
+		client: &http.Client{Timeout: 120 * time.Second, Transport: upstreamHTTPTransport},
 	}
 }
 

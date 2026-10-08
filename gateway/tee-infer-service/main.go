@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -30,6 +31,8 @@ import (
 	"security-ai-gateway/internal/memzero"
 	"security-ai-gateway/protocol/go"
 	"security-ai-gateway/protocol/go/cryptoops"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // maskModulus 掩码模 R（与 otpmask-plugin 对齐 2^32）。
@@ -119,8 +122,8 @@ type keyIssueResponse struct {
 }
 
 type teeServer struct {
-	km            *teecore.KeyManager            // 默认租户（向后兼容）
-	tkm           *teecore.TenantKeyManager      // 二级租户 KEK + 三级会话管理器（P0-4 §6）
+	km            *teecore.KeyManager       // 默认租户（向后兼容）
+	tkm           *teecore.TenantKeyManager // 二级租户 KEK + 三级会话管理器（P0-4 §6）
 	kSig          []byte
 	attest        string             // 远程证明共享令牌（MVP）
 	enclave       Enclave            // 飞地抽象
@@ -150,9 +153,9 @@ type teeServer struct {
 	shadowWindowUsage map[string]int64
 	shadowWindowKey   map[string]string
 	// A 项（判据 4 扩展）：数据面明文路由影子的**窗口级汇总上报**幂等状态（nil = 不判重）。
-	shadowReports   *shadowReportState
-	audit           *auditChain     // 审计哈希链
-	guard           *guardrail      // 内容安全检测（M9-4）
+	shadowReports *shadowReportState
+	audit         *auditChain // 审计哈希链
+	guard         *guardrail  // 内容安全检测（M9-4）
 	// 输入侧语义分类器侧车探活（2026-09-26；nil = 未配置侧车，此时用进程内关键词分类器，
 	// 不存在"不可用"问题）；不健康 → readiness 503。
 	guardProbe *guardClassifierProbe
@@ -201,21 +204,21 @@ type teeServer struct {
 	contentLabelOverride atomic.Value
 	// B1：运行时配置持久化文件（-content-label-config；空 = 不持久化，重启回退启动参数）。
 	contentLabelCfgPath string
-	metrics         *otpmaskMetrics // Prometheus 指标
-	seen            map[string]bool
-	seenAt          map[string]int64       // request_id -> 首见时间戳（TTL 清理用）
-	sessions        map[string]*teeSession // 挑战-响应会话（session_id -> 会话）
-	recomputeStates *recomputeStates       // 补算层序状态机（会话级）
-	weightProvider  LayerWeightProvider    // 层权重提供器（掩码像计算）
-	route           *RouteConfig           // 双路线路由配置
-	tokenizer       Tokenizer              // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
-	cache           model.SemanticCache      // GF.4.1 精确缓存（P0-2：legacy 兜底；仅原生引擎未生效时使用）
-	cacheRT         atomic.Pointer[cacheState] // P0-2 B2 + §6.10：缓存运行时快照（原子切换，请求内一致）
-	warmer          cacheengine.CacheWarmer  // E4-B：预热器（§6.7；nil = 未装配）
-	billing         *billingWebhook        // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
-	meterToken      string                 // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
-	reconciler      *reconciler            // S5 判据 6：审计-计量对账器（/reconcile 快照数据源）
-	mu              sync.Mutex
+	metrics             *otpmaskMetrics // Prometheus 指标
+	seen                map[string]bool
+	seenAt              map[string]int64           // request_id -> 首见时间戳（TTL 清理用）
+	sessions            map[string]*teeSession     // 挑战-响应会话（session_id -> 会话）
+	recomputeStates     *recomputeStates           // 补算层序状态机（会话级）
+	weightProvider      LayerWeightProvider        // 层权重提供器（掩码像计算）
+	route               *RouteConfig               // 双路线路由配置
+	tokenizer           Tokenizer                  // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
+	cache               model.SemanticCache        // GF.4.1 精确缓存（P0-2：legacy 兜底；仅原生引擎未生效时使用）
+	cacheRT             atomic.Pointer[cacheState] // P0-2 B2 + §6.10：缓存运行时快照（原子切换，请求内一致）
+	warmer              cacheengine.CacheWarmer    // E4-B：预热器（§6.7；nil = 未装配）
+	billing             *billingWebhook            // GA-计费 P1-1：Webhook 推送（nil = 关闭，拉取为主）
+	meterToken          string                     // GA-计费 P1-2：独立只读计量令牌（/usage GET；与 admin-token 分离）
+	reconciler          *reconciler                // S5 判据 6：审计-计量对账器（/reconcile 快照数据源）
+	mu                  sync.Mutex
 }
 
 // usageRecord 租户用量计量（token 级）。
@@ -545,7 +548,7 @@ func (s *teeServer) shadowObserve(tenant, requestID string, tokensIn int, engine
 	s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: requestID, Action: "shadow",
 		TokensIn: tokensIn, Result: "would_reject", PayloadSHA: payloadSHA,
-		HashAlg: hashAlgTag(), // §5.2.2：与 PayloadSHA 同档自述
+		HashAlg:    hashAlgTag(), // §5.2.2：与 PayloadSHA 同档自述
 		EngineType: engineType, Model: model,
 		ShadowRule: strings.Join(hits, ","),
 	})
@@ -985,7 +988,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant := tenantOf(r)
 	isRetry := retryAttemptFromHeader(r) > 0 // GA-计费 P0-3：重试归因（来自数据面下行头）
-	payloadSHA := payloadHashHex(body) // 审计记录原始 wire 哈希（随 profile：intl=SHA-256 / sm=SM3，§5.2.2）
+	payloadSHA := payloadHashHex(body)       // 审计记录原始 wire 哈希（随 profile：intl=SHA-256 / sm=SM3，§5.2.2）
 	// P1c 解密入口：有效会话（quote 模式）下请求须为 c2s 信封（fail-closed，防降级攻击）
 	sess := s.sessionByID(r)
 	if sess != nil {
@@ -1046,10 +1049,20 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		s.metrics.incAttestTokenTraffic(tenant)
 	}
 
+	// P1-2：全链路 tracing —— 在通过解码/验签/防重放后创建主 span。
+	// 未启用 tracing 时返回 NoOp span，零开销（C-4/C-8）。
+	// 选择在此处创建而非函数开头：此时 req 已解析，有 request_id / model / engine_type。
+	inferCtx, inferSpan := startInferSpan(r, tenant, req.RequestID, req.Model, req.EngineType)
+	defer func() {
+		// 兜底：若正常路径已显式 end 过，span.End() 幂等不重复
+		//（OTel SDK 对重复 End 是安全的，仅第一次有效）
+		inferSpan.End()
+	}()
+
 	// P2/P5（D1）：text 载荷路径——南向统一 text（tee_gpu 流式 / cmaas SDK 通道），
 	// 与 vectors 路径（路线 2 保留）在此分流。
 	if len(req.TextPayload) > 0 {
-		s.handleTextInfer(w, sess, tenant, req, payloadSHA, isRetry)
+		s.handleTextInfer(w, sess, tenant, req, payloadSHA, isRetry, inferCtx, inferSpan)
 		return
 	}
 
@@ -1066,12 +1079,14 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	if len(req.CipherText) > 0 {
 		text, err := unmaskText(seed, req.CipherText)
 		if err != nil {
-			s.denyAndAudit(tenant, req.RequestID, "guardrail_decrypt_error", payloadSHA)
+			s.denyAndAuditCtx(inferCtx, tenant, req.RequestID, "guardrail_decrypt_error", payloadSHA)
+			endSpanError(inferSpan, "guardrail_decrypt_error")
 			http.Error(w, "guardrail 文本解密失败", http.StatusBadRequest)
 			return
 		}
 		if hit := s.guard.check(text); hit != nil {
-			s.denyAndAudit(tenant, req.RequestID, "guardrail_"+hit.Category, payloadSHA)
+			s.denyAndAuditCtx(inferCtx, tenant, req.RequestID, "guardrail_"+hit.Category, payloadSHA)
+			endSpanDenied(inferSpan, "guardrail_"+hit.Category)
 			log.Printf("[tee] guardrail 拦截 tenant=%s req=%s category=%s match=%s",
 				tenant, req.RequestID, hit.Category, maskForLog(hit.Match))
 			http.Error(w, fmt.Sprintf("内容安全拦截（%s）", hit.Category), http.StatusForbidden)
@@ -1082,7 +1097,8 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	// P1：配额预占（输入 token 数，超限 429 fail-closed；原子占位防并发超卖）
 	if ok, denied := s.reserveQuota(tenant, int64(len(req.CipherVectors))); !ok {
 		s.metrics.incQuotaDeny(tenant, denied)
-		s.denyAndAudit(tenant, req.RequestID, "quota_exceeded", payloadSHA)
+		s.denyAndAuditCtx(inferCtx, tenant, req.RequestID, "quota_exceeded", payloadSHA)
+		endSpanDenied(inferSpan, "quota_exceeded")
 		log.Printf("[tee] 配额超限拒绝 tenant=%s req=%s tokens_in=%d window=%q（空=累计维度）",
 			tenant, req.RequestID, len(req.CipherVectors), denied)
 		http.Error(w, "租户 token 配额超限（429）", http.StatusTooManyRequests)
@@ -1098,7 +1114,8 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			// GA-计费 P0-3：预占后失败且无输出交付 → 回滚输入计量
 			s.rollbackQuota(tenant, int64(len(req.CipherVectors)))
-			s.denyAndAudit(tenant, req.RequestID, "decrypt_error", payloadSHA)
+			s.denyAndAuditCtx(inferCtx, tenant, req.RequestID, "decrypt_error", payloadSHA)
+			endSpanError(inferSpan, "decrypt_error")
 			http.Error(w, fmt.Sprintf("解密失败: %v", err), http.StatusBadRequest)
 			return
 		}
@@ -1106,7 +1123,8 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		if tokenID < 0 {
 			// GA-计费 P0-3：引擎不可用（fail-closed 故障不计费）
 			s.rollbackQuota(tenant, int64(len(req.CipherVectors)))
-			s.denyAndAudit(tenant, req.RequestID, "engine_unavailable", payloadSHA)
+			s.denyAndAuditCtx(inferCtx, tenant, req.RequestID, "engine_unavailable", payloadSHA)
+			endSpanError(inferSpan, "engine_unavailable")
 			http.Error(w, "推理引擎不可用（fail-closed）", http.StatusServiceUnavailable)
 			return
 		}
@@ -1119,7 +1137,8 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	cipherOut, err := maskVector(seed, maskModulus, tokens)
 	if err != nil {
 		s.rollbackQuota(tenant, int64(len(req.CipherVectors))) // GA-计费 P0-3：无输出交付
-		s.denyAndAudit(tenant, req.RequestID, "encrypt_error", payloadSHA)
+		s.denyAndAuditCtx(inferCtx, tenant, req.RequestID, "encrypt_error", payloadSHA)
+		endSpanError(inferSpan, "encrypt_error")
 		http.Error(w, fmt.Sprintf("加密失败: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -1134,7 +1153,8 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	cryptoops.SignResponse(s.sessionK_sig(r), resp)
 	enc, err := protocol.EncodeResponse(resp)
 	if err != nil {
-		s.denyAndAudit(tenant, req.RequestID, "encode_error", payloadSHA)
+		s.denyAndAuditCtx(inferCtx, tenant, req.RequestID, "encode_error", payloadSHA)
+		endSpanError(inferSpan, "encode_error")
 		http.Error(w, fmt.Sprintf("编码响应失败: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -1151,9 +1171,11 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		Result: "ok", PayloadSHA: payloadSHA, HashAlg: hashAlgTag(),
 		EngineType: vecEng, // GA-计费 P0-1
 		Model:      req.Model,
-		IsRetry:    isRetry, // GA-计费 P0-3：重试归因（A-23/A-29）
+		IsRetry:    isRetry,                      // GA-计费 P0-3：重试归因（A-23/A-29）
+		TraceID:    traceIDFromContext(inferCtx), // P1-2：trace_id 证据字段
 	})
 	go s.billing.notify(vecEv) // GA-计费 P1-1：Webhook（nil = no-op）
+	endSpanOK(inferSpan)       // P1-2：主 span 正常结束
 	// M10：指标
 	s.metrics.incRequest(tenant, "ok")
 	s.metrics.addTokens(tenant, int64(len(req.CipherVectors)), int64(len(tokens)))
@@ -1211,13 +1233,13 @@ type chunkLabelMeta struct {
 //
 // 红线（§4.6.1）：guard 不得包含命中词、原文片段、正则源码；category 只允许内部类目 ID。
 type chunkGuardMeta struct {
-	Detected     bool   `json:"detected"`               // 本请求至少一次命中（含 shadow 命中）
-	Filtered     bool   `json:"filtered"`               // 实际拦截/遮蔽（enforcing 下的 block/mask）
-	Action       string `json:"action,omitempty"`       // block | mask | flag（与 §4.4 动作四态对齐）
-	Category     string `json:"category,omitempty"`     // 命中时必填：内部类目 ID（A1-06 等）
-	PolicyVersion string `json:"policy_version"`        // 聚合策略版本（manifest.policy_version）
-	RuleVersion  string `json:"rule_version,omitempty"` // 命中时必填：命中条目所在词库版本
-	Mode         string `json:"mode"`                   // shadow | enforcing
+	Detected      bool   `json:"detected"`               // 本请求至少一次命中（含 shadow 命中）
+	Filtered      bool   `json:"filtered"`               // 实际拦截/遮蔽（enforcing 下的 block/mask）
+	Action        string `json:"action,omitempty"`       // block | mask | flag（与 §4.4 动作四态对齐）
+	Category      string `json:"category,omitempty"`     // 命中时必填：内部类目 ID（A1-06 等）
+	PolicyVersion string `json:"policy_version"`         // 聚合策略版本（manifest.policy_version）
+	RuleVersion   string `json:"rule_version,omitempty"` // 命中时必填：命中条目所在词库版本
+	Mode          string `json:"mode"`                   // shadow | enforcing
 }
 
 // engineFor 按引擎类型返回推理引擎（text 路径）。
@@ -1296,16 +1318,19 @@ func (r replayEngine) Generate(_ model.GenerateRequest, onDelta func(string) err
 // SSE 逐块 s2c 信封（Stream=true）或单信封聚合响应（Stream=false）。
 // fail-closed：text 载荷仅限证明会话信封通道（token 模式无信封，拒绝）。
 func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
-	tenant string, req *protocol.InferenceRequest, payloadSHA string, isRetry bool) {
+	tenant string, req *protocol.InferenceRequest, payloadSHA string, isRetry bool,
+	ctx context.Context, inferSpan trace.Span) {
 	reqStart := time.Now() // P0-2 §9.1 #20：TTFT 基准（请求进入时刻）
 	if sess == nil {
-		s.denyAndAudit(tenant, req.RequestID, "text_without_session", payloadSHA)
+		s.denyAndAuditCtx(ctx, tenant, req.RequestID, "text_without_session", payloadSHA)
+		endSpanDenied(inferSpan, "text_without_session")
 		http.Error(w, "text 载荷须在证明会话信封内（fail-closed）", http.StatusBadRequest)
 		return
 	}
 	var msgs []model.ChatMessage
 	if err := json.Unmarshal(req.TextPayload, &msgs); err != nil || len(msgs) == 0 {
-		s.denyAndAudit(tenant, req.RequestID, "text_payload_invalid", payloadSHA)
+		s.denyAndAuditCtx(ctx, tenant, req.RequestID, "text_payload_invalid", payloadSHA)
+		endSpanDenied(inferSpan, "text_payload_invalid")
 		http.Error(w, "text 载荷无效（须为非空 messages JSON）", http.StatusBadRequest)
 		return
 	}
@@ -1313,6 +1338,11 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	// P2a：pii-mode=mask 时 PII 脱敏替换后放行（数据保护类）；SQL 注入/提示注入
 	// 在任何模式下均拦截（攻击类，fail-closed）。
 	inputText := strings.Builder{}
+
+	// P1-2：guardrail.check 子 span（§7.4 span 清单）
+	_, gspan := startGuardrailSpan(ctx, "input", s.currentPiiMode())
+
+	var guardrailHit *guardrailHit
 	for i := range msgs {
 		if hit := s.guard.check(msgs[i].Content); hit != nil {
 			if hit.Category == "pii" && s.currentPiiMode() == "mask" {
@@ -1324,14 +1354,23 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 					continue
 				}
 			}
-			s.denyAndAudit(tenant, req.RequestID, "guardrail_"+hit.Category, payloadSHA)
-			log.Printf("[tee] guardrail 拦截（text）tenant=%s req=%s category=%s",
-				tenant, req.RequestID, hit.Category)
-			http.Error(w, fmt.Sprintf("内容安全拦截（%s）", hit.Category), http.StatusForbidden)
-			return
+			guardrailHit = hit
+			break
 		}
 		inputText.WriteString(msgs[i].Content)
 	}
+	if guardrailHit != nil {
+		setGuardrailDenied(gspan, guardrailHit.Category)
+		gspan.End()
+		s.denyAndAuditCtx(ctx, tenant, req.RequestID, "guardrail_"+guardrailHit.Category, payloadSHA)
+		endSpanDenied(inferSpan, "guardrail_"+guardrailHit.Category)
+		log.Printf("[tee] guardrail 拦截（text）tenant=%s req=%s category=%s",
+			tenant, req.RequestID, guardrailHit.Category)
+		http.Error(w, fmt.Sprintf("内容安全拦截（%s）", guardrailHit.Category), http.StatusForbidden)
+		return
+	}
+	gspan.End() // guardrail 通过
+
 	// P2a：提示词装饰——非空 system-prompt 时在 messages 头部插入 system 消息。
 	// 系统提示词为平台信任内容，不过 Guardrail；装饰结果计入 transformed_hash。
 	if s.systemPrompt != "" {
@@ -1351,7 +1390,8 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	// 见 GA-AI网关能力补齐方案 D-3）
 	if ok, denied := s.reserveQuota(tenant, int64(s.countTokens(inputText.String()))); !ok {
 		s.metrics.incQuotaDeny(tenant, denied)
-		s.denyAndAudit(tenant, req.RequestID, "quota_exceeded", payloadSHA)
+		s.denyAndAuditCtx(ctx, tenant, req.RequestID, "quota_exceeded", payloadSHA)
+		endSpanDenied(inferSpan, "quota_exceeded")
 		log.Printf("[tee] 配额超限拒绝（text）tenant=%s req=%s window=%q（空=累计维度）",
 			tenant, req.RequestID, denied)
 		http.Error(w, "租户 token 配额超限（429）", http.StatusTooManyRequests)
@@ -1376,7 +1416,8 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		// GA-计费 P0-3：预占后引擎不可用（无任何输出交付）→ 输入计量回滚，
 		// fail-closed 故障不向租户计费。
 		s.rollbackQuota(tenant, int64(s.countTokens(inputText.String())))
-		s.denyAndAudit(tenant, req.RequestID, "engine_unavailable", payloadSHA)
+		s.denyAndAuditCtx(ctx, tenant, req.RequestID, "engine_unavailable", payloadSHA)
+		endSpanError(inferSpan, "engine_unavailable")
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
@@ -1403,6 +1444,10 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	if st != nil {
 		cacheMode = st.mode // §9.1 #20：TTFT 标签（随快照传入流式出口，请求内一致）
 	}
+
+	// P1-2：cache.lookup 子 span（§7.4 span 清单）
+	_, cspan := startCacheSpan(ctx)
+
 	if st != nil && st.engine != nil && st.enabled {
 		lctx := buildCacheLookupContext(tenant, engType, req.Model, txHash,
 			inputText.String(), int(req.MaxNewTokens), req.Stream, s.policyVersion())
@@ -1433,6 +1478,13 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 			eng = replayEngine{text: cached}
 		}
 	}
+	// 记录缓存命中状态并结束 cache.lookup span
+	cacheHitMode := "off"
+	if st != nil && st.enabled {
+		cacheHitMode = st.mode
+	}
+	setCacheHit(cspan, cacheHit, cacheHitMode)
+	cspan.End()
 	// 未命中：包装真实引擎采集流式分片（§6.12 写入侧），供回填使用。
 	var capture *segmentCapturingEngine
 	if cacheStoreCtx != nil && !cacheHit {
@@ -1470,7 +1522,8 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		}
 	}
 	streamErr := s.streamTextInfer(w, sess, eng, genReq, &agg, tenant, req.RequestID, &out,
-		denialFinish, reqStart, cacheLabel, cacheMode)
+		denialFinish, reqStart, cacheLabel, cacheMode, ctx,
+		s.countTokens(inputText.String()), isRetry, inputDigest(payloadSHA))
 	if streamErr != nil {
 		if cacheReplayMode != "" && st != nil && st.engine != nil {
 			st.engine.RecordReplay(cacheReplayMode, "error") // §9.1 #22
@@ -1478,7 +1531,8 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		// X-3：输出侧整流拦截优先于引擎 error 判定——按实际下发回冲（block+genErr 同此）。
 		if out.Blocked {
 			s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
-				s.countTokens(inputText.String()), out, isRetry)
+				s.countTokens(inputText.String()), out, isRetry, traceIDFromContext(ctx))
+			endSpanDenied(inferSpan, "content_filter")
 			return
 		}
 		log.Printf("[tee] infer(text) 引擎失败 request=%s engine=%s err=%v", req.RequestID, engType, streamErr)
@@ -1498,14 +1552,17 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 				EngineType: engType, Model: req.Model,
 				TransformedHash: txHash,
 				MeteringMode:    s.meteringMode(),
-				IsRetry:         isRetry, // GA-计费 P0-3：重试归因
+				IsRetry:         isRetry,                 // GA-计费 P0-3：重试归因
+				TraceID:         traceIDFromContext(ctx), // P1-2：trace_id 证据字段
 			})
 			go s.billing.notify(ev) // GA-计费 P1-1：Webhook（nil = no-op；异步不阻塞主链）
 		} else {
 			s.rollbackQuota(tenant, int64(s.countTokens(inputText.String())))
-			s.denyAndAudit(tenant, req.RequestID, "engine_error", payloadSHA)
+			s.denyAndAuditCtx(ctx, tenant, req.RequestID, "engine_error", payloadSHA)
 		}
 		s.metrics.incDeny(tenant, "engine_error")
+		setInferTokens(inferSpan, s.countTokens(inputText.String()), tokensOut, out.TTFTms) // P1-2
+		endSpanError(inferSpan, "engine_error")
 		return
 	}
 	// X-3：正常收尾（genErr=nil）但输出侧在 Process/Finish 整流拦截 → 按实际下发回冲。
@@ -1514,7 +1571,8 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 			st.engine.RecordReplay(cacheReplayMode, "ok") // §9.1 #22（回放完成，内容随后被拦）
 		}
 		s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
-			s.countTokens(inputText.String()), out, isRetry)
+			s.countTokens(inputText.String()), out, isRetry, traceIDFromContext(ctx))
+		endSpanDenied(inferSpan, "content_filter")
 		return
 	}
 	// §9.1 #22：回放成功。
@@ -1531,9 +1589,11 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 			PayloadSHA: payloadSHA, HashAlg: hashAlgTag(),
 			EngineType: engType, Model: req.Model, TransformedHash: txHash,
 			CacheHit: true, MeteringMode: s.meteringMode(), IsRetry: isRetry,
+			TraceID: traceIDFromContext(ctx), // P1-2：trace_id 证据字段
 		})
 		go s.billing.notify(ev)
 		s.metrics.incRequest(tenant, "ok")
+		endSpanOK(inferSpan)
 		return
 	}
 	// 未命中回填缓存（命中路径不重复回填）。
@@ -1572,16 +1632,19 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		Result: "ok", PayloadSHA: payloadSHA, HashAlg: hashAlgTag(),
 		// P2a：双 hash 审计——PayloadSHA 为入站密文哈希，TransformedHash 为引擎实收内容哈希
 		TransformedHash: txHash,
-		EngineType:      engType,          // GA-计费 P0-1：模型/引擎维度（分价计费）
-		Model:           req.Model,        // GA-计费 P0-1
-		CacheHit:        cacheHit,         // GF.4.1：精确缓存命中标记
-		KeyFP:           keyFP,            // GF.4.2：服务商 key 指纹（多账号归属）
-		MeteringMode:    s.meteringMode(), // GF.2.4：计量口径标记（estimate=未校准）
-		IsRetry:         isRetry,          // GA-计费 P0-3：重试归因（A-23/A-29）
+		EngineType:      engType,                 // GA-计费 P0-1：模型/引擎维度（分价计费）
+		Model:           req.Model,               // GA-计费 P0-1
+		CacheHit:        cacheHit,                // GF.4.1：精确缓存命中标记
+		KeyFP:           keyFP,                   // GF.4.2：服务商 key 指纹（多账号归属）
+		MeteringMode:    s.meteringMode(),        // GF.2.4：计量口径标记（estimate=未校准）
+		IsRetry:         isRetry,                 // GA-计费 P0-3：重试归因（A-23/A-29）
+		TraceID:         traceIDFromContext(ctx), // P1-2：trace_id 证据字段
 	})
 	go s.billing.notify(ev) // GA-计费 P1-1：Webhook（nil = no-op；异步不阻塞主链）
 	s.metrics.incRequest(tenant, "ok")
 	s.metrics.addTokens(tenant, int64(s.countTokens(inputText.String())), int64(tokensOut))
+	setInferTokens(inferSpan, tokensIn, out.TokensOut, out.TTFTms) // P1-2：主 span token/TTFT
+	endSpanOK(inferSpan)                                           // P1-2：主 span 正常结束
 	// P5：C-MaaS 证明/透明度引用落审计链（含 Rekor 日志引用，SDK 开通后经
 	// RecordAttestation 记录；独立审计事件，不动既有哈希链事件结构）
 	if engType == protocol.EngineTypeCMAAS && s.cmaasEngine != nil {
@@ -1600,6 +1663,10 @@ type streamOutcome struct {
 	Blocked       bool   // 输出侧是否整流拦截（enforcing content_filter）
 	Category      string // 拦截类目（blockCat；空 = 降级终止，无类目）
 	EmittedTokens int    // 实际下发（客户端实付）token；不含被拦内容与标识帧
+	// P1-2：供上层写入 tee.infer 主 span 的推理元数据（§6.2 白名单内）。
+	TokensOut    int
+	TTFTms       float64 // 首 token 时延（毫秒；与 otpmask_ttft_seconds 同一测量点）
+	OutputDigest string  // 输出载荷摘要前 16 hex（P1-2）
 }
 
 // newRequestOutputGuard 构造请求级输出侧审查管线（§2.3 I1）。
@@ -1637,7 +1704,8 @@ func (s *teeServer) newRequestOutputGuard(tenant, requestID string) (*outputGuar
 func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	eng model.Engine, genReq model.GenerateRequest, agg *strings.Builder,
 	tenant, requestID string, out *streamOutcome, denialFinish string,
-	reqStart time.Time, cacheLabel, cacheMode string) error {
+	reqStart time.Time, cacheLabel, cacheMode string,
+	ctx context.Context, tokensIn int, isRetry bool, inDigest string) error {
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1684,6 +1752,10 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	if og != nil {
 		defer og.Close() // 幂等释放（C4：请求内生命周期）
 	}
+	// P1-2：upstream.model.call 子 span（§7.4 span 清单）。
+	// 覆盖 engines Generate 调用周期（含本地 mock 引擎）；
+	// tokens.in/is.retry/input.digest 由调用方（handleTextInfer）传入。
+	_, usSpan := startUpstreamSpan(ctx, tokensIn, isRetry, inDigest)
 	// I2 唯一出口：所有写给客户端的内容必须经 emit（防绕过）。
 	// OG-19：emittedBuilder 累计已下发明文（不含终止帧空 delta），
 	// 用于 blocked 时精确计算 filtered_tokens = 总生成 − 已下发。
@@ -1697,7 +1769,13 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 			emittedBuilder.WriteString(delta)
 			if !ttftRecorded {
 				ttftRecorded = true
-				s.metrics.ObserveTTFT(cacheMode, cacheLabel, time.Since(reqStart).Seconds())
+				ttft := time.Since(reqStart)
+				s.metrics.ObserveTTFT(cacheMode, cacheLabel, ttft.Seconds())
+				// P1-2：upstream span 记录 TTFT；同值回传上层写入 tee.infer 主 span
+				observeTTFT(usSpan, ttft)
+				if out != nil {
+					out.TTFTms = float64(ttft.Microseconds()) / 1000.0
+				}
 			}
 		}
 		return writeChunk(delta, finish, nil, label)
@@ -1733,6 +1811,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		return lbl.afterContent(delta, finish)
 	}
 
+	// P1-2：upstream.model.call 子 span 已在 og 构造后创建（覆盖 Generate 调用周期）。
 	genErr := eng.Generate(genReq, func(delta string) error {
 		agg.WriteString(delta)
 		if og == nil {
@@ -1761,6 +1840,20 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		}
 		_ = writeChunk("", finishReason, guard, nil) // B1：error 分支不注入 tail（明文不出，标识无意义）
 		fmt.Fprint(w, "data: [DONE]\n\n")
+
+		// P1-2：upstream span 错误结束（500）
+		tokensOut := s.countTokens(agg.String())
+		outDigest := outputDigest(agg.String())
+		ttftMs := 0.0
+		if out != nil {
+			ttftMs = out.TTFTms
+		}
+		setUpstreamResult(usSpan, 500, tokensOut, ttftMs, outDigest)
+		usSpan.End()
+		if out != nil {
+			out.TokensOut, out.OutputDigest = tokensOut, outDigest
+		}
+
 		// OG-19：block 命中 → 在上层发射 output_blocked 审计（携带 filtered_tokens）。
 		// cascade 内已记指标；此处补审计事件——在上层可精确算出 filtered_tokens。
 		if blocked && blockCat != "" {
@@ -1860,6 +1953,20 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 			})
 		}
 	}
+
+	// P1-2：upstream span 正常结束（200）
+	tokensOut := s.countTokens(agg.String())
+	outDigest := outputDigest(agg.String())
+	ttftMs := 0.0
+	if out != nil {
+		ttftMs = out.TTFTms
+	}
+	setUpstreamResult(usSpan, 200, tokensOut, ttftMs, outDigest)
+	usSpan.End()
+	if out != nil {
+		out.TokensOut, out.OutputDigest = tokensOut, outDigest
+	}
+
 	return nil
 }
 
@@ -1870,7 +1977,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 //   - 部分截断（有下发）：输入保留（已发送并消耗），输出仅按实际下发计费；
 //     infer 审计 result=content_filter（供 from/to 出账聚合）。
 func (s *teeServer) applyOutputBlockBilling(tenant, requestID, payloadSHA, transformedHash,
-	engType, modelName string, tokensIn int, out streamOutcome, isRetry bool) {
+	engType, modelName string, tokensIn int, out streamOutcome, isRetry bool, traceID string) {
 	delivered := out.EmittedTokens
 	if delivered <= 0 {
 		s.rollbackQuota(tenant, int64(tokensIn))
@@ -1889,6 +1996,7 @@ func (s *teeServer) applyOutputBlockBilling(tenant, requestID, payloadSHA, trans
 		EngineType: engType, Model: modelName,
 		MeteringMode: s.meteringMode(),
 		IsRetry:      isRetry, // GA-计费 P0-3：重试归因
+		TraceID:      traceID, // P1-2：trace_id 证据字段
 	})
 	go s.billing.notify(ev)
 	s.metrics.incRequest(tenant, "content_filter")
@@ -1898,10 +2006,17 @@ func (s *teeServer) applyOutputBlockBilling(tenant, requestID, payloadSHA, trans
 
 // denyAndAudit 拒绝路径：用量 deny 计数 + 审计事件（result=拒绝原因）+ 指标。
 func (s *teeServer) denyAndAudit(tenant, requestID, reason, payloadSHA string) {
+	s.denyAndAuditCtx(context.Background(), tenant, requestID, reason, payloadSHA)
+}
+
+// denyAndAuditCtx 拒绝并写入审计链（带 ctx 版本，trace_id 证据字段，D-5）。
+// tracing 未启用时 trace_id 为空，omitempty 不序列化，旧行零差异。
+func (s *teeServer) denyAndAuditCtx(ctx context.Context, tenant, requestID, reason, payloadSHA string) {
 	s.recordUsage(tenant, 0, 0, true)
 	s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: requestID, Action: "deny",
 		Result: reason, PayloadSHA: payloadSHA, HashAlg: hashAlgTag(),
+		TraceID: traceIDFromContext(ctx), // P1-2：trace_id 证据字段
 	})
 	s.metrics.incDeny(tenant, reason)
 }
@@ -2036,16 +2151,16 @@ func (s *teeServer) contentLabelSource() string {
 
 // secConfigView 安全配置只读快照（M3-B 安全中心「密态链路状态 / Guardrail 策略」数据源）。
 type secConfigView struct {
-	ProtocolVersion  string            `json:"protocol_version"`
-	RequireAttest    bool              `json:"require_attest"`
-	AdminAuthEnabled bool              `json:"admin_auth_enabled"`
-	PIIMode          string            `json:"pii_mode"`
-	PIIModeSource    string            `json:"pii_mode_source"` // startup | runtime
-	SystemPromptSet  bool              `json:"system_prompt_set"`
-	AuditEnabled     bool              `json:"audit_enabled"`
+	ProtocolVersion  string `json:"protocol_version"`
+	RequireAttest    bool   `json:"require_attest"`
+	AdminAuthEnabled bool   `json:"admin_auth_enabled"`
+	PIIMode          string `json:"pii_mode"`
+	PIIModeSource    string `json:"pii_mode_source"` // startup | runtime
+	SystemPromptSet  bool   `json:"system_prompt_set"`
+	AuditEnabled     bool   `json:"audit_enabled"`
 	// 审计/日志留存期声明（天；0=未声明）。声明式，删除由存储层生命周期策略执行。
 	AuditRetentionDays int               `json:"audit_retention_days"`
-	Guardrail        guardrailSnapshot `json:"guardrail"`
+	Guardrail          guardrailSnapshot `json:"guardrail"`
 	// GA-输出侧内容审查（OG-3）：当前模式与策略版本（只读；运行时覆盖/持久化归 OG-8）。
 	OutputGuard outputGuardSnapshot `json:"output_guard"`
 	// B1 强标标识（GB 45438-2025）：只读快照（运行时变更走 POST /config/content-label）。
@@ -2056,9 +2171,9 @@ type secConfigView struct {
 // GET /config 返回只读视图；运行时变更走 POST /config/output-guard（OG-8 已实现；
 // D8 高敏复核链在 gateway-admin-service，见 change.go output_guard_mode 动作）。
 type outputGuardSnapshot struct {
-	Mode          string                  `json:"mode"`
-	ModeSource    string                  `json:"mode_source"` // startup | runtime（OG-8 运行时覆盖来源）
-	PolicyVersion string                  `json:"policy_version"`
+	Mode          string                    `json:"mode"`
+	ModeSource    string                    `json:"mode_source"` // startup | runtime（OG-8 运行时覆盖来源）
+	PolicyVersion string                    `json:"policy_version"`
 	Params        outputGuardParamsSnapshot `json:"params"`
 	// Cascade：级联并发参数（OG-13；只读快照，供排障与浸泡脚本核对生效值）
 	Cascade outputGuardCascadeSnapshot `json:"cascade"`
@@ -2084,13 +2199,13 @@ type outputGuardSnapshot struct {
 
 // outputGuardParamsSnapshot 缓冲参数只读快照（D 组参数，§5.4）。
 type outputGuardParamsSnapshot struct {
-	Unit              string `json:"unit"`                // sentence | fixed-window
-	MaxUnitRunes      int    `json:"max_unit_runes"`      // P-MAX-UNIT-RUNES
+	Unit              string `json:"unit"`                 // sentence | fixed-window
+	MaxUnitRunes      int    `json:"max_unit_runes"`       // P-MAX-UNIT-RUNES
 	FirstUnitMaxRunes int    `json:"first_unit_max_runes"` // P-FIRST-UNIT-MAX-RUNES
-	MaxBufferBytes    int    `json:"max_buffer_bytes"`    // P-MAX-BUFFER-BYTES
-	WindowMargin      int    `json:"window_margin"`       // P-WINDOW-MARGIN
-	WindowRunes       int    `json:"window_chars"`        // P-WINDOW-CHARS（派生值）
-	MaxKeywordRunes   int    `json:"max_keyword_runes"`   // 词库最长命中长度（P-WINDOW-CHARS 派生输入）
+	MaxBufferBytes    int    `json:"max_buffer_bytes"`     // P-MAX-BUFFER-BYTES
+	WindowMargin      int    `json:"window_margin"`        // P-WINDOW-MARGIN
+	WindowRunes       int    `json:"window_chars"`         // P-WINDOW-CHARS（派生值）
+	MaxKeywordRunes   int    `json:"max_keyword_runes"`    // 词库最长命中长度（P-WINDOW-CHARS 派生输入）
 }
 
 // outputGuardCascadeSnapshot 级联参数只读快照（跨 §5.3–5.5 多组；OG-13）。
@@ -2146,13 +2261,13 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view := secConfigView{
-		ProtocolVersion:  s.protoVersion,
-		RequireAttest:    s.requireAttest,
-		AdminAuthEnabled: s.adminToken != "",
-		PIIMode:          s.currentPiiMode(),
-		PIIModeSource:    "startup",
-		SystemPromptSet:  s.systemPrompt != "",
-		AuditEnabled:     s.audit != nil,
+		ProtocolVersion:    s.protoVersion,
+		RequireAttest:      s.requireAttest,
+		AdminAuthEnabled:   s.adminToken != "",
+		PIIMode:            s.currentPiiMode(),
+		PIIModeSource:      "startup",
+		SystemPromptSet:    s.systemPrompt != "",
+		AuditEnabled:       s.audit != nil,
 		AuditRetentionDays: s.auditRetentionDays,
 	}
 	if v, ok := s.piiModeOverride.Load().(string); ok && v != "" {
@@ -2163,13 +2278,13 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	ogMode := s.currentOutputGuardMode()
 	view.OutputGuard = outputGuardSnapshot{
-		Mode:          ogMode,
-		ModeSource:    s.outputGuardModeSource(),
-		PolicyVersion: s.policyVersion(),
-		MaskEnabled:   s.outputGuardMaskEnabled,
-		OutputDepth:   deriveOutputDepth(ogMode, s.outputGuardMaskEnabled),
-		Strategy:      s.currentOutputGuardStrategy(),
-		PublicFacing:  s.publicFacing,
+		Mode:               ogMode,
+		ModeSource:         s.outputGuardModeSource(),
+		PolicyVersion:      s.policyVersion(),
+		MaskEnabled:        s.outputGuardMaskEnabled,
+		OutputDepth:        deriveOutputDepth(ogMode, s.outputGuardMaskEnabled),
+		Strategy:           s.currentOutputGuardStrategy(),
+		PublicFacing:       s.publicFacing,
 		DisabledCategories: disabledCategoryList(s.currentDisabledCategories()),
 		Params: outputGuardParamsSnapshot{
 			Unit:              s.outputGuardParams.Unit,
@@ -2270,14 +2385,14 @@ func (s *teeServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[output-guard] 策略热加载失败（保留版本 %s 继续服务）: reason=%s", oldVersion, kind)
 		if s.audit != nil {
 			s.audit.append(AuditEvent{
-				TenantID:        "-",
-				UserID:          actor,
-				RequestID:       reqID,
-				Action:          "output_guard_policy_reload",
-				Result:          "rolled_back",
-				OGOldVersion:    oldVersion,
-				OGPolicySHA256:  sha,
-				PayloadSHA:      sha, // 证据锚定（空串即不影响链；不进 hash 的新字段已独立承载）
+				TenantID:       "-",
+				UserID:         actor,
+				RequestID:      reqID,
+				Action:         "output_guard_policy_reload",
+				Result:         "rolled_back",
+				OGOldVersion:   oldVersion,
+				OGPolicySHA256: sha,
+				PayloadSHA:     sha, // 证据锚定（空串即不影响链；不进 hash 的新字段已独立承载）
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -2522,8 +2637,8 @@ func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Reque
 	log.Printf("[output-guard] 运行时模式变更: %s → %s (source=runtime, depth=%s)", oldMode, req.Mode, deriveOutputDepth(req.Mode, s.outputGuardMaskEnabled))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"mode":   req.Mode,
-		"status": "applied",
+		"mode":     req.Mode,
+		"status":   "applied",
 		"old_mode": oldMode,
 	})
 }
@@ -2824,12 +2939,12 @@ func (s *teeServer) handleContentLabelConfig(w http.ResponseWriter, r *http.Requ
 	log.Printf("[content-label] 运行时配置变更: enabled=%t → %t (source=runtime)", oldEnabled, next.Enabled)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"enabled":    next.Enabled,
-		"status":     "applied",
+		"enabled":     next.Enabled,
+		"status":      "applied",
 		"old_enabled": oldEnabled,
-		"text":       next.Text,
-		"repeat":     next.Repeat,
-		"std":        next.Std,
+		"text":        next.Text,
+		"repeat":      next.Repeat,
+		"std":         next.Std,
 	})
 }
 
@@ -3616,6 +3731,18 @@ func main() {
 		log.Printf("⚠️ 开发模式（-dev-mode）：已放行 mock 飞地 / 空管理令牌；生产环境严禁使用")
 	}
 
+	// P1-2：全链路 tracing 初始化（C-4：默认关闭，TRACING_ENABLED=true 时启用）。
+	// 未启用时使用 NoOpTracer，零开销、/metrics 逐字节不变（C-8）。
+	// 启用但 OTLP 配置非法 → fail-closed 拒绝启动（配置错误须显式暴露）。
+	// 须在引擎构造之前初始化：上游模型引擎据此注入剥离追踪头的出站传输（§6.4）。
+	if err := initTracing(); err != nil {
+		log.Fatalf("初始化 tracing 失败（fail-closed）: %v", err)
+	}
+	defer shutdownTracing() // 退出时刷新并关闭 TracerProvider
+	// §6.4：上游模型出站请求剥离 traceparent/tracestate/x-request-id（内部标识不外泄）。
+	// tracing 未启用时为 http.DefaultTransport（零行为变化）。
+	model.SetUpstreamTransport(upstreamTransport())
+
 	// 双路线路由配置
 	routeCfg := DefaultRouteConfig()
 	if *routeConfigFile != "" {
@@ -3786,7 +3913,7 @@ func main() {
 		recomputeStates:   newRecomputeStates(),
 		weightProvider:    NewMockWeightProvider(32),
 		route:             routeCfg,
-		tokenizer:         nil,                       // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
+		tokenizer:         nil,                                          // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
 		cache:             cacheengine.NewLegacyAdapter(cacheSt.engine), // P0-2：legacy 兜底（仅原生引擎未生效时使用）
 		usage:             make(map[string]*usageRecord),
 		quota:             make(map[string]quotaSpec),
@@ -4069,32 +4196,32 @@ func main() {
 	mux.HandleFunc("/attest/complete", srv.handleAttestComplete)
 	mux.HandleFunc("/key/issue", srv.handleKeyIssue)
 	mux.HandleFunc("/v1/infer", srv.handleInfer)
-	mux.HandleFunc("/v1/recompute", srv.handleRecompute)           // 路线 2 非线性补算
-	mux.HandleFunc("/infer", srv.handleInfer)                      // 网关路由别名
-	mux.HandleFunc("/usage", srv.handleUsage)                      // M9-2 用量
-	mux.HandleFunc("/usage/quota", srv.handleQuota)                // P1 配额设置
-	mux.HandleFunc("/audit", srv.handleAudit)                      // M9-3 审计
-	mux.HandleFunc("/audit/shadow", srv.handleShadowReport)        // A 项：数据面明文影子窗口级汇总上报（幂等落链）
-	mux.HandleFunc("/audit/verify", srv.handleAuditVerify)         // M9-3 哈希链校验
-	mux.HandleFunc("/audit/anchor", srv.handleAuditAnchor)         // C-5 审计锚定
-	mux.HandleFunc("/metrics", srv.handleMetrics)                  // M10 可观测性
-	mux.HandleFunc("/config", srv.handleConfig)                    // M3-B 安全中心：配置只读快照
-	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig)    // M3-B 高敏复核：Guardrail 降级生效点
-	mux.HandleFunc("/config/output-guard", srv.handleOutputGuardConfig) // OG-8 输出侧审查 mode 运行时切换
-	mux.HandleFunc("/config/output-guard/strategy", srv.handleOutputGuardStrategy)   // S3-2 策略 A/B/C 切换（C 诚实门控）
+	mux.HandleFunc("/v1/recompute", srv.handleRecompute)                               // 路线 2 非线性补算
+	mux.HandleFunc("/infer", srv.handleInfer)                                          // 网关路由别名
+	mux.HandleFunc("/usage", srv.handleUsage)                                          // M9-2 用量
+	mux.HandleFunc("/usage/quota", srv.handleQuota)                                    // P1 配额设置
+	mux.HandleFunc("/audit", srv.handleAudit)                                          // M9-3 审计
+	mux.HandleFunc("/audit/shadow", srv.handleShadowReport)                            // A 项：数据面明文影子窗口级汇总上报（幂等落链）
+	mux.HandleFunc("/audit/verify", srv.handleAuditVerify)                             // M9-3 哈希链校验
+	mux.HandleFunc("/audit/anchor", srv.handleAuditAnchor)                             // C-5 审计锚定
+	mux.HandleFunc("/metrics", srv.handleMetrics)                                      // M10 可观测性
+	mux.HandleFunc("/config", srv.handleConfig)                                        // M3-B 安全中心：配置只读快照
+	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig)                     // M3-B 高敏复核：Guardrail 降级生效点
+	mux.HandleFunc("/config/output-guard", srv.handleOutputGuardConfig)                // OG-8 输出侧审查 mode 运行时切换
+	mux.HandleFunc("/config/output-guard/strategy", srv.handleOutputGuardStrategy)     // S3-2 策略 A/B/C 切换（C 诚实门控）
 	mux.HandleFunc("/config/output-guard/categories", srv.handleOutputGuardCategories) // S3-2 类目启停（拦截/脱敏底线不可停）
-	mux.HandleFunc("/config/content-label", srv.handleContentLabelConfig) // B1 强标标识运行时热切换（on/off 双向）
-	mux.HandleFunc("/config/policy/reload", srv.handlePolicyReload)  // OG-9 策略/词库热加载（applied/rolled_back）
+	mux.HandleFunc("/config/content-label", srv.handleContentLabelConfig)              // B1 强标标识运行时热切换（on/off 双向）
+	mux.HandleFunc("/config/policy/reload", srv.handlePolicyReload)                    // OG-9 策略/词库热加载（applied/rolled_back）
 	// S1-4（G21）策略版本库：只读发现 / 显式引用 / 回滚（版本库为只读输入，发布属离线步骤）
 	mux.HandleFunc("/config/policy/versions", srv.handlePolicyVersions) // GET 版本列表（含 bench 结果）
 	mux.HandleFunc("/config/policy/activate", srv.handlePolicyActivate) // POST 显式引用版本（bench 硬门禁）
 	mux.HandleFunc("/config/policy/rollback", srv.handlePolicyRollback) // POST 回滚（缺省=上一 active，可指定历史版本）
-	mux.HandleFunc("/reconcile", srv.handleReconcile)              // S5 判据 6：对账快照（只读）
-	mux.HandleFunc("/reconcile/run", srv.handleReconcileRun)       // S5 判据 6：即时对账（管理令牌）
+	mux.HandleFunc("/reconcile", srv.handleReconcile)                   // S5 判据 6：对账快照（只读）
+	mux.HandleFunc("/reconcile/run", srv.handleReconcileRun)            // S5 判据 6：即时对账（管理令牌）
 	// S4-4：租户处置状态机（SaaS 构建下注册 /config/tenant-disposition 端点；OSS 构建空操作）
 	initTenantDisposition(srv, mux)
-	mux.HandleFunc("/healthz", srv.handleHealthz)                  // 探针与证明状态联动
-	mux.HandleFunc("/healthz/live", srv.handleHealthz)             // liveness
+	mux.HandleFunc("/healthz", srv.handleHealthz)      // 探针与证明状态联动
+	mux.HandleFunc("/healthz/live", srv.handleHealthz) // liveness
 
 	// E4：P0-2 缓存管理 API（§4.3；8 端点，warmup 归后续批次）
 	srv.registerCacheAPIRoutes(mux)

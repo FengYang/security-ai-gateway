@@ -48,7 +48,8 @@ func NewCmaasEngine(proxyURL, apiKey, model string) *CmaasEngine {
 		model:      model,
 		attestByFP: make(map[string]string),
 		// C-MaaS 流式整体超时与 vLLM 对齐（120s 生成窗口）
-		client: &http.Client{Timeout: 120 * time.Second},
+		// Transport：剥离追踪头的上游传输（§6.4；默认 http.DefaultTransport）。
+		client: &http.Client{Timeout: 120 * time.Second, Transport: upstreamHTTPTransport},
 	}
 }
 

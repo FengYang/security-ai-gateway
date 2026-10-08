@@ -84,6 +84,10 @@ type AuditEvent struct {
 	// **证据字段，不进 hash()**（保持 WORM 旧链向后兼容）；重试 token 归平台成本
 	// （不计用户金额，M9），/usage 由此字段按 net/retry 分列（A-35）。
 	IsRetry bool `json:"is_retry,omitempty"`
+	// P1-2 全链路 tracing（D-5）：trace_id 证据字段，关联审计事件与 trace。
+	// **证据字段，不进 hash()**（保持 WORM 旧链逐字节不变）。
+	// omitempty：tracing 未启用或无 trace 时不写入，旧行零差异。
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。
