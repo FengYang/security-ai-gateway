@@ -59,6 +59,17 @@ cd higress-console/frontend && npm ci && npm run build
 `Path .../public/avatar.png is not in cwd`（与页面无关）。以 `subst X: <frontend>` 映射 ASCII 盘符后**构建成功**。
 根因 = 中文路径 + ICE 路径校验，**非本页引入**。
 
+### 4.1 页面契约测试（T-4.3-1..4，M3）
+
+| 用例 | 内容 | 载体 | 结果 |
+|---|---|---|---|
+| T-4.3-1 | 页面级 RBAC 矩阵（读 200 / 写 403 / 未认证 401） | `billing_api_contract_test.go::TestBillingContractT4_3_1_RBACMatrix` | ✅ |
+| T-4.3-2 | `enabled=false` → 计费端点全部 404 | `…T4_3_2_DisabledAllEndpoints404` | ✅ |
+| T-4.3-3 | 写动作落审计链（`plan_upsert`/`plan_bind`/`bill_freeze`） | `…T4_3_3_WriteAuditTrail` | ✅ |
+| T-4.3-4 | 金额列仅账单页（源扫描门禁） | `scripts/check-billing-amount-scope.ps1`（接入 `admin-portal.yml` + `verify-fork-rebuild.ps1`） | ✅（正例 PASS / 反例 FAIL） |
+
+> T-4.3-4 说明：控制台无 JS 测试运行器，故以**源扫描**实现（对齐 tee-infer S-3 的 CI 强制思路）——扫描 `frontend/src/pages/admin-ext/**` 与 `frontend/src/services/**`，金额 token（`fenToYuan`/`amountFen`）仅允许出现于账单页/服务。
+
 ## 5. fork 基线/重建链漂移 —— 已修复（M0，2026-10-08）
 
 **原问题**：`baseline.txt`=36aa9c6 ≠ 上游 v2.2.4 当前提交 `f8410432`；既有补丁 2 个 backend 文件失配 → **不可原子应用**（前端部分可）。
@@ -78,6 +89,6 @@ cd higress-console/frontend && npm ci && npm run build
 
 ## 6. 后续（T9 完整态，未做）
 
-- 页面契约测试（T-4.3-1..4：页面级 RBAC 矩阵、`enabled=false` 404、写动作落审计、金额列仅账单页快照）——**M3 计划**。
+- ~~页面契约测试（T-4.3-1..4）~~ —— **M3 已完成**（见 §4.1）。
 - ~~`billing_reader` 角色放行~~ —— **M2 已完成**（Go + 控制台签发侧）。
-- 与既有用量页（`/admin-ext/usage`）的口径衔接与自助场景打磨。
+- 与既有用量页（`/admin-ext/usage`）的口径衔接与自助场景打磨；M4 验收（E2E 扩展 + 文档）。

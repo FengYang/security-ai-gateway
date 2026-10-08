@@ -89,6 +89,11 @@ if ($LASTEXITCODE -ne 0) { Fail "计费增量补丁应用失败: $billingPatchFi
 Write-Output '--- 补丁落地清单 ---'
 git -C $cloneDir status --short | ForEach-Object { Write-Output $_ }
 
+# ---- 2b. 金额域作用域门禁（T-4.3-4：金额列仅账单页）-----------------------
+Step '2b. 金额域作用域门禁（T-4.3-4）'
+& (Join-Path $PSScriptRoot 'check-billing-amount-scope.ps1') -ForkRoot $cloneDir
+if ($LASTEXITCODE -ne 0) { Fail 'T-4.3-4 金额域作用域门禁失败（金额 token 出现在账单页之外）' }
+
 # ---- 3. 后端：编译 + 单测 --------------------------------------------------
 Step '3. 后端编译（console -am, JDK17）'
 $env:JAVA_HOME = $jdkHome

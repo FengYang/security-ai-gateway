@@ -49,6 +49,11 @@ jobs:
           echo "--- applied customization summary ---"
           git -C /tmp/higress-console status --short
 
+      - name: amount-scope gate（T-4.3-4：金额列仅账单页）
+        run: |
+          pwsh -NoProfile -File "$GITHUB_WORKSPACE/scripts/check-billing-amount-scope.ps1" \
+            -ForkRoot /tmp/higress-console
+
       - name: 后端编译（console+sdk，JDK17；skip npm/pmd/checkstyle/delombok）
         uses: actions/setup-java@v4
         with:

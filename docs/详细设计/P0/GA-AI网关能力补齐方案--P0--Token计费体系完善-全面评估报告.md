@@ -90,8 +90,9 @@
 | D2 | P2 | 缺 §10.6 S-7 兼容用例 | **已修**：旧对端拒 month → 订阅仍 200（优雅降级） |
 | D3 | P3 | E2E-2 OverQuota 计价差异未覆盖 | 已知边界 |
 | D4 | P2 | 缺持久化层基准与性能报告 | **已修**：`bench_persist_test.go` + `perf_acceptance_test.go` + 《PERF-BILLING 报告》 |
+| D5 | P2 | 缺页面契约测试（T-4.3-1..4） | **已修（M3）**：`billing_api_contract_test.go`（RBAC 矩阵 / 404 / 审计链）+ `check-billing-amount-scope.ps1`（金额域扫描） |
 | E1 | P2 | M3/M4/M5/M6 未实测 | **已解决（持久化层）**：M3/M5/M6 达标（§6）；TEE/大规模待目标环境 |
-| F1 | P1 | 无计费自助/管理界面 | **读+写已交付**（计费中心页）；自助打磨/契约测试待后续 |
+| F1 | P1 | 无计费自助/管理界面 | **读+写已交付**（计费中心页）；自助打磨待后续（契约测试已完成 M3） |
 
 ---
 
@@ -134,7 +135,7 @@ go test ./gateway/gateway-admin-service/billing -bench . -benchmem → 见 §6
 
 | 项 | 现状 | 建议 |
 |---|---|---|
-| **T9 管理后台页面** | **读+写已交付（M0/M1）** + **`billing_reader` 已放行（M2）**（计费中心 `/admin-ext/billing`：账单 / 套餐订阅 / 冻结；本机完整构建通过）；页面契约测试待后续 | 详见《…-T9计费页面交付与fork集成说明.md》 |
+| **T9 管理后台页面** | **读+写已交付（M0/M1）** + **`billing_reader` 已放行（M2）** + **页面契约测试已完成（M3）**（计费中心 `/admin-ext/billing`：账单 / 套餐订阅 / 冻结；本机完整构建通过） | 详见《…-T9计费页面交付与fork集成说明.md》 |
 | 控制台 fork 基线/重建链漂移 | **已修复（M0）**：baseline 重钉 `f8410432`、删除 2 条过时 hunk + 剔除 `yarn.lock` 副产物；纯净树**原子应用通过** + `fork-patch-check` **PASS** | 详见《…-T9计费页面交付与fork集成说明.md》§5 |
 | S-7 跨版本 | 无 CI 版本校验（本轮补优雅降级用例） | 部署/CI 版本锁（§8.4 R-α） |
 | REC-6 告警 | 仅日志 | 如需告警单批补指标 + §9.3 |
