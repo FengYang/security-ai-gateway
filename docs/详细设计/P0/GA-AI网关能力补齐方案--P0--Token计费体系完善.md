@@ -2469,19 +2469,19 @@ func (s *BillingService) VerifyBillingChain(b *Bill) error {
 
 | # | 指标 | 类型 | 标签 | 登记 | 用途 / 关联 |
 |---|---|---|---|---|---|
-| 1 | `gateway_admin_billing_requests_total` | counter | `path,code` | required | /billing 域请求量（T6） |
-| 2 | `gateway_admin_billing_ledger_entries_total` | counter | `source` | required | 入账条目数（pull/push/manual，T3） |
-| 3 | `gateway_admin_billing_ledger_head_seq` | gauge | — | required | 账本链尾序号（单调；T3/T7） |
-| 4 | `gateway_admin_billing_ledger_chain_broken` | gauge | — | required | 链校验状态（0 完好 / 1 断裂；**越界即告警**，T7） |
-| 5 | `gateway_admin_billing_pull_total` | counter | `result` | required | 拉取次数（ok/error；T3） |
+| 1 | `gateway_admin_billing_requests_total` | counter | `path,code` | conditional | /billing 域请求量（T6） |
+| 2 | `gateway_admin_billing_ledger_entries_total` | counter | `source` | conditional | 入账条目数（pull/push/manual，T3） |
+| 3 | `gateway_admin_billing_ledger_head_seq` | gauge | — | conditional | 账本链尾序号（单调；T3/T7） |
+| 4 | `gateway_admin_billing_ledger_chain_broken` | gauge | — | conditional | 链校验状态（0 完好 / 1 断裂；**越界即告警**，T7） |
+| 5 | `gateway_admin_billing_pull_total` | counter | `result` | conditional | 拉取次数（ok/error；T3） |
 | 6 | `gateway_admin_billing_push_total` | counter | `result` | conditional | 推送消费（ok/reject/frozen；T3） |
-| 7 | `gateway_admin_billing_close_duration_seconds` | histogram | `kind` | required | 日结/月结耗时（**M3/M4**） |
-| 8 | `gateway_admin_billing_bill_issued_total` | counter | `kind,status` | required | 出账数（daily/monthly × issued/frozen；T5） |
-| 9 | `gateway_admin_billing_api_duration_seconds` | histogram | `path` | required | 查询 API 延迟（**M5**） |
-| 10 | `gateway_admin_billing_anomaly_total` | counter | `kind,severity` | required | 五类异常（spike/reconcile_diff/quota_warn/pricing_missing/**plan_expired**〔S-9 兼发，A-17〕；**M7**） |
-| 11 | `gateway_admin_billing_reconcile_diff` | gauge | `tenant` | required | L2 差异**率**（ratio；0 为达标，★ MET-003 订正：非“三元组合计”） |
+| 7 | `gateway_admin_billing_close_duration_seconds` | histogram | `kind` | conditional | 日结/月结耗时（**M3/M4**） |
+| 8 | `gateway_admin_billing_bill_issued_total` | counter | `kind,status` | conditional | 出账数（daily/monthly × issued/frozen；T5） |
+| 9 | `gateway_admin_billing_api_duration_seconds` | histogram | `path` | conditional | 查询 API 延迟（**M5**） |
+| 10 | `gateway_admin_billing_anomaly_total` | counter | `kind,severity` | conditional | 五类异常（spike/reconcile_diff/quota_warn/pricing_missing/**plan_expired**〔S-9 兼发，A-17〕；**M7**） |
+| 11 | `gateway_admin_billing_reconcile_diff` | gauge | `tenant` | conditional | L2 差异**率**（ratio；0 为达标，★ MET-003 订正：非“三元组合计”） |
 | 12 | `gateway_admin_billing_quota_remaining_ratio` | gauge | `tenant` | conditional | 配额剩余比（预警；**M7**） |
-| 13 | `gateway_admin_billing_quota_apply_duration_seconds` | histogram | — | required | 配额热生效时延（**M6**） |
+| 13 | `gateway_admin_billing_quota_apply_duration_seconds` | histogram | — | conditional | 配额热生效时延（**M6**） |
 | 14 | `gateway_admin_billing_freeze_total` | counter | `kind,severity` | conditional | 冻结/解冻次数（**M7**；T8） |
 | 15 | `gateway_admin_billing_export_total` | counter | `format,result` | conditional | 导出次数（csv/pdf；T5） |
 | 16 | `gateway_admin_billing_signature_verify_total` | counter | `result` | conditional | 验签结果（valid/invalid；**M8**） |
@@ -2494,9 +2494,9 @@ func (s *BillingService) VerifyBillingChain(b *Bill) error {
 | 23 | `gateway_admin_billing_ledger_error_total` | counter | `op` | conditional | ★ A-52：账本写路径错误（`op=begin|append`；§6.1.1 `pullOnce`）；**唯一生产者 = `incLedgerError`** |
 | 24 | `gateway_admin_billing_frozen` | gauge | `tenant` | conditional | ★ 本次回填：租户冻结状态（1=冻结 / 0=解冻）；**§9.3 `BillingFrozenSustained`（冻结持续 >24h）唯一判据**（此前该告警无可用信号） |
 
-> **required vs conditional**：`required` 在 `billing.enabled=true` 时**必须存在**（常驻注册）；`conditional` 为惰性（首次触发才注册），与 `scripts/metrics-required.txt` 语义一致。
+> **required vs conditional**：`required` 在来源可达时**必须存在**；`conditional` 为惰性（首次触发才注册）或**特性可关闭**（缺席不判失败）。
 >
-> **`scripts/metrics-required.txt` 增补（T10 交付）**：新增 `admin gateway_admin_billing_requests_total required` 等上表 `required` 行；`conditional` 行登记为 `conditional`（#9 门禁不判失败）。
+> **`scripts/metrics-required.txt` 增补（T10 交付，★ C3 订正）**：**全部 24 项** billing 指标均登记为 **`conditional`**——因 `billing.enabled` 为**可选开关**，默认关闭时注册表为空、`/metrics` 输出不变（R-1/M10），缺席不得判失败（见 `scripts/metrics-required.txt` P0-3 段头注释）。本表 `登记` 列已与清单**逐项一致**（原表误标 11 项为 `required`，会在关闭态触发门禁误 FAIL，已订正）。
 
 #### 9.1.1 唯一生产者对照表（★ O-7：判据指标必查生产者）
 
