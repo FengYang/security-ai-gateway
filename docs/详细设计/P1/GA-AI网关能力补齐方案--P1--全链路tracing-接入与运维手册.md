@@ -85,6 +85,14 @@ POST /v1/adminext/slo
 - 告警规则：`deploy/monitoring/slo-prometheusrule.yaml`（默认目标 99.9%，燃尽 14.4/6，含 `AISLOTTFTp99Slow`）。
 - 看板：`deploy/monitoring/grafana.yaml` 的 `otpmask-ai`（TTFT/Token/拦截率/缓存命中）与 `otpmask-slo`（可用性/P99/错误率/错误预算/燃尽率）。
 
+### 前端排障视图（console fork，§7.7）
+
+`fork-patches/higress-console/higress-console-trace.patch`（增量补丁，基于 custom+billing 之上）新增
+「排障查询」页（菜单 ADMIN-EXT → 排障查询，路由 `/admin-ext/tracing`）：
+多维检索（tenant/model/status）、单请求聚合（span 树 + 审计 + 耗时分解）、报告导出（JSON/CSV）。
+仅修改白名单内的注册点（`_defaultProps.tsx` 菜单 + `translation.json` en/zh），页面与 service 均为新增文件。
+重建/校验：`scripts/verify-fork-rebuild.ps1`（clean-room：clone v2.2.4 → 依序应用三个补丁 → 编译/构建）。
+
 ## 5. 性能基线（V-3：tracing 开启后 p99 延迟增加 < 5%）
 
 固定压测条件（并发/QPS/时长/样本量），对比 `TRACING_ENABLED=false/true`：

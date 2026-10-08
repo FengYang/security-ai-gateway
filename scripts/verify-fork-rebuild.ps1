@@ -46,6 +46,7 @@ function Step([string]$msg) {
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $patchFile = Join-Path $repo 'fork-patches\higress-console\higress-console-custom.patch'
 $billingPatchFile = Join-Path $repo 'fork-patches\higress-console\higress-console-billing.patch'
+$tracePatchFile = Join-Path $repo 'fork-patches\higress-console\higress-console-trace.patch'
 $forkRoot = Join-Path $repo 'vendor\higress-console'
 $nodeDir = Join-Path $forkRoot 'frontend\node'
 $jdkHome = Join-Path $repo '.tools\jdk-17.0.20.1+1'
@@ -56,7 +57,7 @@ $mvnSkips = @('-Dskip.npm=true', '-Dskip.npx=true', '-Dpmd.skip=true',
     '-Dcheckstyle.skip=true', '-Dlombok.delombok.skip=true')
 
 Step '0. 前置检查'
-foreach ($p in @($patchFile, $billingPatchFile, $forkRoot, $jdkHome)) {
+foreach ($p in @($patchFile, $billingPatchFile, $tracePatchFile, $forkRoot, $jdkHome)) {
     if (-not (Test-Path $p)) { Fail "缺少前置资源: $p" }
 }
 if (-not (Test-Path (Join-Path $nodeDir 'npm.cmd'))) {
@@ -86,6 +87,8 @@ git -C $cloneDir apply --verbose $patchFile
 if ($LASTEXITCODE -ne 0) { Fail "补丁应用失败（补丁已随上游漂移，需重导）: $patchFile" }
 git -C $cloneDir apply --verbose $billingPatchFile
 if ($LASTEXITCODE -ne 0) { Fail "计费增量补丁应用失败: $billingPatchFile" }
+git -C $cloneDir apply --verbose $tracePatchFile
+if ($LASTEXITCODE -ne 0) { Fail "排障视图增量补丁应用失败: $tracePatchFile" }
 Write-Output '--- 补丁落地清单 ---'
 git -C $cloneDir status --short | ForEach-Object { Write-Output $_ }
 

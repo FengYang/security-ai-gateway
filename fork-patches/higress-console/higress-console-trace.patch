@@ -1,0 +1,472 @@
+diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
+index 87ffc59..2d70491 100644
+--- a/frontend/src/locales/en-US/translation.json
++++ b/frontend/src/locales/en-US/translation.json
+@@ -30,11 +30,37 @@
+     "adminExtAccounts": "Accounts & Roles",
+     "adminExtChanges": "High-risk Change Review",
+     "adminExtVendors": "Vendor Activation & Status",
+-    "adminExtBilling": "Billing Center"
++    "adminExtBilling": "Billing Center",
++    "adminExtTracing": "Troubleshooting"
+   },
+   "adminExt": {
+     "badge": "Self-developed",
+     "badgeTip": "This page is an OTP-Mask ADMIN-EXT addition, not an upstream Higress feature.",
++    "tracing": {
++      "searchTitle": "Trace Search",
++      "tenant": "Tenant",
++      "tenantPlaceholder": "Filter by tenant (optional)",
++      "model": "Model",
++      "status": "Status",
++      "search": "Search",
++      "status_ok": "OK",
++      "status_client_error": "Client Error",
++      "status_server_error": "Server Error",
++      "status_denied": "Denied",
++      "colTraceId": "trace_id",
++      "colService": "Root Service",
++      "colDurationMs": "Duration (ms)",
++      "detailTitle": "Single-request Trace",
++      "requestId": "request_id",
++      "requestIdRequired": "Please input request_id",
++      "query": "Query",
++      "detailError": "Query failed",
++      "breakdown": "Breakdown",
++      "audit": "Audit Correlation",
++      "denies": "Denials",
++      "exportJson": "Export JSON",
++      "exportCsv": "Export CSV"
++    },
+     "billing": {
+       "tabBills": "Billing",
+       "tabPlans": "Plans & Subscription",
+diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
+index 4820f66..2c35ee0 100644
+--- a/frontend/src/locales/zh-CN/translation.json
++++ b/frontend/src/locales/zh-CN/translation.json
+@@ -30,11 +30,37 @@
+     "adminExtAccounts": "账号与角色",
+     "adminExtChanges": "高敏变更复核",
+     "adminExtVendors": "厂商激活与状态",
+-    "adminExtBilling": "计费中心"
++    "adminExtBilling": "计费中心",
++    "adminExtTracing": "排障查询"
+   },
+   "adminExt": {
+     "badge": "自研扩展",
+     "badgeTip": "本页由 OTP-Mask 自研扩展提供（ADMIN-EXT），非 Higress 上游功能。",
++    "tracing": {
++      "searchTitle": "多维检索",
++      "tenant": "租户",
++      "tenantPlaceholder": "按租户过滤（可选）",
++      "model": "模型",
++      "status": "状态",
++      "search": "检索",
++      "status_ok": "成功",
++      "status_client_error": "客户端错误",
++      "status_server_error": "服务端错误",
++      "status_denied": "内容拦截",
++      "colTraceId": "trace_id",
++      "colService": "根服务",
++      "colDurationMs": "耗时(ms)",
++      "detailTitle": "单请求全链路聚合",
++      "requestId": "request_id",
++      "requestIdRequired": "请输入 request_id",
++      "query": "查询",
++      "detailError": "查询失败",
++      "breakdown": "耗时分解",
++      "audit": "审计关联",
++      "denies": "拒绝/拦截记录",
++      "exportJson": "导出 JSON",
++      "exportCsv": "导出 CSV"
++    },
+     "billing": {
+       "tabBills": "账单中心",
+       "tabPlans": "套餐与订阅",
+diff --git a/frontend/src/pages/_defaultProps.tsx b/frontend/src/pages/_defaultProps.tsx
+index b21ee79..cc943bd 100644
+--- a/frontend/src/pages/_defaultProps.tsx
++++ b/frontend/src/pages/_defaultProps.tsx
+@@ -108,6 +108,16 @@ export default {
+         path: '/admin-ext/billing',
+         icon: <AccountBookOutlined />,
+       },
++      {
++        // ADMIN-EXT（自研扩展，vendor-fork 只增不减）：排障查询（P1-2 全链路 tracing，§7.7）
++        // 单请求全链路聚合（span 树 + 审计 + 耗时分解）+ 多维检索 + 报告导出。
++        // 响应仅含 §6.2 白名单属性，无原文、无金额（C-1/C-5）；后端按会话 tenant 强隔离。
++        // 注：图标复用已导入的 AuditOutlined，避免引入未验证图标（历史上曾因不存在
++        //     的图标导致构建静默、菜单渲染崩溃）。
++        name: 'menu.adminExtTracing',
++        path: '/admin-ext/tracing',
++        icon: <AuditOutlined />,
++      },
+       {
+         name: 'menu.serviceSources',
+         path: '/service-source',
+diff --git a/frontend/src/pages/admin-ext/tracing/index.tsx b/frontend/src/pages/admin-ext/tracing/index.tsx
+new file mode 100644
+index 0000000..aadb88e
+--- /dev/null
++++ b/frontend/src/pages/admin-ext/tracing/index.tsx
+@@ -0,0 +1,243 @@
++import { PageContainer } from '@ant-design/pro-layout';
++import { Alert, Button, Card, Descriptions, Form, Input, Select, Space, Table, Tag } from 'antd';
++import { useCallback, useState } from 'react';
++import { useTranslation } from 'react-i18next';
++import AdminExtBadge from '@/components/AdminExtBadge';
++import {
++  TRACE_STATUS_OPTIONS,
++  TraceAggregate,
++  TraceSearchItem,
++  TraceSearchParams,
++  TraceSpan,
++  exportTraceReport,
++  getTrace,
++  searchTrace,
++} from '@/services/admin-ext-tracing';
++
++/**
++ * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：排障查询（P1-2 全链路 tracing，§6.3/§7.7）。
++ *
++ * 三区块：
++ *  ① 多维检索：tenant/model/status（status 枚举固定 ok/client_error/server_error/denied）
++ *     → 映射 Tempo Search；命中表只读展示 traceID/服务/耗时（供定位）。
++ *  ② 单请求聚合：按 request_id 拉取 span 树 + 审计段 + 耗时分解（§6.3 响应结构）。
++ *  ③ 报告导出：json / csv（CSV 由后端做公式注入防护）。
++ *
++ * 最小披露（C-1/C-5）：响应仅含 §6.2 白名单属性与审计元数据，**无原文、无金额**。
++ * 租户隔离：后端按会话 claims 强隔离（跨租户/缺省 tenant 的非 admin → 403）。
++ * 503 语义：Tempo/Prometheus 未配置或不可达时后端返回 503（不静默给空数据）。
++ */
++
++interface SearchFormValues {
++  tenant?: string;
++  model?: string;
++  status?: string;
++}
++
++const TracingCenter: React.FC = () => {
++  const { t } = useTranslation();
++  const [detailForm] = Form.useForm<{ request_id?: string }>();
++  const [searchForm] = Form.useForm<SearchFormValues>();
++
++  const [agg, setAgg] = useState<TraceAggregate | null>(null);
++  const [loading, setLoading] = useState(false);
++  const [err, setErr] = useState<string | null>(null);
++
++  const [hits, setHits] = useState<TraceSearchItem[]>([]);
++  const [searching, setSearching] = useState(false);
++  const [searchErr, setSearchErr] = useState<string | null>(null);
++
++  const loadTrace = useCallback((rid: string) => {
++    const id = (rid || '').trim();
++    if (!id) {
++      return;
++    }
++    setLoading(true);
++    setErr(null);
++    getTrace(id)
++      .then((r) => setAgg(r))
++      .catch((e) => {
++        setAgg(null);
++        setErr(String(e));
++      })
++      .finally(() => setLoading(false));
++  }, []);
++
++  const doSearch = useCallback((v: SearchFormValues) => {
++    setSearching(true);
++    setSearchErr(null);
++    const params: TraceSearchParams = {
++      tenant: v.tenant,
++      model: v.model,
++      status: v.status,
++      limit: 50,
++    };
++    searchTrace(params)
++      .then((r) => setHits(r.traces || []))
++      .catch((e) => {
++        setHits([]);
++        setSearchErr(String(e));
++      })
++      .finally(() => setSearching(false));
++  }, []);
++
++  const hitColumns = [
++    { title: t('adminExt.tracing.colTraceId'), dataIndex: 'traceID', ellipsis: true },
++    { title: t('adminExt.tracing.colService'), dataIndex: 'rootServiceName' },
++    { title: t('adminExt.tracing.colDurationMs'), dataIndex: 'durationMs', width: 120 },
++  ];
++
++  const spanColumns = [
++    { title: t('adminExt.tracing.colSpanName'), dataIndex: 'name', width: 200 },
++    {
++      title: t('adminExt.tracing.colStartMs'),
++      dataIndex: 'start_ms',
++      width: 110,
++      render: (v: number) => (typeof v === 'number' ? v.toFixed(2) : '-'),
++    },
++    {
++      title: t('adminExt.tracing.colDurMs'),
++      dataIndex: 'dur_ms',
++      width: 110,
++      render: (v: number) => (typeof v === 'number' ? v.toFixed(2) : '-'),
++    },
++    {
++      title: t('adminExt.tracing.colAttrs'),
++      dataIndex: 'attrs',
++      render: (attrs: Record<string, unknown>) => (
++        <Space size={[4, 4]} wrap>
++          {Object.keys(attrs || {}).map((k) => (
++            <Tag key={k}>{`${k}=${String((attrs || {})[k])}`}</Tag>
++          ))}
++        </Space>
++      ),
++    },
++  ];
++
++  const statusOptions = TRACE_STATUS_OPTIONS.map((s) => ({
++    value: s,
++    label: t(`adminExt.tracing.status_${s}`),
++  }));
++
++  return (
++    <PageContainer title={t('menu.adminExtTracing')}>
++      <AdminExtBadge />
++
++      <Card title={t('adminExt.tracing.searchTitle')} style={{ marginBottom: 16 }}>
++        <Form form={searchForm} layout="inline" onFinish={doSearch}>
++          <Form.Item name="tenant" label={t('adminExt.tracing.tenant')}>
++            <Input allowClear placeholder={t('adminExt.tracing.tenantPlaceholder')} style={{ width: 180 }} />
++          </Form.Item>
++          <Form.Item name="model" label={t('adminExt.tracing.model')}>
++            <Input allowClear style={{ width: 160 }} />
++          </Form.Item>
++          <Form.Item name="status" label={t('adminExt.tracing.status')}>
++            <Select allowClear options={statusOptions} style={{ width: 160 }} />
++          </Form.Item>
++          <Form.Item>
++            <Button type="primary" htmlType="submit" loading={searching}>
++              {t('adminExt.tracing.search')}
++            </Button>
++          </Form.Item>
++        </Form>
++        {searchErr && <Alert type="error" showIcon message={searchErr} style={{ marginTop: 12 }} />}
++        <Table<TraceSearchItem>
++          rowKey="traceID"
++          size="small"
++          style={{ marginTop: 12 }}
++          loading={searching}
++          dataSource={hits}
++          columns={hitColumns}
++          pagination={{ pageSize: 10, hideOnSinglePage: true }}
++        />
++      </Card>
++
++      <Card
++        title={t('adminExt.tracing.detailTitle')}
++        extra={
++          <Space>
++            <Button
++              size="small"
++              disabled={!agg}
++              onClick={() => agg && exportTraceReport(agg.request_id, 'json')}
++            >
++              {t('adminExt.tracing.exportJson')}
++            </Button>
++            <Button
++              size="small"
++              disabled={!agg}
++              onClick={() => agg && exportTraceReport(agg.request_id, 'csv')}
++            >
++              {t('adminExt.tracing.exportCsv')}
++            </Button>
++          </Space>
++        }
++      >
++        <Form
++          form={detailForm}
++          layout="inline"
++          onFinish={(v) => loadTrace(v.request_id || '')}
++          style={{ marginBottom: 12 }}
++        >
++          <Form.Item
++            name="request_id"
++            label={t('adminExt.tracing.requestId')}
++            rules={[{ required: true, message: t('adminExt.tracing.requestIdRequired') }]}
++          >
++            <Input allowClear style={{ width: 320 }} placeholder="req-..." />
++          </Form.Item>
++          <Form.Item>
++            <Button type="primary" htmlType="submit" loading={loading}>
++              {t('adminExt.tracing.query')}
++            </Button>
++          </Form.Item>
++        </Form>
++
++        {err && <Alert type="error" showIcon message={t('adminExt.tracing.detailError')} description={err} />}
++
++        {agg && (
++          <>
++            <Descriptions bordered size="small" column={2}>
++              <Descriptions.Item label="request_id">{agg.request_id}</Descriptions.Item>
++              <Descriptions.Item label="trace_id">{agg.trace_id}</Descriptions.Item>
++              <Descriptions.Item label={t('adminExt.tracing.tenant')}>{agg.tenant || '-'}</Descriptions.Item>
++              <Descriptions.Item label={t('adminExt.tracing.breakdown')}>
++                {`ingress ${agg.breakdown.ingress_ms.toFixed(2)}ms / tee ${agg.breakdown.tee_overhead_ms.toFixed(
++                  2,
++                )}ms / upstream ${agg.breakdown.upstream_ms.toFixed(2)}ms`}
++              </Descriptions.Item>
++            </Descriptions>
++
++            <Table<TraceSpan>
++              rowKey={(r) => `${r.name}-${r.start_ms}`}
++              size="small"
++              style={{ marginTop: 16 }}
++              dataSource={agg.spans}
++              columns={spanColumns}
++              pagination={false}
++            />
++
++            <Descriptions
++              title={t('adminExt.tracing.audit')}
++              bordered
++              size="small"
++              column={2}
++              style={{ marginTop: 16 }}
++            >
++              <Descriptions.Item label="available">{String(agg.audit.available)}</Descriptions.Item>
++              <Descriptions.Item label="action">{agg.audit.action || '-'}</Descriptions.Item>
++              <Descriptions.Item label="result">{agg.audit.result || '-'}</Descriptions.Item>
++              <Descriptions.Item label="cache_hit">{String(agg.audit.cache_hit)}</Descriptions.Item>
++              <Descriptions.Item label="is_retry">{String(agg.audit.is_retry)}</Descriptions.Item>
++              <Descriptions.Item label={t('adminExt.tracing.denies')}>
++                {(agg.audit.denies || []).map((d) => `${d.result}:${d.reason}`).join(', ') || '-'}
++              </Descriptions.Item>
++            </Descriptions>
++          </>
++        )}
++      </Card>
++    </PageContainer>
++  );
++};
++
++export default TracingCenter;
+diff --git a/frontend/src/services/admin-ext-tracing.ts b/frontend/src/services/admin-ext-tracing.ts
+new file mode 100644
+index 0000000..3f9bba6
+--- /dev/null
++++ b/frontend/src/services/admin-ext-tracing.ts
+@@ -0,0 +1,110 @@
++import request from './request';
++
++/**
++ * ADMIN-EXT（自研扩展）：排障查询 API 客户端（P1-2 全链路 tracing，§6.3）。
++ *
++ * 数据源：gateway-admin-service `/v1/adminext/*`
++ *  - GET /trace/{request_id}         单请求全链路聚合（span 树 + 审计 + 耗时分解）
++ *  - GET /trace/search               多维检索（映射 Tempo Search）
++ *  - GET /trace/{request_id}/report  导出报告（json | csv）
++ *
++ * 安全约束（§6.3）：响应仅含 §6.2 白名单属性与审计元数据，**无原文、无金额**（C-1/C-5）；
++ * 租户隔离：非 admin 会话仅可访问本声明租户（跨租户/缺省 tenant → 403，fail-closed）。
++ * 503 语义：Tempo/Prometheus 未配置或不可达时后端返回 503（不静默给空数据）。
++ */
++
++const BASE = '/v1/adminext';
++
++/** 单个 span（元数据，属性已按白名单裁剪）。 */
++export interface TraceSpan {
++  name: string;
++  start_ms: number;
++  dur_ms: number;
++  attrs: Record<string, unknown>;
++}
++
++/** 拒绝/拦截记录（审计段）。 */
++export interface TraceDeny {
++  reason: string;
++  result: string;
++}
++
++/** 审计段（audit.available=false 表示 tee-infer 审计代理不可达，如实标注）。 */
++export interface TraceAudit {
++  available: boolean;
++  action: string;
++  result: string;
++  cache_hit: boolean;
++  is_retry: boolean;
++  denies: TraceDeny[];
++}
++
++/** 耗时分解（毫秒）。 */
++export interface TraceBreakdown {
++  ingress_ms: number;
++  tee_overhead_ms: number;
++  upstream_ms: number;
++}
++
++/** 单请求全链路聚合响应。 */
++export interface TraceAggregate {
++  request_id: string;
++  trace_id: string;
++  tenant: string;
++  spans: TraceSpan[];
++  audit: TraceAudit;
++  breakdown: TraceBreakdown;
++}
++
++/** 检索命中项（Tempo Search 精简视图）。 */
++export interface TraceSearchItem {
++  traceID: string;
++  rootServiceName?: string;
++  rootTraceName?: string;
++  startTimeUnixNano?: string;
++  durationMs?: number;
++}
++
++/** 检索响应（Tempo 原样透传，取 traces 字段。 */
++export interface TraceSearchResult {
++  traces?: TraceSearchItem[];
++}
++
++/** §6.3 status 枚举（枚举外值后端返回 400）。 */
++export const TRACE_STATUS_OPTIONS = ['ok', 'client_error', 'server_error', 'denied'];
++
++export interface TraceSearchParams {
++  tenant?: string;
++  model?: string;
++  status?: string;
++  category?: string;
++  from?: string;
++  to?: string;
++  limit?: number;
++  offset?: number;
++}
++
++/** 单请求全链路聚合。 */
++export const getTrace = (requestId: string): Promise<TraceAggregate> => {
++  return request.get<any, TraceAggregate>(`${BASE}/trace/${encodeURIComponent(requestId)}`);
++};
++
++/** 多维检索。 */
++export const searchTrace = (params: TraceSearchParams): Promise<TraceSearchResult> => {
++  const q: Record<string, string> = {};
++  Object.keys(params).forEach((k) => {
++    const v = (params as Record<string, unknown>)[k];
++    if (v !== undefined && v !== null && v !== '') {
++      q[k] = String(v);
++    }
++  });
++  return request.get<any, TraceSearchResult>(`${BASE}/trace/search`, { params: q });
++};
++
++/** 导出排障报告（浏览器直接下载，走同源会话认证）。 */
++export const exportTraceReport = (requestId: string, format: 'json' | 'csv'): void => {
++  window.open(
++    `${BASE}/trace/${encodeURIComponent(requestId)}/report?format=${format}`,
++    '_blank',
++  );
++};

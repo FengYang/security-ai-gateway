@@ -46,6 +46,8 @@ jobs:
             "$GITHUB_WORKSPACE/fork-patches/higress-console/higress-console-custom.patch"
           git -C /tmp/higress-console apply --verbose \
             "$GITHUB_WORKSPACE/fork-patches/higress-console/higress-console-billing.patch"
+          git -C /tmp/higress-console apply --verbose \
+            "$GITHUB_WORKSPACE/fork-patches/higress-console/higress-console-trace.patch"
           echo "--- applied customization summary ---"
           git -C /tmp/higress-console status --short
 
