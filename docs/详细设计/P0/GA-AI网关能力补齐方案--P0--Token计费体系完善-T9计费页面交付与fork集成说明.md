@@ -94,4 +94,4 @@ cd higress-console/frontend && npm ci && npm run build
 
 后续（可选）：
 - 与既有用量页（`/admin-ext/usage`）的口径衔接与自助场景打磨。
-- 生产环境 UI 回归（真机控制台 + 真实 SSO 账号派生 `billing_reader`）。
+- 生产环境 UI 回归：**手册已就绪** —— 《…-T9计费页面UI回归手册.md》（含 7 组检查项/证据留痕/记录模板）；待具备控制台运行栈（Java 后端 + 会话 + `billing_reader` 账号）的环境照单执行。

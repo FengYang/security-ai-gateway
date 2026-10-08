@@ -598,6 +598,7 @@ S-2「独立鉴权域」未实现；配置项语义误导，运维按 R-27 配�
 | 2026-10-08 | 开发（M2：billing_reader 放行） | ① **Go**：`auth.go` 增 `roleBillingReader`（`validRole` 放行 + 错误文案）→ 读端点即自动放行、写端点仍仅 `admin`、租户隔离沿用；② **控制台 fork**：`AdminExtRole` 增 `BILLING_READER`、账号校验与账号页角色下拉 + 双语 i18n（控制台可签发该角色）；③ 重导主补丁。验证：`TestVerifyInternalToken` 新用例 + `TestBillingBillingReaderRole`（读 200 / 跨租户·写 403）**通过**；主补丁**原子应用** + `fork-patch-check` **PASS**；billing 补丁仍可应用 |
 | 2026-10-08 | 开发（M3：页面契约测试） | 新增 `billing_api_contract_test.go`：**T-4.3-1** 页面级 RBAC 矩阵（admin/auditor/billing_reader × 读/写 + 未认证 401）、**T-4.3-2** `enabled=false` 计费端点全 404、**T-4.3-3** 写动作落审计链（`plan_upsert`/`plan_bind`/`bill_freeze`）；**T-4.3-4** 以**源扫描门禁** `scripts/check-billing-amount-scope.ps1` 落地（金额 token 仅账单页；接入 `admin-portal.yml` + `verify-fork-rebuild.ps1`）。验证：3 用例 **PASS** + 全量 `go test` 绿（admin 109.6s / billing 0.59s）；门禁正例 PASS / 反例 FAIL |
 | 2026-10-08 | 开发（M4：T9 验收 E2E） | E2E 扩展 **E2E-5**：套餐 upsert/绑定/订阅读回 + `billing_reader` 只读矩阵（读 200 / 跨租户·写 403）+ 冻结停出账（409）+ **审计链留痕**（`plan_upsert`/`plan_bind`/`bill_freeze`）；harness 增 `ADMIN_AUDIT_FILE` 启用 G1 链。验证：`go test -tags e2e ./e2e -run TestE2E_Billing` → **E2E-1..5 5/5 PASS（17.9s）**。**T9 完整态里程碑 M0–M4 全部达成** |
+| 2026-10-08 | 文档（生产 UI 回归资产） | **环境阻塞（如实登记）**：本机无控制台运行栈（无 `mvn/java`、无会话/SSO），生产 UI 回归**无法本地执行**（页面 401 强制跳登录，见 `request.tsx`）。替代交付：**《T9 计费页面 UI 回归手册与检查表》**（前置/准备/7 组检查项 A–G/证据留痕/清理/记录模板/已知边界），供目标环境照单执行；纳入 `.gitignore` 白名单 |
 
 ---
 
