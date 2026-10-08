@@ -65,6 +65,7 @@ func TestVerifyInternalToken(t *testing.T) {
 		{"合法令牌（白名单内 → admin）", nil, nil, false, roleAdmin},
 		{"白名单外 + 令牌 admin → 采信 admin（M3-A）", func(c *claims) { c.Sub = "bob" }, nil, false, roleAdmin},
 		{"白名单外 + 令牌 auditor → auditor", func(c *claims) { c.Sub = "bob"; c.Role = roleAuditor }, nil, false, roleAuditor},
+		{"白名单外 + 令牌 billing_reader → billing_reader（P0-3 §4.3.5）", func(c *claims) { c.Sub = "bob"; c.Role = roleBillingReader }, nil, false, roleBillingReader},
 		{"令牌自称 auditor 但白名单内 → 加成 admin（白名单优先）", func(c *claims) { c.Role = roleAuditor }, nil, false, roleAdmin},
 		{"未声明 iss/aud 兼容", func(c *claims) { c.Iss, c.Aud = "", "" }, nil, false, roleAdmin},
 		{"过期令牌", func(c *claims) { c.EXP = time.Now().Unix() - 60 }, nil, true, ""},

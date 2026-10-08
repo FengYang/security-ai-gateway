@@ -13,7 +13,7 @@
   2. **套餐与订阅**：套餐列表 + 当前租户订阅查询 + 订阅绑定（admin）。
   3. **冻结管理**：租户冻结/解冻（admin）。
 - **写操作（M1）**：套餐 upsert（审计 `plan_upsert`）、订阅绑定（`plan_bind`）、冻结/解冻（`bill_freeze`/`bill_unfreeze`）——由**后端 `requireRole("admin")` 强制**并落审计链；前端不做角色隐藏（无身份信息，§4.3.4 D10），越权由后端 403。
-- **未放行**：`billing_reader`（复用 `auditor`/`admin`，§4.3.5 P-5 回退）。
+- **角色（M2）**：已放行 `billing_reader`（Go `auth.go` + 控制台签发侧 Java/账号页）；写端点仍仅 `admin`，租户隔离沿用（非 admin 受令牌 `tenant` 约束）。
 - **不改上游逻辑**：仅新增文件 + 修改白名单文件（菜单/locale）。
 
 ## 2. 交付物清单
@@ -79,5 +79,5 @@ cd higress-console/frontend && npm ci && npm run build
 ## 6. 后续（T9 完整态，未做）
 
 - 页面契约测试（T-4.3-1..4：页面级 RBAC 矩阵、`enabled=false` 404、写动作落审计、金额列仅账单页快照）——**M3 计划**。
-- `billing_reader` 角色放行（§4.3.5）——**M2 计划**（写页面已于 M1 交付）。
+- ~~`billing_reader` 角色放行~~ —— **M2 已完成**（Go + 控制台签发侧）。
 - 与既有用量页（`/admin-ext/usage`）的口径衔接与自助场景打磨。

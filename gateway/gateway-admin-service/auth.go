@@ -13,7 +13,7 @@
 //   - ADMIN_SVC_ROLE_ADMINS 降级为**运维层强制加成**：白名单内 sub 恒 admin
 //     （优先于 JWT role）。定位 = K8s/账号表故障时的最后防线（集群运维通道，
 //     不依赖账号 Secret 可读），向后兼容 M2 既有部署配置；
-//   - 写端点要求 role=admin，读端点允许 role=auditor；
+//   - 写端点要求 role=admin，读端点允许 role=auditor / billing_reader（P0-3 §4.3.5）；
 //   - 白名单未配置 → 全按 JWT role（原"无人可写 fail-closed"改由 Java 会话 + 账号表承担）。
 package main
 
@@ -29,10 +29,11 @@ import (
 	"time"
 )
 
-// 管理面角色（D6/D10：admin / auditor 两角色起步）。
+// 管理面角色（D6/D10：admin / auditor 起步；P0-3 §4.3.5 增只读角色 billing_reader）。
 const (
-	roleAdmin   = "admin"
-	roleAuditor = "auditor"
+	roleAdmin         = "admin"
+	roleAuditor       = "auditor"
+	roleBillingReader = "billing_reader" // 只读账单/套餐/用量（§4.3.5；写端点仍仅 admin）
 )
 
 // claims 内部服务令牌载荷。
@@ -54,7 +55,7 @@ var b64 = base64.RawURLEncoding // RFC 7515：base64url 无 padding
 
 // validRole 校验角色是否在管理面白名单内（仅令牌格式校验，非授权依据）。
 func validRole(role string) bool {
-	return role == roleAdmin || role == roleAuditor
+	return role == roleAdmin || role == roleAuditor || role == roleBillingReader
 }
 
 // resolveRole 派生授权角色（M3-A）：JWT role 为授权依据，运维白名单强制加成。
@@ -110,7 +111,7 @@ func verifyInternalToken(token string, cfg *config) (*claims, error) {
 		return nil, fmt.Errorf("auth: 签发方不匹配（got=%q want=%q）", c.Iss, cfg.jwtIssuer)
 	}
 	if !validRole(c.Role) {
-		return nil, fmt.Errorf("auth: 未知角色 %q（允许 admin/auditor）", c.Role)
+		return nil, fmt.Errorf("auth: 未知角色 %q（允许 admin/auditor/billing_reader）", c.Role)
 	}
 	if c.Sub == "" {
 		return nil, errors.New("auth: 主体（sub）为空，无法留痕到人")

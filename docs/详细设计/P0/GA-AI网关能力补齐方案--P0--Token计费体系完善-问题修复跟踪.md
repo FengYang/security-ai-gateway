@@ -595,6 +595,7 @@ S-2「独立鉴权域」未实现；配置项语义误导，运维按 R-27 配�
 | 2026-10-08 | 开发（决策项一：T9 计费页面，方案 B/A） | 落地控制台**计费中心（只读）**：新增页面 `admin-ext/billing/index.tsx` + service `admin-ext-billing.ts`，注册菜单与 i18n（白名单文件）；导出**前端增量补丁** `higress-console-billing.patch`。验证：`tsc` 我的文件 0 错误、**完整构建通过**（`build/admin-ext/billing.html` + chunk）。**新发现**：fork 基线与重建链漂移（上游 v2.2.4=f8410432≠baseline 36aa9c6；2 个 backend 文件失配）→ 登记**独立待办**，详见《…-T9计费页面交付与fork集成说明.md》 |
 | 2026-10-08 | 开发（M0：fork 基线修复） | 修复控制台 fork **基线/重建链漂移**：① `baseline.txt` 重钉 **f8410432**（同步 `admin-portal.yml` + `verify-fork-rebuild.ps1` 的 `$baseRev`）；② 删除 2 条**过时** hunk（上游已自修 #761，`WasmPluginServiceTest` 改版本无关断言；`plugin-snapshot.lock.json` 上游已移除）+ 剔除 `frontend/yarn.lock`（本地 `npm ci` 副产物，非定制点）；③ 从 f8410432 重定基并重导 `higress-console-custom.patch`（35 文件/5051 行）。验证：纯净 f8410432 **原子应用通过**（此前失败）；`fork-patch-check.ps1 -BaseRev f8410432` **PASS**（白名单合规） |
 | 2026-10-08 | 开发（M1：T9 写页面 + 集成） | 计费中心增**写操作**：套餐 upsert / 订阅绑定 / 冻结解冻（service 写接口 + 页面 Modal/Form/Popconfirm + 双语 i18n）；写端点仅 `admin`（后端 `requireRole` 强制 + 落审计链 `plan_upsert`/`plan_bind`/`bill_freeze`/`bill_unfreeze`）。重导 `higress-console-billing.patch`（读+写 / 855 行）；`admin-portal.yml` 与 `verify-fork-rebuild.ps1` 接入**按序 apply 两补丁** + 断言计费页产物。验证：tsc 计费文件 **0 错误**；`npm run build` **成功**（billing.html + chunk）；增量补丁在主补丁基线上**原子应用 OK** |
+| 2026-10-08 | 开发（M2：billing_reader 放行） | ① **Go**：`auth.go` 增 `roleBillingReader`（`validRole` 放行 + 错误文案）→ 读端点即自动放行、写端点仍仅 `admin`、租户隔离沿用；② **控制台 fork**：`AdminExtRole` 增 `BILLING_READER`、账号校验与账号页角色下拉 + 双语 i18n（控制台可签发该角色）；③ 重导主补丁。验证：`TestVerifyInternalToken` 新用例 + `TestBillingBillingReaderRole`（读 200 / 跨租户·写 403）**通过**；主补丁**原子应用** + `fork-patch-check` **PASS**；billing 补丁仍可应用 |
 
 ---
 
@@ -619,6 +620,7 @@ S-2「独立鉴权域」未实现；配置项语义误导，运维按 R-27 配�
 | P0-3-DOC-007 | P2 | 无 P0-3 性能基准报告 | 《PERF-BILLING-性能基准报告.md》 | 已出品（对齐 PERF-S2 格式） |
 | P0-3-FEAT-T9 | P1 | T9 管理后台计费页面未实现 | 控制台 fork 增量补丁（页面/service/菜单/i18n） | 本机**完整构建通过**（`billing.html` + chunk）；详见交付说明 |
 | P0-3-FEAT-T9-M1 | P1 | T9 写页面（套餐/绑定/冻结）缺失 | 计费中心写操作 + service 写接口 + 双语 i18n；两补丁接入 `admin-portal.yml`/`verify-fork-rebuild.ps1` | 计费文件 tsc **0 错误**；**完整构建通过**；增量补丁原子应用 OK |
+| P0-3-FEAT-T9-M2 | P1 | `billing_reader` 角色未放行 | Go `auth.go`（角色常量/`validRole`/文案）+ 控制台 fork `AdminExtRole`/`AdminExtAccountController`/账号页/i18n | Go 角色矩阵用例通过；主补丁原子应用 + 白名单 PASS；billing 补丁仍可应用 |
 
 ### 8.2 性能基准实测（内存 vs 持久化；详见《PERF-BILLING-性能基准报告.md》）
 
@@ -639,7 +641,7 @@ S-2「独立鉴权域」未实现；配置项语义误导，运维按 R-27 配�
 
 | 项 | 现状 | 处置 |
 |---|---|---|
-| **T9 管理后台页面** | **只读 + 写操作已交付（M0/M1）**：计费中心 `/admin-ext/billing`（账单中心 / 套餐订阅 / 冻结管理）；写操作（套餐 upsert、订阅绑定、冻结解冻）经后端 `admin` 强制 + 落审计链。经**前端增量补丁** `higress-console-billing.patch` 交付（读+写/855 行），本机**完整构建通过**。仍存：`billing_reader` 放行、页面契约测试 | `billing_reader`（M2）与页面契约测试（M3）为后续；fork 基线/重建链漂移已由 M0 修复——详见《…-T9计费页面交付与fork集成说明.md》 |
+| **T9 管理后台页面** | **只读 + 写操作已交付（M0/M1）**：计费中心 `/admin-ext/billing`（账单中心 / 套餐订阅 / 冻结管理）；写操作（套餐 upsert、订阅绑定、冻结解冻）经后端 `admin` 强制 + 落审计链。**`billing_reader` 角色已放行（M2）**（Go 读端点 + 控制台签发侧）。经**前端增量补丁** `higress-console-billing.patch` 交付（读+写/855 行），本机**完整构建通过**。仍存：页面契约测试 | 页面契约测试（M3）为后续；fork 基线/重建链漂移已由 M0 修复——详见《…-T9计费页面交付与fork集成说明.md》 |
 | §10.6 S-7 跨版本（旧 tee-infer 不识别 `month`） | 无 CI 版本校验；本轮补**优雅降级**用例 | 版本一致性仍建议由部署/CI 版本锁保障（§8.4 R-α） |
 | REC-6 审计链断裂 | 无专用指标/告警（仅日志） | 保留为已知边界；如需告警可后续单批补指标 + §9.3 规则 |
 | E2E-2 OverQuota 计价差异 | E2E 仅“基础版”，计价差异由单测/集成覆盖 | 已知边界（详设 §10.3 已声明） |

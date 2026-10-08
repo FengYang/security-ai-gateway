@@ -74,7 +74,7 @@
 |---|---|---|---|
 | A1 | P1 | `GET /billing/subscription` 缺实现（§4.3.2 要求 GET\|POST，原 GET→405） | **已修**：`handleGetSubscription`（租户隔离）+ `TestBillingGetSubscription` |
 | A2 | P1 | T9 管理后台页面（套餐/账单/冻结）未实现 | **读+写已交付（M0/M1）**（计费中心：账单/套餐订阅/冻结；写操作经后端 `admin` 强制 + 审计）；`billing_reader`/契约测试待后续 |
-| A3 | P2 | `billing_reader` 角色未放行（P-5 回退） | 保留为开放边界（UI 立项时一并实现） |
+| A3 | P2 | `billing_reader` 角色未放行（P-5 回退） | **已放行（M2）**：Go 角色（`auth.go`）+ 控制台签发侧（Java `AdminExtRole`/账号页）；角色矩阵用例通过 |
 | A4 | P3 | 明细行取整硬编码 `half_up`，`floor` 时明细≠总额 | **已修**：`ratingEngine.Rounding()` + `buildItems` |
 | A5/B2 | P3 | `effectiveTiers` 空档返回 nil 且注释矛盾 | **已修**：注释对齐 fail-closed 不变量 |
 | A6 | P3 | 拉取秒粒度 `event_key` 碰撞 → 迟到事件漏账 | **已修**：端点秒对齐（`pullOnce`/`onReconcileWarning`） |
@@ -134,7 +134,7 @@ go test ./gateway/gateway-admin-service/billing -bench . -benchmem → 见 §6
 
 | 项 | 现状 | 建议 |
 |---|---|---|
-| **T9 管理后台页面** | **读+写已交付（M0/M1）**（计费中心 `/admin-ext/billing`：账单 / 套餐订阅 / 冻结；本机完整构建通过）；`billing_reader` / 页面契约测试待后续 | 详见《…-T9计费页面交付与fork集成说明.md》 |
+| **T9 管理后台页面** | **读+写已交付（M0/M1）** + **`billing_reader` 已放行（M2）**（计费中心 `/admin-ext/billing`：账单 / 套餐订阅 / 冻结；本机完整构建通过）；页面契约测试待后续 | 详见《…-T9计费页面交付与fork集成说明.md》 |
 | 控制台 fork 基线/重建链漂移 | **已修复（M0）**：baseline 重钉 `f8410432`、删除 2 条过时 hunk + 剔除 `yarn.lock` 副产物；纯净树**原子应用通过** + `fork-patch-check` **PASS** | 详见《…-T9计费页面交付与fork集成说明.md》§5 |
 | S-7 跨版本 | 无 CI 版本校验（本轮补优雅降级用例） | 部署/CI 版本锁（§8.4 R-α） |
 | REC-6 告警 | 仅日志 | 如需告警单批补指标 + §9.3 |

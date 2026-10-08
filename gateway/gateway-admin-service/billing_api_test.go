@@ -530,6 +530,54 @@ func postSubscription(t *testing.T, srvURL string) int {
 	return resp.StatusCode
 }
 
+// billingPost 以指定令牌发起 POST（body 为 JSON 原始串）。
+func billingPost(t *testing.T, env *billingTestEnv, token, path, body string) int {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, env.srv.URL+path, bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// ★ M2：billing_reader 角色矩阵（§4.3.5）——读端点（自身租户）200；写端点 403；跨租户/缺声明 403。
+func TestBillingBillingReaderRole(t *testing.T) {
+	env := newBillingTestEnv(t)
+
+	brT1 := testSignToken(t, testSecret, claims{
+		Sub: "fin", Role: roleBillingReader, Iss: defaultIssuer, Aud: defaultAudience, Tenant: "t1",
+	})
+	brNoTenant := testSignToken(t, testSecret, claims{
+		Sub: "fin2", Role: roleBillingReader, Iss: defaultIssuer, Aud: defaultAudience,
+	})
+
+	// 读（自身租户）→ 200
+	for _, path := range []string{"/bills?tenant=t1", "/ledger?tenant=t1", "/plans", "/subscription?tenant=t1"} {
+		if code := billingGet(t, env, brT1, billingAPIBase+path); code != http.StatusOK {
+			t.Fatalf("billing_reader 读 %s 期望 200，实际 %d", path, code)
+		}
+	}
+	// 跨租户读 → 403（fail-closed）
+	if code := billingGet(t, env, brT1, billingAPIBase+"/bills?tenant=t2"); code != http.StatusForbidden {
+		t.Fatalf("billing_reader 跨租户读 期望 403，实际 %d", code)
+	}
+	// 缺租户声明读 → 403
+	if code := billingGet(t, env, brNoTenant, billingAPIBase+"/bills?tenant=t1"); code != http.StatusForbidden {
+		t.Fatalf("billing_reader 缺租户声明读 期望 403，实际 %d", code)
+	}
+	// 写端点 → 403（仅 admin）
+	if code := billingPost(t, env, brT1, billingAPIBase+"/freeze", `{"tenant":"t1"}`); code != http.StatusForbidden {
+		t.Fatalf("billing_reader 冻结 期望 403，实际 %d", code)
+	}
+	if code := billingPost(t, env, brT1, billingAPIBase+"/close-daily", `{"tenant":"t1","day":"2026-09-01"}`); code != http.StatusForbidden {
+		t.Fatalf("billing_reader 日结 期望 403，实际 %d", code)
+	}
+}
+
 // ★ A1：GET /billing/subscription 返回当前租户生效套餐；跨租户 403（§4.3.2/§7.4）。
 func TestBillingGetSubscription(t *testing.T) {
 	env := newBillingTestEnv(t)

@@ -1,6 +1,6 @@
 diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtAccountController.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtAccountController.java
 new file mode 100644
-index 0000000..015d72a
+index 0000000..29b2f02
 --- /dev/null
 +++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtAccountController.java
 @@ -0,0 +1,228 @@
@@ -78,7 +78,7 @@ index 0000000..015d72a
 +            throw new ValidationException(weak);
 +        }
 +        if (!AdminExtRole.isValid(req.getRole())) {
-+            throw new ValidationException("角色须为 admin 或 auditor");
++            throw new ValidationException("角色须为 admin、auditor 或 billing_reader");
 +        }
 +
 +        AdminExtUserStore.Snapshot snapshot = userStore.readFresh();
@@ -802,17 +802,17 @@ index 0000000..4695ba2
 +}
 diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtRole.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtRole.java
 new file mode 100644
-index 0000000..ec5d7cd
+index 0000000..3926fd0
 --- /dev/null
 +++ b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtRole.java
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,31 @@
 +/*
 + * Copyright (c) 2026
 + *
 + * ADMIN-EXT（自研扩展，vendor-fork 只增不减）：
 + * 管理面角色常量（M3-A 账号角色扩展，docs/管理门户-细化方案.md §4 D6）。
 + *
-+ * 两角色起步：admin（读写）/ auditor（只读审计）。
++ * 角色：admin（读写）/ auditor（只读审计）/ billing_reader（只读计费，P0-3 §4.3.5）。
 + * 角色持久化于账号表（AdminExtUserStore，独立 K8s Secret）；
 + * 授权消费方 = gateway-admin-service（JWT role 采信 + 运维白名单加成）。
 + */
@@ -827,11 +827,14 @@ index 0000000..ec5d7cd
 +
 +    public static final String AUDITOR = "auditor";
 +
++    /** P0-3 §4.3.5：只读账单/套餐/用量（授权消费方 gateway-admin-service 读端点放行）。 */
++    public static final String BILLING_READER = "billing_reader";
++
 +    private AdminExtRole() {
 +    }
 +
 +    public static boolean isValid(String role) {
-+        return ADMIN.equals(role) || AUDITOR.equals(role);
++        return ADMIN.equals(role) || AUDITOR.equals(role) || BILLING_READER.equals(role);
 +    }
 +}
 diff --git a/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtSessionService.java b/backend/console/src/main/java/com/alibaba/higress/console/controller/admin/AdminExtSessionService.java
@@ -2162,10 +2165,10 @@ index 0000000..9c5f80a
 +
 +export default AdminExtBadge;
 diff --git a/frontend/src/locales/en-US/translation.json b/frontend/src/locales/en-US/translation.json
-index 626465b..14c6204 100644
+index 626465b..d26835e 100644
 --- a/frontend/src/locales/en-US/translation.json
 +++ b/frontend/src/locales/en-US/translation.json
-@@ -22,7 +22,224 @@
+@@ -22,7 +22,225 @@
      "pluginManagement": "Plugin Management",
      "systemSettings": "System Settings",
      "mcpManagement": "MCP Management",
@@ -2338,6 +2341,7 @@ index 626465b..14c6204 100644
 +      "colRole": "Role",
 +      "roleAdmin": "Administrator",
 +      "roleAuditor": "Auditor (read-only)",
++      "roleBillingReader": "Billing (read-only)",
 +      "colActions": "Actions",
 +      "password": "Password",
 +      "passwordTip": "At least 8 chars with both letters and digits",
@@ -2391,7 +2395,7 @@ index 626465b..14c6204 100644
    },
    "index": {
      "title": "Higress Console"
-@@ -224,7 +441,7 @@
+@@ -224,7 +442,7 @@
        "tokens": "Tokens"
      },
      "providerTypes": {
@@ -2401,10 +2405,10 @@ index 626465b..14c6204 100644
        "moonshot": "Moonshot",
        "ai360": "360 Zhinao",
 diff --git a/frontend/src/locales/zh-CN/translation.json b/frontend/src/locales/zh-CN/translation.json
-index 5b016dc..07c3f64 100644
+index 5b016dc..7f62c52 100644
 --- a/frontend/src/locales/zh-CN/translation.json
 +++ b/frontend/src/locales/zh-CN/translation.json
-@@ -22,7 +22,224 @@
+@@ -22,7 +22,225 @@
      "pluginManagement": "插件配置",
      "systemSettings": "系统设置",
      "mcpManagement": "MCP管理",
@@ -2577,6 +2581,7 @@ index 5b016dc..07c3f64 100644
 +      "colRole": "角色",
 +      "roleAdmin": "管理员",
 +      "roleAuditor": "审计员（只读）",
++      "roleBillingReader": "计费只读",
 +      "colActions": "操作",
 +      "password": "密码",
 +      "passwordTip": "至少 8 位且同时含字母与数字",
@@ -2630,7 +2635,7 @@ index 5b016dc..07c3f64 100644
    },
    "index": {
      "title": "Higress Console"
-@@ -224,7 +441,7 @@
+@@ -224,7 +442,7 @@
        "tokens": "凭证"
      },
      "providerTypes": {
@@ -2721,10 +2726,10 @@ index f4c0ecb..111d28a 100644
          path: '/service-source',
 diff --git a/frontend/src/pages/admin-ext/accounts/index.tsx b/frontend/src/pages/admin-ext/accounts/index.tsx
 new file mode 100644
-index 0000000..fde0707
+index 0000000..587be5e
 --- /dev/null
 +++ b/frontend/src/pages/admin-ext/accounts/index.tsx
-@@ -0,0 +1,339 @@
+@@ -0,0 +1,344 @@
 +import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 +import { PageContainer } from '@ant-design/pro-layout';
 +import {
@@ -2879,6 +2884,8 @@ index 0000000..fde0707
 +      render: (v: string) =>
 +        v === 'admin' ? (
 +          <Tag color="geekblue">{t('adminExt.accounts.roleAdmin')}</Tag>
++        ) : v === 'billing_reader' ? (
++          <Tag color="green">{t('adminExt.accounts.roleBillingReader')}</Tag>
 +        ) : (
 +          <Tag color="orange">{t('adminExt.accounts.roleAuditor')}</Tag>
 +        ),
@@ -2989,6 +2996,9 @@ index 0000000..fde0707
 +              <Select.Option value="admin">{t('adminExt.accounts.roleAdmin')}</Select.Option>
 +              <Select.Option value="auditor">
 +                {t('adminExt.accounts.roleAuditor')}
++              </Select.Option>
++              <Select.Option value="billing_reader">
++                {t('adminExt.accounts.roleBillingReader')}
 +              </Select.Option>
 +            </Select>
 +          </Form.Item>
