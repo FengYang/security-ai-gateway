@@ -280,6 +280,20 @@ func main() {
 	}
 	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, ah, sch, cs, bih, bs.legacyPort)
 
+	// P1-2 排障查询 API（M6，§6.3/§7.7）：恒注册；Tempo 未配置（ADMIN_TEMPO_URL）→ 503。
+	// 路由优先级：Go 1.22 ServeMux 下字面量 /trace/search 优先于 /trace/{request_id}。
+	th := newTraceHandler(os.Getenv("ADMIN_TEMPO_URL"), us)
+	adminMux.HandleFunc(traceSearchPath, authMiddleware(cfg, th.handleTraceSearch))
+	adminMux.HandleFunc(traceBasePath+"{request_id}", authMiddleware(cfg, th.handleTraceByID))
+	adminMux.HandleFunc(traceBasePath+"{request_id}"+traceReportSuffix, authMiddleware(cfg, th.handleTraceReport))
+	// P1-2 SLA 报表端点（M6，§6.3/§7.8）：恒注册；Prometheus 未配置（ADMIN_PROMETHEUS_URL）→ 503。
+	slah := newSLAHandler(os.Getenv("ADMIN_PROMETHEUS_URL"))
+	adminMux.HandleFunc(slaSummaryPath, authMiddleware(cfg, slah.handleSLASummary))
+	// P1-2 SLO 定义与租户 tracing 灰度开关（M7，§6.3/§7.9）：POST 落审计链（fail-closed）。
+	sloh := newSLOHandler(os.Getenv("ADMIN_SLO_FILE"), os.Getenv("ADMIN_PROMETHEUS_URL"), auditChain)
+	adminMux.HandleFunc(sloPath, authMiddleware(cfg, sloh.handleSLO))
+	adminMux.HandleFunc(tracingTenantPath, authMiddleware(cfg, sloh.handleTracingTenant))
+
 	// 段① 凭据只读投递端点（Phase 1 门禁 #8；C 项起支持多集合）：
 	// 未配置任何集合 = 不注册（fail-closed：绝不无令牌裸奔投递密钥）。仅供插件内网周期拉取。
 	if csh := newCredentialHandler(loadCredentialSettings()); csh != nil {
@@ -311,6 +325,12 @@ func main() {
 	} else {
 		log.Printf("broker 未启用（凭据目录不存在且未设置 ADMIN_BROKER_PROVIDERS_JSON）")
 	}
+
+	// P1-2：管理面 tracing（M3，§7.4 `admin.request` span；默认关闭，C-4）。
+	if err := InitTracing(); err != nil {
+		log.Fatalf("初始化 tracing 失败（fail-closed）: %v", err)
+	}
+	defer ShutdownTracing()
 
 	log.Printf("gateway-admin-service 就绪（M2 A-2 双 listener）：admin=%s", cfg.listen)
 	serve("admin", cfg.listen, adminMux)

@@ -124,7 +124,13 @@ func verifyInternalToken(token string, cfg *config) (*claims, error) {
 
 // authMiddleware 内部令牌鉴权中间件：校验 Authorization: Bearer <JWT>。
 // 通过后把 claims 放入请求上下文，供 handler 取操作人/角色。
+//
+// P1-2：tracing 启用时改走 adminTracingMiddleware（额外创建 `admin.request` span，
+// §7.4）；关闭时走原路径，行为逐字节不变（C-4/C-8）。
 func authMiddleware(cfg *config, next http.HandlerFunc) http.HandlerFunc {
+	if adminTracingEnabled() {
+		return adminTracingMiddleware(cfg, next)
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		h := r.Header.Get("Authorization")
 		const prefix = "Bearer "

@@ -1,0 +1,96 @@
+# P1-2 全链路 tracing —— M7 SLO 告警规则（PrometheusRule）
+#
+# 单一事实源：本文件（kind: PrometheusRule）。
+# 部署：kube-prometheus-stack / PrometheusOperator 环境下 `kubectl apply -f`。
+# 指标来源：tee-infer-service /metrics 暴露的 `otpmask_*` 体系（C-8：不改动既有 /metrics）。
+#
+# 与 `billing-prometheusrule.yaml` 一致：不入 kustomization（CRD 依赖 Operator 环境），
+# 由部署单位显式 apply；runbook_url 为相对占位，须替换为内部 wiki 绝对 URL。
+#
+# SLO 口径（§7.6/§7.9）：
+#   - 可用性 SLO = 成功率（result="ok"）；默认目标 99.9%（§7.9 冻结示例 target=0.999），
+#     可经 POST /v1/adminext/slo 调整（alerting.fast_burn_rate=14.4 / slow_burn_rate=6）。
+#   - 错误预算 = 1 − 目标 = 0.1%；燃尽率（burn rate）= 错误率 / 错误预算。
+#   - 多窗口燃尽：1h 燃尽率 ≥ 14.4（≈14.4× 正常消耗）→ critical；6h 燃尽率 ≥ 6 → warning。
+#   - 延迟 SLO：P99 首 token 时延（otpmask_ttft_seconds）> 5s 持续 10m → warning。
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ai-slo-alerts
+  namespace: security-ai-gateway
+  labels:
+    app: ai-gateway
+    role: slo
+spec:
+  groups:
+    - name: ai-slo.rules
+      interval: 30s
+      rules:
+        # ---- 可用性燃尽（critical）：1h 窗口燃尽率 ≥ 14.4 ----
+        - alert: AISLOAvailabilityBurnFast
+          expr: |
+            (
+              1 - (
+                sum(rate(otpmask_inference_requests_total{result="ok"}[1h]))
+                / clamp_min(sum(rate(otpmask_inference_requests_total[1h])), 1)
+              )
+            ) / 0.001 >= 14.4
+          for: 5m
+          labels:
+            severity: critical
+            category: slo
+            team: ai-gateway-ops
+          annotations:
+            summary: "AI 网关可用性错误预算燃尽过快（1h 燃尽率 ≥ 14.4）"
+            description: "近 1h 成功率低于 SLO 99.9% 对应的燃尽速率。当前燃尽率 {{ $value | printf \"%.2f\" }}。排查 tee-infer 错误率（otpmask_denies_total）与上游模型可用性。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全链路tracing.md"
+
+        # ---- 可用性燃尽（warning）：6h 窗口燃尽率 ≥ 6 ----
+        - alert: AISLOAvailabilityBurnSlow
+          expr: |
+            (
+              1 - (
+                sum(rate(otpmask_inference_requests_total{result="ok"}[6h]))
+                / clamp_min(sum(rate(otpmask_inference_requests_total[6h])), 1)
+              )
+            ) / 0.001 >= 6
+          for: 30m
+          labels:
+            severity: warning
+            category: slo
+            team: ai-gateway-ops
+          annotations:
+            summary: "AI 网关可用性错误预算持续消耗（6h 燃尽率 ≥ 6）"
+            description: "近 6h 燃尽率 {{ $value | printf \"%.2f\" }}，持续消耗错误预算。核查租户侧错误分布与拒绝原因。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全链路tracing.md"
+
+        # ---- 延迟 SLO（warning）：P99 首 token 时延 > 5s ----
+        - alert: AISLOTTFTp99Slow
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(otpmask_ttft_seconds_bucket[30m])) by (le)
+            ) > 5
+          for: 10m
+          labels:
+            severity: warning
+            category: slo
+            team: ai-gateway-ops
+          annotations:
+            summary: "P99 首 token 时延超过 5s"
+            description: "近 30 分钟 P99 TTFT = {{ $value | printf \"%.2f\" }}s，超过延迟 SLO 阈值 5s。排查上游模型排队/缓存命中率下降（otpmask_cache_lookups_total）/网络时延。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全链路tracing.md"
+
+        # ---- 拒绝率（warning）：内容/安全拒绝占比 > 5% ----
+        - alert: AIGatewayDenyRateHigh
+          expr: |
+            sum(rate(otpmask_denies_total[10m]))
+            / clamp_min(sum(rate(otpmask_inference_requests_total[10m])), 1) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+            category: slo
+            team: ai-gateway-ops
+          annotations:
+            summary: "请求拒绝率 > 5%"
+            description: "近 10 分钟拒绝率 {{ $value | humanizePercentage }}。按 reason 拆分（otpmask_denies_total）核实：内容安全拦截 / 配额 / 签名 / 重放。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全链路tracing.md"
