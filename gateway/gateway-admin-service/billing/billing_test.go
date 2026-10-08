@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -139,6 +140,77 @@ func TestCloseDaily_NonConcreteRatingEngine(t *testing.T) {
 	// 当日区间 [1,000,000, 1,500,000) 全在第二档（15 元/千）：500 × 15 = 7500 元 = 750000 分
 	if bill.Total != Amount(750000) {
 		t.Errorf("total = %d 分, want 750000（月累计分档；失败=丢失月起点/依赖类型断言）", bill.Total)
+	}
+}
+
+// ---------- P3 修复回归（BUG-005 / BUG-006 / SEC-002） ----------
+
+// BUG-005 回归锚：同租户多模型 retry → #19 指标取**租户聚合和**（旧实现仅保留最后一条）。
+func TestIngestWindow_RetryGaugeAggregated(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	svc := newTestBillingService(s, nil)
+	win := &UsageWindow{FromNs: 0, ToNs: 1, Source: "pull", EventKey: "pull-b5",
+		Tenants: map[string]*TenantAgg{
+			"t1": {TokensIn: 30, Requests: 2, RetryToks: 150, ByModel: map[string]*ModelAgg{
+				"gpt-4o":      {TokensIn: 10, Requests: 1, RetryToks: 100},
+				"cheap-model": {TokensIn: 20, Requests: 1, RetryToks: 50},
+			}},
+		}}
+	if _, err := svc.IngestWindow(context.Background(), win, SyncModePull); err != nil {
+		t.Fatalf("IngestWindow err: %v", err)
+	}
+	var buf bytes.Buffer
+	DefaultMetrics.Render(&buf)
+	if !strings.Contains(buf.String(), `gateway_admin_billing_platform_retry_tokens{tenant="t1"} 150`) {
+		t.Errorf("BUG-005 回归：#19 应为租户聚合和 150：\n%s", buf.String())
+	}
+}
+
+// BUG-006 回归锚：链尾 updated_at 取**实际新增末条** created_at（含重复被忽略时），返回值同源。
+func TestLedgerAppend_HeadUpdatedAtFromInserted(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	tx, err := s.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	entries := []LedgerEntry{
+		{TenantID: "t1", ModelKey: "cheap-model", Day: "2026-10-01", TokensIn: 1, StdIn: 1, EventKey: "k1", CreatedAt: 111},
+		// 重复 EventKey（被忽略）→ 不得以其 CreatedAt 作为链尾 updated_at
+		{TenantID: "t1", ModelKey: "cheap-model", Day: "2026-10-01", TokensIn: 1, StdIn: 1, EventKey: "k1", CreatedAt: 999},
+	}
+	added, head, err := s.Ledger().Append(tx, entries)
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if added != 1 {
+		t.Fatalf("added = %d, want 1", added)
+	}
+	if head.UpdatedAt != 111 {
+		t.Errorf("BUG-006 回归：返回 head.UpdatedAt = %d, want 111（实际新增末条，非输入末条 999）", head.UpdatedAt)
+	}
+	if h, _ := s.Ledger().Head(); h.UpdatedAt != 111 {
+		t.Errorf("BUG-006 回归：DB head.updated_at = %d, want 111", h.UpdatedAt)
+	}
+}
+
+// SEC-002 回归锚：以公式前缀（= + - @）开头的文本单元格导出时前置 `'`，避免表格软件执行。
+func TestExportCSV_FormulaInjectionEscaped(t *testing.T) {
+	b := &Bill{
+		ID: "b1", TenantID: "=cmd()", Kind: "daily", Period: "2026-10-01",
+		Status: "issued", Currency: "CNY", PriceVersion: "v1", GeneratedAt: 1,
+		Items: []BillItem{{ModelKey: "@evil", Amount: 100}},
+	}
+	out, _, err := ExportCSV(b)
+	if err != nil {
+		t.Fatalf("ExportCSV err: %v", err)
+	}
+	if !strings.Contains(string(out), "'=cmd()") || !strings.Contains(string(out), "'@evil") {
+		t.Errorf("SEC-002 回归：公式前缀未转义：\n%s", out)
 	}
 }
 

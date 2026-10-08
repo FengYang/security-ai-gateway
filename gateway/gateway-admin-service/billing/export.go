@@ -31,10 +31,10 @@ func ExportCSV(b *Bill) ([]byte, string, error) {
 	// 明细行（无明细时输出一行汇总）
 	if len(b.Items) == 0 {
 		row := []string{
-			b.TenantID, b.ID, b.Kind, b.Period, "",
+			csvSafe(b.TenantID), csvSafe(b.ID), csvSafe(b.Kind), csvSafe(b.Period), "",
 			"0", "0", "0", "0",
-			strconv.FormatInt(int64(b.Total), 10), b.Currency, b.PriceVersion,
-			b.Status, strconv.FormatInt(b.GeneratedAt, 10),
+			strconv.FormatInt(int64(b.Total), 10), csvSafe(b.Currency), csvSafe(b.PriceVersion),
+			csvSafe(b.Status), strconv.FormatInt(b.GeneratedAt, 10),
 		}
 		if err := w.Write(row); err != nil {
 			return nil, "", fmt.Errorf("billing: export row: %w", err)
@@ -42,13 +42,13 @@ func ExportCSV(b *Bill) ([]byte, string, error) {
 	} else {
 		for _, it := range b.Items {
 			row := []string{
-				b.TenantID, b.ID, b.Kind, b.Period, it.ModelKey,
+				csvSafe(b.TenantID), csvSafe(b.ID), csvSafe(b.Kind), csvSafe(b.Period), csvSafe(it.ModelKey),
 				strconv.FormatInt(it.StandardTokens, 10),
 				strconv.FormatInt(it.TokensIn, 10),
 				strconv.FormatInt(it.TokensOut, 10),
 				strconv.FormatInt(it.RetryToks, 10),
 				strconv.FormatInt(int64(it.Amount), 10),
-				b.Currency, b.PriceVersion, b.Status,
+				csvSafe(b.Currency), csvSafe(b.PriceVersion), csvSafe(b.Status),
 				strconv.FormatInt(b.GeneratedAt, 10),
 			}
 			if err := w.Write(row); err != nil {
@@ -61,4 +61,18 @@ func ExportCSV(b *Bill) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("billing: export flush: %w", err)
 	}
 	return buf.Bytes(), "text/csv; charset=utf-8", nil
+}
+
+// csvSafe 防 CSV 公式注入（★ SEC-002）：以 `= + - @` 或制表/回车开头的文本单元格，
+// 在表格软件（Excel 等）中可能被当作公式执行；前置单引号 `'` 使其降级为纯文本。
+// 空串与普通文本原样返回（对既有导出内容零影响）。
+func csvSafe(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	}
+	return s
 }

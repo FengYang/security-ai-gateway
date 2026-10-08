@@ -152,8 +152,17 @@ func (s *BillingService) IngestWindow(ctx context.Context, win *UsageWindow, syn
 		entries[i].StdIn = stdIn
 		entries[i].StdOut = stdOut
 		entries[i].PriceVer = tbl.Version
-		// retry 归平台成本（M9）
-		SetPlatformRetryTokens(entries[i].TenantID, entries[i].RetryToks)
+	}
+	// retry 归平台成本（M9；指标 #19）：按租户**聚合**后一次性置值。
+	// ★ BUG-005：原实现逐条 Set，同租户多模型时 gauge 仅保留最后一条 → 值偏小。
+	retryByTenant := map[string]int64{}
+	for i := range entries {
+		if entries[i].RetryToks != 0 {
+			retryByTenant[entries[i].TenantID] += entries[i].RetryToks
+		}
+	}
+	for tenant, toks := range retryByTenant {
+		SetPlatformRetryTokens(tenant, toks)
 	}
 
 	tx, err := s.store.Begin()

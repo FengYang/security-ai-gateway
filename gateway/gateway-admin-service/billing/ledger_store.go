@@ -68,6 +68,10 @@ func (s *sqliteLedgerStore) Append(tx Tx, entries []LedgerEntry) (int, LedgerHea
 	}
 	defer stmt.Close()
 
+	// ★ BUG-006：记录**实际新增**的最后一条 created_at（而非输入切片末条），
+	// 用于链尾 updated_at 与返回值（输入含重复被忽略时二者可能不同）。
+	var lastCreatedAt int64
+
 	for _, e := range entries {
 		// 设置链序号与前序哈希
 		curSeq++
@@ -95,6 +99,7 @@ func (s *sqliteLedgerStore) Append(tx Tx, entries []LedgerEntry) (int, LedgerHea
 		ra, _ := res.RowsAffected()
 		if ra > 0 {
 			prevHash = e.EntryHash
+			lastCreatedAt = e.CreatedAt
 			added++
 		} else {
 			// 重复：回退 curSeq（下次插入重新用），prevHash 不变
@@ -104,12 +109,13 @@ func (s *sqliteLedgerStore) Append(tx Tx, entries []LedgerEntry) (int, LedgerHea
 
 	// 3. 更新链尾表（仅当有新增）
 	if added > 0 {
-		now := entries[len(entries)-1].CreatedAt
+		now := lastCreatedAt // ★ BUG-006：实际新增末条
 		_, err := sqlTx.Exec(`UPDATE billing_ledger_head SET seq = ?, entry_hash = ?, updated_at = ? WHERE id = 1`,
 			int64(curSeq), prevHash, now)
 		if err != nil {
 			return added, LedgerHead{}, fmt.Errorf("billing: update ledger head: %w", err)
 		}
+		headUpdated = now // ★ BUG-006：返回值反映已写入的 updated_at（此前为更新前旧值）
 		// 指标 #2/#3（§9.1.1 唯一生产者）
 		IncLedgerEntries(added)
 		SetLedgerHeadSeq(curSeq)
