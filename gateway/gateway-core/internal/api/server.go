@@ -133,11 +133,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /routes", s.withAuth(s.handleGetRoutes))
 	// 路由配置管理（方案 §4.1，P0-1 W4-2）
 	s.mux.HandleFunc("GET /routes/{tenant}/{model}", s.withAuth(s.handleGetRoute))
-	s.mux.HandleFunc("PUT /routes/{tenant}/{model}", s.withAuth(s.handleUpsertRoute))
-	s.mux.HandleFunc("DELETE /routes/{tenant}/{model}", s.withAuth(s.handleDeleteRoute))
+	// P1-2：路由变更端点包裹 `core.route.change` span（§7.4；tracing 关闭时零开销透传）
+	s.mux.HandleFunc("PUT /routes/{tenant}/{model}", s.withAuth(s.withRouteChangeSpan("upsert", s.handleUpsertRoute)))
+	s.mux.HandleFunc("DELETE /routes/{tenant}/{model}", s.withAuth(s.withRouteChangeSpan("delete", s.handleDeleteRoute)))
 	s.mux.HandleFunc("POST /routes/dry-run", s.withAuth(s.handleDryRun))
 	s.mux.HandleFunc("GET /routes/endpoints/status", s.withAuth(s.handleEndpointStatus))
-	s.mux.HandleFunc("POST /routes/rollback", s.withAuth(s.handleRouteRollback))
+	s.mux.HandleFunc("POST /routes/rollback", s.withAuth(s.withRouteChangeSpan("rollback", s.handleRouteRollback)))
 	s.mux.HandleFunc("GET /routes/history", s.withAuth(s.handleRouteHistory))
 	s.mux.HandleFunc("POST /routes/push", s.withAuth(s.handleRoutePush))
 	s.mux.HandleFunc("GET /routes/audit", s.withAuth(s.handleRouteAudit))

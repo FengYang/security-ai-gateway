@@ -80,6 +80,12 @@ func main() {
 		auditState = auditFile
 	}
 
+	// P1-2：控制面 tracing（M3，§7.4 `core.route.change` span；默认关闭，C-4）。
+	if err := api.InitTracing(); err != nil {
+		log.Fatalf("初始化 tracing 失败（fail-closed）: %v", err)
+	}
+	defer api.ShutdownTracing()
+
 	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d 限流版本=%d TEE配额下发=%v 变更审计=%s",
 		addr, authToken != "", rt.Version, rlt.Version, teeQuota != nil, auditState)
 	// 控制面无流式响应，全量超时；body 上限防资源耗尽（T-1 评审项）
