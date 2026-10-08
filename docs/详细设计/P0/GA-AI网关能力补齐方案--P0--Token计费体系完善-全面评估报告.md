@@ -89,24 +89,31 @@
 | D1 | P2 | 缺 P-1..P-5 基准 | **已修**：`billing/bench_test.go`（见 §6） |
 | D2 | P2 | 缺 §10.6 S-7 兼容用例 | **已修**：旧对端拒 month → 订阅仍 200（优雅降级） |
 | D3 | P3 | E2E-2 OverQuota 计价差异未覆盖 | 已知边界 |
-| E1 | P2 | M3/M4/M5/M6 未实测 | **部分解决**：本机基准（§6）；生产容量待目标环境 |
+| D4 | P2 | 缺持久化层基准与性能报告 | **已修**：`bench_persist_test.go` + `perf_acceptance_test.go` + 《PERF-BILLING 报告》 |
+| E1 | P2 | M3/M4/M5/M6 未实测 | **已解决（持久化层）**：M3/M5/M6 达标（§6）；TEE/大规模待目标环境 |
 | F1 | P1 | 无计费自助/管理界面 | 同 A2（开放边界） |
 
 ---
 
 ## 6. 性能基准实测
 
-命令：`go test ./gateway/gateway-admin-service/billing -run '^$' -bench . -benchmem`（单机内存 SQLite）。
+命令（持久化层验收 + 基准；详见《PERF-BILLING-性能基准报告.md》）：
 
-| 用例 | 规模 | 实测 | 门槛 | 判定 |
-|---|---|---|---|---|
-| P-1 拉取入账 | 10k 条目/轮 | ~69 ms/op | < 5 s | ✅ |
-| P-2 查询延迟 | 2 万行、`Limit 1000` | ~0.90 ms/op | p95 < 200 ms | ✅（本规模） |
-| P-3 日结（单租户） | 30 天 × 20 模型 | ~1.01 ms/op | < 500 ms | ✅ |
-| P-4 链校验 | 2 万行全量 | ~51 ms/op | 1.8M 行 < 30 s | ✅（线性外推 ~4.6 s） |
-| P-5 批量写 | 1000 条/事务 | ~5.4 ms/op | 写锁 p99 < 100 ms | ◻ 待目标环境复测 |
+```
+go test -tags perf ./gateway/gateway-admin-service/billing -run TestPerfAcceptance -v
+go test ./gateway/gateway-admin-service/billing -run '^$' -bench 'BenchmarkP[1-5]|BenchmarkPp' -benchmem
+```
 
-> 规模较生产估算（1000 租户 / 1.8M 行）小 1~2 个数量级，用于数量级与回归判定；生产容量验收须在目标环境复测。
+| 用例 | 规模 | 内存 `:memory:` | 持久化 file+WAL | 门槛 | 判定 |
+|---|---|---|---|---|---|
+| P-1 拉取入账 | 10k 条目/轮 | 69 ms | 88 ms | < 5 s | ✅ |
+| P-2 / M5 查询 | 2 万 / 10 万行 | 0.90 ms | 1.55 ms；10 万行 p95=11.3 ms | p95 < 200 ms | ✅ |
+| P-3 / M3 日结（单租户） | 30 天 × 20 模型 | 1.0 ms | 2.2 ms | < 500 ms | ✅ |
+| P-4 链校验 | 2 万行（外推 1.8M） | 51 ms | 56 ms（1.8M ≈ 5.1 s） | 1.8M < 30 s | ✅ |
+| P-5 批量/写争用 | 1000 条；8 并发写 | 5.4 ms；p99≈25 ms | 7.1 ms | 写锁 p99 < 100 ms | ✅ |
+| M6 配额回读确认 | 替身（轮询 200 ms） | — | 200 ms | ≤ 60 s | ✅（真实 RTT 待复测） |
+
+> 单机开发机（Ryzen 7 7840HS / Win11 / Go 1.27），用于数量级与回归判定；TEE/kind 相关项列为**目标环境复测待办**（报告 §5）。
 
 ---
 
