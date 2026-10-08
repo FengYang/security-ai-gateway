@@ -67,6 +67,7 @@ cd higress-console/frontend && npm ci && npm run build
 | T-4.3-2 | `enabled=false` → 计费端点全部 404 | `…T4_3_2_DisabledAllEndpoints404` | ✅ |
 | T-4.3-3 | 写动作落审计链（`plan_upsert`/`plan_bind`/`bill_freeze`） | `…T4_3_3_WriteAuditTrail` | ✅ |
 | T-4.3-4 | 金额列仅账单页（源扫描门禁） | `scripts/check-billing-amount-scope.ps1`（接入 `admin-portal.yml` + `verify-fork-rebuild.ps1`） | ✅（正例 PASS / 反例 FAIL） |
+| E2E-5（M4） | 真实双服务链路：套餐 upsert→绑定→订阅读回；`billing_reader` 读 200 / 跨租户·写 403；冻结→出账 409→解冻；审计链含 `plan_upsert`/`plan_bind`/`bill_freeze` | `e2e/billing_e2e_test.go`（`ADMIN_AUDIT_FILE` 启用 G1 链） | ✅（E2E-1..5 **5/5 PASS**，17.9s） |
 
 > T-4.3-4 说明：控制台无 JS 测试运行器，故以**源扫描**实现（对齐 tee-infer S-3 的 CI 强制思路）——扫描 `frontend/src/pages/admin-ext/**` 与 `frontend/src/services/**`，金额 token（`fenToYuan`/`amountFen`）仅允许出现于账单页/服务。
 
@@ -87,8 +88,10 @@ cd higress-console/frontend && npm ci && npm run build
 
 > 已于 **M1** 完成：本增量补丁按序接入 `admin-portal.yml`（+ `verify-fork-rebuild.ps1`），CI 一并构建并断言计费页产物。
 
-## 6. 后续（T9 完整态，未做）
+## 6. 里程碑与后续
 
-- ~~页面契约测试（T-4.3-1..4）~~ —— **M3 已完成**（见 §4.1）。
-- ~~`billing_reader` 角色放行~~ —— **M2 已完成**（Go + 控制台签发侧）。
-- 与既有用量页（`/admin-ext/usage`）的口径衔接与自助场景打磨；M4 验收（E2E 扩展 + 文档）。
+**T9 完整态里程碑**：M0 fork 基线修复 ✅ → M1 写页面+授权 ✅ → M2 `billing_reader` ✅ → M3 契约测试 ✅ → **M4 验收（E2E-5 + 文档）✅**。
+
+后续（可选）：
+- 与既有用量页（`/admin-ext/usage`）的口径衔接与自助场景打磨。
+- 生产环境 UI 回归（真机控制台 + 真实 SSO 账号派生 `billing_reader`）。

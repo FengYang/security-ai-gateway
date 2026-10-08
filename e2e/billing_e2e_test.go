@@ -26,6 +26,7 @@ func TestE2E_Billing(t *testing.T) {
 
 	t.Run("E2E-1_推理到账单", func(t *testing.T) { testE2E1(t, s) })
 	t.Run("E2E-2_四档套餐与配额", func(t *testing.T) { testE2E2(t, s) })
+	t.Run("E2E-5_T9写链路与billing_reader", func(t *testing.T) { testE2E5(t, s) })
 	t.Run("E2E-3_篡改账本停出账", func(t *testing.T) { testE2E3(t, s) })
 	t.Run("E2E-4_关闭billing逐字节一致", func(t *testing.T) { testE2E4(t, s) })
 }
@@ -219,6 +220,82 @@ func testE2E2(t *testing.T, s *stack) {
 	// 超限：e2e-q1（month=1）发 3 vectors（tokens_in=3 > 1）→ 429（fail-closed）
 	if code, body := teeInfer(t, s.teeURL, "e2e-q1", 3); code != http.StatusTooManyRequests {
 		t.Fatalf("超配额期望 429，实际 %d: %s", code, body)
+	}
+}
+
+// E2E-5（M4/T9）：写链路（套餐 upsert → 绑定 → 订阅读回）+ billing_reader 只读矩阵
+// + 冻结租户停出账 + 审计链留痕（plan_upsert/plan_bind/bill_freeze）。须在 E2E-3 篡改**之前**运行。
+func testE2E5(t *testing.T, s *stack) {
+	const (
+		plan   = "e2e-t9"
+		tenant = "e2e-t9b"
+	)
+	admin := authHdr(adminUser, "admin", "")
+
+	// 1) 套餐 upsert
+	body, _ := json.Marshal(map[string]any{
+		"id": plan, "name": "E2E T9", "over_quota": "reject",
+		"pay_mode": "postpaid", "cache_tier": "none", "monthly_tokens": 1000,
+	})
+	if code, rb := do(t, http.MethodPost, s.admURL+billingBase+"/plans", admin, body); code != http.StatusOK {
+		t.Fatalf("建套餐期望 200，实际 %d: %s", code, rb)
+	}
+	// 2) 订阅绑定
+	sub, _ := json.Marshal(map[string]any{"tenant": tenant, "plan_id": plan})
+	if code, rb := do(t, http.MethodPost, s.admURL+billingBase+"/subscription", admin, sub); code != http.StatusOK {
+		t.Fatalf("绑定期望 200，实际 %d: %s", code, rb)
+	}
+	// 3) 订阅读回
+	code, rb := do(t, http.MethodGet, s.admURL+billingBase+"/subscription?tenant="+tenant, admin, nil)
+	if code != http.StatusOK {
+		t.Fatalf("读订阅期望 200，实际 %d: %s", code, rb)
+	}
+	var got struct {
+		Subscription *struct {
+			PlanID string `json:"plan_id"`
+		} `json:"subscription"`
+	}
+	mustJSON(t, rb, &got)
+	if got.Subscription == nil || got.Subscription.PlanID != plan {
+		t.Fatalf("订阅未生效（期望 %s）: %s", plan, rb)
+	}
+
+	// 4) billing_reader 只读矩阵
+	reader := authHdr("fin-reader", "billing_reader", tenant)
+	if code, _ := do(t, http.MethodGet, s.admURL+billingBase+"/bills?tenant="+tenant, reader, nil); code != http.StatusOK {
+		t.Fatalf("billing_reader 读账单期望 200，实际 %d", code)
+	}
+	if code, _ := do(t, http.MethodGet, s.admURL+billingBase+"/plans", reader, nil); code != http.StatusOK {
+		t.Fatalf("billing_reader 读套餐期望 200，实际 %d", code)
+	}
+	if code, _ := do(t, http.MethodGet, s.admURL+billingBase+"/bills?tenant=other", reader, nil); code != http.StatusForbidden {
+		t.Fatalf("billing_reader 跨租户期望 403，实际 %d", code)
+	}
+	if code, _ := do(t, http.MethodPost, s.admURL+billingBase+"/freeze", reader, []byte(`{"tenant":"`+tenant+`"}`)); code != http.StatusForbidden {
+		t.Fatalf("billing_reader 写冻结期望 403，实际 %d", code)
+	}
+
+	// 5) 冻结 → 出账被拒（409，fail-closed）；解冻恢复
+	if code, rb := do(t, http.MethodPost, s.admURL+billingBase+"/freeze", admin, []byte(`{"tenant":"`+tenant+`"}`)); code != http.StatusOK {
+		t.Fatalf("admin 冻结期望 200，实际 %d: %s", code, rb)
+	}
+	if code, rb := do(t, http.MethodPost, s.admURL+billingBase+"/close-daily", admin,
+		[]byte(`{"tenant":"`+tenant+`","day":"2026-09-20"}`)); code != http.StatusConflict {
+		t.Fatalf("冻结租户出账期望 409，实际 %d: %s", code, rb)
+	}
+	if code, rb := do(t, http.MethodPost, s.admURL+billingBase+"/unfreeze", admin, []byte(`{"tenant":"`+tenant+`"}`)); code != http.StatusOK {
+		t.Fatalf("admin 解冻期望 200，实际 %d: %s", code, rb)
+	}
+
+	// 6) 审计链留痕（G1）：plan_upsert / plan_bind / bill_freeze
+	code, rb = do(t, http.MethodGet, s.admURL+"/v1/adminext/audit-chain?limit=100", admin, nil)
+	if code != http.StatusOK {
+		t.Fatalf("审计链查询期望 200，实际 %d: %s", code, rb)
+	}
+	for _, want := range []string{"plan_upsert", "plan_bind", "bill_freeze"} {
+		if !strings.Contains(string(rb), want) {
+			t.Fatalf("审计链缺少动作 %q: %s", want, rb)
+		}
 	}
 }
 

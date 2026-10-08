@@ -254,6 +254,9 @@ func adminEnv(port int, teeURL, db, pricing string, billingOn bool) []string {
 		"BILLING_SECRETS_EVENTS_SECRET_REF=env:E2E_EVENTS_SECRET",
 		"BILLING_SECRETS_SIGNING_KEY_REF=env:E2E_SIGNING_KEY",
 		"BILLING_SCHEDULE_ENABLED=true",
+		// G1 审计链：启用后计费写动作（plan_upsert/plan_bind/bill_freeze/…）落链，
+		// 供 E2E-5 经 GET /v1/adminext/audit-chain 断言（M4 T9 写链路）。
+		"ADMIN_AUDIT_FILE="+filepath.Join(filepath.Dir(db), "admin-audit.jsonl"),
 		"E2E_TEE_ADMIN_TOKEN="+teeAdminToken,
 		"E2E_EVENTS_SECRET="+e2eEventsSecret,
 		"E2E_SIGNING_KEY="+e2eSigningKey,
