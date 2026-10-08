@@ -110,7 +110,7 @@ type stubAuditAnchor struct {
 }
 
 func (s *stubAuditAnchor) AuditAnchorExists(head string) bool { return s.heads[head] }
-func (s *stubAuditAnchor) AuditHead() (string, error)          { return s.cur, nil }
+func (s *stubAuditAnchor) AuditHead() (string, error)         { return s.cur, nil }
 
 func TestVerifyBillingChain_Pass(t *testing.T) {
 	// T-7.3-1 账单→链→审计 全链绿

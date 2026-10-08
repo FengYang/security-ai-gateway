@@ -304,7 +304,7 @@ func (h *billingHandler) withMetrics(next http.HandlerFunc) http.HandlerFunc {
 			code = http.StatusOK
 		}
 		route := billingRouteLabel(r.URL.Path)
-		billing.IncBillingRequests(route, strconv.Itoa(code)) // 指标 #1
+		billing.IncBillingRequests(route, strconv.Itoa(code))  // 指标 #1
 		billing.ObserveAPI(route, time.Since(start).Seconds()) // 指标 #9
 	}
 }

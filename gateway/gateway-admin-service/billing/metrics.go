@@ -247,7 +247,9 @@ func RenderMetrics(w io.Writer) { DefaultMetrics.Render(w) }
 // ---------- 生产者辅助（§9.1.1 唯一生产者） ----------
 
 // IncLedgerEntries 账本入账条目数（#2）。
-func IncLedgerEntries(n int) { DefaultMetrics.IncCounter("gateway_admin_billing_ledger_entries_total", nil, float64(n)) }
+func IncLedgerEntries(n int) {
+	DefaultMetrics.IncCounter("gateway_admin_billing_ledger_entries_total", nil, float64(n))
+}
 
 // SetLedgerHeadSeq 账本链尾序号（#3）。
 func SetLedgerHeadSeq(seq uint64) {

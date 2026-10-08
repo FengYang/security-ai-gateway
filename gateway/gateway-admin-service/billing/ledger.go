@@ -18,21 +18,21 @@ import (
 // ★ A-42：TokensIn/TokensOut 一律为净量（剔除 retry；与审计链净量三元组一致
 // = M1 零容差基准）；retry 另列 RetryToks。
 type LedgerEntry struct {
-	Seq       uint64 `json:"seq"`         // 单调递增序号（链序）
+	Seq       uint64 `json:"seq"` // 单调递增序号（链序）
 	TenantID  string `json:"tenant"`
-	ModelKey  string `json:"model_key"`   // "engine_type/model"（空侧省略斜杠）
-	Day       string `json:"day"`         // UTC+8 自然日 "2006-01-02"
-	TokensIn  int64  `json:"tokens_in"`   // 输入 token 净量（剔除 retry）
-	TokensOut int64  `json:"tokens_out"`  // 输出 token 净量
+	ModelKey  string `json:"model_key"`  // "engine_type/model"（空侧省略斜杠）
+	Day       string `json:"day"`        // UTC+8 自然日 "2006-01-02"
+	TokensIn  int64  `json:"tokens_in"`  // 输入 token 净量（剔除 retry）
+	TokensOut int64  `json:"tokens_out"` // 输出 token 净量
 	Requests  int64  `json:"requests"`
-	RetryToks int64  `json:"retry_toks"`  // 重试 token（平台成本，不计用户；M9）
-	StdIn     int64  `json:"std_in"`      // 标准输入 token（入账时锁定）
-	StdOut    int64  `json:"std_out"`     // 标准输出 token
-	Source    string `json:"source"`      // pull | push | manual
-	PriceVer  string `json:"price_ver"`   // 入账时价格表版本（系数追溯依据）
-	EventKey  string `json:"event_key"`   // 幂等键（去重）
-	PrevHash  string `json:"prev_hash"`   // 前序 EntryHash
-	EntryHash string `json:"entry_hash"`  // 本条哈希（不进自身，§7.1.2）
+	RetryToks int64  `json:"retry_toks"` // 重试 token（平台成本，不计用户；M9）
+	StdIn     int64  `json:"std_in"`     // 标准输入 token（入账时锁定）
+	StdOut    int64  `json:"std_out"`    // 标准输出 token
+	Source    string `json:"source"`     // pull | push | manual
+	PriceVer  string `json:"price_ver"`  // 入账时价格表版本（系数追溯依据）
+	EventKey  string `json:"event_key"`  // 幂等键（去重）
+	PrevHash  string `json:"prev_hash"`  // 前序 EntryHash
+	EntryHash string `json:"entry_hash"` // 本条哈希（不进自身，§7.1.2）
 	// HashAlg P0-4 §5.4.3 B-5.4-1：本条账目哈希算法自述（**证据字段，不进自身哈希**）。
 	// 缺省 "" = SHA-256（R-13）；"sm3" = SM3；未知值 → 校验失败（不得静默回退）。
 	HashAlg   string `json:"hash_alg,omitempty"`

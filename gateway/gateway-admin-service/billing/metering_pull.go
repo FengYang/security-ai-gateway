@@ -130,9 +130,9 @@ func (s *BillingService) pullOnce(ctx context.Context) {
 
 // teeInferPullSource 调用 tee-infer GET /usage?from=&to= 的实现。
 type teeInferPullSource struct {
-	baseURL   string
-	token     string // Admin-Token（独立计量令牌，§6.3.1）
-	client    *http.Client
+	baseURL string
+	token   string // Admin-Token（独立计量令牌，§6.3.1）
+	client  *http.Client
 }
 
 // NewTEEPullSource 构造 tee-infer 拉取源。
@@ -149,9 +149,9 @@ func NewTEEPullSource(baseURL, token string, timeout time.Duration) PullSource {
 
 // pullUsageResp tee-infer /usage?from=&to= 的 JSON 响应。
 type pullUsageResp struct {
-	From    string                       `json:"from"`
-	To      string                       `json:"to"`
-	Tenants map[string]*billingIncTee    `json:"tenants"`
+	From    string                    `json:"from"`
+	To      string                    `json:"to"`
+	Tenants map[string]*billingIncTee `json:"tenants"`
 }
 
 // billingIncTee 兼容 tee-infer billingIncrement 结构（int + 字段名映射）。
@@ -159,12 +159,12 @@ type pullUsageResp struct {
 // GA-计费 P0-3（A-27/A-35）：新增 `_net` 净量与 `retry_tokens` 单列字段；
 // 拉取侧**消费 `_net` 字段入账**（tokens 与 retry 不重叠，M9 与 M1 同保）。
 type billingIncTee struct {
-	TokensIn     int                      `json:"tokens_in"`
-	TokensOut    int                      `json:"tokens_out"`
-	Requests     int                      `json:"requests"`
-	TokensInNet  int                      `json:"tokens_in_net"`
-	TokensOutNet int                      `json:"tokens_out_net"`
-	RetryTokens  int                      `json:"retry_tokens"`
+	TokensIn     int                       `json:"tokens_in"`
+	TokensOut    int                       `json:"tokens_out"`
+	Requests     int                       `json:"requests"`
+	TokensInNet  int                       `json:"tokens_in_net"`
+	TokensOutNet int                       `json:"tokens_out_net"`
+	RetryTokens  int                       `json:"retry_tokens"`
 	ByModel      map[string]*modelUsageTee `json:"by_model"`
 }
 

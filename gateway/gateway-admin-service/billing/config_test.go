@@ -24,15 +24,15 @@ func TestConfig_DefaultDisabled(t *testing.T) {
 func TestConfig_ValidMinimal(t *testing.T) {
 	// 最小合法配置
 	setEnvs(t, map[string]string{
-		"ENABLED":                    "true",
-		"STORE_DRIVER":               "sqlite",
-		"STORE_DSN":                  ":memory:",
-		"SOURCE_TEE_URL":             "http://127.0.0.1:19090",
-		"SOURCE_ADMIN_TOKEN_REF":     "env:TEE_TOKEN",
-		"SOURCE_SYNC_MODE":           "pull",
-		"SOURCE_PUSH_ENABLED":        "false",
-		"SECRETS_EVENTS_SECRET_REF":  "env:EVENTS_SECRET",
-		"SOURCE_PUSH_SECRET_REF":     "env:UNUSED",
+		"ENABLED":                   "true",
+		"STORE_DRIVER":              "sqlite",
+		"STORE_DSN":                 ":memory:",
+		"SOURCE_TEE_URL":            "http://127.0.0.1:19090",
+		"SOURCE_ADMIN_TOKEN_REF":    "env:TEE_TOKEN",
+		"SOURCE_SYNC_MODE":          "pull",
+		"SOURCE_PUSH_ENABLED":       "false",
+		"SECRETS_EVENTS_SECRET_REF": "env:EVENTS_SECRET",
+		"SOURCE_PUSH_SECRET_REF":    "env:UNUSED",
 	})
 	cfg, err := LoadBillingConfig()
 	if err != nil {
@@ -253,15 +253,15 @@ func TestValidateConfig_DirectStruct(t *testing.T) {
 
 func baseEnvs() map[string]string {
 	return map[string]string{
-		"ENABLED":                    "true",
-		"STORE_DRIVER":               "sqlite",
-		"STORE_DSN":                  ":memory:",
-		"SOURCE_TEE_URL":             "http://127.0.0.1:19090",
-		"SOURCE_ADMIN_TOKEN_REF":     "env:TEE_TOKEN",
-		"SOURCE_SYNC_MODE":           "pull",
-		"SOURCE_PUSH_ENABLED":        "false",
-		"SOURCE_PUSH_SECRET_REF":     "env:PUSH_SECRET",
-		"SECRETS_EVENTS_SECRET_REF":  "env:EVENTS_SECRET",
+		"ENABLED":                   "true",
+		"STORE_DRIVER":              "sqlite",
+		"STORE_DSN":                 ":memory:",
+		"SOURCE_TEE_URL":            "http://127.0.0.1:19090",
+		"SOURCE_ADMIN_TOKEN_REF":    "env:TEE_TOKEN",
+		"SOURCE_SYNC_MODE":          "pull",
+		"SOURCE_PUSH_ENABLED":       "false",
+		"SOURCE_PUSH_SECRET_REF":    "env:PUSH_SECRET",
+		"SECRETS_EVENTS_SECRET_REF": "env:EVENTS_SECRET",
 	}
 }
 

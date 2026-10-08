@@ -12,9 +12,9 @@ import (
 // PriceTable 单价表（**JSON** 文件加载，热加载版本随 Version 字段）。
 // 注：结构体保留 yaml tag 以便未来引入 YAML 解析；当前加载器为 JSON（★ DOC-003）。
 type PriceTable struct {
-	Version  string                `json:"version"  yaml:"version"`  // 版本号（账期锁定追溯）
-	Currency string                `json:"currency" yaml:"currency"` // CNY（P0）
-	Models   map[string]*ModelPrice `json:"models"   yaml:"models"`   // key = model_key（"engine_type/model"）
+	Version  string                 `json:"version"  yaml:"version"`                      // 版本号（账期锁定追溯）
+	Currency string                 `json:"currency" yaml:"currency"`                     // CNY（P0）
+	Models   map[string]*ModelPrice `json:"models"   yaml:"models"`                       // key = model_key（"engine_type/model"）
 	Defaults *ModelPrice            `json:"defaults,omitempty" yaml:"defaults,omitempty"` // 未匹配模型的默认档（可选）
 }
 
@@ -93,6 +93,7 @@ func LoadPriceTable(path string) (*PriceTable, error) {
 //   - UpToTokens=0 表示顶档（+∞），必须**恰好一个**且位于最后（覆盖全部用量）；
 //   - 有限档 UpToTokens 必须 > 0 且严格递增；
 //   - 缺失 ∞ 档 → 拒绝（存在未覆盖区间）。
+//
 // 校验后原地重排 tiers 为规范顺序。
 func validateTiers(tiers []Tier) error {
 	if len(tiers) == 0 {

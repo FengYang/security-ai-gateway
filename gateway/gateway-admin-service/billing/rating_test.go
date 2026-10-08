@@ -242,10 +242,10 @@ func TestRate_SplitAxisAdditivity(t *testing.T) {
 
 	type dayAgg struct{ in, out int64 }
 	days := []dayAgg{
-		{500000, 300000},   // D1
-		{400000, 500000},   // D2
-		{600000, 400000},   // D3
-		{300000, 800000},   // D4
+		{500000, 300000}, // D1
+		{400000, 500000}, // D2
+		{600000, 400000}, // D3
+		{300000, 800000}, // D4
 	}
 
 	var sumDaily Amount
@@ -378,13 +378,13 @@ func TestRoundAmount(t *testing.T) {
 		mode   string
 		expect Amount
 	}{
-		{1500, "half_up", 2},     // 1.5 分 → 四舍五入 2
-		{1499, "half_up", 1},     // 1.499 分 → 1
-		{0, "half_up", 0},        // 0
-		{-1500, "half_up", -2},   // 负数对称（C-3）
-		{-1499, "half_up", -1},   // 负数对称
-		{1999, "floor", 1},       // floor 截断
-		{-1999, "floor", -1},     // floor 负数也截断（向零）
+		{1500, "half_up", 2},   // 1.5 分 → 四舍五入 2
+		{1499, "half_up", 1},   // 1.499 分 → 1
+		{0, "half_up", 0},      // 0
+		{-1500, "half_up", -2}, // 负数对称（C-3）
+		{-1499, "half_up", -1}, // 负数对称
+		{1999, "floor", 1},     // floor 截断
+		{-1999, "floor", -1},   // floor 负数也截断（向零）
 	}
 	for _, tt := range tests {
 		got := roundAmount(tt.mu, tt.mode)
@@ -401,11 +401,11 @@ func TestOverlap(t *testing.T) {
 		length, start, lo, up int64
 		expect                int64
 	}{
-		{100, 0, 0, 1000, 100},       // 完全在档内
-		{500, 800, 0, 1000, 200},     // 跨档：200 在档内
-		{500, 1200, 0, 1000, 0},      // 完全在档外
-		{1000, 500, 0, 0, 1000},      // 顶档(up=0=∞)
-		{0, 100, 0, 1000, 0},         // 空段
+		{100, 0, 0, 1000, 100},   // 完全在档内
+		{500, 800, 0, 1000, 200}, // 跨档：200 在档内
+		{500, 1200, 0, 1000, 0},  // 完全在档外
+		{1000, 500, 0, 0, 1000},  // 顶档(up=0=∞)
+		{0, 100, 0, 1000, 0},     // 空段
 	}
 	for _, tt := range tests {
 		got := overlap(tt.length, tt.start, tt.lo, tt.up)

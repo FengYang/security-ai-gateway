@@ -33,18 +33,18 @@ type RatingEngine interface {
 // UsageAgg 计价输入聚合（周期内某租户的用量）。
 type UsageAgg struct {
 	TenantID string
-	Period   string                // "2026-10-01" 日 | "2026-10" 月
-	ByModel  map[string]*ModelStd  // key=modelKey
+	Period   string               // "2026-10-01" 日 | "2026-10" 月
+	ByModel  map[string]*ModelStd // key=modelKey
 }
 
 // ModelStd 单模型的标准 token 用量（来自账本锁定值，A-39）。
 type ModelStd struct {
-	StdIn      int64 // 标准输入 token
-	StdOut     int64 // 标准输出 token
-	TokensIn   int64 // 原始输入 token（仅供展示/追溯）
-	TokensOut  int64 // 原始输出 token
-	Requests   int64
-	RetryToks  int64 // 重试 token（平台成本，不计用户金额，M9）
+	StdIn     int64 // 标准输入 token
+	StdOut    int64 // 标准输出 token
+	TokensIn  int64 // 原始输入 token（仅供展示/追溯）
+	TokensOut int64 // 原始输出 token
+	Requests  int64
+	RetryToks int64 // 重试 token（平台成本，不计用户金额，M9）
 }
 
 // ---------- 实现 ----------
@@ -59,7 +59,7 @@ type MonthStdProvider interface {
 }
 
 type ratingEngine struct {
-	rounding string      // half_up | floor
+	rounding string // half_up | floor
 	monthStd MonthStdProvider
 }
 
@@ -160,8 +160,8 @@ func (e *ratingEngine) ExtraAmount(u *UsageAgg, plan *Plan, tbl *PriceTable) (in
 
 	// 1. 套餐级合计：逐模型取「月前（账本锁定）+ 当次（账本锁定）」std
 	type mUsed struct {
-		mk     string
-		inUsed int64
+		mk      string
+		inUsed  int64
 		outUsed int64
 	}
 	var ms []mUsed

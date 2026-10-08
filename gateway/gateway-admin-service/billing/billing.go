@@ -17,15 +17,15 @@ type PriceTableProvider interface {
 
 // BillingService 账单生成服务。
 type BillingService struct {
-	store       Store
-	rating      RatingEngine
-	prices      PriceTableProvider
-	reconciler  *Reconciler        // nil = 跳过 L2（未接入计量侧）
-	freeze      FreezeStore        // nil = 不判冻结
-	signer      BillSigner         // nil = 不签名（T7b）
-	auditAnchor AuditAnchorProvider // nil = 不锚定审计链（T7b）
-	monthStdCache *CachedMonthStd   // nil = 未启用月累计缓存（A-37）
-	now         func() int64
+	store         Store
+	rating        RatingEngine
+	prices        PriceTableProvider
+	reconciler    *Reconciler         // nil = 跳过 L2（未接入计量侧）
+	freeze        FreezeStore         // nil = 不判冻结
+	signer        BillSigner          // nil = 不签名（T7b）
+	auditAnchor   AuditAnchorProvider // nil = 不锚定审计链（T7b）
+	monthStdCache *CachedMonthStd     // nil = 未启用月累计缓存（A-37）
+	now           func() int64
 
 	// S-1 增量拉取（§6.1.1）
 	source       PullSource    // nil = 不拉取

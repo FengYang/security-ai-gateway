@@ -33,36 +33,36 @@ type StoreConfig struct {
 }
 
 type SourceConfig struct {
-	TEEURL         string
-	AdminTokenRef  string // env:NAME | file:PATH
-	SyncMode       string // pull | push（单写者，R-30）
-	PullInterval   time.Duration
-	PullLookback   time.Duration
-	PushEnabled    bool
-	PushSecretRef  string
+	TEEURL        string
+	AdminTokenRef string // env:NAME | file:PATH
+	SyncMode      string // pull | push（单写者，R-30）
+	PullInterval  time.Duration
+	PullLookback  time.Duration
+	PushEnabled   bool
+	PushSecretRef string
 }
 
 type PeriodConfig struct {
-	Timezone         string
-	DailyCloseAt     string // "HH:MM"
-	MonthlyCloseDay  int
-	MonthlyCloseAt   string // "HH:MM"
+	Timezone        string
+	DailyCloseAt    string // "HH:MM"
+	MonthlyCloseDay int
+	MonthlyCloseAt  string // "HH:MM"
 }
 
 type RatingConfig struct {
-	PriceTable         string // 配置文件路径
-	Rounding           string // half_up | floor
+	PriceTable          string // 配置文件路径
+	Rounding            string // half_up | floor
 	AccumulateThenRound bool
-	TierMode           string // progressive
-	RetryAttribution   string // platform
+	TierMode            string // progressive
+	RetryAttribution    string // platform
 }
 
 type AnomalyConfig struct {
-	DailySpikeRatio    float64
+	DailySpikeRatio     float64
 	ReconcileAlertRatio float64
-	QuotaWarnRatio     float64
-	AutoThrottle       bool
-	SpikeCriticalRatio float64
+	QuotaWarnRatio      float64
+	AutoThrottle        bool
+	SpikeCriticalRatio  float64
 }
 
 type DisplayConfig struct {

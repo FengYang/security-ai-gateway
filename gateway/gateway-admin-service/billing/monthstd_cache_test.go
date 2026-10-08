@@ -11,10 +11,10 @@ import (
 
 // countingStdSrc 计数替身：记录全量回源与区间求和调用次数（验证增量推进）。
 type countingStdSrc struct {
-	stds  map[string][2]int64 // day -> {stdIn, stdOut}
-	full  int                 // MonthStdBefore 调用次数
-	rng   int                 // SumStdRange 调用次数
-	days  []string            // 有序日列表
+	stds map[string][2]int64 // day -> {stdIn, stdOut}
+	full int                 // MonthStdBefore 调用次数
+	rng  int                 // SumStdRange 调用次数
+	days []string            // 有序日列表
 }
 
 func newCountingStdSrc(stds map[string][2]int64) *countingStdSrc {
@@ -250,9 +250,9 @@ func TestCachedMonthStd_WarmMakesNextDayHit(t *testing.T) {
 func TestCachedMonthStd_WarmEmptyModelsNoop(t *testing.T) {
 	src := newCountingStdSrc(map[string][2]int64{"2026-10-01": {5, 1}})
 	c := NewCachedMonthStd(src)
-	c.Warm("t1", nil, "2026-10-01")                 // 无模型 → no-op
-	c.Warm("t1", []string{""}, "2026-10-01")        // 空模型键 → 跳过
-	c.Warm("t1", []string{"m1"}, "bad")             // 非法日期 → no-op
+	c.Warm("t1", nil, "2026-10-01")          // 无模型 → no-op
+	c.Warm("t1", []string{""}, "2026-10-01") // 空模型键 → 跳过
+	c.Warm("t1", []string{"m1"}, "bad")      // 非法日期 → no-op
 	if src.full != 0 || src.rng != 0 {
 		t.Errorf("warm no-op cases must not query source (full=%d rng=%d)", src.full, src.rng)
 	}

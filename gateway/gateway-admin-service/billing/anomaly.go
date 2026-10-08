@@ -12,11 +12,11 @@ import (
 type AnomalyKind string
 
 const (
-	KindSpike           AnomalyKind = "spike"            // 单日用量突增
-	KindReconcileDiff   AnomalyKind = "reconcile_diff"   // L2 差异
-	KindQuotaWarn       AnomalyKind = "quota_warn"       // 配额预警
-	KindPricingMissing  AnomalyKind = "pricing_missing"  // 缺单价
-	KindPlanExpired     AnomalyKind = "plan_expired"     // 套餐到期（S-9）
+	KindSpike          AnomalyKind = "spike"           // 单日用量突增
+	KindReconcileDiff  AnomalyKind = "reconcile_diff"  // L2 差异
+	KindQuotaWarn      AnomalyKind = "quota_warn"      // 配额预警
+	KindPricingMissing AnomalyKind = "pricing_missing" // 缺单价
+	KindPlanExpired    AnomalyKind = "plan_expired"    // 套餐到期（S-9）
 )
 
 // Severity 严重级。
