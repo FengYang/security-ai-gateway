@@ -590,6 +590,7 @@ S-2「独立鉴权域」未实现；配置项语义误导，运维按 R-27 配�
 | 2026-10-08 | 开发（P3 批次） | **P3 池集中评估完成**：BUG-005/006/SEC-002 修复并提交（`5df9d09`，含 3 条回归锚）；DOC-004 判 **不修**；TEST-001 判 **已消除**。P3 池清零 |
 | 2026-10-08 | 文档（同步与入库） | ① 详设同步 BUG-001 新机制（§6.1.1 注释、§6.3.2 幂等键、§6.12.3 回补、§7.x S-1 行、§9.3 告警、R-7 语义）；② `.gitignore` 增加 P0-3 文档白名单（**推翻上条“不入库”说明**），本跟踪文档与 P0-3 详设文档**随之入库** |
 | 2026-10-08 | 开发/文档（第二轮独立复核改进） | 补 **BUG-008**（`GET /subscription`）、**BUG-009**（明细舍入遵循配置）、**BUG-010**（拉取端点秒对齐）、**BUG-011**（价格表防御）；新增 **P-1..P-5 基准**（`billing/bench_test.go`）与 **S-7 优雅降级用例**；订正 **详设 §9.1 指标登记**（11 项 `required`→`conditional`，与清单逐项一致）并回填本文件详情块状态；新增 **§8 实现现状与开放边界**（T9 页面等登记为开放边界）。`go build`/`go vet`/`go test` 全绿，billing 覆盖 ≥80% |
+| 2026-10-08 | 开发（gofmt 治理闭环） | ① `billing/` 包 + `billing_api.go` 执行 `gofmt -w`（**纯格式、零行为变更**，独立提交，与功能提交隔离）；② 新增 **CI 增量门禁** `scripts/check-gofmt.ps1`（仅校验本次变更 `.go` 文件，避免全仓历史漂移误伤）并接入 `.github/workflows/ci.yml`；③ 回填 §8.1 `QUAL-001` 状态。验证：`gofmt -l` 清零；`build/vet/test` 全绿 |
 
 ---
 
@@ -609,7 +610,7 @@ S-2「独立鉴权域」未实现；配置项语义误导，运维按 R-27 配�
 | P0-3-TEST-003 | P2 | 缺 §10.6 S-7 版本兼容用例 | `billing_api_test.go` | 旧对端 400 → 订阅仍 200 |
 | P0-3-DOC-005 | P2 | §9.1 指标 `required/conditional` 与 `metrics-required.txt` 不一致（11 项误标 `required`） | 详设 §9.1 | 逐项对齐（全 `conditional`） |
 | P0-3-DOC-006 | P2 | 本跟踪文档详情块状态与总览/附录不一致 | 本文件 §4 | 详情块回填（本次） |
-| P0-3-QUAL-001 | P3 | `billing/*.go` 与 `billing_api.go` 存在**既有** gofmt 漂移（struct 字段/尾随注释对齐，非本轮引入；本轮新增行本身 gofmt 干净） | `billing/*.go`、`billing_api.go` | **未改**（避免与“精准修改/不改无关格式”冲突）；建议后续**单批 `gofmt -w`**（纯格式、零行为变更） |
+| P0-3-QUAL-001 | P3 | `billing/*.go` 与 `billing_api.go` 存在**既有** gofmt 漂移（struct 字段/尾随注释对齐，非本轮引入；本轮新增行本身 gofmt 干净） | `billing/*.go`、`billing_api.go` | **已修复**：`gofmt -w` **独立格式化提交**（与功能提交隔离）；并加 **CI 增量门禁** `scripts/check-gofmt.ps1`（仅校验变更 `.go` 文件，待全量清零后可放宽为全仓） |
 
 ### 8.2 性能基准实测（单机内存 SQLite；`go test ... -bench . -benchmem`）
 

@@ -22,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gofmt 增量门禁需 diff 基线（PR base / HEAD^）
 
       - uses: actions/setup-go@v5
         with:
@@ -66,6 +68,17 @@ jobs:
         run: |
           bash -n scripts/setup-env.sh
           pwsh -NoProfile -Command "Get-ChildItem scripts/*.ps1 | ForEach-Object { \$null = [System.Management.Automation.Language.Parser]::ParseFile(\$_.FullName, [ref]\$null, [ref]\$e); if (\$e) { throw \$e[0] } }; Write-Host 'ps1 parse OK'"
+
+      # 8. gofmt 增量门禁（仅校验本次变更的 .go 文件；防新代码格式漂移）
+      #    全仓历史仍存在漂移，故不做全量校验；待全量清零后可放宽。
+      - name: gofmt gate (changed files)
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          else
+            BASE="HEAD^"
+          fi
+          pwsh -NoProfile -File scripts/check-gofmt.ps1 -Base "$BASE"
 
   # ---------------- job 2：自托管 runner（完整环境依赖） ----------------
   # 前置条件（在环境机上注册 runner 并打标签 otpmask-e2e）：

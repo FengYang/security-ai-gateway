@@ -85,7 +85,7 @@
 | C2 | P2 | 无落盘评估报告 | **本文件** |
 | C3 | P2 | §9.1 指标 `required/conditional` 与清单不一致（11 项误标） | **已修**：全 `conditional`，逐项对齐 |
 | C4 | P2 | 未实现项未登记 | **已修**：台账 §8.3 开放边界 |
-| C5 | P3 | `billing/*.go`/`billing_api.go` 存在**既有** gofmt 对齐漂移（非本轮引入） | 记录；建议后续单批 `gofmt -w`（纯格式） |
+| C5 | P3 | `billing/*.go`/`billing_api.go` 存在**既有** gofmt 对齐漂移（非本轮引入） | **已修复**：`gofmt -w` 独立格式化提交 + CI 增量门禁（`scripts/check-gofmt.ps1`） |
 | D1 | P2 | 缺 P-1..P-5 基准 | **已修**：`billing/bench_test.go`（见 §6） |
 | D2 | P2 | 缺 §10.6 S-7 兼容用例 | **已修**：旧对端拒 month → 订阅仍 200（优雅降级） |
 | D3 | P3 | E2E-2 OverQuota 计价差异未覆盖 | 已知边界 |
