@@ -50,7 +50,7 @@ func benchWindow(eventKey string, nTenants int) *UsageWindow {
 }
 
 // seedBenchEntries 一次性写入 n 条账本条目（跨 100 租户 × 28 天）。
-func seedBenchEntries(b *testing.B, s Store, n int) {
+func seedBenchEntries(b testing.TB, s Store, n int) {
 	b.Helper()
 	entries := make([]LedgerEntry, 0, n)
 	for i := 0; i < n; i++ {
@@ -66,7 +66,7 @@ func seedBenchEntries(b *testing.B, s Store, n int) {
 }
 
 // seedClose 为单租户写入 days × models 条条目（供日结基准）。
-func seedClose(b *testing.B, s Store, tenant string, days, models int) {
+func seedClose(b testing.TB, s Store, tenant string, days, models int) {
 	b.Helper()
 	var entries []LedgerEntry
 	k := 0
@@ -86,7 +86,7 @@ func seedClose(b *testing.B, s Store, tenant string, days, models int) {
 	appendBench(b, s, entries)
 }
 
-func appendBench(b *testing.B, s Store, entries []LedgerEntry) {
+func appendBench(b testing.TB, s Store, entries []LedgerEntry) {
 	b.Helper()
 	tx, err := s.Begin()
 	if err != nil {
