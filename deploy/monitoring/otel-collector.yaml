@@ -1,0 +1,255 @@
+# P1-2：OTel Collector（全链路 tracing 汇聚 + tail_sampling + 脱敏）
+#
+# 架构：单实例部署（默认，满足初期容量）；HA 升级路径见 §6.4 两层拓扑：
+#   转发层（loadbalancingexporter, routing_key=traceID）→ 采样层（tail_sampling）
+#   普通 LB 会打散单 trace 的 span，破坏 tail 决策（R-6）。
+#
+# 安全默认（C-4 / FD-3）：
+#   - 全局 tracing 开关 = 全局配置（feature_gates 或 receiver 开关）
+#   - 租户 allow-list = tail_sampling string_attribute policy，默认空=全拒绝
+#   - 错误全采（L2）仅对 allow-list 内租户生效
+#   - 正常请求默认 1% 采样（L1）
+#
+# Span 脱敏（D-4 / V-2）：
+#   - TEE 内 SanitizingSpanProcessor 第一道
+#   - Collector attributes processor 白名单裁剪（纵深防御第二道）
+#   - 白名单见 §6.2 Span 属性 Schema
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: otpmask
+data:
+  otel-collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+            # 生产启用 TLS（TEE→Collector 强制 mTLS）
+            # tls:
+            #   cert_file: /etc/otel/tls/server.crt
+            #   key_file: /etc/otel/tls/server.key
+          http:
+            endpoint: 0.0.0.0:4318
+            # tls:
+            #   cert_file: /etc/otel/tls/server.crt
+            #   key_file: /etc/otel/tls/server.key
+
+    processors:
+      # 属性白名单裁剪（纵深防御第二道；TEE 内已做第一道，D-4）
+      # 白名单外一律删除，防止 TEE 侧遗漏或数据面默认 tags 带敏感信息。
+      attributes:
+        actions:
+          - key: tenant.id
+            action: keep
+          - key: request.id
+            action: keep
+          - key: model.id
+            action: keep
+          - key: engine.type
+            action: keep
+          - key: cache.hit
+            action: keep
+          - key: cache.mode
+            action: keep
+          - key: tokens.in
+            action: keep
+          - key: tokens.out
+            action: keep
+          - key: result
+            action: keep
+          - key: deny.reason
+            action: keep
+          - key: og.category
+            action: keep
+          - key: og.mode
+            action: keep
+          - key: is.retry
+            action: keep
+          - key: http.status_code
+            action: keep
+          - key: http.response.status_code
+            action: keep
+          - key: ttft.ms
+            action: keep
+          - key: input.digest
+            action: keep
+          - key: output.digest
+            action: keep
+          # —— M3 控制面/管理面 span 属性（§7.4：core.route.change / admin.request）——
+          - key: http.method
+            action: keep
+          - key: http.request.method
+            action: keep
+          - key: http.route
+            action: keep
+          - key: url.path
+            action: keep
+          - key: user.role
+            action: keep
+          - key: route.name
+            action: keep
+          - key: change.type
+            action: keep
+          - key: otlp.library.name
+            action: keep
+          - key: otlp.resource.version
+            action: keep
+          - key: service.name
+            action: keep
+          # —— 白名单上界，以下全删 ——
+          - action: delete
+
+      # 兼容键名映射：Envoy OTel tracer 新语义约定用 http.response.status_code，
+      # 而 tail_sampling http_status_code policy 读 http.status_code。
+      # 同时保留两个键，避免 Collector/查询侧键名不匹配导致错误漏采。
+      resource/ensure_status_code:
+        attributes:
+          - key: http.status_code
+            from_attribute: http.response.status_code
+            action: insert
+
+      # Tail Sampling（D-3 / §3.4 三层策略）
+      # decision_wait 初始 30s（覆盖 LLM 流式长 trace p99），
+      # 落地后按实测 trace 时长 p99 校正——过短会在 trace 未闭合时裁决，
+      # 导致 status_code 未写入、长错误 trace 仅按 1% 处理而漏采。
+      tail_sampling:
+        decision_wait: 30s
+        num_traces: 100000
+        expected_new_traces_per_sec: 1000
+        policies:
+          # —— 第 1 层：租户 allow-list（FD-3 / D-8，deny-by-default）——
+          # 不在列表 → 全拒绝；由 POST /v1/adminext/tracing/tenant 热更 values。
+          - name: tenant-allow-list
+            type: and
+            and:
+              and_sub_policy:
+                - name: tenant-attr-match
+                  type: string_attribute
+                  string_attribute:
+                    key: tenant.id
+                    # 空列表 = 全拒绝（安全默认，C-4）；
+                    # 生产按租户灰度开启时追加值。
+                    values: []
+                    # 启用 allow-list（匹配=放行进入后续策略；不匹配=该 policy 拒绝）
+                    invert_match: false
+          # —— 第 2 层：错误全采（L2，优先级最高）——
+          - name: error-policy-http
+            type: http_status_code
+            http_status_code:
+              status_codes: ["4xx", "5xx"]
+          - name: error-policy-span
+            type: status_code
+            status_code: ERROR
+          # —— 第 3 层：默认概率采样（L1 = 1%）——
+          - name: default-probabilistic
+            type: probabilistic
+            probabilistic:
+              sampling_percentage: 1
+
+    exporters:
+      # 导出到 Tempo（OTLP/gRPC）
+      otlp/tempo:
+        endpoint: tempo:4317
+        tls:
+          insecure: true  # 集群内同 namespace，开发/演示形态；生产启用 mTLS
+
+      # 日志 exporter（调试用，默认注释）
+      # debug:
+      #   verbosity: detailed
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors:
+            - attributes
+            - resource/ensure_status_code
+            - tail_sampling
+          exporters:
+            - otlp/tempo
+      # telemetry:
+      #   logs:
+      #     level: info
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: otpmask
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1  # 单实例起步；HA 须按 §6.4 两层拓扑改造
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8888"
+    spec:
+      containers:
+      - name: otel-collector
+        image: otel/opentelemetry-collector-contrib:0.112.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - /otelcol-contrib
+        - "--config=/etc/otel/otel-collector.yaml"
+        ports:
+        - containerPort: 4317
+          name: otlp-grpc
+          protocol: TCP
+        - containerPort: 4318
+          name: otlp-http
+          protocol: TCP
+        - containerPort: 8888
+          name: metrics
+          protocol: TCP
+        volumeMounts:
+        - name: otel-collector-config
+          mountPath: /etc/otel
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 13133
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      volumes:
+      - name: otel-collector-config
+        configMap:
+          name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: otpmask
+  labels:
+    app: otel-collector
+spec:
+  type: ClusterIP
+  selector:
+    app: otel-collector
+  ports:
+  - name: otlp-grpc
+    port: 4317
+    targetPort: otlp-grpc
+    protocol: TCP
+  - name: otlp-http
+    port: 4318
+    targetPort: otlp-http
+    protocol: TCP

@@ -4,3 +4,5 @@ kind: Kustomization
 resources:
 - prometheus.yaml
 - grafana.yaml
+- otel-collector.yaml  # P1-2：OTel Collector（tracing 汇聚 + tail_sampling + 脱敏）
+- tempo.yaml           # P1-2：Tempo（trace 存储，30d 保留）

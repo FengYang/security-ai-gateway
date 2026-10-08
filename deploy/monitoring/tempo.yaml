@@ -1,0 +1,188 @@
+# P1-2：Grafana Tempo（trace 存储）
+#
+# 存储策略（D-2 / V-8，方案① 单实例 30d + 查询默认 7d 窗口）：
+#   - 单实例部署，对象存储为唯一持久后端
+#   - block_retention: 720h（30d）—— 全量保留 30d
+#   - 查询默认窗口：Grafana 看板默认 7d，避免冷数据扫描
+#   - 冷热分层冻结为方案①（§6.4 待确认项 3），单实例足够初期容量
+#
+# HA 升级：增加 query-frontend + 多副本 ingester，按时间/租户分片。
+# 生产化：启用 S3 兼容存储（MINIO / 云厂商 OSS），替换下面的 filesystem。
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-config
+  namespace: otpmask
+data:
+  tempo.yaml: |
+    server:
+      http_listen_port: 3200
+      grpc_listen_port: 9095
+
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:4317
+            http:
+              endpoint: 0.0.0.0:4318
+
+    ingester:
+      max_block_duration: 5m
+      flush_check_period: 1m
+      trace_idle_period: 10s
+
+    compactor:
+      compaction:
+        block_retention: 720h  # 30d（V-8：冷热合并，单实例形态）
+        compacted_block_retention: 1h
+
+    storage:
+      trace:
+        backend: local  # 开发/演示用 local filesystem；生产改为 s3
+        local:
+          path: /tmp/tempo/traces
+        wal:
+          path: /tmp/tempo/wal
+        # 生产 s3 配置示例：
+        # s3:
+        #   bucket: tempo-traces
+        #   endpoint: minio:9000
+        #   access_key: tempo
+        #   secret_key: tempo123
+        #   insecure: true
+
+    querier:
+      max_concurrent_queries: 10
+      search:
+        default_result_limit: 20
+        max_result_limit: 1000
+
+    query_frontend:
+      max_outstanding_per_tenant: 100
+      search:
+        duration_slo: 5s
+        throughput_slo: 1MBps
+
+    # metrics_generator（可选，SLO span metrics 用）：
+    # traces_spanmetrics_* 系列指标，与 otpmask_* 分体系隔离（C-8）。
+    # 本期不启用，避免双口径。需要时取消下方注释并在 metrics_generator 块配置。
+    # metrics_generator:
+    #   registry:
+    #     collection_interval: 15s
+    #   processor:
+    #     service_graphs:
+    #       dimensions:
+    #         - tenant.id
+    #     span_metrics:
+    #       dimensions:
+    #         - tenant.id
+    #         - model.id
+    #         - http.status_code
+    #   storage:
+    #     path: /tmp/tempo/generator/wal
+    #     remote_write:
+    #       - url: http://prometheus:9090/api/v1/write
+
+    overrides:
+      defaults:
+        read:
+          search:
+            max_duration: 7d  # 查询默认 7d 窗口（V-8 方案①）
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: otpmask
+  labels:
+    app: tempo
+spec:
+  replicas: 1  # 单实例起步；HA 升级路径见文件头
+  selector:
+    matchLabels:
+      app: tempo
+  template:
+    metadata:
+      labels:
+        app: tempo
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3200"
+    spec:
+      containers:
+      - name: tempo
+        image: grafana/tempo:2.5.0
+        imagePullPolicy: IfNotPresent
+        args:
+        - "-config.file=/etc/tempo/tempo.yaml"
+        ports:
+        - containerPort: 3200
+          name: http
+          protocol: TCP
+        - containerPort: 4317
+          name: otlp-grpc
+          protocol: TCP
+        - containerPort: 4318
+          name: otlp-http
+          protocol: TCP
+        - containerPort: 9095
+          name: grpc
+          protocol: TCP
+        volumeMounts:
+        - name: tempo-config
+          mountPath: /etc/tempo
+          readOnly: true
+        - name: tempo-data
+          mountPath: /tmp/tempo
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        readinessProbe:
+          httpGet:
+            path: /status/ready
+            port: 3200
+          initialDelaySeconds: 10
+          periodSeconds: 10
+      volumes:
+      - name: tempo-config
+        configMap:
+          name: tempo-config
+      - name: tempo-data
+        emptyDir: {}  # 开发用 emptyDir；生产用 PersistentVolumeClaim
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: otpmask
+  labels:
+    app: tempo
+spec:
+  type: ClusterIP
+  selector:
+    app: tempo
+  ports:
+  - name: http
+    port: 3200
+    targetPort: http
+    protocol: TCP
+  - name: otlp-grpc
+    port: 4317
+    targetPort: otlp-grpc
+    protocol: TCP
+  - name: otlp-http
+    port: 4318
+    targetPort: otlp-http
+    protocol: TCP
+  - name: grpc
+    port: 9095
+    targetPort: grpc
+    protocol: TCP
