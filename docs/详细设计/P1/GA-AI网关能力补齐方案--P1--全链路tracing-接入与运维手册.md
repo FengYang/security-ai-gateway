@@ -13,8 +13,24 @@ tracing **默认关闭**；关闭时零开销、`/metrics` 逐字节不变（C-8
 | 全局（紧急） | 同上，置回 `false` 并滚动重启 | — | **一键关闭**：语义等同未接入；已产生数据由 Tempo 保留期管理 |
 | 租户级（灰度） | `POST /v1/adminext/tracing/tenant` → Collector `tail_sampling` allow-list | 空（全拒绝） | 仅 allow-list 内 `tenant.id` 的 trace 进入采样；其余默认拒绝 |
 
-> **执行点说明（§6.4）**：租户级开闭的**执行点**在 Collector `tail_sampling` 的显式 allow-list（deny-by-default）。
-> 本 API 维护「期望 allow-list」并落审计链；Collector 侧热更为运维动作（见 §6 待实机验证项）。
+> **执行点与热更（§6.4，方案 B3，2026-10-08 落地）**：租户级开闭的**执行点**在 Collector
+> `tail_sampling` 的显式 allow-list（deny-by-default），**事实源 = Collector ConfigMap**
+> （`otel-collector-config` 的 `values: &tenant_allowlist`）。
+> `POST /v1/adminext/tracing/tenant` 的执行链为：
+> **读 ConfigMap → 增/删租户 → 渲染 → PATCH ConfigMap → PATCH `otel-collector` Deployment
+> pod-template 注解 `otpmask.io/allowlist-rev` 触发滚动重建**。
+> - **生效时延** = 滚动重建时间（秒级）；期间该 Collector 实例短暂不可用（tracing 非关键路径）。
+> - **OTel Collector 无原生配置热重载**，故"热更"以滚动实现；如需避免重启，可置
+>   `ADMIN_OTEL_COLLECTOR_RESTART=false`（Helm: `tracingAllowlist.restart=false`）改由外部
+>   Reloader 生效。
+> - **fail-closed**：任一步失败（K8s API 不可达 / RBAC 403 / 锚点缺失）→ 端点返回 **503** 且
+>   **不改本地缓存**——保证「200 即已生效」，不再出现"200 但未生效"。
+> - **权限最小化**：RBAC 以 `resourceNames` 点名收敛，仅授予
+>   `configmaps/otel-collector-config` 与 `deployments/otel-collector` 的 `get/patch`
+>   （无 list/watch、不涉及其它资源）；见 `deploy/k8s/gateway-admin-service.yaml` 与
+>   `deploy/helm/gateway-admin-service/templates/rbac.yaml`。
+> - **未接线**（非 in-cluster）→ 写端点 503；`GET /slo` 增加 `tracing_wired` /
+>   `tracing_source`（`collector-configmap` | `local-cache`）如实标注来源。
 
 ## 2. 各服务接入（环境变量）
 
@@ -27,7 +43,11 @@ tracing **默认关闭**；关闭时零开销、`/metrics` 逐字节不变（C-8
 | gateway-admin-service | 同上 | 同上 | 管理面 `admin.request` span |
 | gateway-admin-service | `ADMIN_TEMPO_URL` | 空 | 排障查询 Tempo 地址；空 → `/trace/*` 返回 503 |
 | | `ADMIN_PROMETHEUS_URL` | 空 | SLA/SLO 聚合；空 → 相关端点 503 |
-| | `ADMIN_SLO_FILE` | 空 | SLO/allow-list 持久化文件；空 = 内存模式（重启丢失） |
+| | `ADMIN_SLO_FILE` | 空 | SLO 定义持久化文件（**不再承载 allow-list**；allow-list 事实源为 Collector ConfigMap） |
+| | `ADMIN_OTEL_COLLECTOR_CONFIGMAP` | `otel-collector-config` | Collector ConfigMap 名（allow-list 事实源） |
+| | `ADMIN_OTEL_COLLECTOR_KEY` | `otel-collector.yaml` | ConfigMap 内的配置键 |
+| | `ADMIN_OTEL_COLLECTOR_DEPLOYMENT` | `otel-collector` | 需滚动触发的 Collector Deployment 名 |
+| | `ADMIN_OTEL_COLLECTOR_RESTART` | `true` | `false` = 仅写配置，不触发滚动（交由外部 Reloader） |
 
 Envoy/Higress 侧：HCM `tracing` 块（OTel provider，根采样 100%）+ `otel-collector` 集群；
 Wasm 插件**不生成 span**，仅透传 `traceparent`（默认行为）+ 统一 `X-Request-Id`。
@@ -132,7 +152,7 @@ POST /v1/adminext/slo
 | 4 | Higress `tracing.*` schema | chart 实机核对（本项目为自持 Envoy bootstrap，不依赖 Higress 动态 `tracing.*`） |
 | 5 | Wasm 对 traceparent 可见性 | 插件实测 |
 | 6 | Envoy OTel 默认 tags 清单 | 确认无敏感 fields（`http.url` 不带 query） |
-| 7 | Collector 租户 allow-list 热更 | `POST /tracing/tenant` 与 Collector 侧同步的自动化 wiring（allow-list 现为单一事实源 `values: &tenant_allowlist`） |
+| 7 | ~~Collector 租户 allow-list 热更~~ | **已落地（方案 B3，2026-10-08）**：事实源 = Collector ConfigMap；API 读→改→PATCH + 触发 `otel-collector` 滚动；RBAC `resourceNames` 收敛；未接线/失败一律 503 fail-closed。**待实机验证**：集群内 RBAC 实际授权链路与滚动重启耗时 |
 | 8 | 性能基线实测 | §5 方法在实机负载下执行并留证 |
 | 9 | ~~Envoy 配置预存缺陷（非 tracing）~~ | **已修复并实测校验通过**：RBAC 过滤器移除已废弃的 `stat_prefix`（1.27 仅存 `shadow_rules_stat_prefix`）；`retry_budget` 由 `route.retry_policy` 迁至 `Cluster.CircuitBreakers.Thresholds`。k8s 与 Helm（渲染后）均 `envoy --mode validate` **OK**（去 wasm 过滤器；Wasm VM 在 validate 模式不可运行属已知限制） |
 
