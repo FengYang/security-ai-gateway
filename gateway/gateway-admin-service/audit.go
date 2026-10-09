@@ -59,6 +59,10 @@ const (
 	auditActionAPIKeyCreate = "api_key_create"
 	auditActionAPIKeyRotate = "api_key_rotate"
 	auditActionAPIKeyRevoke = "api_key_revoke"
+	// P1-4 M5 策略/模型动作（附录 D；策略仅存条目数/类目数摘要，不存具体词）。
+	auditActionPolicyUpdate      = "policy_update"
+	auditActionPolicyApply       = "policy_apply"
+	auditActionModelConfigUpdate = "model_config_update"
 )
 
 // auditAnchorInterval 每追加 N 条事件锚定一次链尾哈希。
@@ -101,6 +105,9 @@ type adminAuditEvent struct {
 	// 注：`KeyFingerprint` 为**标识类**字段（API 可见、跨服务引用），恒 SHA-256，不随本标签迁移。
 	// 写入端打标随服务 profile 接线落地（B4）；本批先建分派机制。
 	HashAlg  string `json:"hash_alg,omitempty"`
+	// Detail M5（策略/模型变更摘要，附录 D）：**证据字段，不进 hash()**（与 HashAlg 同法），
+	// 保持既有链格式不变；空 = 不写。
+	Detail   string `json:"detail,omitempty"`
 	PrevHash string `json:"prev_hash"`
 }
 

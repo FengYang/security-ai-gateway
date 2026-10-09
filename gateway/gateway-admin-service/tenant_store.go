@@ -88,24 +88,7 @@ CREATE INDEX IF NOT EXISTS idx_mtoken_expires ON mail_action_tokens(expires_at);
 
 -- API Key 表由 ensureAPIKeysSchema 负责（M3；含 M1 占位表迁移 → §3.5 结构）。
 
--- 策略 overlay（M5 补 CRUD；M1 仅建表占位）
-CREATE TABLE IF NOT EXISTS policy_overlays (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  tenant_id  TEXT    NOT NULL,
-  scope      TEXT    NOT NULL,
-  action     TEXT    NOT NULL,
-  pattern    TEXT    NOT NULL,
-  created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_policy_tenant ON policy_overlays(tenant_id);
-
--- 模型配置（M5 补 CRUD；M1 仅建表占位）
-CREATE TABLE IF NOT EXISTS model_configs (
-  tenant_id      TEXT PRIMARY KEY,
-  default_model  TEXT    NOT NULL DEFAULT '',
-  allowed_models TEXT    NOT NULL DEFAULT '[]',
-  updated_at     INTEGER NOT NULL
-);
+-- 策略 overlay / 模型配置表由 ensurePolicySchema 负责（M5；含 M1 占位表迁移 → §3.5 ⑤⑥）。
 
 -- 注册频率限制（按 IP 窗口计数；C-11）
 CREATE TABLE IF NOT EXISTS register_rate (
@@ -175,6 +158,12 @@ type TenantStore interface {
 	ListAPIKeysByTenant(tenantID string) ([]*APIKey, error)
 	RevokeAPIKey(tx TenantTx, keyID string, revokedAt int64) error
 	ListRevokedAPIKeysSince(since int64) ([]*APIKey, error)
+
+	// 策略 overlay / 模型配置（M5）
+	GetPolicyOverlay(tenantID string) (*PolicyOverlay, error)
+	UpsertPolicyOverlay(tx TenantTx, p *PolicyOverlay) error
+	GetModelConfig(tenantID string) (*ModelConfig, error)
+	UpsertModelConfig(tx TenantTx, m *ModelConfig) error
 
 	// 注册限流
 	IncRegisterRate(ip string, windowSec int) (int, error)
@@ -256,6 +245,11 @@ func OpenTenantStore(dsn string, wal bool, pepper []byte) (TenantStore, error) {
 	}
 	// API Key 表（M3）：对齐 §3.5（含 M1 占位表迁移）
 	if err := ensureAPIKeysSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// 策略 overlay / 模型配置表（M5）：对齐 §3.5 ⑤⑥（含 M1 占位表迁移）
+	if err := ensurePolicySchema(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -514,7 +508,7 @@ type APIKey struct {
 
 // ensureAPIKeysSchema 建表；若检测到 M1 旧占位表（无 key_id 列）则重建（旧表从未写入，安全）。
 func ensureAPIKeysSchema(db *sql.DB) error {
-	needs, err := apiKeysNeedsRebuild(db)
+	needs, err := tableNeedsRebuild(db, "api_keys", "key_id")
 	if err != nil {
 		return err
 	}
@@ -529,27 +523,28 @@ func ensureAPIKeysSchema(db *sql.DB) error {
 	return nil
 }
 
-// apiKeysNeedsRebuild 检测 api_keys 是否为 M1 旧结构（存在但无 key_id 列）。
-func apiKeysNeedsRebuild(db *sql.DB) (bool, error) {
-	rows, err := db.Query(`PRAGMA table_info(api_keys)`)
+// tableNeedsRebuild 检测表是否为旧结构（表存在但不含 requiredCol 列）。
+// table 与 requiredCol 均为代码内常量（无注入面）。
+func tableNeedsRebuild(db *sql.DB, table, requiredCol string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
-		return false, fmt.Errorf("tenant: inspect api_keys: %w", err)
+		return false, fmt.Errorf("tenant: inspect %s: %w", table, err)
 	}
 	defer func() { _ = rows.Close() }()
-	exists, hasKeyID := false, false
+	exists, hasCol := false, false
 	for rows.Next() {
 		var cid, notnull, pk int
 		var name, ctype string
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return false, fmt.Errorf("tenant: scan api_keys info: %w", err)
+			return false, fmt.Errorf("tenant: scan %s info: %w", table, err)
 		}
 		exists = true
-		if name == "key_id" {
-			hasKeyID = true
+		if name == requiredCol {
+			hasCol = true
 		}
 	}
-	return exists && !hasKeyID, rows.Err()
+	return exists && !hasCol, rows.Err()
 }
 
 const apiKeyColumns = `key_id, tenant_id, name, jti, fingerprint, status, created_by, created_at, last_used_at, revoked_at, expires_at`
@@ -641,6 +636,159 @@ func (s *sqliteTenantStore) RevokeAPIKey(tx TenantTx, keyID string, revokedAt in
 		return fmt.Errorf("tenant: api key %s not found or already revoked", keyID)
 	}
 	return nil
+}
+
+// ---------- 策略 overlay / 模型配置（M5，§3.5⑤⑥）----------
+
+// errTenantVersionConflict 乐观锁版本冲突（服务层映射 409）。
+var errTenantVersionConflict = errors.New("tenant: version conflict")
+
+// policyDDL 策略 overlay 与模型配置表结构（对齐 §3.5 ⑤⑥）。
+const policyDDL = `
+CREATE TABLE IF NOT EXISTS policy_overlays (
+  tenant_id        TEXT PRIMARY KEY,
+  version          INTEGER NOT NULL DEFAULT 1,
+  whitelist        TEXT    NOT NULL DEFAULT '{"entries":[]}',
+  blacklist        TEXT    NOT NULL DEFAULT '{"entries":[]}',
+  category_actions TEXT    NOT NULL DEFAULT '{}',
+  updated_at       INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS model_configs (
+  tenant_id      TEXT PRIMARY KEY,
+  allowed_models TEXT    NOT NULL DEFAULT '[]',
+  default_model  TEXT    NOT NULL DEFAULT '',
+  version        INTEGER NOT NULL DEFAULT 1,
+  updated_at     INTEGER NOT NULL
+);
+`
+
+// PolicyOverlay 租户策略 overlay（每租户一行）。
+type PolicyOverlay struct {
+	TenantID            string
+	Version             int64
+	WhitelistJSON       string // {"entries":[{id,kind,value,created_at}]}
+	BlacklistJSON       string
+	CategoryActionsJSON string // {<内置类目>: block|mask|allow}
+	UpdatedAt           int64
+}
+
+// ModelConfig 租户模型配置（每租户一行）。
+type ModelConfig struct {
+	TenantID          string
+	AllowedModelsJSON string // JSON 数组
+	DefaultModel      string
+	Version           int64
+	UpdatedAt         int64
+}
+
+// ensurePolicySchema 建表；M1 旧占位表（无 version 列）→ 重建（旧表从未写入，安全）。
+func ensurePolicySchema(db *sql.DB) error {
+	for _, t := range []string{"policy_overlays", "model_configs"} {
+		needs, err := tableNeedsRebuild(db, t, "version")
+		if err != nil {
+			return err
+		}
+		if needs {
+			if _, err := db.Exec(`DROP TABLE IF EXISTS ` + t); err != nil {
+				return fmt.Errorf("tenant: drop legacy %s: %w", t, err)
+			}
+		}
+	}
+	if _, err := db.Exec(policyDDL); err != nil {
+		return fmt.Errorf("tenant: init policy schema: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTenantStore) GetPolicyOverlay(tenantID string) (*PolicyOverlay, error) {
+	var p PolicyOverlay
+	err := s.db.QueryRow(`SELECT tenant_id, version, whitelist, blacklist, category_actions, updated_at
+		FROM policy_overlays WHERE tenant_id = ?`, tenantID).
+		Scan(&p.TenantID, &p.Version, &p.WhitelistJSON, &p.BlacklistJSON, &p.CategoryActionsJSON, &p.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant: get policy overlay: %w", err)
+	}
+	return &p, nil
+}
+
+// UpsertPolicyOverlay 写入 overlay（乐观锁：WHERE version = p.Version；不存在则插入 version=1）。
+// 版本不匹配 → errTenantVersionConflict。
+func (s *sqliteTenantStore) UpsertPolicyOverlay(tx TenantTx, p *PolicyOverlay) error {
+	res, err := tx.tx().Exec(`UPDATE policy_overlays
+		SET version = version + 1, whitelist = ?, blacklist = ?, category_actions = ?, updated_at = ?
+		WHERE tenant_id = ? AND version = ?`,
+		p.WhitelistJSON, p.BlacklistJSON, p.CategoryActionsJSON, p.UpdatedAt, p.TenantID, p.Version)
+	if err != nil {
+		return fmt.Errorf("tenant: upsert policy overlay: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	if exists, err := rowExists(tx, `SELECT COUNT(1) FROM policy_overlays WHERE tenant_id = ?`, p.TenantID); err != nil {
+		return err
+	} else if exists {
+		return errTenantVersionConflict
+	}
+	if _, err := tx.tx().Exec(`INSERT INTO policy_overlays
+		(tenant_id, version, whitelist, blacklist, category_actions, updated_at)
+		VALUES (?, 1, ?, ?, ?, ?)`,
+		p.TenantID, p.WhitelistJSON, p.BlacklistJSON, p.CategoryActionsJSON, p.UpdatedAt); err != nil {
+		return fmt.Errorf("tenant: insert policy overlay: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTenantStore) GetModelConfig(tenantID string) (*ModelConfig, error) {
+	var m ModelConfig
+	err := s.db.QueryRow(`SELECT tenant_id, allowed_models, default_model, version, updated_at
+		FROM model_configs WHERE tenant_id = ?`, tenantID).
+		Scan(&m.TenantID, &m.AllowedModelsJSON, &m.DefaultModel, &m.Version, &m.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant: get model config: %w", err)
+	}
+	return &m, nil
+}
+
+// UpsertModelConfig 写入模型配置（乐观锁同 UpsertPolicyOverlay）。
+func (s *sqliteTenantStore) UpsertModelConfig(tx TenantTx, m *ModelConfig) error {
+	res, err := tx.tx().Exec(`UPDATE model_configs
+		SET version = version + 1, allowed_models = ?, default_model = ?, updated_at = ?
+		WHERE tenant_id = ? AND version = ?`,
+		m.AllowedModelsJSON, m.DefaultModel, m.UpdatedAt, m.TenantID, m.Version)
+	if err != nil {
+		return fmt.Errorf("tenant: upsert model config: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	if exists, err := rowExists(tx, `SELECT COUNT(1) FROM model_configs WHERE tenant_id = ?`, m.TenantID); err != nil {
+		return err
+	} else if exists {
+		return errTenantVersionConflict
+	}
+	if _, err := tx.tx().Exec(`INSERT INTO model_configs
+		(tenant_id, allowed_models, default_model, version, updated_at)
+		VALUES (?, ?, ?, 1, ?)`,
+		m.TenantID, m.AllowedModelsJSON, m.DefaultModel, m.UpdatedAt); err != nil {
+		return fmt.Errorf("tenant: insert model config: %w", err)
+	}
+	return nil
+}
+
+// rowExists 执行 COUNT 查询并返回是否存在（>0）。
+func rowExists(tx TenantTx, query string, args ...any) (bool, error) {
+	var n int
+	if err := tx.tx().QueryRow(query, args...).Scan(&n); err != nil {
+		return false, fmt.Errorf("tenant: count query: %w", err)
+	}
+	return n > 0, nil
 }
 
 // ---------- 注册限流 ----------

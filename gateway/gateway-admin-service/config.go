@@ -59,6 +59,9 @@ type config struct {
 	authServiceURL       string // auth-service 基址（Key 签发通道，§6.11）
 	apiKeyDefaultTTLDays int
 	apiKeyMaxTTLDays     int
+
+	// 策略（M5，§6.5）：各套餐条目上限（TENANT_POLICY_LIMITS）
+	policyLimits map[string]int
 }
 
 // defaultIssuer / defaultAudience 内部令牌的签发方与本服务受众默认值。
@@ -228,7 +231,23 @@ func loadTenantConfig(cfg *config) error {
 		return fmt.Errorf("配置错误：API Key TTL 非法（default=%d max=%d）",
 			cfg.apiKeyDefaultTTLDays, cfg.apiKeyMaxTTLDays)
 	}
+
+	// F. 策略（§6.5）：各套餐白/黑名单条目上限
+	cfg.policyLimits = parsePolicyLimits(os.Getenv("TENANT_POLICY_LIMITS"))
 	return nil
+}
+
+// parsePolicyLimits 解析 TENANT_POLICY_LIMITS（JSON: {"free":50,...}）；空/非法 → 缺省。
+func parsePolicyLimits(raw string) map[string]int {
+	def := map[string]int{"free": 50, "basic": 50, "pro": 200, "enterprise": 500}
+	if raw == "" {
+		return def
+	}
+	var m map[string]int
+	if err := json.Unmarshal([]byte(raw), &m); err != nil || len(m) == 0 {
+		return def
+	}
+	return m
 }
 
 // ---------- broker（apiTokens Secret 化，路线丙）----------
