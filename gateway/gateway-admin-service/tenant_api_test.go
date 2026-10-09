@@ -80,7 +80,7 @@ func (b *fakeBinder) BindFree(_ context.Context, tenantID, _ string) (bindResult
 func newAPITestHandler(t *testing.T, cfg *config, binder quotaBinder) (*tenantHandler, *sqliteTenantStore, *fakeMailer) {
 	t.Helper()
 	ts := newTestStore(t)
-	h := newTenantHandler(ts, cfg, binder, nil, nil, nil)
+	h := newTenantHandler(ts, cfg, binder, nil, nil, nil, nil)
 	fm := &fakeMailer{}
 	h.mailer = fm
 	return h, ts, fm

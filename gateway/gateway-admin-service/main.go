@@ -296,7 +296,7 @@ func main() {
 		if bih != nil {
 			binder = bih
 		}
-		tenantH = newTenantHandler(ts, cfg, binder, uh, bih, auditChain)
+		tenantH = newTenantHandler(ts, cfg, binder, uh, bih, mh, auditChain)
 		tenantH.registerCaptcha(adminMux, cfg)
 		tenantH.registerKeyRevocations(adminMux, cfg)
 		defer func() { _ = ts.Close() }()

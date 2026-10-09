@@ -40,8 +40,9 @@ type tenantHandler struct {
 	captcha    *captchaStore
 	binder     quotaBinder     // nil = billing 域未启用
 	issuer     keyIssuer       // nil = Key 签发通道未配置（§6.11）
-	usage      *usageHandler   // M4：tee-infer 用量代理（复用）
-	billing    *billingHandler // M4：账单查询/导出（复用；nil = billing 未启用）
+	usage      *usageHandler        // M4：tee-infer 用量代理（复用）
+	billing    *billingHandler      // M4：账单查询/导出（复用；nil = billing 未启用）
+	catalog    *modelCatalogHandler // M5：模型目录（复用；nil = 目录未接线）
 	audit      *adminAuditChain
 	loginGuard *loginGuard
 	resetGuard *intervalGuard
@@ -49,7 +50,7 @@ type tenantHandler struct {
 
 // newTenantHandler 构造租户 handler（captcha 仅在启用时创建）。
 func newTenantHandler(store TenantStore, cfg *config, binder quotaBinder,
-	usage *usageHandler, billH *billingHandler, audit *adminAuditChain) *tenantHandler {
+	usage *usageHandler, billH *billingHandler, cat *modelCatalogHandler, audit *adminAuditChain) *tenantHandler {
 	// 注意：issuer 为接口，须显式判空赋值（避免 *httpKeyIssuer(nil) 造成 typed-nil 非空）
 	var issuer keyIssuer
 	if cfg.authServiceURL != "" {
@@ -64,6 +65,7 @@ func newTenantHandler(store TenantStore, cfg *config, binder quotaBinder,
 		issuer:     issuer,
 		usage:      usage,
 		billing:    billH,
+		catalog:    cat,
 		audit:      audit,
 		loginGuard: newLoginGuard(cfg.loginMaxFail, cfg.loginLockMin),
 		resetGuard: newIntervalGuard(cfg.passwordResetIntervalMin),
@@ -92,6 +94,9 @@ func (h *tenantHandler) registerMux(mux *http.ServeMux) {
 
 	// 用量与账单（M4）
 	h.registerTenantUsageMux(mux)
+
+	// 策略与模型（M5）
+	h.registerTenantPolicyMux(mux)
 }
 
 // registerCaptcha 在管理面 mux 注册验证码签发端点（Console 内部，authMiddleware）。
