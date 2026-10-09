@@ -137,7 +137,7 @@ func (h *sloHandler) handleSLO(w http.ResponseWriter, r *http.Request) {
 
 // getSLO GET /v1/adminext/slo：定义 + 错误预算余量（Prometheus；未配置则仅返回定义）。
 func (h *sloHandler) getSLO(w http.ResponseWriter, r *http.Request) {
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epTraceFamilyRead) {
 		return
 	}
 	h.mu.Lock()
@@ -168,7 +168,7 @@ func (h *sloHandler) getSLO(w http.ResponseWriter, r *http.Request) {
 	// 错误预算余量：按调用者租户作用域（admin = 全租户）
 	c := claimsFrom(r.Context())
 	tenant := ""
-	if c != nil && c.Role != roleAdmin {
+	if c != nil && !roleUnrestricted(c) {
 		tenant = c.Tenant
 	}
 	if h.promURL != "" && len(state.SLOS) > 0 {
@@ -207,7 +207,7 @@ func (h *sloHandler) getSLO(w http.ResponseWriter, r *http.Request) {
 
 // postSLO POST /v1/adminext/slo：创建/更新 SLO（admin，落审计链）。
 func (h *sloHandler) postSLO(w http.ResponseWriter, r *http.Request) {
-	if !requireRole(w, r, roleAdmin) {
+	if !requireRule(w, r, epSloWrite) {
 		return
 	}
 	if h.chain == nil {
@@ -260,7 +260,7 @@ func (h *sloHandler) handleTracingTenant(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
 		return
 	}
-	if !requireRole(w, r, roleAdmin) {
+	if !requireRule(w, r, epTracingTenant) {
 		return
 	}
 	if h.chain == nil {

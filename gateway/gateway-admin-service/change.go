@@ -214,7 +214,7 @@ type changeSubmitRequest struct {
 func (s *changeStore) handleList(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if !requireReadAccess(w, r) {
+		if !requireRule(w, r, epChangesRead) {
 			return
 		}
 		s.mu.Lock()
@@ -223,7 +223,7 @@ func (s *changeStore) handleList(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]interface{}{"items": out, "total": len(out)})
 	case http.MethodPost:
-		if !requireRole(w, r, roleAdmin) {
+		if !requireRule(w, r, epChangesWrite) {
 			return
 		}
 		s.submit(w, r)
@@ -398,7 +398,7 @@ func (s *changeStore) handleItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
 		return
 	}
-	if !requireRole(w, r, roleAdmin) {
+	if !requireRule(w, r, epChangesWrite) {
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.Path, changeAPIBase+"/")

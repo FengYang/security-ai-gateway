@@ -333,7 +333,7 @@ func billingRouteLabel(p string) string {
 func (h *billingHandler) handlePlans(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if !requireReadAccess(w, r) {
+		if !requireRule(w, r, epBillingRead) {
 			return
 		}
 		plans, err := h.store.Plans().ListPlans()
@@ -343,7 +343,7 @@ func (h *billingHandler) handlePlans(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"plans": plans})
 	case http.MethodPost:
-		if !requireRole(w, r, "admin") {
+		if !requireRule(w, r, epBillingWrite) {
 			return
 		}
 		var p billing.Plan
@@ -394,7 +394,7 @@ func (h *billingHandler) handleSubscription(w http.ResponseWriter, r *http.Reque
 // 自助场景：`tenant` 缺省取令牌内 `tenant` 声明；非 admin 跨租户 → 403（§7.4，fail-closed）。
 // 返回当前生效订阅（最新 `effective_at` 且未过期）；无绑定 → `subscription=null`。
 func (h *billingHandler) handleGetSubscription(w http.ResponseWriter, r *http.Request) {
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epBillingRead) {
 		return
 	}
 	c := claimsFrom(r.Context())
@@ -436,7 +436,7 @@ func (h *billingHandler) handleGetSubscription(w http.ResponseWriter, r *http.Re
 // handleBindSubscription POST /v1/adminext/billing/subscription（**admin**）：绑定/升降级。
 func (h *billingHandler) handleBindSubscription(w http.ResponseWriter, r *http.Request) {
 	start := time.Now() // ★ A-14：M6 计时起点（套餐变更**受理** → 回读确认）
-	if !requireRole(w, r, "admin") {
+	if !requireRule(w, r, epBillingWrite) {
 		return
 	}
 	var req struct {
@@ -509,7 +509,7 @@ func (h *billingHandler) handleBills(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epBillingRead) {
 		return
 	}
 	q := r.URL.Query()
@@ -537,7 +537,7 @@ func (h *billingHandler) handleBillItem(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epBillingRead) {
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.Path, billingAPIBase+"/bills/")
@@ -616,7 +616,7 @@ func (h *billingHandler) handleLedger(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epBillingRead) {
 		return
 	}
 	q := r.URL.Query()
@@ -644,7 +644,7 @@ func (h *billingHandler) handleCloseDaily(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
 		return
 	}
-	if !requireRole(w, r, "admin") {
+	if !requireRule(w, r, epBillingWrite) {
 		return
 	}
 	var req struct {
@@ -674,7 +674,7 @@ func (h *billingHandler) handleCloseMonthly(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
 		return
 	}
-	if !requireRole(w, r, "admin") {
+	if !requireRule(w, r, epBillingWrite) {
 		return
 	}
 	var req struct {
@@ -706,7 +706,7 @@ func (h *billingHandler) handleFreeze(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
 		return
 	}
-	if !requireRole(w, r, "admin") {
+	if !requireRule(w, r, epBillingFreezeWrite) {
 		return
 	}
 	var req struct {
@@ -743,7 +743,7 @@ func (h *billingHandler) handleUnfreeze(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
 		return
 	}
-	if !requireRole(w, r, "admin") {
+	if !requireRule(w, r, epBillingFreezeWrite) {
 		return
 	}
 	var req struct {
@@ -779,7 +779,7 @@ func (h *billingHandler) handleVerifyChain(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
 		return
 	}
-	if !requireRole(w, r, "admin") {
+	if !requireRule(w, r, epBillingVerifyChain) {
 		return
 	}
 	if h.svc == nil {
@@ -811,7 +811,7 @@ func (h *billingHandler) tenantAllowed(r *http.Request, tenant string) bool {
 	if c == nil {
 		return false
 	}
-	if c.Role == roleAdmin {
+	if roleUnrestricted(c) {
 		return true
 	}
 	return tenant != "" && c.Tenant != "" && c.Tenant == tenant

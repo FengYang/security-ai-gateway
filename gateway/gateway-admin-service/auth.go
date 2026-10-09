@@ -29,11 +29,16 @@ import (
 	"time"
 )
 
-// 管理面角色（D6/D10：admin / auditor 起步；P0-3 §4.3.5 增只读角色 billing_reader）。
+// 管理面角色（D6/D10：admin / auditor 起步；P0-3 §4.3.5 增只读角色 billing_reader；
+// P1-3 等保 §6.2 三权分立 6 角色，ENB2-07）。
 const (
-	roleAdmin         = "admin"
-	roleAuditor       = "auditor"
-	roleBillingReader = "billing_reader" // 只读账单/套餐/用量（§4.3.5；写端点仍仅 admin）
+	roleAdmin         = "admin"          // 过渡期兼容角色（详设 §6.2：映射 system_admin ∪ sec_admin）
+	roleSystemAdmin   = "system_admin"   // 系统管理员（配置/运维/账号管理）
+	roleSecAdmin      = "sec_admin"      // 安全管理员（安全策略/WAF/加密 profile）
+	roleAuditAdmin    = "audit_admin"    // 审计管理员（审计查看/导出/链校验）
+	roleAuditor       = "auditor"        // 只读审计观察岗
+	roleBillingReader = "billing_reader" // 只读账单/套餐/用量（§4.3.5；P1-3 收窄为仅 billing:read）
+	roleBreakGlass    = "break_glass"    // 应急账号（正常禁用，启用须双人审批 + 短时效令牌）
 )
 
 // claims 内部服务令牌载荷。
@@ -49,13 +54,34 @@ type claims struct {
 	Tenant string `json:"tenant,omitempty"`
 	IAT    int64  `json:"iat"`
 	EXP    int64  `json:"exp"`
+	// P1-3 §6.1 第一因素策略：会话空闲超时 lat（last-active，Unix 秒）。
+	// 控制台在每次管理操作时重签 JWT 携带新 lat；缺省（旧令牌无此字段）不拦（兼容期），
+	// 声明后 now-lat > 1800s → 401 fail-closed。纯浏览/只读轮询不刷新 lat（控制台契约）。
+	LAT int64 `json:"lat,omitempty"`
+	// P1-3 §6.1 MFA 第二步声明：verify 通过后重签令牌携带（mfa=true + 核验时间），
+	// 写端点按新鲜度校验（authz.go requireRule；step-up 见 mfaStepUpFreshness）。
+	MFA   bool  `json:"mfa,omitempty"`
+	MFAAt int64 `json:"mfa_at,omitempty"`
 }
+
+// P1-3 §6.1 会话策略常量（等保三级"身份鉴别-会话超时"）。
+const (
+	maxSessionLifetimeSec = 8 * 3600 // 绝对超时：exp-iat ≤ 8h
+	maxIdleSec            = 1800     // 空闲超时：now-lat ≤ 30min
+)
 
 var b64 = base64.RawURLEncoding // RFC 7515：base64url 无 padding
 
 // validRole 校验角色是否在管理面白名单内（仅令牌格式校验，非授权依据）。
+//
+// P1-3 §6.2：三权分立 6 角色 + 过渡期 legacy admin（向后兼容至 M6）。
 func validRole(role string) bool {
-	return role == roleAdmin || role == roleAuditor || role == roleBillingReader
+	switch role {
+	case roleAdmin, roleSystemAdmin, roleSecAdmin, roleAuditAdmin,
+		roleAuditor, roleBillingReader, roleBreakGlass:
+		return true
+	}
+	return false
 }
 
 // resolveRole 派生授权角色（M3-A）：JWT role 为授权依据，运维白名单强制加成。
@@ -100,8 +126,18 @@ func verifyInternalToken(token string, cfg *config) (*claims, error) {
 	}
 
 	// 过期校验（管理令牌有效期短，不做时钟偏移宽容）。
-	if c.EXP > 0 && time.Now().Unix() > c.EXP {
+	now := time.Now().Unix()
+	if c.EXP > 0 && now > c.EXP {
 		return nil, errors.New("auth: 令牌已过期")
+	}
+	// P1-3 §6.1 第一因素策略（先于角色校验执行）：
+	//   ① 绝对超时——令牌总寿命 exp-iat ≤ 8h（等保三级"会话超时"）；
+	//   ② 空闲超时——lat 声明存在时 now-lat ≤ 1800s，fail-closed 401。
+	if c.EXP > 0 && c.IAT > 0 && c.EXP-c.IAT > maxSessionLifetimeSec {
+		return nil, fmt.Errorf("auth: 会话超过绝对超时（exp-iat=%ds > %ds）", c.EXP-c.IAT, maxSessionLifetimeSec)
+	}
+	if c.LAT > 0 && now-c.LAT > maxIdleSec {
+		return nil, fmt.Errorf("auth: 会话空闲超时（now-lat=%ds > %ds）", now-c.LAT, maxIdleSec)
 	}
 	// 受众/签发方：字段缺失视为未声明不拦（兼容早期签发），声明则必须匹配。
 	if c.Aud != "" && c.Aud != cfg.jwtAudience {
@@ -111,7 +147,7 @@ func verifyInternalToken(token string, cfg *config) (*claims, error) {
 		return nil, fmt.Errorf("auth: 签发方不匹配（got=%q want=%q）", c.Iss, cfg.jwtIssuer)
 	}
 	if !validRole(c.Role) {
-		return nil, fmt.Errorf("auth: 未知角色 %q（允许 admin/auditor/billing_reader）", c.Role)
+		return nil, fmt.Errorf("auth: 未知角色 %q（允许 admin/system_admin/sec_admin/audit_admin/auditor/billing_reader/break_glass）", c.Role)
 	}
 	if c.Sub == "" {
 		return nil, errors.New("auth: 主体（sub）为空，无法留痕到人")

@@ -111,7 +111,7 @@ func (s *cryptopProfileSwitcher) handle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// 写操作：必须 admin 角色（auditor → 403）。
-	if !requireRole(w, r, roleAdmin) {
+	if !requireRule(w, r, epCryptopProfile) {
 		return
 	}
 

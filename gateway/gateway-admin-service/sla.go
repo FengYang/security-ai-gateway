@@ -58,7 +58,7 @@ func (h *slaHandler) handleSLASummary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epTraceFamilyRead) {
 		return
 	}
 	if h.promURL == "" {
@@ -68,7 +68,7 @@ func (h *slaHandler) handleSLASummary(w http.ResponseWriter, r *http.Request) {
 	// 租户作用域：非 admin 强制收敛为自身租户
 	c := claimsFrom(r.Context())
 	tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
-	if c != nil && c.Role != roleAdmin {
+	if c != nil && !roleUnrestricted(c) {
 		if c.Tenant == "" || (tenant != "" && tenant != c.Tenant) {
 			writeError(w, http.StatusForbidden, "跨租户访问被拒绝")
 			return

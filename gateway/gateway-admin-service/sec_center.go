@@ -73,7 +73,7 @@ func (h *secCenterHandler) handleAuditChain(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) || !h.requireChain(w) {
+	if !requireRule(w, r, epAuditChain) || !h.requireChain(w) {
 		return
 	}
 	limit := clampQueryInt(r.URL.Query().Get("limit"), auditQueryDefaultLimit, 1, auditQueryMaxLimit)
@@ -102,7 +102,7 @@ func (h *secCenterHandler) handleAuditChainVerify(w http.ResponseWriter, r *http
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) || !h.requireChain(w) {
+	if !requireRule(w, r, epAuditChainVerify) || !h.requireChain(w) {
 		return
 	}
 	ok, n := h.chain.verify()
@@ -121,7 +121,7 @@ func (h *secCenterHandler) handleAuditChainExport(w http.ResponseWriter, r *http
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) || !h.requireChain(w) {
+	if !requireRule(w, r, epAuditChainExport) || !h.requireChain(w) {
 		return
 	}
 	// 导出全部：limit 给足够大值（list 内部按实际条数分配容量，无预分配风险）。
@@ -144,7 +144,7 @@ func (h *secCenterHandler) handleTeeAudit(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epAuditTee) {
 		return
 	}
 	if h.settings.url == "" {
@@ -192,7 +192,7 @@ func (h *secCenterHandler) handleSecStatus(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epSecStatus) {
 		return
 	}
 	view := secStatusView{

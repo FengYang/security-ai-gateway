@@ -119,7 +119,7 @@ func (h *traceHandler) handleTraceByID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epTraceFamilyRead) {
 		return
 	}
 	rid := strings.TrimSpace(r.PathValue("request_id"))
@@ -142,7 +142,7 @@ func (h *traceHandler) handleTraceReport(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epTraceFamilyRead) {
 		return
 	}
 	rid := strings.TrimSpace(r.PathValue("request_id"))
@@ -183,7 +183,7 @@ func (h *traceHandler) handleTraceSearch(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epTraceFamilyRead) {
 		return
 	}
 	if h.tempoURL == "" {
@@ -201,7 +201,7 @@ func (h *traceHandler) handleTraceSearch(w http.ResponseWriter, r *http.Request)
 	// 租户隔离：非 admin 强制收敛为自身租户（传入不一致值即 403，不静默改写）
 	c := claimsFrom(r.Context())
 	tenant := strings.TrimSpace(q.Get("tenant"))
-	if c != nil && c.Role != roleAdmin {
+	if c != nil && !roleUnrestricted(c) {
 		if c.Tenant == "" || (tenant != "" && tenant != c.Tenant) {
 			writeError(w, http.StatusForbidden, "跨租户访问被拒绝")
 			return
@@ -290,7 +290,7 @@ func (h *traceHandler) aggregate(r *http.Request, rid string) (*traceAggregateVi
 
 	// 3) 租户隔离（fail-closed）：非 admin 仅本租户；tenant 未知亦拒绝
 	c := claimsFrom(r.Context())
-	if c != nil && c.Role != roleAdmin {
+	if c != nil && !roleUnrestricted(c) {
 		if c.Tenant == "" || tenant == "" || tenant != c.Tenant {
 			return nil, http.StatusForbidden, "跨租户访问被拒绝"
 		}

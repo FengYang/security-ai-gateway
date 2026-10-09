@@ -27,6 +27,13 @@ const (
 	auditActionAccountUpdate        = "account_update"
 	auditActionAccountPasswordReset = "account_password_reset"
 	auditActionAccountDelete        = "account_delete"
+	// P1-3 §6.1 身份鉴别审计动作（登录/登出/锁定，账号管理域契约）。
+	auditActionLoginSuccess    = "login_success"
+	auditActionLoginFailure    = "login_failure"
+	auditActionLogout          = "logout"
+	auditActionAccountLocked   = "account_locked"
+	auditActionAccountUnlocked = "account_unlocked"
+	auditActionSessionKicked   = "session_kicked"
 )
 
 // auditEventActions 投递端点接受的 action 集合。
@@ -35,6 +42,12 @@ var auditEventActions = map[string]struct{}{
 	auditActionAccountUpdate:        {},
 	auditActionAccountPasswordReset: {},
 	auditActionAccountDelete:        {},
+	auditActionLoginSuccess:    {},
+	auditActionLoginFailure:    {},
+	auditActionLogout:          {},
+	auditActionAccountLocked:   {},
+	auditActionAccountUnlocked: {},
+	auditActionSessionKicked:   {},
 }
 
 // maxTargetLen 目标资源名上限（账号名 ≤32，放宽到 64 防御性上限）。
@@ -61,7 +74,7 @@ func (h *auditEventHandler) handle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
 		return
 	}
-	if !requireRole(w, r, roleAdmin) {
+	if !requireRule(w, r, epAuditEvents) {
 		return
 	}
 	if h.chain == nil {

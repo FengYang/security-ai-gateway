@@ -414,7 +414,7 @@ func (h *brokerSecretHandler) handleList(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epBrokerRead) {
 		return
 	}
 
@@ -467,17 +467,17 @@ func (h *brokerSecretHandler) handleItem(w http.ResponseWriter, r *http.Request)
 
 	switch r.Method {
 	case http.MethodGet:
-		if !requireReadAccess(w, r) {
+		if !requireRule(w, r, epBrokerRead) {
 			return
 		}
 		h.getOne(w, name)
 	case http.MethodPost, http.MethodPut:
-		if !requireRole(w, r, roleAdmin) {
+		if !requireRule(w, r, epBrokerWrite) {
 			return
 		}
 		h.upsert(w, r, name)
 	case http.MethodDelete:
-		if !requireRole(w, r, roleAdmin) {
+		if !requireRule(w, r, epBrokerWrite) {
 			return
 		}
 		h.remove(w, r, name)

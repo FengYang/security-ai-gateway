@@ -101,7 +101,7 @@ func (h *usageHandler) handleUsage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epUsageRead) {
 		return
 	}
 	if !h.requireDataSource(w) {
@@ -139,14 +139,14 @@ func (h *usageHandler) handleUsage(w http.ResponseWriter, r *http.Request) {
 	h.relay(w, resp)
 }
 
-// handleQuota 配额设置：POST /v1/adminext/usage/quota（**admin**）。
+// handleQuota 配额设置：POST /v1/adminext/usage/quota（system_admin + 会话级 MFA；§6.2 映射表）。
 // 先在 tee-infer 生效，再落 G1 审计链 quota_set；落链失败拒绝 2xx（fail-closed）。
 func (h *usageHandler) handleQuota(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
 		return
 	}
-	if !requireRole(w, r, roleAdmin) {
+	if !requireRule(w, r, epQuotaWrite) {
 		return
 	}
 	if !h.requireDataSource(w) {
@@ -211,7 +211,7 @@ func (h *usageHandler) handleMeteringReconcile(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epMeteringReconcile) {
 		return
 	}
 	if !h.requireDataSource(w) {

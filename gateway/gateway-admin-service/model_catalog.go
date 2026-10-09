@@ -299,7 +299,7 @@ func (h *modelCatalogHandler) handleModels(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 GET")
 		return
 	}
-	if !requireReadAccess(w, r) {
+	if !requireRule(w, r, epModels) {
 		return
 	}
 
