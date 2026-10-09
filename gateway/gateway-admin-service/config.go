@@ -54,6 +54,11 @@ type config struct {
 	smtpFrom      string
 	smtpTLS       bool
 	portalBaseURL string
+
+	// API Key（M3，§6.3/§10.3）
+	authServiceURL       string // auth-service 基址（Key 签发通道，§6.11）
+	apiKeyDefaultTTLDays int
+	apiKeyMaxTTLDays     int
 }
 
 // defaultIssuer / defaultAudience 内部令牌的签发方与本服务受众默认值。
@@ -135,6 +140,8 @@ const (
 	defaultCompensateIntervalMin    = 30
 	defaultCaptchaTTLMin            = 5
 	defaultCaptchaIPRatePerHour     = 30
+	defaultAPIKeyDefaultTTLDays     = 90
+	defaultAPIKeyMaxTTLDays         = 365
 )
 
 // envInt 读取整型 env（缺省/非法 → 默认值）。
@@ -207,6 +214,19 @@ func loadTenantConfig(cfg *config) error {
 
 	if cfg.smtpPort <= 0 || cfg.smtpPort > 65535 {
 		return fmt.Errorf("配置错误：SMTP_PORT 非法（%d）", cfg.smtpPort)
+	}
+
+	// E. API Key 签发通道（§6.11/§10.3；租户门户启用时必填，fail-closed）
+	cfg.authServiceURL = strings.TrimRight(os.Getenv("AUTH_SERVICE_URL"), "/")
+	if cfg.authServiceURL == "" {
+		return fmt.Errorf("配置缺失：AUTH_SERVICE_URL 未设置（租户门户已启用，Key 签发通道必填，fail-closed）")
+	}
+	cfg.apiKeyDefaultTTLDays = envInt("API_KEY_DEFAULT_TTL_DAYS", defaultAPIKeyDefaultTTLDays)
+	cfg.apiKeyMaxTTLDays = envInt("API_KEY_MAX_TTL_DAYS", defaultAPIKeyMaxTTLDays)
+	if cfg.apiKeyDefaultTTLDays <= 0 || cfg.apiKeyMaxTTLDays <= 0 ||
+		cfg.apiKeyDefaultTTLDays > cfg.apiKeyMaxTTLDays {
+		return fmt.Errorf("配置错误：API Key TTL 非法（default=%d max=%d）",
+			cfg.apiKeyDefaultTTLDays, cfg.apiKeyMaxTTLDays)
 	}
 	return nil
 }

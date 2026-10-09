@@ -86,16 +86,7 @@ CREATE TABLE IF NOT EXISTS mail_action_tokens (
 CREATE INDEX IF NOT EXISTS idx_mtoken_user ON mail_action_tokens(tenant_user_id);
 CREATE INDEX IF NOT EXISTS idx_mtoken_expires ON mail_action_tokens(expires_at);
 
--- API Key（M3 补 CRUD；M1 仅建表占位）
-CREATE TABLE IF NOT EXISTS api_keys (
-  jti             TEXT PRIMARY KEY,
-  tenant_id       TEXT    NOT NULL,
-  key_fingerprint TEXT    NOT NULL,
-  status          TEXT    NOT NULL DEFAULT 'active',
-  created_at      INTEGER NOT NULL,
-  expires_at      INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_apikey_tenant ON api_keys(tenant_id);
+-- API Key 表由 ensureAPIKeysSchema 负责（M3；含 M1 占位表迁移 → §3.5 结构）。
 
 -- 策略 overlay（M5 补 CRUD；M1 仅建表占位）
 CREATE TABLE IF NOT EXISTS policy_overlays (
@@ -177,6 +168,14 @@ type TenantStore interface {
 	GetToken(tokenHash string) (*MailActionToken, error)
 	ConsumeToken(tx TenantTx, tokenHash string) error
 
+	// API Key（M3）
+	CreateAPIKey(tx TenantTx, k *APIKey) error
+	GetAPIKeyByID(keyID string) (*APIKey, error)
+	GetActiveAPIKeyByName(tenantID, name string) (*APIKey, error)
+	ListAPIKeysByTenant(tenantID string) ([]*APIKey, error)
+	RevokeAPIKey(tx TenantTx, keyID string, revokedAt int64) error
+	ListRevokedAPIKeysSince(since int64) ([]*APIKey, error)
+
 	// 注册限流
 	IncRegisterRate(ip string, windowSec int) (int, error)
 
@@ -254,6 +253,11 @@ func OpenTenantStore(dsn string, wal bool, pepper []byte) (TenantStore, error) {
 	if _, err := db.Exec(tenantDDLSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("tenant: init schema: %w", err)
+	}
+	// API Key 表（M3）：对齐 §3.5（含 M1 占位表迁移）
+	if err := ensureAPIKeysSchema(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return &sqliteTenantStore{db: db, pepper: append([]byte(nil), pepper...)}, nil
 }
@@ -461,6 +465,180 @@ func (s *sqliteTenantStore) ConsumeToken(tx TenantTx, tokenHash string) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return errors.New("tenant: token not found or already consumed")
+	}
+	return nil
+}
+
+// ---------- API Key（M3，§3.5④）----------
+
+// apiKeyStatus* API Key 状态。
+const (
+	apiKeyStatusActive  = "active"
+	apiKeyStatusRevoked = "revoked"
+)
+
+// apiKeysDDL API Key 表结构（对齐 §3.5：key_id 主键、jti 唯一、同租户 active 名称唯一）。
+const apiKeysDDL = `
+CREATE TABLE IF NOT EXISTS api_keys (
+  key_id       TEXT PRIMARY KEY,
+  tenant_id    TEXT    NOT NULL,
+  name         TEXT    NOT NULL,
+  jti          TEXT    NOT NULL UNIQUE,
+  fingerprint  TEXT    NOT NULL,
+  status       TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
+  created_by   TEXT    NOT NULL,
+  created_at   INTEGER NOT NULL,
+  last_used_at INTEGER NOT NULL DEFAULT 0,
+  revoked_at   INTEGER NOT NULL DEFAULT 0,
+  expires_at   INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_key_name ON api_keys(tenant_id, name) WHERE status='active';
+CREATE INDEX IF NOT EXISTS idx_apikey_revoked ON api_keys(revoked_at) WHERE status='revoked';
+CREATE INDEX IF NOT EXISTS idx_apikey_tenant ON api_keys(tenant_id);
+`
+
+// APIKey API Key 元数据（不含明文；fingerprint 为 SHA-256 全量 hex，展示取前 8 位）。
+type APIKey struct {
+	KeyID       string
+	TenantID    string
+	Name        string
+	JTI         string
+	Fingerprint string
+	Status      string
+	CreatedBy   string
+	CreatedAt   int64
+	LastUsedAt  int64
+	RevokedAt   int64
+	ExpiresAt   int64
+}
+
+// ensureAPIKeysSchema 建表；若检测到 M1 旧占位表（无 key_id 列）则重建（旧表从未写入，安全）。
+func ensureAPIKeysSchema(db *sql.DB) error {
+	needs, err := apiKeysNeedsRebuild(db)
+	if err != nil {
+		return err
+	}
+	if needs {
+		if _, err := db.Exec(`DROP TABLE IF EXISTS api_keys`); err != nil {
+			return fmt.Errorf("tenant: drop legacy api_keys: %w", err)
+		}
+	}
+	if _, err := db.Exec(apiKeysDDL); err != nil {
+		return fmt.Errorf("tenant: init api_keys schema: %w", err)
+	}
+	return nil
+}
+
+// apiKeysNeedsRebuild 检测 api_keys 是否为 M1 旧结构（存在但无 key_id 列）。
+func apiKeysNeedsRebuild(db *sql.DB) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(api_keys)`)
+	if err != nil {
+		return false, fmt.Errorf("tenant: inspect api_keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	exists, hasKeyID := false, false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("tenant: scan api_keys info: %w", err)
+		}
+		exists = true
+		if name == "key_id" {
+			hasKeyID = true
+		}
+	}
+	return exists && !hasKeyID, rows.Err()
+}
+
+const apiKeyColumns = `key_id, tenant_id, name, jti, fingerprint, status, created_by, created_at, last_used_at, revoked_at, expires_at`
+
+// rowScanner 行扫描抽象（*sql.Row / *sql.Rows 共用）。
+type rowScanner interface{ Scan(dest ...any) error }
+
+func scanAPIKey(sc rowScanner) (*APIKey, error) {
+	var k APIKey
+	if err := sc.Scan(&k.KeyID, &k.TenantID, &k.Name, &k.JTI, &k.Fingerprint, &k.Status,
+		&k.CreatedBy, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt, &k.ExpiresAt); err != nil {
+		return nil, err
+	}
+	return &k, nil
+}
+
+func (s *sqliteTenantStore) CreateAPIKey(tx TenantTx, k *APIKey) error {
+	if k == nil || k.KeyID == "" || k.TenantID == "" || k.JTI == "" {
+		return errors.New("tenant: api key id/tenant_id/jti are required")
+	}
+	_, err := tx.tx().Exec(`INSERT INTO api_keys
+		(key_id, tenant_id, name, jti, fingerprint, status, created_by, created_at, last_used_at, revoked_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		k.KeyID, k.TenantID, k.Name, k.JTI, k.Fingerprint, k.Status, k.CreatedBy,
+		k.CreatedAt, k.LastUsedAt, k.RevokedAt, k.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("tenant: create api key: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTenantStore) GetAPIKeyByID(keyID string) (*APIKey, error) {
+	k, err := scanAPIKey(s.db.QueryRow(`SELECT `+apiKeyColumns+` FROM api_keys WHERE key_id = ?`, keyID))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant: get api key: %w", err)
+	}
+	return k, nil
+}
+
+func (s *sqliteTenantStore) GetActiveAPIKeyByName(tenantID, name string) (*APIKey, error) {
+	k, err := scanAPIKey(s.db.QueryRow(`SELECT `+apiKeyColumns+
+		` FROM api_keys WHERE tenant_id = ? AND name = ? AND status = 'active'`, tenantID, name))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant: get active api key by name: %w", err)
+	}
+	return k, nil
+}
+
+func (s *sqliteTenantStore) ListAPIKeysByTenant(tenantID string) ([]*APIKey, error) {
+	return s.queryAPIKeys(`SELECT `+apiKeyColumns+
+		` FROM api_keys WHERE tenant_id = ? ORDER BY created_at DESC`, tenantID)
+}
+
+func (s *sqliteTenantStore) ListRevokedAPIKeysSince(since int64) ([]*APIKey, error) {
+	return s.queryAPIKeys(`SELECT `+apiKeyColumns+
+		` FROM api_keys WHERE status = 'revoked' AND revoked_at > ? ORDER BY revoked_at ASC`, since)
+}
+
+func (s *sqliteTenantStore) queryAPIKeys(query string, args ...any) ([]*APIKey, error) {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("tenant: list api keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*APIKey
+	for rows.Next() {
+		k, err := scanAPIKey(rows)
+		if err != nil {
+			return nil, fmt.Errorf("tenant: scan api key: %w", err)
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteTenantStore) RevokeAPIKey(tx TenantTx, keyID string, revokedAt int64) error {
+	res, err := tx.tx().Exec(`UPDATE api_keys SET status = 'revoked', revoked_at = ? WHERE key_id = ? AND status = 'active'`,
+		revokedAt, keyID)
+	if err != nil {
+		return fmt.Errorf("tenant: revoke api key: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("tenant: api key %s not found or already revoked", keyID)
 	}
 	return nil
 }

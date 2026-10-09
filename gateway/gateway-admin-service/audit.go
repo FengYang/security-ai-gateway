@@ -55,6 +55,10 @@ const (
 	auditActionTenantRegister = "tenant_register"
 	auditActionTenantLogout   = "tenant_logout"
 	auditActionPasswordReset  = "password_reset"
+	// P1-4 M3 API Key 动作（附录 D；只记 key_id + 指纹前 8，明文绝不入链）。
+	auditActionAPIKeyCreate = "api_key_create"
+	auditActionAPIKeyRotate = "api_key_rotate"
+	auditActionAPIKeyRevoke = "api_key_revoke"
 )
 
 // auditAnchorInterval 每追加 N 条事件锚定一次链尾哈希。
