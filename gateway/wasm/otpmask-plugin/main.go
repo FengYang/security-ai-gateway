@@ -108,6 +108,13 @@ type PluginConfig struct {
 	// gateway_core_credential_name 为空 = 沿用静态 gateway_core_token（行为不变）。
 	GatewayCoreCredentialName  string `json:"gateway_core_credential_name"`  // 集合名（如 core-channel）
 	GatewayCoreCredentialToken string `json:"gateway_core_credential_token"` // 该集合的独立读令牌
+	// M3 租户 API Key 吊销拉取（§8 依赖 3）：启用后从管理面周期拉取已吊销 jti，
+	// 插件校验租户 Key JWT 后拒绝命中 jti。**未启用 = 行为与接线前完全一致**。
+	KeyRevocationEnabled         bool   `json:"key_revocation_enabled"`
+	KeyRevocationService         string `json:"key_revocation_service"`
+	KeyRevocationPort            int64  `json:"key_revocation_port"`
+	KeyRevocationToken           string `json:"key_revocation_token"`
+	KeyRevocationIntervalSeconds int64  `json:"key_revocation_interval"` // 缺省 60（≤60s，§8）
 	// OG-16 扩展：插件侧 PII mask 改写（两形态第二形态）。
 	// 默认 false（off），不改写内容；开启后对解密后的 delta 做 PII 等长脱敏。
 	// 正则为 builtin（编译进 wasm），与 tee-infer 侧 pii_patterns.json 同源。
@@ -278,6 +285,8 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	initCredentialRuntime(*config)
 	// 限流表拉取（Phase 1 门禁 #7 / 判据 5；未启用则零影响：不拉取、不介入请求）。
 	initRateLimitRuntime(*config, log)
+	// 租户 API Key 吊销拉取（M3 §8 依赖 3；未启用则零影响）。
+	initKeyRevocationRuntime(*config, log)
 	// P0-4 §12.3：装配 cryptop sidecar 客户端 + 启动期载入 capabilities（R-18）。
 	initCryptoRuntime(*config, log)
 	log.Infof("otpmask-plugin: 配置已加载 config_version=%q mask_modulus=%d model=%q embedding=%s:%d tee=%s:%d require_auth=%v",

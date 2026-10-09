@@ -23,8 +23,11 @@ var jwtB64 = base64.RawURLEncoding
 type jwtClaims struct {
 	Sub    string `json:"sub"`
 	Tenant string `json:"tenant"`
-	IAT    int64  `json:"iat"`
-	EXP    int64  `json:"exp"`
+	// M3 扩展：role（API Key 为 "api"）/ jti（供数据面吊销判定，§6.3 D-5）。
+	Role string `json:"role,omitempty"`
+	JTI  string `json:"jti,omitempty"`
+	IAT  int64  `json:"iat"`
+	EXP  int64  `json:"exp"`
 }
 
 // verifyJWT 校验 HS256 签名与过期时间，返回声明（CPS 交付：HMAC 求值经 cryptop sidecar，§5.4.5）。
@@ -64,6 +67,11 @@ func verifyJWT(keyRef string, token string, cb func(*jwtClaims, error)) {
 		// RFC 8725 §3.1：exp 必填——缺失（=0）的 token 一律拒绝，防"永不过期"的伪造载荷
 		if c.EXP == 0 || c.EXP < time.Now().Unix() {
 			cb(nil, errors.New("jwt: token 缺失 exp 或已过期"))
+			return
+		}
+		// M3：API Key 吊销判定（jti 命中本地吊销集 → 拒绝；未启用/未拉到 → 放行，TTL 兜底）
+		if isKeyRevoked(c.JTI) {
+			cb(nil, errors.New("jwt: token 已吊销"))
 			return
 		}
 		cb(&c, nil)
