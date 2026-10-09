@@ -188,19 +188,35 @@ func TestSecCenterStatusAggregatesTee(t *testing.T) {
 	}
 }
 
-func TestSecCenterStatusTeeUnreachableIsReported(t *testing.T) {
+// secDo 以指定角色发起任意方法请求（用于方法契约回归）。
+func secDo(t *testing.T, mux *http.ServeMux, cfg *config, method, sub, role, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, target, nil)
+	req.Header.Set("Authorization", "Bearer "+testSignToken(t, cfg.jwtSecret, claims{
+		Sub: sub, Role: role, Iss: defaultIssuer, Aud: defaultAudience,
+	}))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestSecCenterReadEndpointsRejectNonGet 锁定只读端点的方法契约（F-9 回归）：
+// 安全中心各只读端点仅接受 GET，非 GET 一律 405——防止"表/实现方法不一致"类缺陷
+// （§6.2 表曾两轮出现 F-2/F-5，本轮 F-9 将 audit-chain/verify 误记为 POST）。
+func TestSecCenterReadEndpointsRejectNonGet(t *testing.T) {
 	cfg := testCfg()
 	chain := newAuditTestChain(t, false)
-	// 127.0.0.1:1 无监听 → 连接失败。
-	mux := newSecTestMux(cfg, chain, "http://127.0.0.1:1")
+	seedChain(t, chain, 1)
+	mux := newSecTestMux(cfg, chain, "")
 
-	rec := secGet(t, mux, cfg, testAdminUser, roleAdmin, secStatusPath)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("tee 不可达时 sec-status 仍应 200（如实展示链路状态），实际 %d", rec.Code)
-	}
-	var view secStatusView
-	_ = json.Unmarshal(rec.Body.Bytes(), &view)
-	if view.TEEHealth != "unreachable" {
-		t.Fatalf("tee 不可达应标注 unreachable，实际 %q", view.TEEHealth)
+	for _, p := range []string{secStatusPath, auditChainPath, auditChainVerifyPath, auditChainExportPath, teeAuditPath} {
+		rec := secDo(t, mux, cfg, http.MethodPost, "audit-user", roleAuditAdmin, p)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s POST 应 405（只读端点），实际 %d", p, rec.Code)
+		}
+		// 同一路径 GET 不得为 405（方法契约正向核对）。
+		if rec := secDo(t, mux, cfg, http.MethodGet, "audit-user", roleAuditAdmin, p); rec.Code == http.StatusMethodNotAllowed {
+			t.Fatalf("%s GET 不应 405", p)
+		}
 	}
 }

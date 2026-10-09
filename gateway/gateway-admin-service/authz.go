@@ -92,7 +92,9 @@ var (
 	epAuditChain = endpointRule{domAudit, actRead,
 		[]string{roleAuditAdmin, roleAuditor, roleSecAdmin}, 0}
 
-	// /v1/adminext/audit-chain/verify POST（audit:read；R2-19② 点名变更）。
+	// /v1/adminext/audit-chain/verify GET（audit:read；R2-19② 点名变更）。
+	// 2026-10-10 修正（F-9）：本体 §6.2 表原误记为 POST（实现与测试均为 GET 只读重算，
+	// 与 audit:read 动作一致）；以实现语义回改映射表，避免"方法/动作不一致"类缺陷复发。
 	epAuditChainVerify = endpointRule{domAudit, actRead, []string{roleAuditAdmin}, 0}
 
 	// /v1/adminext/audit-chain/export GET（audit:export；R2-19① 点名变更，auditor 不含）。
