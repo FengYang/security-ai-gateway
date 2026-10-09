@@ -24,16 +24,36 @@ type config struct {
 	jwtAudience string              // 本服务 audience（缺省 gateway-admin-service）
 	roleAdmins  map[string]struct{} // 最小角色控制（M2 §2.4）：写权限用户名白名单
 
-	// 租户自助门户（M1+；可选启用：TENANT_STORE_PATH 未配置 = 不启用）
+	// 租户自助门户（可选启用：TENANT_STORE_PATH 未配置 = 不启用）。
+	// 租户会话令牌复用 cfg.jwtSecret（§6.1：Console 用共享密钥签发 role=tenant_user JWT，
+	// Go 侧校验；**无独立租户密钥**，恒 HS256，与内部令牌链的 SM3 分派解耦，R-9）。
 	tenantEnabled   bool
 	tenantStorePath string // SQLite 存储路径（空 = 功能关闭）
-	tenantJWTSecret []byte // 租户会话 JWT 密钥（启用时必填）
-	tenantPepper    []byte // 邮件令牌 pepper（启用时必填）
-	smtpHost        string
-	smtpPort        int
-	smtpUser        string
-	smtpPass        string
-	smtpFrom        string
+	tenantPepper    []byte // 邮件令牌哈希 pepper（启用时必填）
+
+	// 令牌 TTL / 限流 / 锁定（§10.3 B）
+	emailVerifyTTLHours         int
+	passwordResetTTLHours       int
+	passwordResetIntervalMin    int
+	mailTokenFailLimit          int
+	loginMaxFail                int
+	loginLockMin                int
+	registerIPDailyLimit        int
+	tenantCompensateIntervalMin int
+
+	// 图形验证码（§10.3 C）
+	captchaEnabled       bool
+	captchaTTLMin        int
+	captchaIPRatePerHour int
+
+	// SMTP 与邮件链接（§10.3 D）
+	smtpHost      string
+	smtpPort      int
+	smtpUsername  string
+	smtpPassword  string
+	smtpFrom      string
+	smtpTLS       bool
+	portalBaseURL string
 }
 
 // defaultIssuer / defaultAudience 内部令牌的签发方与本服务受众默认值。
@@ -95,13 +115,52 @@ func parseRoleAdmins(raw string) map[string]struct{} {
 	return out
 }
 
-// ---------- 租户自助门户配置（M1+）----------
+// ---------- 租户自助门户配置（§10.3）----------
 //
 // TENANT_STORE_PATH 未配置 = 功能关闭（不注册 /v1/tenant/*，既有行为零影响）。
-// 启用后 TENANT_JWT_SECRET 与 TENANT_TOKEN_PEPPER 必填（fail-closed）。
-// SMTP 配置不全 → 注册/验证/密码重置端点返回 503（C-12）。
+// 启用后 TENANT_TOKEN_PEPPER 必填（fail-closed）；租户会话令牌复用 ADMIN_SVC_JWT_SECRET
+// （§6.1：Console 用共享密钥签发 role=tenant_user JWT；无独立租户密钥）。
+// SMTP 配置不全 → 注册/验证/密码重置端点返回 503（C-12）。其余参数带默认值（§10.3 B/C/D）。
 
-const defaultSMTPPort = 587
+// 租户门户默认参数（§10.3 缺省列）。
+const (
+	defaultSMTPPort                 = 587
+	defaultEmailVerifyTTLHours      = 24
+	defaultPasswordResetTTLHours    = 1
+	defaultPasswordResetIntervalMin = 15
+	defaultMailTokenFailLimit       = 10
+	defaultLoginMaxFail             = 5
+	defaultLoginLockMin             = 15
+	defaultRegisterIPDailyLimit     = 5
+	defaultCompensateIntervalMin    = 30
+	defaultCaptchaTTLMin            = 5
+	defaultCaptchaIPRatePerHour     = 30
+)
+
+// envInt 读取整型 env（缺省/非法 → 默认值）。
+func envInt(name string, def int) int {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return def
+	}
+	return v
+}
+
+// envBool 读取布尔 env（仅接受 true/false；其它 → def）。
+func envBool(name string, def bool) bool {
+	switch os.Getenv(name) {
+	case "true":
+		return true
+	case "false":
+		return false
+	default:
+		return def
+	}
+}
 
 // loadTenantConfig 加载租户门户配置到 cfg（可选特性，未配置时 tenantEnabled=false）。
 func loadTenantConfig(cfg *config) error {
@@ -110,45 +169,45 @@ func loadTenantConfig(cfg *config) error {
 		return nil // 未启用
 	}
 
-	jwtSecret := os.Getenv("TENANT_JWT_SECRET")
-	if jwtSecret == "" {
-		return fmt.Errorf("配置缺失：TENANT_JWT_SECRET 未设置（租户门户已启用，fail-closed）")
-	}
-	if len(jwtSecret) < 16 {
-		return fmt.Errorf("配置错误：TENANT_JWT_SECRET 过短（<16 字节）")
-	}
 	pepper := os.Getenv("TENANT_TOKEN_PEPPER")
 	if pepper == "" {
 		return fmt.Errorf("配置缺失：TENANT_TOKEN_PEPPER 未设置（租户门户已启用，fail-closed）")
 	}
-	if len(pepper) < 8 {
-		return fmt.Errorf("配置错误：TENANT_TOKEN_PEPPER 过短（<8 字节）")
-	}
-
-	// SMTP（可选；未配置则邮件相关端点 503）
-	smtpHost := os.Getenv("TENANT_SMTP_HOST")
-	smtpUser := os.Getenv("TENANT_SMTP_USER")
-	smtpPass := os.Getenv("TENANT_SMTP_PASS")
-	smtpFrom := os.Getenv("TENANT_SMTP_FROM")
-	smtpPortStr := os.Getenv("TENANT_SMTP_PORT")
-	smtpPort := defaultSMTPPort
-	if smtpPortStr != "" {
-		p, err := strconv.Atoi(smtpPortStr)
-		if err != nil || p <= 0 || p > 65535 {
-			return fmt.Errorf("配置错误：TENANT_SMTP_PORT 非法（%q）", smtpPortStr)
-		}
-		smtpPort = p
+	if len(pepper) < 32 {
+		return fmt.Errorf("配置错误：TENANT_TOKEN_PEPPER 过短（<32 字节）")
 	}
 
 	cfg.tenantEnabled = true
 	cfg.tenantStorePath = storePath
-	cfg.tenantJWTSecret = []byte(jwtSecret)
 	cfg.tenantPepper = []byte(pepper)
-	cfg.smtpHost = smtpHost
-	cfg.smtpPort = smtpPort
-	cfg.smtpUser = smtpUser
-	cfg.smtpPass = smtpPass
-	cfg.smtpFrom = smtpFrom
+
+	// B. 令牌 TTL / 限流 / 锁定（§10.3 B）
+	cfg.emailVerifyTTLHours = envInt("EMAIL_VERIFY_TTL_HOURS", defaultEmailVerifyTTLHours)
+	cfg.passwordResetTTLHours = envInt("PASSWORD_RESET_TTL_HOURS", defaultPasswordResetTTLHours)
+	cfg.passwordResetIntervalMin = envInt("PASSWORD_RESET_EMAIL_INTERVAL_MIN", defaultPasswordResetIntervalMin)
+	cfg.mailTokenFailLimit = envInt("MAIL_TOKEN_FAIL_LIMIT", defaultMailTokenFailLimit)
+	cfg.loginMaxFail = envInt("LOGIN_MAX_FAIL", defaultLoginMaxFail)
+	cfg.loginLockMin = envInt("LOGIN_LOCK_MIN", defaultLoginLockMin)
+	cfg.registerIPDailyLimit = envInt("REGISTER_IP_DAILY_LIMIT", defaultRegisterIPDailyLimit)
+	cfg.tenantCompensateIntervalMin = envInt("TENANT_COMPENSATE_INTERVAL_MIN", defaultCompensateIntervalMin)
+
+	// C. 图形验证码（§10.3 C；生产禁止关闭 = 仅显式 false 才关）
+	cfg.captchaEnabled = envBool("TENANT_CAPTCHA_ENABLED", true)
+	cfg.captchaTTLMin = envInt("TENANT_CAPTCHA_TTL_MIN", defaultCaptchaTTLMin)
+	cfg.captchaIPRatePerHour = envInt("TENANT_CAPTCHA_IP_RATE_PER_HOUR", defaultCaptchaIPRatePerHour)
+
+	// D. SMTP 与邮件链接（§10.3 D）
+	cfg.smtpHost = os.Getenv("SMTP_HOST")
+	cfg.smtpPort = envInt("SMTP_PORT", defaultSMTPPort)
+	cfg.smtpUsername = os.Getenv("SMTP_USERNAME")
+	cfg.smtpPassword = os.Getenv("SMTP_PASSWORD")
+	cfg.smtpFrom = os.Getenv("SMTP_FROM")
+	cfg.smtpTLS = envBool("SMTP_TLS", true)
+	cfg.portalBaseURL = strings.TrimRight(os.Getenv("PORTAL_BASE_URL"), "/")
+
+	if cfg.smtpPort <= 0 || cfg.smtpPort > 65535 {
+		return fmt.Errorf("配置错误：SMTP_PORT 非法（%d）", cfg.smtpPort)
+	}
 	return nil
 }
 

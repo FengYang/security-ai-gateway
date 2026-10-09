@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,482 +10,540 @@ import (
 	"time"
 )
 
-// newTestHandler 创建测试用 tenant handler（SMTP 启用，走日志模式不发实信）。
-func newTestHandler(t *testing.T, smtpEnabled bool) (*tenantHandler, *sqliteTenantStore) {
+// ---------- 测试辅助 ----------
+
+// testTenantCfg 构造测试用配置（captcha 默认关闭，专项用例单独开启）。
+func testTenantCfg() *config {
+	return &config{
+		jwtSecret:                   []byte("shared-secret-16chars-minimum"),
+		tenantPepper:                []byte("test-pepper-32bytes-minimum-padding!!"),
+		emailVerifyTTLHours:         24,
+		passwordResetTTLHours:       1,
+		passwordResetIntervalMin:    15,
+		mailTokenFailLimit:          10,
+		loginMaxFail:                5,
+		loginLockMin:                15,
+		registerIPDailyLimit:        5,
+		tenantCompensateIntervalMin: 30,
+		captchaEnabled:              false,
+		captchaTTLMin:               5,
+		captchaIPRatePerHour:        30,
+		smtpHost:                    "smtp.example.com",
+		smtpPort:                    587,
+		smtpFrom:                    "no-reply@example.com",
+		smtpTLS:                     true,
+		portalBaseURL:               "https://portal.example.com",
+	}
+}
+
+// fakeMailer 记录邮件调用，不真正发信。
+type fakeMailer struct {
+	verifyCalls     int
+	resetCalls      int
+	alreadyCalls    int
+	lastVerifyToken string
+	lastResetToken  string
+}
+
+func (m *fakeMailer) SendVerifyEmail(_, _, token string) error {
+	m.verifyCalls++
+	m.lastVerifyToken = token
+	return nil
+}
+func (m *fakeMailer) SendResetEmail(_, token string) error {
+	m.resetCalls++
+	m.lastResetToken = token
+	return nil
+}
+func (m *fakeMailer) SendAlreadyRegisteredEmail(string) error {
+	m.alreadyCalls++
+	return nil
+}
+
+// fakeBinder 记录绑定调用。
+type fakeBinder struct {
+	res    bindResult
+	err    error
+	calls  int
+	tenant string
+}
+
+func (b *fakeBinder) BindFree(_ context.Context, tenantID, _ string) (bindResult, error) {
+	b.calls++
+	b.tenant = tenantID
+	return b.res, b.err
+}
+
+// newAPITestHandler 构造测试 handler（mailer 替换为 fake）。
+func newAPITestHandler(t *testing.T, cfg *config, binder quotaBinder) (*tenantHandler, *sqliteTenantStore, *fakeMailer) {
 	t.Helper()
 	ts := newTestStore(t)
-	secret := []byte("test-secret-16chars-minimum-jwt")
-	host, user, pass, from := "", "", "", ""
-	if smtpEnabled {
-		host = "smtp.example.com"
-		user = "test@example.com"
-		pass = "pass123"
-		from = "no-reply@example.com"
+	h := newTenantHandler(ts, cfg, binder, nil)
+	fm := &fakeMailer{}
+	h.mailer = fm
+	return h, ts, fm
+}
+
+// issueTestCaptcha 生成验证码并取回明文（同包访问内部 map）。
+func issueTestCaptcha(t *testing.T, h *tenantHandler) (id, code string) {
+	t.Helper()
+	id, _, err := h.captcha.Issue("10.0.0.1")
+	if err != nil {
+		t.Fatalf("签发验证码失败: %v", err)
 	}
-	h := newTenantHandler(ts, secret, host, user, pass, from, 587)
-	return h, ts
+	h.captcha.mu.Lock()
+	code = h.captcha.items[id].code
+	h.captcha.mu.Unlock()
+	return id, code
+}
+
+// postJSON 构造 POST 请求。
+func postJSON(path, body string) *http.Request {
+	req := httptest.NewRequest("POST", path, bytes.NewBufferString(body))
+	req.RemoteAddr = "10.0.0.1:12345"
+	return req
 }
 
 // ---------- 注册 ----------
 
-func TestAPI_Register_SMTPDisabled_Returns503(t *testing.T) {
-	h, _ := newTestHandler(t, false)
-	body := `{"email":"test@example.com","password":"password123","tenant_name":"测试"}`
-	req := httptest.NewRequest("POST", "/v1/tenant/register", bytes.NewBufferString(body))
+func TestAPI_Register_MailerDisabled_Returns503(t *testing.T) {
+	h, _, _ := newAPITestHandler(t, testTenantCfg(), nil)
+	h.mailer = nil
 	w := httptest.NewRecorder()
-	h.handleRegister(w, req)
-
+	h.handleRegister(w, postJSON("/v1/tenant/register", `{}`))
 	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("SMTP 未启用应返 503, got=%d", w.Code)
+		t.Errorf("SMTP 未配置应 503, got=%d", w.Code)
 	}
 }
 
 func TestAPI_Register_Success_Returns202(t *testing.T) {
-	h, _ := newTestHandler(t, true)
-	body := `{"email":"newuser@example.com","password":"password123","tenant_name":"我的租户"}`
-	req := httptest.NewRequest("POST", "/v1/tenant/register", bytes.NewBufferString(body))
-	req.RemoteAddr = "10.0.0.1:12345"
+	h, store, fm := newAPITestHandler(t, testTenantCfg(), nil)
+	body := `{"email":"new@example.com","password":"Password123!","tenant_name":"我的租户","agree_terms":true}`
 	w := httptest.NewRecorder()
-	h.handleRegister(w, req)
+	h.handleRegister(w, postJSON("/v1/tenant/register", body))
 
 	if w.Code != http.StatusAccepted {
-		t.Errorf("注册成功应返 202, got=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("注册应 202, got=%d body=%s", w.Code, w.Body.String())
 	}
-
-	// 验证用户已创建
-	u, err := h.store.GetUserByEmail("newuser@example.com")
-	if err != nil {
-		t.Fatalf("查询用户失败: %v", err)
+	u, _ := store.GetUserByEmail("new@example.com")
+	if u == nil || u.Status != tenantUserStatusPending {
+		t.Fatal("用户未按 pending 创建")
 	}
-	if u == nil {
-		t.Fatal("用户未创建")
+	tn, _ := store.GetTenantByID(u.TenantID)
+	if tn == nil || tn.Status != tenantStatusPending {
+		t.Fatalf("租户状态应为 pending, got=%+v", tn)
 	}
-	if u.Status != tenantUserStatusPending {
-		t.Errorf("新用户状态应为 pending, got=%s", u.Status)
-	}
-	if u.TenantID == "" {
-		t.Error("租户 ID 为空")
-	}
-	// 验证租户
-	tenant, _ := h.store.GetTenantByID(u.TenantID)
-	if tenant == nil {
-		t.Error("租户未创建")
-	}
-	if tenant.Name != "我的租户" {
-		t.Errorf("租户名不对: %s", tenant.Name)
-	}
-	if tenant.PlanID != "free" {
-		t.Errorf("默认套餐应为 free, got=%s", tenant.PlanID)
+	if fm.verifyCalls != 1 || fm.lastVerifyToken == "" {
+		t.Error("未发送验证邮件")
 	}
 }
 
-func TestAPI_Register_DuplicateEmail_Returns202(t *testing.T) {
-	h, s := newTestHandler(t, true)
-
-	// 先创建一个
-	now := time.Now().Unix()
-	tx, _ := s.Begin()
-	s.CreateTenant(tx, &Tenant{ID: "t_exist", Name: "e", Status: tenantStatusActive, PlanID: "free", CreatedAt: now})
-	pwHash, _ := hashPassword("password123")
-	s.CreateUser(tx, &TenantUser{TenantID: "t_exist", Email: "exist@example.com", PasswordHash: pwHash, Status: tenantUserStatusActive, CreatedAt: now})
-	tx.Commit()
-
-	// 再注册同一个邮箱
-	body := `{"email":"exist@example.com","password":"password123","tenant_name":"新租户"}`
-	req := httptest.NewRequest("POST", "/v1/tenant/register", bytes.NewBufferString(body))
-	req.RemoteAddr = "10.0.0.2:12345"
-	w := httptest.NewRecorder()
-	h.handleRegister(w, req)
-
-	// 防枚举：也返 202
-	if w.Code != http.StatusAccepted {
-		t.Errorf("重复邮箱也应返 202, got=%d", w.Code)
+func TestAPI_Register_InvalidParams_Returns400(t *testing.T) {
+	h, _, _ := newAPITestHandler(t, testTenantCfg(), nil)
+	cases := map[string]string{
+		"非法邮箱":    `{"email":"bad","password":"Password123!","tenant_name":"ab","agree_terms":true}`,
+		"弱密码":     `{"email":"a@b.com","password":"short","tenant_name":"ab","agree_terms":true}`,
+		"密码类别不足":  `{"email":"a@b.com","password":"abcdefghij","tenant_name":"ab","agree_terms":true}`,
+		"租户名过短":   `{"email":"a@b.com","password":"Password123!","tenant_name":"a","agree_terms":true}`,
 	}
-	// 用户数应不变
-	u, _ := h.store.GetUserByEmail("exist@example.com")
-	if u.TenantID != "t_exist" {
-		t.Error("不应覆盖既有用户的租户")
-	}
-}
-
-func TestAPI_Register_InvalidInput_Returns202(t *testing.T) {
-	h, _ := newTestHandler(t, true)
-
-	tests := []struct {
-		name string
-		body string
-	}{
-		{"空邮箱", `{"email":"","password":"password123","tenant_name":"t"}`},
-		{"非法邮箱", `{"email":"not-an-email","password":"password123","tenant_name":"t"}`},
-		{"短密码", `{"email":"a@b.com","password":"short","tenant_name":"t"}`},
-		{"空租户名", `{"email":"a@b.com","password":"password123","tenant_name":""}`},
-		{"空 body", ``},
-		{"非法 JSON", `not-json`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("POST", "/v1/tenant/register", bytes.NewBufferString(tt.body))
-			req.RemoteAddr = "10.0.0.9:12345"
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			h.handleRegister(w, req)
-			if w.Code != http.StatusAccepted {
-				t.Errorf("%s: 应返 202, got=%d", tt.name, w.Code)
-			}
-		})
-	}
-}
-
-// ---------- 验证 ----------
-
-func TestAPI_Verify_Success(t *testing.T) {
-	h, s := newTestHandler(t, true)
-	now := time.Now().Unix()
-
-	// 创建 pending 用户 + 验证令牌
-	tx, _ := s.Begin()
-	s.CreateTenant(tx, &Tenant{ID: "t_v", Name: "v", Status: tenantStatusActive, PlanID: "free", CreatedAt: now})
-	uid, _ := s.CreateUser(tx, &TenantUser{TenantID: "t_v", Email: "v@e.com", PasswordHash: "h", Status: tenantUserStatusPending, CreatedAt: now})
-	tokenHash := s.hashMailToken("verify-token-123")
-	s.CreateToken(tx, &MailActionToken{
-		TokenHash:    tokenHash,
-		TenantUserID: uid,
-		Action:       mailActionVerify,
-		ExpiresAt:    now + 3600,
-	})
-	tx.Commit()
-
-	body := `{"token":"verify-token-123"}`
-	req := httptest.NewRequest("POST", "/v1/tenant/verify", bytes.NewBufferString(body))
-	w := httptest.NewRecorder()
-	h.handleVerify(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("验证成功应返 200, got=%d body=%s", w.Code, w.Body.String())
-	}
-	// 用户状态变 active
-	u, _ := h.store.GetUserByID(uid)
-	if u.Status != tenantUserStatusActive {
-		t.Errorf("用户状态应为 active, got=%s", u.Status)
-	}
-	// 令牌被消费
-	tok, _ := h.store.GetToken(tokenHash)
-	if tok.ConsumedAt == 0 {
-		t.Error("令牌应被消费")
-	}
-}
-
-func TestAPI_Verify_InvalidToken(t *testing.T) {
-	h, _ := newTestHandler(t, true)
-
-	tests := []struct {
-		name string
-		body string
-	}{
-		{"空令牌", `{"token":""}`},
-		{"不存在的令牌", `{"token":"no-such-token"}`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("POST", "/v1/tenant/verify", bytes.NewBufferString(tt.body))
-			w := httptest.NewRecorder()
-			h.handleVerify(w, req)
+			h.handleRegister(w, postJSON("/v1/tenant/register", body))
 			if w.Code != http.StatusBadRequest {
-				t.Errorf("%s: 应返 400, got=%d", tt.name, w.Code)
+				t.Errorf("应 400, got=%d", w.Code)
 			}
 		})
 	}
 }
 
-func TestAPI_Verify_ExpiredToken(t *testing.T) {
-	h, s := newTestHandler(t, true)
-	now := time.Now().Unix()
-
-	tx, _ := s.Begin()
-	s.CreateTenant(tx, &Tenant{ID: "t_e", Name: "e", Status: tenantStatusActive, PlanID: "free", CreatedAt: now})
-	uid, _ := s.CreateUser(tx, &TenantUser{TenantID: "t_e", Email: "e@e.com", PasswordHash: "h", Status: tenantUserStatusPending, CreatedAt: now})
-	s.CreateToken(tx, &MailActionToken{
-		TokenHash:    s.hashMailToken("expired-token"),
-		TenantUserID: uid,
-		Action:       mailActionVerify,
-		ExpiresAt:    now - 100, // 已过期
-	})
-	tx.Commit()
-
-	req := httptest.NewRequest("POST", "/v1/tenant/verify", bytes.NewBufferString(`{"token":"expired-token"}`))
+func TestAPI_Register_AgreeTermsFalse_Returns400(t *testing.T) {
+	h, _, _ := newAPITestHandler(t, testTenantCfg(), nil)
+	body := `{"email":"a@b.com","password":"Password123!","tenant_name":"ab","agree_terms":false}`
 	w := httptest.NewRecorder()
-	h.handleVerify(w, req)
+	h.handleRegister(w, postJSON("/v1/tenant/register", body))
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("过期令牌应返 400, got=%d", w.Code)
+		t.Errorf("未同意条款应 400, got=%d", w.Code)
+	}
+}
+
+func TestAPI_Register_DuplicateEmail_Returns202WithNotice(t *testing.T) {
+	h, store, fm := newAPITestHandler(t, testTenantCfg(), nil)
+	seedTenantUser(t, store, "dup@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
+
+	body := `{"email":"dup@example.com","password":"Password123!","tenant_name":"新租户","agree_terms":true}`
+	w := httptest.NewRecorder()
+	h.handleRegister(w, postJSON("/v1/tenant/register", body))
+	if w.Code != http.StatusAccepted {
+		t.Errorf("重复邮箱应 202, got=%d", w.Code)
+	}
+	if fm.alreadyCalls != 1 {
+		t.Error("未发送已注册提示邮件")
+	}
+}
+
+func TestAPI_Register_CaptchaRequired(t *testing.T) {
+	cfg := testTenantCfg()
+	cfg.captchaEnabled = true
+	h, _, _ := newAPITestHandler(t, cfg, nil)
+
+	// 缺验证码 → 400
+	body := `{"email":"c@example.com","password":"Password123!","tenant_name":"ab","agree_terms":true}`
+	w := httptest.NewRecorder()
+	h.handleRegister(w, postJSON("/v1/tenant/register", body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("缺验证码应 400, got=%d", w.Code)
+	}
+
+	// 带正确验证码 → 202
+	id, code := issueTestCaptcha(t, h)
+	body2 := `{"email":"c@example.com","password":"Password123!","tenant_name":"ab","agree_terms":true,"captcha_id":"` + id + `","captcha_code":"` + code + `"}`
+	w2 := httptest.NewRecorder()
+	h.handleRegister(w2, postJSON("/v1/tenant/register", body2))
+	if w2.Code != http.StatusAccepted {
+		t.Errorf("正确验证码应 202, got=%d", w2.Code)
+	}
+}
+
+// ---------- 邮箱验证 ----------
+
+func TestAPI_Verify_BinderDisabled_Returns503(t *testing.T) {
+	h, _, _ := newAPITestHandler(t, testTenantCfg(), nil)
+	w := httptest.NewRecorder()
+	h.handleVerify(w, postJSON("/v1/tenant/verify", `{"email":"a@b.com","token":"x"}`))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("billing 未启用应 503, got=%d", w.Code)
+	}
+}
+
+func TestAPI_Verify_Success_ActiveAndBound(t *testing.T) {
+	binder := &fakeBinder{res: bindResult{Status: tenantStatusActive, MonthlyTokens: 1000000, Concurrency: 5}}
+	h, store, _ := newAPITestHandler(t, testTenantCfg(), binder)
+
+	tenantID, userID, rawToken := seedPendingVerify(t, store)
+
+	w := httptest.NewRecorder()
+	h.handleVerify(w, postJSON("/v1/tenant/verify",
+		`{"email":"v@example.com","token":"`+rawToken+`"}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("验证应 200, got=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp verifyResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if resp.Status != tenantStatusActive || resp.PlanID != freePlanID {
+		t.Errorf("响应不对: %+v", resp)
+	}
+	if resp.Quota == nil || !resp.Quota.Applied {
+		t.Errorf("quota 应 applied: %+v", resp.Quota)
+	}
+	if binder.calls != 1 || binder.tenant != tenantID {
+		t.Errorf("binder 调用异常: calls=%d tenant=%s", binder.calls, binder.tenant)
+	}
+	tn, _ := store.GetTenantByID(tenantID)
+	if tn.Status != tenantStatusActive {
+		t.Errorf("租户应 active, got=%s", tn.Status)
+	}
+	u, _ := store.GetUserByID(userID)
+	if u.Status != tenantUserStatusActive {
+		t.Errorf("用户应 active, got=%s", u.Status)
+	}
+}
+
+func TestAPI_Verify_QuotaPending(t *testing.T) {
+	binder := &fakeBinder{res: bindResult{Status: tenantStatusQuotaPending, MonthlyTokens: 1000000, Concurrency: 5}}
+	h, store, _ := newAPITestHandler(t, testTenantCfg(), binder)
+	tenantID, _, rawToken := seedPendingVerify(t, store)
+
+	w := httptest.NewRecorder()
+	h.handleVerify(w, postJSON("/v1/tenant/verify",
+		`{"email":"v@example.com","token":"`+rawToken+`"}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("应 200, got=%d", w.Code)
+	}
+	var resp verifyResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Status != tenantStatusQuotaPending || resp.Quota.Applied {
+		t.Errorf("应为 quota_pending 且 applied=false: %+v", resp)
+	}
+	tn, _ := store.GetTenantByID(tenantID)
+	if tn.Status != tenantStatusQuotaPending {
+		t.Errorf("租户应 quota_pending, got=%s", tn.Status)
+	}
+}
+
+func TestAPI_Verify_InvalidToken_Returns400(t *testing.T) {
+	binder := &fakeBinder{res: bindResult{Status: tenantStatusActive}}
+	h, _, _ := newAPITestHandler(t, testTenantCfg(), binder)
+	w := httptest.NewRecorder()
+	h.handleVerify(w, postJSON("/v1/tenant/verify", `{"email":"v@example.com","token":"bogus"}`))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("无效令牌应 400, got=%d", w.Code)
 	}
 }
 
 // ---------- 登录 ----------
 
-func TestAPI_Login_Success(t *testing.T) {
-	h, s := newTestHandler(t, true)
-	now := time.Now().Unix()
+func TestAPI_Login_Success_NoToken(t *testing.T) {
+	h, store, _ := newAPITestHandler(t, testTenantCfg(), nil)
+	seedTenantUser(t, store, "login@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
 
-	tx, _ := s.Begin()
-	s.CreateTenant(tx, &Tenant{ID: "t_login", Name: "l", Status: tenantStatusActive, PlanID: "free", CreatedAt: now})
-	pwHash, _ := hashPassword("correct-pass")
-	s.CreateUser(tx, &TenantUser{TenantID: "t_login", Email: "login@e.com", PasswordHash: pwHash, Status: tenantUserStatusActive, CreatedAt: now})
-	tx.Commit()
-
-	body := `{"email":"login@e.com","password":"correct-pass"}`
-	req := httptest.NewRequest("POST", "/v1/tenant/login", bytes.NewBufferString(body))
+	body := `{"email":"login@example.com","password":"Password123!"}`
 	w := httptest.NewRecorder()
-	h.handleLogin(w, req)
-
+	h.handleLogin(w, postJSON("/v1/tenant/login", body))
 	if w.Code != http.StatusOK {
-		t.Fatalf("登录成功应返 200, got=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("登录应 200, got=%d body=%s", w.Code, w.Body.String())
 	}
-
-	var resp loginResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("解析响应失败: %v", err)
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if _, hasToken := resp["token"]; hasToken {
+		t.Error("login 不应返回令牌（C-14）")
 	}
-	if resp.Token == "" {
-		t.Error("响应无 token")
-	}
-	if resp.ExpiresIn != tenantTokenTTL {
-		t.Errorf("ExpiresIn: got=%d want=%d", resp.ExpiresIn, tenantTokenTTL)
-	}
-
-	// 校验返回的令牌合法
-	claims, err := verifyTenantToken(resp.Token, h.jwtSecret)
-	if err != nil {
-		t.Errorf("返回的令牌校验失败: %v", err)
-	}
-	if claims.Tenant != "t_login" {
-		t.Errorf("令牌 tenant 不对: %s", claims.Tenant)
+	if resp["role"] != tenantRole {
+		t.Errorf("role 不对: %v", resp["role"])
 	}
 }
 
-func TestAPI_Login_WrongPassword(t *testing.T) {
-	h, s := newTestHandler(t, true)
-	now := time.Now().Unix()
-
-	tx, _ := s.Begin()
-	s.CreateTenant(tx, &Tenant{ID: "t_lp", Name: "lp", Status: tenantStatusActive, PlanID: "free", CreatedAt: now})
-	pwHash, _ := hashPassword("correct-pass")
-	s.CreateUser(tx, &TenantUser{TenantID: "t_lp", Email: "lp@e.com", PasswordHash: pwHash, Status: tenantUserStatusActive, CreatedAt: now})
-	tx.Commit()
-
-	body := `{"email":"lp@e.com","password":"wrong-pass"}`
-	req := httptest.NewRequest("POST", "/v1/tenant/login", bytes.NewBufferString(body))
+func TestAPI_Login_WrongPassword_Returns401(t *testing.T) {
+	h, store, _ := newAPITestHandler(t, testTenantCfg(), nil)
+	seedTenantUser(t, store, "lp@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
 	w := httptest.NewRecorder()
-	h.handleLogin(w, req)
-
+	h.handleLogin(w, postJSON("/v1/tenant/login", `{"email":"lp@example.com","password":"WrongPass123!"}`))
 	if w.Code != http.StatusUnauthorized {
-		t.Errorf("密码错误应返 401, got=%d", w.Code)
+		t.Errorf("密码错误应 401, got=%d", w.Code)
 	}
 }
 
-func TestAPI_Login_UserNotFound(t *testing.T) {
-	h, _ := newTestHandler(t, true)
-	body := `{"email":"no@e.com","password":"password123"}`
-	req := httptest.NewRequest("POST", "/v1/tenant/login", bytes.NewBufferString(body))
-	w := httptest.NewRecorder()
-	h.handleLogin(w, req)
+func TestAPI_Login_LockAfterMaxFail(t *testing.T) {
+	cfg := testTenantCfg()
+	cfg.loginMaxFail = 3
+	h, store, _ := newAPITestHandler(t, cfg, nil)
+	seedTenantUser(t, store, "lock@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
 
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("用户不存在应返 401, got=%d", w.Code)
+	for i := 0; i < 3; i++ {
+		w := httptest.NewRecorder()
+		h.handleLogin(w, postJSON("/v1/tenant/login", `{"email":"lock@example.com","password":"WrongPass123!"}`))
+	}
+	// 第 4 次（即使密码正确）应因锁定返回 423
+	w := httptest.NewRecorder()
+	h.handleLogin(w, postJSON("/v1/tenant/login", `{"email":"lock@example.com","password":"Password123!"}`))
+	if w.Code != http.StatusLocked {
+		t.Errorf("锁定后应 423, got=%d", w.Code)
 	}
 }
 
-func TestAPI_Login_PendingUser(t *testing.T) {
-	h, s := newTestHandler(t, true)
-	now := time.Now().Unix()
-
-	tx, _ := s.Begin()
-	s.CreateTenant(tx, &Tenant{ID: "t_p", Name: "p", Status: tenantStatusActive, PlanID: "free", CreatedAt: now})
-	pwHash, _ := hashPassword("password123")
-	s.CreateUser(tx, &TenantUser{TenantID: "t_p", Email: "p@e.com", PasswordHash: pwHash, Status: tenantUserStatusPending, CreatedAt: now})
-	tx.Commit()
-
-	body := `{"email":"p@e.com","password":"password123"}`
-	req := httptest.NewRequest("POST", "/v1/tenant/login", bytes.NewBufferString(body))
+func TestAPI_Login_QuotaPending_Returns403(t *testing.T) {
+	h, store, _ := newAPITestHandler(t, testTenantCfg(), nil)
+	seedTenantUser(t, store, "qp@example.com", "Password123!", tenantUserStatusActive, tenantStatusQuotaPending)
 	w := httptest.NewRecorder()
-	h.handleLogin(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("pending 用户应返 401, got=%d body=%s", w.Code, w.Body.String())
-	}
-	if w.Body.String() == "" || !bytes.Contains(w.Body.Bytes(), []byte("邮箱未验证")) {
-		// 应该包含提示信息
-		t.Logf("响应体: %s", w.Body.String())
+	h.handleLogin(w, postJSON("/v1/tenant/login", `{"email":"qp@example.com","password":"Password123!"}`))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("quota_pending 应 403, got=%d", w.Code)
 	}
 }
 
 // ---------- 登出 ----------
 
-func TestAPI_Logout(t *testing.T) {
-	h, _ := newTestHandler(t, true)
+func TestAPI_Logout_RequiresCSRF(t *testing.T) {
+	h, _, _ := newAPITestHandler(t, testTenantCfg(), nil)
+	token := newTenantJWT(h.jwtSecret, "1", "t_1", "a@b.com", 3600)
+	chain := tenantAuthMiddleware(h.jwtSecret, csrfCheck(h.handleLogout))
 
-	secret := h.jwtSecret
-	token, _ := issueTenantToken(secret, 1, "t_1", "a@b.com")
-
-	req := httptest.NewRequest("POST", "/v1/tenant/logout", nil)
+	// 缺 CSRF → 403
+	req := httptest.NewRequest("POST", "/v1/adminext/tenant/logout", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
+	chain(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("缺 CSRF 应 403, got=%d", w.Code)
+	}
 
-	// 走中间件 + handler
-	handler := tenantAuthMiddleware(secret, h.handleLogout)
-	handler(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("登出应返 200, got=%d", w.Code)
+	// 带 CSRF → 200
+	req2 := httptest.NewRequest("POST", "/v1/adminext/tenant/logout", nil)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	req2.Header.Set("X-CSRF-Token", "csrf-token-value")
+	req2.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "csrf-token-value"})
+	w2 := httptest.NewRecorder()
+	chain(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Errorf("带 CSRF 应 200, got=%d", w2.Code)
 	}
 }
 
-// ---------- /me ----------
+// ---------- 验证码签发 ----------
 
-func TestAPI_Me(t *testing.T) {
-	h, _ := newTestHandler(t, true)
+func TestAPI_Captcha_Issue(t *testing.T) {
+	cfg := testTenantCfg()
+	cfg.captchaEnabled = true
+	h, _, _ := newAPITestHandler(t, cfg, nil)
 
-	token, _ := issueTenantToken(h.jwtSecret, 1, "t_me", "me@e.com")
-
-	req := httptest.NewRequest("GET", "/v1/tenant/me", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req := httptest.NewRequest("GET", "/v1/adminext/captcha", nil)
+	req.RemoteAddr = "10.0.0.1:1234"
 	w := httptest.NewRecorder()
-
-	handler := tenantAuthMiddleware(h.jwtSecret, h.handleMe)
-	handler(w, req)
-
+	h.handleCaptcha(w, req)
 	if w.Code != http.StatusOK {
-		t.Errorf("/me 应返 200, got=%d", w.Code)
+		t.Fatalf("签发应 200, got=%d", w.Code)
 	}
-	var resp meResponse
+	var resp map[string]string
 	json.NewDecoder(w.Body).Decode(&resp)
-	if resp.Email != "me@e.com" {
-		t.Errorf("Email 不对: %s", resp.Email)
+	if resp["captcha_id"] == "" || resp["image"] == "" {
+		t.Errorf("响应缺少字段: %+v", resp)
 	}
-	if resp.Tenant != "t_me" {
-		t.Errorf("Tenant 不对: %s", resp.Tenant)
+}
+
+func TestAPI_Captcha_Disabled_Returns404(t *testing.T) {
+	h, _, _ := newAPITestHandler(t, testTenantCfg(), nil) // captchaEnabled=false
+	req := httptest.NewRequest("GET", "/v1/adminext/captcha", nil)
+	w := httptest.NewRecorder()
+	h.handleCaptcha(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("禁用应 404, got=%d", w.Code)
 	}
 }
 
 // ---------- 密码重置 ----------
 
-func TestAPI_PasswordReset_Request_Returns202(t *testing.T) {
-	h, s := newTestHandler(t, true)
-	now := time.Now().Unix()
+func TestAPI_PasswordReset_Flow(t *testing.T) {
+	h, store, fm := newAPITestHandler(t, testTenantCfg(), nil)
+	seedTenantUser(t, store, "reset@example.com", "OldPass123!", tenantUserStatusActive, tenantStatusActive)
 
-	tx, _ := s.Begin()
-	s.CreateTenant(tx, &Tenant{ID: "t_r", Name: "r", Status: tenantStatusActive, PlanID: "free", CreatedAt: now})
-	pwHash, _ := hashPassword("old-pass")
-	s.CreateUser(tx, &TenantUser{TenantID: "t_r", Email: "reset@e.com", PasswordHash: pwHash, Status: tenantUserStatusActive, CreatedAt: now})
-	tx.Commit()
-
-	body := `{"email":"reset@e.com"}`
-	req := httptest.NewRequest("POST", "/v1/tenant/password-reset", bytes.NewBufferString(body))
+	// 申请
 	w := httptest.NewRecorder()
-	h.handlePasswordReset(w, req)
-
+	h.handlePasswordReset(w, postJSON("/v1/tenant/password-reset", `{"email":"reset@example.com"}`))
 	if w.Code != http.StatusAccepted {
-		t.Errorf("重置申请应返 202, got=%d", w.Code)
+		t.Fatalf("申请应 202, got=%d", w.Code)
 	}
-	// 应该有 token 被创建（通过用户 ID 查）
-	u, _ := h.store.GetUserByEmail("reset@e.com")
-	if u == nil {
-		t.Fatal("用户不存在")
+	if fm.resetCalls != 1 || fm.lastResetToken == "" {
+		t.Fatal("未发送重置邮件")
+	}
+
+	// 确认
+	confirmBody := `{"email":"reset@example.com","token":"` + fm.lastResetToken + `","new_password":"NewPass456!"}`
+	w2 := httptest.NewRecorder()
+	h.handlePasswordResetConfirm(w2, postJSON("/v1/tenant/password-reset/confirm", confirmBody))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("确认应 200, got=%d body=%s", w2.Code, w2.Body.String())
+	}
+	u, _ := store.GetUserByEmail("reset@example.com")
+	if !verifyPassword(u.PasswordHash, "NewPass456!") {
+		t.Error("新密码未生效")
 	}
 }
 
-func TestAPI_PasswordReset_UserNotFound_Returns202(t *testing.T) {
-	h, _ := newTestHandler(t, true)
-	body := `{"email":"notfound@e.com"}`
-	req := httptest.NewRequest("POST", "/v1/tenant/password-reset", bytes.NewBufferString(body))
+func TestAPI_PasswordReset_UnknownEmail_Still202(t *testing.T) {
+	h, _, fm := newAPITestHandler(t, testTenantCfg(), nil)
 	w := httptest.NewRecorder()
-	h.handlePasswordReset(w, req)
-
+	h.handlePasswordReset(w, postJSON("/v1/tenant/password-reset", `{"email":"nobody@example.com"}`))
 	if w.Code != http.StatusAccepted {
-		t.Errorf("用户不存在也应返 202, got=%d", w.Code)
+		t.Errorf("未知邮箱也应 202, got=%d", w.Code)
+	}
+	if fm.resetCalls != 0 {
+		t.Error("未知邮箱不应发信")
 	}
 }
 
-func TestAPI_PasswordReset_Confirm_Success(t *testing.T) {
-	h, s := newTestHandler(t, true)
-	now := time.Now().Unix()
-
-	tx, _ := s.Begin()
-	s.CreateTenant(tx, &Tenant{ID: "t_rc", Name: "rc", Status: tenantStatusActive, PlanID: "free", CreatedAt: now})
-	oldHash, _ := hashPassword("old-pass")
-	uid, _ := s.CreateUser(tx, &TenantUser{TenantID: "t_rc", Email: "rc@e.com", PasswordHash: oldHash, Status: tenantUserStatusActive, CreatedAt: now})
-	s.CreateToken(tx, &MailActionToken{
-		TokenHash:    s.hashMailToken("reset-token-abc"),
-		TenantUserID: uid,
-		Action:       mailActionPasswordReset,
-		ExpiresAt:    now + 3600,
-	})
-	tx.Commit()
-
-	body := `{"token":"reset-token-abc","new_password":"new-password-123"}`
-	req := httptest.NewRequest("POST", "/v1/tenant/password-reset/confirm", bytes.NewBufferString(body))
-	w := httptest.NewRecorder()
-	h.handlePasswordResetConfirm(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("重置确认应返 200, got=%d body=%s", w.Code, w.Body.String())
-	}
-	// 验证新密码可用
-	u, _ := h.store.GetUserByID(uid)
-	if !verifyPassword(u.PasswordHash, "new-password-123") {
-		t.Error("新密码校验失败")
-	}
-	if verifyPassword(u.PasswordHash, "old-pass") {
-		t.Error("旧密码不应仍可用")
-	}
-}
-
-// ---------- 辅助工具 ----------
+// ---------- 工具函数 ----------
 
 func TestValidEmail(t *testing.T) {
-	tests := []struct {
-		email string
-		want  bool
-	}{
-		{"a@b.com", true},
-		{"user.name+tag@domain.co.uk", true},
-		{"notanemail", false},
-		{"@no-local.com", false},
-		{"", false},
+	cases := map[string]bool{
+		"a@b.com": true, "user.name@domain.co.uk": true,
+		"notanemail": false, "@x.com": false, "": false,
 	}
-	for _, tt := range tests {
-		if got := validEmail(tt.email); got != tt.want {
-			t.Errorf("validEmail(%q) = %v, want %v", tt.email, got, tt.want)
+	for in, want := range cases {
+		if got := validEmail(in); got != want {
+			t.Errorf("validEmail(%q)=%v want=%v", in, got, want)
 		}
 	}
 }
 
 func TestValidPassword(t *testing.T) {
-	if validPassword("") {
-		t.Error("空密码应无效")
+	cases := map[string]bool{
+		"Password123!": true,          // 四类
+		"abcdefghij1":  false,         // 仅两类（小写+数字）
+		"Abcdefgh12":   true,          // 大写+小写+数字
+		"short1A":      false,         // 过短
+		"abcdefghijk":  false,         // 仅一类
 	}
-	if validPassword("1234567") {
-		t.Error("7 位密码应无效")
+	for in, want := range cases {
+		if got := validPassword(in); got != want {
+			t.Errorf("validPassword(%q)=%v want=%v", in, got, want)
+		}
 	}
-	if !validPassword("12345678") {
-		t.Error("8 位密码应有效")
+}
+
+func TestSanitizeTenantName(t *testing.T) {
+	if _, ok := sanitizeTenantName("a"); ok {
+		t.Error("过短应失败")
 	}
-	if !validPassword("aA1!@#$%^&*()_+") {
-		t.Error("复杂密码应有效")
+	if got, ok := sanitizeTenantName("  示例科技  "); !ok || got != "示例科技" {
+		t.Errorf("trim 失败: %q ok=%v", got, ok)
 	}
 }
 
 func TestGenerateTenantID(t *testing.T) {
 	id1, err := generateTenantID()
 	if err != nil {
-		t.Fatalf("generateTenantID 失败: %v", err)
+		t.Fatal(err)
 	}
 	id2, _ := generateTenantID()
 	if id1 == id2 {
-		t.Error("两次生成的 ID 不应相同")
+		t.Error("ID 不应重复")
 	}
-	if len(id1) != 2+24 { // t_ + 12 bytes hex
-		t.Errorf("ID 长度不对: %d", len(id1))
+	if len(id1) != 2+24 || id1[:2] != "t_" {
+		t.Errorf("ID 格式不对: %s", id1)
 	}
-	if id1[:2] != "t_" {
-		t.Errorf("ID 应以 t_ 开头: %s", id1)
+}
+
+// ---------- seed 辅助 ----------
+
+// seedTenantUser 直接写入 active/指定状态的租户与用户。
+func seedTenantUser(t *testing.T, store *sqliteTenantStore, email, password, userStatus, tenantStatus string) (string, int64) {
+	t.Helper()
+	now := time.Now().Unix()
+	tx, err := store.Begin()
+	if err != nil {
+		t.Fatal(err)
 	}
+	tid, _ := generateTenantID()
+	if err := store.CreateTenant(tx, &Tenant{
+		ID: tid, Name: "seed", Status: tenantStatus, PlanID: freePlanID, CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pwHash, _ := hashPassword(password)
+	uid, err := store.CreateUser(tx, &TenantUser{
+		TenantID: tid, Email: email, PasswordHash: pwHash, Status: userStatus, CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return tid, uid
+}
+
+// seedPendingVerify 写入 pending 租户/用户 + 验证令牌，返回 (tenantID, userID, 明文令牌)。
+func seedPendingVerify(t *testing.T, store *sqliteTenantStore) (string, int64, string) {
+	t.Helper()
+	tid, uid := seedTenantUser(t, store, "v@example.com", "Password123!", tenantUserStatusPending, tenantStatusPending)
+	raw, err := randomToken(32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := store.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateToken(tx, &MailActionToken{
+		TokenHash: store.hashMailToken(raw), TenantUserID: uid, Action: mailActionVerify,
+		ExpiresAt: time.Now().Unix() + 3600,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return tid, uid, raw
 }

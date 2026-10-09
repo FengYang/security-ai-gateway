@@ -51,6 +51,10 @@ const (
 	auditActionBillVerify  = "bill_verify"
 	// P0-4 §4.3.10：密码 profile/mask_prg 切换（B5-c）。
 	auditActionCryptopProfileSwitch = "cryptop.profile.switch"
+	// P1-4 租户自助门户动作（附录 D 审计动作清单）。
+	auditActionTenantRegister = "tenant_register"
+	auditActionTenantLogout   = "tenant_logout"
+	auditActionPasswordReset  = "password_reset"
 )
 
 // auditAnchorInterval 每追加 N 条事件锚定一次链尾哈希。

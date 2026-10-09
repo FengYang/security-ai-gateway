@@ -34,9 +34,11 @@ const (
 	tenantUserStatusLocked = "locked"
 	tenantUserStatusPending = "pending" // 未验证邮箱
 
-	// tenantStatusActive / Disabled。
-	tenantStatusActive   = "active"
-	tenantStatusDisabled = "disabled"
+	// tenantStatus* 租户状态（§3.2 状态机：pending → quota_pending → active；disabled = 停用）。
+	tenantStatusPending      = "pending"       // 刚注册、邮箱未验证
+	tenantStatusQuotaPending = "quota_pending" // 套餐已绑定但配额未回读确认（非 active）
+	tenantStatusActive       = "active"
+	tenantStatusDisabled     = "disabled"
 
 	// mailActionVerify / PasswordReset 邮件令牌动作类型。
 	mailActionVerify        = "email_verify"
@@ -160,6 +162,8 @@ type TenantStore interface {
 	CreateTenant(tx TenantTx, t *Tenant) error
 	GetTenantByID(id string) (*Tenant, error)
 	UpdateTenantStatus(tx TenantTx, id, status string) error
+	// ListTenantsByStatus 按状态枚举租户（补偿任务扫描 quota_pending 用）。
+	ListTenantsByStatus(status string) ([]*Tenant, error)
 
 	// 用户
 	CreateUser(tx TenantTx, u *TenantUser) (int64, error)
@@ -331,6 +335,24 @@ func (s *sqliteTenantStore) UpdateTenantStatus(tx TenantTx, id, status string) e
 		return fmt.Errorf("tenant: tenant %s not found", id)
 	}
 	return nil
+}
+
+// ListTenantsByStatus 按状态枚举租户（补偿任务扫描 quota_pending 用）。
+func (s *sqliteTenantStore) ListTenantsByStatus(status string) ([]*Tenant, error) {
+	rows, err := s.db.Query(`SELECT id, name, status, plan_id, created_at FROM tenants WHERE status = ?`, status)
+	if err != nil {
+		return nil, fmt.Errorf("tenant: list tenants by status: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*Tenant
+	for rows.Next() {
+		var t Tenant
+		if err := rows.Scan(&t.ID, &t.Name, &t.Status, &t.PlanID, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("tenant: scan tenant: %w", err)
+		}
+		out = append(out, &t)
+	}
+	return out, rows.Err()
 }
 
 // ---------- 用户 CRUD ----------

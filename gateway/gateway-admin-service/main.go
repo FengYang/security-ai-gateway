@@ -280,7 +280,8 @@ func main() {
 	}
 	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, ah, sch, cs, bih, bs.legacyPort)
 
-	// 租户自助门户（M1+；可选启用）：启用后在 admin 端口上挂 /v1/tenant/*。
+	// 租户自助门户（可选启用）：独立 tenantMux 承载 /v1/tenant/* 与 /v1/adminext/tenant/*
+	// （双 mux 隔离，C-16）；验证码签发为 Console 内部端点，挂管理面（authMiddleware）。
 	var tenantStore TenantStore
 	var tenantH *tenantHandler
 	if cfg.tenantEnabled {
@@ -289,12 +290,19 @@ func main() {
 			log.Fatalf("租户存储初始化失败（fail-closed）：%v", err)
 		}
 		tenantStore = ts
-		tenantH = newTenantHandler(ts, cfg.tenantJWTSecret,
-			cfg.smtpHost, cfg.smtpUser, cfg.smtpPass, cfg.smtpFrom, cfg.smtpPort)
-		tenantH.registerMux(adminMux)
+		// billing 域启用时注入免费版绑定器（复用其 store/compiler/applier/回读确认）；
+		// 未启用 → binder=nil → verify 返回 503（C-12）
+		var binder quotaBinder
+		if bih != nil {
+			binder = bih
+		}
+		tenantH = newTenantHandler(ts, cfg, binder, auditChain)
+		tenantH.registerCaptcha(adminMux, cfg)
 		defer func() { _ = ts.Close() }()
-		log.Printf("租户自助门户已启用：store=%s smtp_enabled=%v",
-			cfg.tenantStorePath, tenantH.smtpEnabled)
+		tenantH.startQuotaCompensator(context.Background(),
+			time.Duration(cfg.tenantCompensateIntervalMin)*time.Minute)
+		log.Printf("租户自助门户已启用：store=%s smtp=%v captcha=%v billing=%v",
+			cfg.tenantStorePath, tenantH.mailer != nil, cfg.captchaEnabled, binder != nil)
 	} else {
 		log.Printf("租户自助门户未启用（TENANT_STORE_PATH 未配置），/v1/tenant/* 端点不注册")
 	}
@@ -352,6 +360,19 @@ func main() {
 	}
 	defer ShutdownTracing()
 
+	// 双 mux 隔离（C-16）：租户子树（/v1/tenant/* + /v1/adminext/tenant/*）独立 tenantMux，
+	// 其余路径走 adminMux；租户端点严禁挂在管理 mux。
+	adminHandler := http.Handler(adminMux)
+	if tenantH != nil {
+		tenantMux := http.NewServeMux()
+		tenantH.registerMux(tenantMux)
+		root := http.NewServeMux()
+		root.Handle(tenantAPIBase+"/", tenantMux)
+		root.Handle(tenantSessionBase+"/", tenantMux)
+		root.Handle("/", adminMux)
+		adminHandler = root
+	}
+
 	log.Printf("gateway-admin-service 就绪（M2 A-2 双 listener）：admin=%s", cfg.listen)
-	serve("admin", cfg.listen, adminMux)
+	serve("admin", cfg.listen, adminHandler)
 }

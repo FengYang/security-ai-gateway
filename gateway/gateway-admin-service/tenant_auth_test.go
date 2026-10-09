@@ -1,197 +1,102 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
 
-// ---------- 签发与校验 ----------
+// signTenantJWT 测试辅助：用共享密钥构造租户令牌（生产由 Console 签发）。
+func signTenantJWT(secret []byte, claims tenantClaims) string {
+	headerB64 := tenantB64.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload, _ := json.Marshal(claims)
+	payloadB64 := tenantB64.EncodeToString(payload)
+	signingInput := headerB64 + "." + payloadB64
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(signingInput))
+	return signingInput + "." + tenantB64.EncodeToString(mac.Sum(nil))
+}
 
-func TestTenantJWT_SignAndVerify(t *testing.T) {
-	secret := []byte("test-secret-16chars-minimum")
-	token, err := issueTenantToken(secret, 42, "t_test1", "user@example.com")
-	if err != nil {
-		t.Fatalf("签发失败: %v", err)
-	}
-	if token == "" {
-		t.Fatal("令牌为空")
-	}
+// newTenantJWT 构造合法租户令牌（ttl 秒）。
+func newTenantJWT(secret []byte, sub, tenant, email string, ttl int64) string {
+	now := time.Now().Unix()
+	return signTenantJWT(secret, tenantClaims{
+		Sub: sub, Tenant: tenant, Role: tenantRole, Email: email, IAT: now, EXP: now + ttl,
+	})
+}
+
+func TestTenantJWT_Verify(t *testing.T) {
+	secret := []byte("shared-secret-16chars-minimum")
+	token := newTenantJWT(secret, "42", "t_test1", "user@example.com", 3600)
 
 	claims, err := verifyTenantToken(token, secret)
 	if err != nil {
 		t.Fatalf("校验失败: %v", err)
 	}
-	if claims.Sub != "42" {
-		t.Errorf("Sub 不匹配: got=%s want=42", claims.Sub)
-	}
-	if claims.Tenant != "t_test1" {
-		t.Errorf("Tenant 不匹配: got=%s", claims.Tenant)
-	}
-	if claims.Role != tenantRole {
-		t.Errorf("Role 不匹配: got=%s", claims.Role)
-	}
-	if claims.Email != "user@example.com" {
-		t.Errorf("Email 不匹配: got=%s", claims.Email)
-	}
-	if claims.EXP <= claims.IAT {
-		t.Error("EXP 应大于 IAT")
-	}
-	if claims.EXP-claims.IAT != tenantTokenTTL {
-		t.Errorf("TTL 不匹配: got=%d want=%d", claims.EXP-claims.IAT, tenantTokenTTL)
+	if claims.Sub != "42" || claims.Tenant != "t_test1" || claims.Role != tenantRole {
+		t.Errorf("claims 不匹配: %+v", claims)
 	}
 }
 
 func TestTenantJWT_InvalidSignature(t *testing.T) {
-	secret1 := []byte("secret-one-16chars-minimum")
-	secret2 := []byte("secret-two-16chars-minimum")
-	token, _ := issueTenantToken(secret1, 1, "t_1", "a@b.com")
-
-	_, err := verifyTenantToken(token, secret2)
-	if err == nil {
-		t.Error("用错误密钥校验不应通过")
+	token := newTenantJWT([]byte("secret-one-16chars-minimum"), "1", "t_1", "a@b.com", 3600)
+	if _, err := verifyTenantToken(token, []byte("secret-two-16chars-minimum")); err == nil {
+		t.Error("错误密钥不应通过")
 	}
 }
 
 func TestTenantJWT_Expired(t *testing.T) {
-	secret := []byte("test-secret-16chars-minimum")
-	// 手工构造一个已过期的令牌
-	claims := tenantClaims{
-		Sub:    "1",
-		Tenant: "t_1",
-		Role:   tenantRole,
-		IAT:    time.Now().Unix() - 10,
-		EXP:    time.Now().Unix() - 5, // 已过期 5 秒
-	}
-	token, err := signTenantJWT(secret, claims)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = verifyTenantToken(token, secret)
-	if err == nil {
-		t.Error("过期令牌不应通过校验")
+	secret := []byte("shared-secret-16chars-minimum")
+	token := signTenantJWT(secret, tenantClaims{
+		Sub: "1", Tenant: "t_1", Role: tenantRole,
+		IAT: time.Now().Unix() - 10, EXP: time.Now().Unix() - 5,
+	})
+	if _, err := verifyTenantToken(token, secret); err == nil {
+		t.Error("过期令牌不应通过")
 	}
 }
 
 func TestTenantJWT_InvalidFormat(t *testing.T) {
-	secret := []byte("test-secret-16chars-minimum")
-	_, err := verifyTenantToken("not-a-jwt", secret)
-	if err == nil {
-		t.Error("格式错误的令牌应报错")
+	if _, err := verifyTenantToken("not-a-jwt", []byte("x")); err == nil {
+		t.Error("格式错误应报错")
 	}
 }
 
 func TestTenantJWT_WrongRole(t *testing.T) {
-	secret := []byte("test-secret-16chars-minimum")
-	claims := tenantClaims{
-		Sub:    "1",
-		Tenant: "t_1",
-		Role:   "admin", // 错误角色
-		IAT:    time.Now().Unix(),
-		EXP:    time.Now().Unix() + 3600,
-	}
-	token, _ := signTenantJWT(secret, claims)
-	_, err := verifyTenantToken(token, secret)
-	if err == nil {
+	secret := []byte("shared-secret-16chars-minimum")
+	token := signTenantJWT(secret, tenantClaims{
+		Sub: "1", Tenant: "t_1", Role: "admin", IAT: time.Now().Unix(), EXP: time.Now().Unix() + 3600,
+	})
+	if _, err := verifyTenantToken(token, secret); err == nil {
 		t.Error("非 tenant_user 角色应被拒")
 	}
 }
 
 func TestTenantJWT_EmptyTenant(t *testing.T) {
-	secret := []byte("test-secret-16chars-minimum")
-	claims := tenantClaims{
-		Sub:    "1",
-		Tenant: "",
-		Role:   tenantRole,
-		IAT:    time.Now().Unix(),
-		EXP:    time.Now().Unix() + 3600,
-	}
-	token, _ := signTenantJWT(secret, claims)
-	_, err := verifyTenantToken(token, secret)
-	if err == nil {
+	secret := []byte("shared-secret-16chars-minimum")
+	token := signTenantJWT(secret, tenantClaims{
+		Sub: "1", Tenant: "", Role: tenantRole, IAT: time.Now().Unix(), EXP: time.Now().Unix() + 3600,
+	})
+	if _, err := verifyTenantToken(token, secret); err == nil {
 		t.Error("空 tenant 应被拒")
 	}
 }
 
-// ---------- 中间件 ----------
-
 func TestTenantAuthMiddleware_ValidToken(t *testing.T) {
-	secret := []byte("test-secret-16chars-minimum")
-	token, _ := issueTenantToken(secret, 1, "t_test", "u@e.com")
+	secret := []byte("shared-secret-16chars-minimum")
+	token := newTenantJWT(secret, "1", "t_test", "u@e.com", 3600)
 
 	handler := tenantAuthMiddleware(secret, func(w http.ResponseWriter, r *http.Request) {
 		c := tenantFromCtx(r.Context())
-		if c == nil {
-			t.Error("上下文无 tenant claims")
-			return
-		}
-		if c.Tenant != "t_test" {
-			t.Errorf("Tenant 不对: %s", c.Tenant)
+		if c == nil || c.Tenant != "t_test" {
+			t.Errorf("上下文 tenant 不对: %+v", c)
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-
-	req := httptest.NewRequest("GET", "/test", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-	handler(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("状态码不对: got=%d", w.Code)
-	}
-}
-
-func TestTenantAuthMiddleware_NoToken(t *testing.T) {
-	secret := []byte("test-secret-16chars-minimum")
-	handler := tenantAuthMiddleware(secret, func(w http.ResponseWriter, r *http.Request) {
-		t.Error("handler 不应被调用")
-	})
-
-	req := httptest.NewRequest("GET", "/test", nil)
-	w := httptest.NewRecorder()
-	handler(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("状态码应为 401, got=%d", w.Code)
-	}
-}
-
-func TestTenantAuthMiddleware_BadToken(t *testing.T) {
-	secret := []byte("test-secret-16chars-minimum")
-	handler := tenantAuthMiddleware(secret, func(w http.ResponseWriter, r *http.Request) {
-		t.Error("handler 不应被调用")
-	})
-
-	req := httptest.NewRequest("GET", "/test", nil)
-	req.Header.Set("Authorization", "Bearer invalid-token-jwt")
-	w := httptest.NewRecorder()
-	handler(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("状态码应为 401, got=%d", w.Code)
-	}
-}
-
-// ---------- requireTenantScope ----------
-
-func TestRequireTenantScope(t *testing.T) {
-	secret := []byte("test-secret-16chars-minimum")
-	token, _ := issueTenantToken(secret, 1, "t_abc", "u@e.com")
-
-	handler := tenantAuthMiddleware(secret, func(w http.ResponseWriter, r *http.Request) {
-		tenantID, err := requireTenantScope(r)
-		if err != nil {
-			t.Errorf("requireTenantScope 失败: %v", err)
-			return
-		}
-		if tenantID != "t_abc" {
-			t.Errorf("tenantID 不对: %s", tenantID)
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
@@ -201,22 +106,59 @@ func TestRequireTenantScope(t *testing.T) {
 	}
 }
 
-// ---------- bearerFromHeader ----------
+func TestTenantAuthMiddleware_NoToken(t *testing.T) {
+	handler := tenantAuthMiddleware([]byte("x"), func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler 不应被调用")
+	})
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("应为 401, got=%d", w.Code)
+	}
+}
+
+func TestTenantAuthMiddleware_BadToken(t *testing.T) {
+	handler := tenantAuthMiddleware([]byte("shared-secret-16chars-minimum"), func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler 不应被调用")
+	})
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer bad.token.here")
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("应为 401, got=%d", w.Code)
+	}
+}
+
+func TestRequireTenantScope(t *testing.T) {
+	secret := []byte("shared-secret-16chars-minimum")
+	token := newTenantJWT(secret, "1", "t_abc", "u@e.com", 3600)
+
+	handler := tenantAuthMiddleware(secret, func(w http.ResponseWriter, r *http.Request) {
+		tenantID, err := requireTenantScope(r)
+		if err != nil || tenantID != "t_abc" {
+			t.Errorf("requireTenantScope: id=%s err=%v", tenantID, err)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("状态码: %d", w.Code)
+	}
+}
 
 func TestBearerFromHeader(t *testing.T) {
-	tok, ok := bearerFromHeader("Bearer abc123")
-	if !ok || tok != "abc123" {
-		t.Errorf("失败: ok=%v tok=%s", ok, tok)
+	if tok, ok := bearerFromHeader("Bearer abc123"); !ok || tok != "abc123" {
+		t.Errorf("解析失败: ok=%v tok=%s", ok, tok)
 	}
-	_, ok = bearerFromHeader("Basic abc")
-	if ok {
-		t.Error("非 Bearer 应返回 false")
+	if _, ok := bearerFromHeader("Basic abc"); ok {
+		t.Error("非 Bearer 应 false")
 	}
-	_, ok = bearerFromHeader("")
-	if ok {
-		t.Error("空串应返回 false")
-	}
-	if !strings.HasPrefix("Bearer x", "Bearer ") {
-		t.Error("基本前缀检测失败")
+	if _, ok := bearerFromHeader(""); ok {
+		t.Error("空串应 false")
 	}
 }

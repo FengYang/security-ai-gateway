@@ -1,12 +1,16 @@
-// Package main — 租户自助门户认证层（JWT 签发/校验 + 中间件）。
+// Package main — 租户自助门户认证层（租户会话令牌校验 + 中间件）。
 //
-// 租户 JWT 与内部管理 JWT 独立密钥，避免跨域混用：
-//   - 内部管理令牌：ADMIN_SVC_JWT_SECRET（HS256/SM3 按 cryptop）
-//   - 租户会话令牌：TENANT_JWT_SECRET（恒 HS256，C-8；对齐 auth-service 租户 Key 策略）
+// 令牌口径（§6.1，v1.3 定档）：
+//   - 租户会话令牌 = Console 用**共享密钥**（ADMIN_SVC_JWT_SECRET）签发的 HS256 JWT，
+//     payload 含 {role:"tenant_user", tenant:...}；Go 侧只校验、不签发（**无独立租户密钥**）。
+//   - 恒 HS256（R-9）：与内部令牌链的 cryptop 分派（intl=HMAC-SHA256 / sm=HMAC-SM3）解耦，
+//     故此处固定 crypto/hmac + sha256，不经 cryptoProvider。
+//   - 双 mux 隔离（C-16）：本中间件仅用于租户子树；admin mux 的 validRole 不含
+//     tenant_user（C-13），租户令牌在管理端点自然 401。
 //
-// 双策略鉴权（§6.2）：
+// 双策略（§6.1）：
 //  1. 租户令牌（role=tenant_user + tenant 非空）→ 租户上下文
-//  2. admin 令牌 + target_tenant → 管理员接管上下文（落审计留痕）
+//  2. 内部 admin 令牌 + target_tenant → 管理员接管上下文（留待后续模块）
 package main
 
 import (
@@ -24,15 +28,19 @@ import (
 	"time"
 )
 
-// tenantRole 租户用户角色（M1 只有一种）。
+// tenantRole 租户用户角色（M1+ 只有一种）。
 const tenantRole = "tenant_user"
 
-// tenantClaims 租户 JWT 载荷。
+// tenantSessionTTL 租户会话提示有效期（秒）：login 响应 expires_at 用；
+// 实际会话由 Console AdminExtSessionService 生成并管理（§6.2 会话归属）。
+const tenantSessionTTL = 8 * 3600
+
+// tenantClaims 租户 JWT 载荷（Console 签发，Go 侧解析；容忍额外字段）。
 type tenantClaims struct {
-	Sub    string `json:"sub"`              // 用户 ID（字符串化，与 JWT 惯例一致）
-	Tenant string `json:"tenant"`           // 租户 ID
-	Role   string `json:"role"`             // 恒 "tenant_user"
-	Email  string `json:"email,omitempty"`  // 邮箱（便于前端展示，不做授权依据）
+	Sub    string `json:"sub"`             // 用户 ID（字符串化，与 JWT 惯例一致）
+	Tenant string `json:"tenant"`          // 租户 ID
+	Role   string `json:"role"`            // 恒 "tenant_user"
+	Email  string `json:"email,omitempty"` // 邮箱（展示用，非授权依据）
 	IAT    int64  `json:"iat"`
 	EXP    int64  `json:"exp"`
 }
@@ -54,49 +62,8 @@ func tenantFromCtx(ctx context.Context) *tenantClaims {
 // tenantB64 与内部 JWT 同一编码（RFC 7515：base64url 无 padding）。
 var tenantB64 = base64.RawURLEncoding
 
-// ---------- 签发 ----------
-
-// tenantTokenTTL 租户会话令牌有效期（M1 暂定 8h，与管理面绝对超时对齐；
-// Console 接入后按会话策略调整）。
-const tenantTokenTTL = 8 * 3600 // 秒
-
-// issueTenantToken 签发租户会话 JWT（恒 HS256，C-8）。
-func issueTenantToken(secret []byte, userID int64, tenantID, email string) (string, error) {
-	now := time.Now().Unix()
-	claims := tenantClaims{
-		Sub:    fmt.Sprintf("%d", userID),
-		Tenant: tenantID,
-		Role:   tenantRole,
-		Email:  email,
-		IAT:    now,
-		EXP:    now + tenantTokenTTL,
-	}
-	return signTenantJWT(secret, claims)
-}
-
-// signTenantJWT 构造并签名租户 JWT（手写 HS256，零依赖，与内部 JWT 同风格）。
-func signTenantJWT(secret []byte, claims tenantClaims) (string, error) {
-	header := `{"alg":"HS256","typ":"JWT"}`
-	headerB64 := tenantB64.EncodeToString([]byte(header))
-
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		return "", fmt.Errorf("tenant: marshal claims: %w", err)
-	}
-	payloadB64 := tenantB64.EncodeToString(payload)
-
-	signingInput := headerB64 + "." + payloadB64
-	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(signingInput))
-	sig := mac.Sum(nil)
-	sigB64 := tenantB64.EncodeToString(sig)
-
-	return signingInput + "." + sigB64, nil
-}
-
-// ---------- 校验 ----------
-
-// verifyTenantToken 校验租户 JWT：签名 → 过期 → role/tenant 非空。
+// verifyTenantToken 校验租户会话 JWT：签名（恒 HS256）→ 过期 → role/tenant 非空。
+// secret = cfg.jwtSecret（共享密钥，§6.1）。
 func verifyTenantToken(token string, secret []byte) (*tenantClaims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -108,7 +75,7 @@ func verifyTenantToken(token string, secret []byte) (*tenantClaims, error) {
 	if err != nil {
 		return nil, errors.New("tenant: 签名段非 base64url")
 	}
-	// 常量时间比较
+	// 恒 HS256（R-9）：固定 hmac-sha256，不经 cryptop 分派（sm profile 下仍为 HS256）。
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(signingInput))
 	expected := mac.Sum(nil)
@@ -141,20 +108,15 @@ func verifyTenantToken(token string, secret []byte) (*tenantClaims, error) {
 	return &c, nil
 }
 
-// ---------- 中间件 ----------
-
-// tenantAuthMiddleware 租户令牌鉴权中间件。
-// 校验 Authorization: Bearer <租户 JWT>，通过后写入上下文。
-// 失败返回 401，不 fallback 到 admin 令牌（admin 接管走独立路径）。
+// tenantAuthMiddleware 租户令牌鉴权中间件（租户子树专用）。
+// 校验 Authorization: Bearer <租户 JWT>，通过后写入上下文；失败 401（不 fallback admin 令牌）。
 func tenantAuthMiddleware(secret []byte, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		h := r.Header.Get("Authorization")
-		const prefix = "Bearer "
-		if !strings.HasPrefix(h, prefix) {
+		tokenStr, ok := bearerFromHeader(r.Header.Get("Authorization"))
+		if !ok {
 			http.Error(w, "unauthorized: 缺少 Bearer 令牌", http.StatusUnauthorized)
 			return
 		}
-		tokenStr := strings.TrimPrefix(h, prefix)
 		claims, err := verifyTenantToken(tokenStr, secret)
 		if err != nil {
 			log.Printf("[tenant-auth] 令牌校验失败: %v", err)
@@ -166,8 +128,8 @@ func tenantAuthMiddleware(secret []byte, next http.HandlerFunc) http.HandlerFunc
 	}
 }
 
-// requireTenantScope 确保请求上下文中有合法租户声明（fail-closed）。
-// handler 内调用，拿到 tenantID 后再做业务逻辑。
+// requireTenantScope 确保请求上下文中有合法租户声明（fail-closed）；
+// 返回 tenantID 供业务逻辑做强制租户过滤（C-15）。
 func requireTenantScope(r *http.Request) (string, error) {
 	c := tenantFromCtx(r.Context())
 	if c == nil || c.Tenant == "" {
