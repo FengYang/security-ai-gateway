@@ -58,7 +58,7 @@ const (
 	totpSecretLen     = 20        // 共享密钥 160 位（RFC 6238 推荐）
 	mfaMaxFails       = 5         // 连续失败锁定阈值
 	mfaLockSeconds    = 1800      // 锁定 30 分钟
-	emergencyCodeLen  = 8         // 应急码长度（不含连字符）
+	emergencyCodeLen  = 16        // 应急码长度：16 位 hex（8 字节 = 64 位熵），不含连字符
 	emergencyCodeCnt  = 6         // enroll 生成一次性应急码枚数
 	breakGlassMaxLifetime = 900   // break_glass 令牌短时效 exp-iat ≤ 15min（authz.go）
 )
@@ -244,17 +244,24 @@ func mfaSatisfied(c *claims, freshness time.Duration) bool {
 
 // ---- 应急码（R2-05）----
 
-// newEmergencyCodes 生成 n 枚一次性应急码（形如 XXXX-XXXX；仅存 SHA-256 摘要）。
+// formatEmergencyCode 将 16 位 hex 归一为 XXXX-XXXX-XXXX-XXXX。
+// 生成与核销共用本函数，避免两处格式漂移。
+// 2026-10-09 修正 F-8：原实现生成 8 位 hex 而核销要求 16 位，致应急码恒不可核销
+// （break-glass 通道失效）；现统一为 64 位熵。
+func formatEmergencyCode(hexUpper string) string {
+	return hexUpper[:4] + "-" + hexUpper[4:8] + "-" + hexUpper[8:12] + "-" + hexUpper[12:]
+}
+
+// newEmergencyCodes 生成 n 枚一次性应急码（形如 XXXX-XXXX-XXXX-XXXX；仅存 SHA-256 摘要）。
 func newEmergencyCodes(n int) ([]mfaEmergencyCode, []string, error) {
 	recs := make([]mfaEmergencyCode, 0, n)
 	plain := make([]string, 0, n)
-	rnd, err := cryptoProvider.Rand(n * 4) // 每枚 4 字节 → 8 hex 字符
+	rnd, err := cryptoProvider.Rand(n * 8) // 每枚 8 字节 → 16 hex 字符（64 位熵）
 	if err != nil {
 		return nil, nil, err
 	}
 	for i := 0; i < n; i++ {
-		code := strings.ToUpper(hex.EncodeToString(rnd[i*4 : (i+1)*4]))
-		code = code[:4] + "-" + code[4:]
+		code := formatEmergencyCode(strings.ToUpper(hex.EncodeToString(rnd[i*8 : (i+1)*8])))
 		h := cryptoProvider.Hash([]byte(code))
 		recs = append(recs, mfaEmergencyCode{Hash: hex.EncodeToString(h)})
 		plain = append(plain, code)
@@ -265,10 +272,10 @@ func newEmergencyCodes(n int) ([]mfaEmergencyCode, []string, error) {
 // consumeEmergencyLocked 核销一枚应急码（调用方持锁）；返回是否命中。
 func (r *mfaRecord) consumeEmergencyLocked(code string) bool {
 	norm := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(code), "-", ""))
-	if len(norm) != emergencyCodeLen*2 { // hex 编码后 16 字符
+	if len(norm) != emergencyCodeLen { // 16 位 hex（不含连字符）
 		return false
 	}
-	h := hex.EncodeToString(cryptoProvider.Hash([]byte(strings.ToUpper(norm[:4]) + "-" + norm[4:])))
+	h := hex.EncodeToString(cryptoProvider.Hash([]byte(formatEmergencyCode(norm))))
 	for i := range r.Emergency {
 		if r.Emergency[i].UsedAt == 0 && subtle.ConstantTimeCompare([]byte(r.Emergency[i].Hash), []byte(h)) == 1 {
 			r.Emergency[i].UsedAt = time.Now().Unix()
