@@ -251,3 +251,46 @@ spec:
     ports:
     - port: 443
       protocol: TCP
+---
+# P1-2：Collector allow-list 热更 wiring（方案 B3，2026-10-08）。
+#
+# admin-service 以 **Collector ConfigMap 为唯一事实源**：读 → 改 → PATCH 写回，
+# 并 PATCH otel-collector Deployment 的 pod-template 注解触发滚动重建
+# （OTel Collector 无原生配置热重载，见手册 §6.4）。
+#
+# 权限按 **resourceNames 点名收敛**——仅授予：
+#   - configmaps/otel-collector-config 的 get/patch（allow-list 事实源）
+#   - deployments/otel-collector 的 get/patch（滚动触发）
+# 不含 list/watch，也不涉及任何其它资源（最小权限，可审计）。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gateway-admin-service-tracing
+  namespace: otpmask
+  labels:
+    app: gateway-admin-service
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["otel-collector-config"]
+  verbs: ["get", "patch"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  resourceNames: ["otel-collector"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gateway-admin-service-tracing
+  namespace: otpmask
+  labels:
+    app: gateway-admin-service
+subjects:
+- kind: ServiceAccount
+  name: gateway-admin-service
+  namespace: otpmask
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gateway-admin-service-tracing

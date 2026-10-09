@@ -1,0 +1,41 @@
+{{- if .Values.tracingAllowlist.enabled }}
+# P1-2：Collector allow-list 热更 wiring（方案 B3，2026-10-08）。
+#
+# admin-service 以 **Collector ConfigMap 为唯一事实源**：读 → 改 → PATCH 写回，并 PATCH
+# otel-collector Deployment 的 pod-template 注解触发滚动重建（Collector 无原生热重载）。
+#
+# 权限按 **resourceNames 点名收敛**——仅授予：
+#   - configmaps/<configMapName>  的 get/patch（allow-list 事实源）
+#   - deployments/<deploymentName> 的 get/patch（滚动触发）
+# 不含 list/watch，也不涉及其它资源（最小权限，可审计）。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "gateway-admin-service.fullname" . }}-tracing
+  labels:
+    {{- include "gateway-admin-service.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ .Values.tracingAllowlist.configMapName | quote }}]
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: [{{ .Values.tracingAllowlist.deploymentName | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "gateway-admin-service.fullname" . }}-tracing
+  labels:
+    {{- include "gateway-admin-service.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "gateway-admin-service.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "gateway-admin-service.fullname" . }}-tracing
+{{- end }}

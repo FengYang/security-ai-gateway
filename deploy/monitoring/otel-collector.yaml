@@ -175,6 +175,11 @@ spec:
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8888"
+        # P1-2：allow-list 热更触发点（方案 B3）。
+        # admin-service 在 POST /v1/adminext/tracing/tenant 时改写 ConfigMap 的
+        # allow-list 并 **PATCH 本 pod-template 注解 `otpmask.io/allowlist-rev`**
+        # → 变更 pod template 即触发滚动重建，使新采样策略生效
+        # （OTel Collector 无原生配置热重载）。初始无需值，由 admin-service 写入。
     spec:
       containers:
       - name: otel-collector

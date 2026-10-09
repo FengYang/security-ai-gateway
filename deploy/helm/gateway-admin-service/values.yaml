@@ -49,6 +49,18 @@ broker:
 auth:
   adminUsers: []
 
+# P1-2：Collector allow-list 热更 wiring（方案 B3，2026-10-08）
+# 事实源 = Collector ConfigMap；admin-service 读→改→PATCH 写回，并 PATCH otel-collector
+# Deployment 的 pod-template 注解触发滚动（OTel Collector 无原生热重载）。
+# RBAC 由 templates/rbac.yaml 经 **resourceNames 点名收敛**（仅本 ConfigMap + 本 Deployment）。
+# 注意：Collector 须与 admin-service 同 namespace（Role 为 namespace 作用域）。
+tracingAllowlist:
+  enabled: true
+  configMapName: otel-collector-config
+  deploymentName: otel-collector
+  # true = 由 admin-service 触发滚动重建；false = 仅写配置，交由外部 Reloader 生效
+  restart: true
+
 # 内部令牌共享密钥（与 Java 控制台 admin-ext 一致）
 jwt:
   # 直接给定明文（仅本地联调）；生产建议 existingSecret
