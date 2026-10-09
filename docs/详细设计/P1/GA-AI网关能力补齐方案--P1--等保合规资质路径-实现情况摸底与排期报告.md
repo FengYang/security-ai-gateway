@@ -19,7 +19,7 @@
 | W3 | 身份鉴别（管理员双因素） | ✅ **代码级完成（在制，未提交）** | `gateway-admin-service/mfa.go`（TOTP RFC6238 + 信封加密密钥 + 应急码 + 重放防护 + 失败锁定 + step-up）；`go build` **通过** |
 | W4 | 访问控制（权限粒度细化/三权分立） | ✅ **代码级完成（在制，未提交）** | `authz.go`（角色×资源域×动作矩阵 + `requireRule`/`ep*` 规则）+ `auth.go`（7 内部角色）；`go build` **通过** |
 | W5 | 安全审计覆盖（联动 P1-7） | ⏳ **部分** | `sec_center.go` 在制（审计链查询/校验/导出代理）；全流量审计**本体属 P1-7**，未上线（P-4 未达） |
-| W6 | 入侵防范（WAF/入侵检测） | ⚠️ **部分** | `deploy/higress/security-plugins.yaml`/`-extended.yaml` 存在（WAF 基线）；**Falco HIDS / Trivy 未启动**（无对应文件），WAF 切 On 未完成 |
+| W6 | 入侵防范（WAF/入侵检测） | ⚠️ **部分**（Falco 配置已交付） | WAF 基线在 `deploy/higress/security-plugins*.yaml`（切 On 未完成）；**Falco HIDS 已交付**（`deploy/security/falco.yaml`：eBPF + otpmask 特化规则 + falcosidekick → Alertmanager）；**Trivy 镜像扫描未启动**（属 W11 供应链） |
 | W7 | 数据完整性（传输层完整性） | ⏳ **依赖外部** | `deploy/tlcp/`（certgen/verify.sh/nginx 配置）为 **P0-4 产物**；P1-3 侧"服务间收敛 mTLS"接线状态待核（§7.6） |
 | W8 | 数据保密性 | ⏳ **依赖 P0-4/P1-5** | 属跨方案接口衔接（§3.3 D-7），无本方案独立实现 |
 | W9 | 备份恢复（策略 + 演练） | ❌ **未启动** | **无 `deploy/backup/`**；无恢复演练记录；OPS-06 未闭环 |
@@ -31,8 +31,8 @@
 
 | 模块 | 状态 | 证据 |
 |---|---|---|
-| M11 日志集中采集（Promtail+Loki，180 天留存） | ❌ **未启动** | **无 `deploy/logging/`** |
-| M12 集中告警与可观测强化（Alertmanager + NTP） | ❌ **未启动** | `deploy/monitoring/` 有 prometheus/grafana/tempo/slo，**无 `alertmanager.yaml`**；NTP 监控缺 |
+| M11 日志集中采集（Promtail+Loki，180 天留存） | ✅ **配置已交付**（2026-10-09，接手本轮 W4 节点） | 新增 `deploy/logging/`（promtail DaemonSet + Loki + kustomization）；Grafana 已接 Loki 数据源；`kubectl kustomize` 构建通过 |
+| M12 集中告警与可观测强化（Alertmanager + NTP） | ✅ **配置已交付**（2026-10-09，接手本轮 W4 节点） | 新增 `deploy/monitoring/alertmanager.yaml` + `security-prometheusrule.yaml`（RedisDown/RateLimitDegraded/FalcoCritical/NodeClockSkew/AuthRejectedSpike/AuditChainWriteFailed/PodCrashLooping）+ `redis-exporter.yaml`；Prometheus `alerting` 接线补齐；构建通过 |
 
 ---
 
@@ -50,8 +50,8 @@
 | M8 管理体系 | 文档 | ❌ 未启动（0/14） |
 | M9 供应链/运行时加固 | 配置 + 流程 | ❌ 未启动 |
 | M10 测评与渗透 | 报告 + 材料 | ❌ 未启动（外部） |
-| M11 日志集中采集 | 配置 + 部署 | ❌ 未启动 |
-| M12 集中告警 | 配置 + 部署 | ❌ 未启动 |
+| M11 日志集中采集 | 配置 + 部署 | ✅ 配置已交付（`deploy/logging/`） |
+| M12 集中告警 | 配置 + 部署 | ✅ 配置已交付（`deploy/monitoring/`） |
 
 ---
 
@@ -61,7 +61,7 @@
 |---|---|---|---|
 | §7.1 | 前置（定级/供应商/契约冻结） | ✅ | 研发跟踪：前置冻结核验完成 |
 | §7.2 | M4 差距分析（M1） | ✅ | 差距分析报告 v1.0（**V-1 达成**） |
-| §7.3 | 技术整改（身份鉴别 + 访问控制） | ✅ **代码级完成（在制未提交）** | `mfa.go`/`authz.go`/`auth.go`；`go build` 通过；单测待随 P1-3 提交 |
+| §7.3 | 技术整改（身份鉴别 + 访问控制） | ✅ **已完成并提交** | `mfa.go`/`authz.go`/`auth.go` + 12 端点权限迁移；全量测试通过；提交 `c994036`（含 F-1/F-2/F-5 修复） |
 | §7.4 | 安全审计覆盖（M4） | ⏳ 部分 | `sec_center.go` 在制；全流量审计上线属 P1-7 |
 | §7.5 | 入侵防范 + 供应链/运行时（M5/M9） | ⚠️/❌ | WAF 策略部分；供应链（cosign/SBOM/admission）、运行时（CC/Kata）未启动 |
 | §7.6 | 数据完整性 + 保密性（M6） | ⏳ 依赖 | TLCP 属 P0-4；接线状态待核 |
@@ -94,10 +94,10 @@
 
 | # | 卡点 | 类型 | 影响 | 建议 |
 |---|---|---|---|---|
-| K-1 | P1-3 在制代码（**14 个文件**：`audit_events.go`/`auth.go`/`billing_api.go`/`broker_secret.go`/`change.go`/`cryptop_profile.go`/`model_catalog.go`/`sec_center.go`/`sla.go`/`slo.go`/`trace.go`/`usage.go` + `authz.go`/`mfa.go`）**未提交** | 基线 | 基线不洁，后续整改易冲突；`mfa.go`/`authz.go` 尚未入版本控制 | 由 P1-3 工作流按自身排期提交（**不应由他人代提交**） |
+| K-1 | ~~P1-3 在制代码（14 个文件）未提交~~ → **已解**（2026-10-09，接手本轮）：经全量测试验证后分 3 批提交（`c994036` / `066307e` / `9b94f2b`），并行修复 F-1/F-2/F-5/F-7 | 基线 | — | 已闭环 |
 | K-2 | §7.9/§7.10 依赖**客户定级备案**（R2-08：确定等级后 30 日内报公安备案） | 外部 | 测评机构受理前置 | 提前启动客户侧备案流程 |
 | K-3 | W7/W8 依赖 **P0-4（国密）/P1-5（密评）**；W5 依赖 **P1-7（全流量审计）** | 跨方案 | 本方案无法独立收口 | 按 §8 集成方案对齐接口 |
-| K-4 | W6 入侵检测（Falco/Trivy）需**选型决策**（§6.4 决策门） | 决策 | 阻塞 W6 收口 | 先完成选型决策 |
+| K-4 | ~~W6 入侵检测（Falco/Trivy）需选型决策~~ → **已解**：方案 §6.4 已定稿 Falco（HIDS）+ Trivy（镜像扫描）；Falco 配置本轮已交付，Trivy 待 W11 落地 | 决策 | — | 按 §6.4 工具链推进 |
 | K-5 | W10（14 制度）与 W12（渗透/测评）为**人力/外部密集**项 | 资源 | 排期长 | 按 §7.8 分阶段（先 5 份核心 → 14 份初稿 → 内审发布） |
 
 ---
