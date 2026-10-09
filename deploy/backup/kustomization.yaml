@@ -1,0 +1,14 @@
+# 备份栈入口：kubectl apply -k deploy/backup
+# P1-3 等保 §6.6（W9/M7）：K8s 配置/CR + 密钥 + 审计链 + 指标的受控快照与恢复。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- cronjob.yaml
+# 脚本以 ConfigMap 挂载（内容与仓库版本同步；kustomize 自动处理名称哈希与引用更新）。
+configMapGenerator:
+- name: backup-scripts
+  files:
+  - backup.sh
+  - restore.sh
+generatorOptions:
+  disableNameSuffixHash: false

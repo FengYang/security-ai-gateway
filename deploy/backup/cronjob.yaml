@@ -1,0 +1,138 @@
+# 备份作业（P1-3 等保 §6.6 / W9）：最小授权 SA + 定时调度（日增量 / 周全量）。
+#
+# 镜像说明：本清单使用 alpine/k8s（含 kubectl）。生产部署请替换为自建
+# `backup-tools` 镜像，内含 kubectl + aws-cli（或 mc/rclone）+ age + jq + tar，
+# 并预置 KMS 取密钥的入口（age 私钥仅恢复时取用，用后即焚）。
+#
+# 权限（§6.6 R2-14）：Role 限定 namespace 级只读，避免集群级泛 Secret 读。
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-sa
+  namespace: otpmask
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backup-reader
+  namespace: otpmask
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets", "persistentvolumeclaims", "endpoints"]
+  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets", "daemonsets"]
+  verbs: ["get", "list"]
+# 网关行为配置（CR）：备份对象含自定义资源（R2-10）。
+- apiGroups: ["extensions.higress.io", "networking.higress.io", "networking.k8s.io", "gateway.networking.k8s.io"]
+  resources: ["wasmplugins", "mcpbridges", "ingresses", "httproutes"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backup-reader
+  namespace: otpmask
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: backup-reader
+subjects:
+- kind: ServiceAccount
+  name: backup-sa
+  namespace: otpmask
+---
+# 日增量：配置/CR（RPO ≤ 24h）。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-config-daily
+  namespace: otpmask
+spec:
+  schedule: "0 2 * * *"          # 每日 02:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 7
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          serviceAccountName: backup-sa
+          restartPolicy: Never
+          containers:
+          - name: backup
+            image: alpine/k8s:1.29.3
+            command: ["/scripts/backup.sh"]
+            env:
+            - name: BACKUP_SCOPE
+              value: "config"
+            - name: NAMESPACE
+              value: "otpmask"
+            - name: OUTDIR
+              value: "/backup"
+            envFrom:
+            - secretRef:
+                name: backup-credentials   # AGE_RECIPIENT / S3_ENDPOINT / S3_BUCKET（KMS 托管后注入）
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            - name: out
+              mountPath: /backup
+            resources:
+              requests: {cpu: 50m, memory: 128Mi}
+              limits: {cpu: 500m, memory: 512Mi}
+          volumes:
+          - name: scripts
+            configMap:
+              name: backup-scripts
+          - name: out
+            emptyDir: {}
+---
+# 周全量：配置/CR 全量（保留 90 天）+ 密钥月全量由独立作业承接（本清单示意周全量挂载点）。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-config-weekly
+  namespace: otpmask
+spec:
+  schedule: "0 3 * * 0"          # 每周日 03:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 4
+  failedJobsHistoryLimit: 4
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          serviceAccountName: backup-sa
+          restartPolicy: Never
+          containers:
+          - name: backup
+            image: alpine/k8s:1.29.3
+            command: ["/scripts/backup.sh"]
+            env:
+            - name: BACKUP_SCOPE
+              value: "config"
+            - name: NAMESPACE
+              value: "otpmask"
+            - name: OUTDIR
+              value: "/backup"
+            envFrom:
+            - secretRef:
+                name: backup-credentials
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            - name: out
+              mountPath: /backup
+            resources:
+              requests: {cpu: 50m, memory: 128Mi}
+              limits: {cpu: 500m, memory: 512Mi}
+          volumes:
+          - name: scripts
+            configMap:
+              name: backup-scripts
+          - name: out
+            emptyDir: {}
