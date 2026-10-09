@@ -39,6 +39,7 @@ type tenantHandler struct {
 	mailer     tenantMailer
 	captcha    *captchaStore
 	binder     quotaBinder // nil = billing 域未启用
+	issuer     keyIssuer   // nil = Key 签发通道未配置（§6.11）
 	audit      *adminAuditChain
 	loginGuard *loginGuard
 	resetGuard *intervalGuard
@@ -46,12 +47,18 @@ type tenantHandler struct {
 
 // newTenantHandler 构造租户 handler（captcha 仅在启用时创建）。
 func newTenantHandler(store TenantStore, cfg *config, binder quotaBinder, audit *adminAuditChain) *tenantHandler {
+	// 注意：issuer 为接口，须显式判空赋值（避免 *httpKeyIssuer(nil) 造成 typed-nil 非空）
+	var issuer keyIssuer
+	if cfg.authServiceURL != "" {
+		issuer = newHTTPKeyIssuer(cfg.authServiceURL, 10*time.Second)
+	}
 	h := &tenantHandler{
 		store:      store,
 		cfg:        cfg,
 		jwtSecret:  cfg.jwtSecret,
 		mailer:     newTenantMailer(cfg),
 		binder:     binder,
+		issuer:     issuer,
 		audit:      audit,
 		loginGuard: newLoginGuard(cfg.loginMaxFail, cfg.loginLockMin),
 		resetGuard: newIntervalGuard(cfg.passwordResetIntervalMin),
@@ -74,6 +81,9 @@ func (h *tenantHandler) registerMux(mux *http.ServeMux) {
 	// 租户会话端点（/v1/adminext/tenant/*）：租户令牌 + CSRF（写）
 	mux.HandleFunc(tenantSessionBase+"/logout",
 		tenantAuthMiddleware(h.jwtSecret, csrfCheck(h.handleLogout)))
+
+	// API Key 管理（M3）
+	h.registerKeyMux(mux)
 }
 
 // registerCaptcha 在管理面 mux 注册验证码签发端点（Console 内部，authMiddleware）。

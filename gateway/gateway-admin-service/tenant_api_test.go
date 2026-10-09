@@ -33,6 +33,8 @@ func testTenantCfg() *config {
 		smtpFrom:                    "no-reply@example.com",
 		smtpTLS:                     true,
 		portalBaseURL:               "https://portal.example.com",
+		apiKeyDefaultTTLDays:        90,
+		apiKeyMaxTTLDays:            365,
 	}
 }
 

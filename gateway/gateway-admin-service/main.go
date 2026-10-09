@@ -298,6 +298,7 @@ func main() {
 		}
 		tenantH = newTenantHandler(ts, cfg, binder, auditChain)
 		tenantH.registerCaptcha(adminMux, cfg)
+		tenantH.registerKeyRevocations(adminMux, cfg)
 		defer func() { _ = ts.Close() }()
 		tenantH.startQuotaCompensator(context.Background(),
 			time.Duration(cfg.tenantCompensateIntervalMin)*time.Minute)
