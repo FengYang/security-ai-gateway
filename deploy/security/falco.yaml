@@ -1,0 +1,260 @@
+# Falco（P1-3 等保 §6.4 入侵检测，W6；M4 末上线）
+#
+# 定位：主机/容器层运行时异常检测（HIDS）——覆盖异常系统调用、容器逃逸、敏感文件访问、
+# 反向 shell、权限提升（§6.4 ③）。命中事件经 falcosidekick 投递 Alertmanager
+# （与 Prometheus 告警统一收敛，profile=security）。
+#
+# 【特权例外备案】（§6.4 ①，R2-09）：Falco 需要 privileged 与 hostPath（/proc、/boot、/lib/modules）
+# 采集内核事件，与 GAP-08 主机加固基线存在冲突——按"安全工具例外"单独备案，通过准入策略
+# 豁免**仅限 Falco DaemonSet**，不扩散至其他工作负载。
+#
+# 【NIDS 替代论证】（§6.4 ②）：本方案以「WAF（边界）+ Falco HIDS（主机）+ 全流量审计（回溯）」三层
+# 覆盖替代独立网络型 IDS，论证见差距分析报告。
+#
+# 部署：kubectl apply -k deploy/security
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-config
+  namespace: otpmask
+data:
+  falco.yaml: |
+    rules_files:
+    - /etc/falco/falco_rules.yaml
+    - /etc/falco/falco_rules.local.yaml
+    - /etc/falco/rules.d
+    json_output: true
+    json_include_output_property: true
+    log_stderr: true
+    log_syslog: false
+    priority: notice
+    buffered_outputs: false
+    outputs:
+      rate: 1
+      max_burst: 1000
+      # 事件统一投递 falcosidekick（由其路由至 Alertmanager / 值班通道）。
+      program_output:
+        enabled: true
+        keep_alive: false
+        program: "jq '{output: .output, priority: .priority, rule: .rule, time: .time, source: .source, output_fields: .output_fields}' | curl -s -X POST --data-binary @- -H 'Content-Type: application/json' http://falcosidekick.otpmask.svc.cluster.local:2801/"
+    grpc:
+      enabled: false
+    metrics:
+      enabled: true
+      interval: 15m
+      output_rule: true
+    # eBPF 驱动（无需内核模块编译，适配受管节点）。
+    engine:
+      kind: ebpf
+  falco_rules.local.yaml: |
+    # ---- otpmask 特化规则（§6.4 ③：逃逸/敏感文件/反向 shell/权限提升）----
+    - rule: Otpmask Secret File Read
+      desc: otpmask 容器读取挂载的密钥/凭据文件（非预期进程）
+      condition: >
+        open_read and container and k8s.ns.name = "otpmask"
+        and (fd.name pmatch (/var/run/secrets/kubernetes.io, /etc/otpmask, /var/run/otpmask))
+        and not proc.name in (gateway-admin-service, tee-infer-service, auth-service, higress)
+      output: "otpmask 容器非预期读取密钥文件 (pod=%k8s.pod.name proc=%proc.name file=%fd.name)"
+      priority: WARNING
+      tags: [otpmask, credentials, mitre_credential_access]
+
+    - rule: Otpmask Container Escape Attempt
+      desc: 容器内尝试逃逸（挂载/命名空间/调试接口）
+      condition: >
+        container and k8s.ns.name = "otpmask"
+        and (evt.type in (mount, unshare, setns) or proc.name in (nsenter, docker, crictl))
+      output: "otpmask 容器疑似逃逸 (pod=%k8s.pod.name proc=%proc.name cmd=%proc.cmdline)"
+      priority: CRITICAL
+      tags: [otpmask, container, mitre_privilege_escalation]
+
+    - rule: Otpmask Reverse Shell
+      desc: 容器内建立反向 shell 特征连接
+      condition: >
+        container and k8s.ns.name = "otpmask"
+        and outbound and (proc.name in (bash, sh, nc, ncat, socat, python, python3))
+        and fd.typechar = 4
+      output: "otpmask 容器疑似反向 shell (pod=%k8s.pod.name proc=%proc.name cmd=%proc.cmdline)"
+      priority: CRITICAL
+      tags: [otpmask, network, mitre_execution]
+
+    - rule: Otpmask Unexpected Binary Execution
+      desc: otpmask 服务容器内执行非白名单二进制（供应链投毒/植入）
+      condition: >
+        spawned_process and container and k8s.ns.name = "otpmask"
+        and not proc.name in (gateway-admin-service, tee-infer-service, auth-service, higress, envoy, sh)
+      output: "otpmask 容器执行非白名单进程 (pod=%k8s.pod.name proc=%proc.name cmd=%proc.cmdline)"
+      priority: WARNING
+      tags: [otpmask, supply_chain, mitre_execution]
+
+    - rule: Otpmask Privilege Escalation
+      desc: 容器内提权（setuid/sudo/capability）
+      condition: >
+        container and k8s.ns.name = "otpmask"
+        and (evt.type in (setuid, setgid) or proc.name = sudo or cap.name = CAP_SYS_ADMIN)
+        and proc.name != gateway-admin-service
+      output: "otpmask 容器疑似提权 (pod=%k8s.pod.name proc=%proc.name caps=%cap.name)"
+      priority: WARNING
+      tags: [otpmask, privilege_escalation, mitre_privilege_escalation]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falcosidekick-config
+  namespace: otpmask
+data:
+  config.yaml: |
+    # Falco 事件 → Alertmanager（作为告警源统一收敛；priority 决定 severity 标签）。
+    alertmanager:
+      hostport: http://alertmanager.otpmask.svc.cluster.local:9093
+      # 最小告警等级：notice 及以上投递（debug/informational 仅落本地）。
+      minimumpriority: notice
+    # 保留 stdout 便于调试与 Loki 采集（Promtail 采集本 Pod 日志）。
+    stdout:
+      outputformat: json
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: falcosidekick
+  namespace: otpmask
+  labels:
+    app: falcosidekick
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: falcosidekick
+  template:
+    metadata:
+      labels:
+        app: falcosidekick
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "2801"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1234
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: falcosidekick
+        image: falcosecurity/falcosidekick:2.29.0
+        ports:
+        - name: http
+          containerPort: 2801
+        volumeMounts:
+        - name: config
+          mountPath: /etc/falcosidekick
+          readOnly: true
+        resources:
+          requests:
+            cpu: 20m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+      volumes:
+      - name: config
+        configMap:
+          name: falcosidekick-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: falcosidekick
+  namespace: otpmask
+  labels:
+    app: falcosidekick
+spec:
+  selector:
+    app: falcosidekick
+  ports:
+  - name: http
+    port: 2801
+    targetPort: 2801
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: falco
+  namespace: otpmask
+  labels:
+    app: falco
+spec:
+  selector:
+    matchLabels:
+      app: falco
+  template:
+    metadata:
+      labels:
+        app: falco
+    spec:
+      serviceAccountName: falco
+      tolerations:
+      - operator: Exists  # 覆盖全部节点（含系统/污点节点）。
+      containers:
+      - name: falco
+        image: falcosecurity/falco:0.38.2
+        args:
+        - /usr/bin/falco
+        - -c
+        - /etc/falco/falco.yaml
+        securityContext:
+          # 【例外备案】采集内核事件所需；仅本 DaemonSet 允许（§6.4 ①）。
+          privileged: true
+        env:
+        - name: HOST_ROOT
+          value: /host
+        volumeMounts:
+        - name: config
+          mountPath: /etc/falco
+          readOnly: true
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: boot
+          mountPath: /host/boot
+          readOnly: true
+        - name: modules
+          mountPath: /host/lib/modules
+          readOnly: true
+        - name: usr
+          mountPath: /host/usr
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      volumes:
+      - name: config
+        configMap:
+          name: falco-config
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: boot
+        hostPath:
+          path: /boot
+      - name: modules
+        hostPath:
+          path: /lib/modules
+      - name: usr
+        hostPath:
+          path: /usr
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: falco
+  namespace: otpmask

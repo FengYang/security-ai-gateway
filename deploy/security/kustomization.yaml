@@ -1,0 +1,7 @@
+# 安全栈入口：kubectl apply -k deploy/security
+# P1-3 等保 §6.4（W6/M5）：主机与容器层运行时入侵检测（Falco HIDS）。
+# 与边界（WAF）和回溯（全流量审计）构成三层覆盖，替代独立 NIDS。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- falco.yaml
