@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -22,6 +23,17 @@ type config struct {
 	jwtIssuer   string              // 允许的签发方（缺省 higress-console）
 	jwtAudience string              // 本服务 audience（缺省 gateway-admin-service）
 	roleAdmins  map[string]struct{} // 最小角色控制（M2 §2.4）：写权限用户名白名单
+
+	// 租户自助门户（M1+；可选启用：TENANT_STORE_PATH 未配置 = 不启用）
+	tenantEnabled   bool
+	tenantStorePath string // SQLite 存储路径（空 = 功能关闭）
+	tenantJWTSecret []byte // 租户会话 JWT 密钥（启用时必填）
+	tenantPepper    []byte // 邮件令牌 pepper（启用时必填）
+	smtpHost        string
+	smtpPort        int
+	smtpUser        string
+	smtpPass        string
+	smtpFrom        string
 }
 
 // defaultIssuer / defaultAudience 内部令牌的签发方与本服务受众默认值。
@@ -53,13 +65,20 @@ func loadConfig() (*config, error) {
 		listen = ":19095"
 	}
 
-	return &config{
+	cfg := &config{
 		listen:      listen,
 		jwtSecret:   []byte(secret),
 		jwtIssuer:   issuer,
 		jwtAudience: audience,
 		roleAdmins:  parseRoleAdmins(os.Getenv("ADMIN_SVC_ROLE_ADMINS")),
-	}, nil
+	}
+
+	// 租户自助门户（M1+，可选启用）
+	if err := loadTenantConfig(cfg); err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
 }
 
 // parseRoleAdmins 解析管理员用户名白名单（逗号分隔；空白项忽略）。
@@ -74,6 +93,63 @@ func parseRoleAdmins(raw string) map[string]struct{} {
 		}
 	}
 	return out
+}
+
+// ---------- 租户自助门户配置（M1+）----------
+//
+// TENANT_STORE_PATH 未配置 = 功能关闭（不注册 /v1/tenant/*，既有行为零影响）。
+// 启用后 TENANT_JWT_SECRET 与 TENANT_TOKEN_PEPPER 必填（fail-closed）。
+// SMTP 配置不全 → 注册/验证/密码重置端点返回 503（C-12）。
+
+const defaultSMTPPort = 587
+
+// loadTenantConfig 加载租户门户配置到 cfg（可选特性，未配置时 tenantEnabled=false）。
+func loadTenantConfig(cfg *config) error {
+	storePath := os.Getenv("TENANT_STORE_PATH")
+	if storePath == "" {
+		return nil // 未启用
+	}
+
+	jwtSecret := os.Getenv("TENANT_JWT_SECRET")
+	if jwtSecret == "" {
+		return fmt.Errorf("配置缺失：TENANT_JWT_SECRET 未设置（租户门户已启用，fail-closed）")
+	}
+	if len(jwtSecret) < 16 {
+		return fmt.Errorf("配置错误：TENANT_JWT_SECRET 过短（<16 字节）")
+	}
+	pepper := os.Getenv("TENANT_TOKEN_PEPPER")
+	if pepper == "" {
+		return fmt.Errorf("配置缺失：TENANT_TOKEN_PEPPER 未设置（租户门户已启用，fail-closed）")
+	}
+	if len(pepper) < 8 {
+		return fmt.Errorf("配置错误：TENANT_TOKEN_PEPPER 过短（<8 字节）")
+	}
+
+	// SMTP（可选；未配置则邮件相关端点 503）
+	smtpHost := os.Getenv("TENANT_SMTP_HOST")
+	smtpUser := os.Getenv("TENANT_SMTP_USER")
+	smtpPass := os.Getenv("TENANT_SMTP_PASS")
+	smtpFrom := os.Getenv("TENANT_SMTP_FROM")
+	smtpPortStr := os.Getenv("TENANT_SMTP_PORT")
+	smtpPort := defaultSMTPPort
+	if smtpPortStr != "" {
+		p, err := strconv.Atoi(smtpPortStr)
+		if err != nil || p <= 0 || p > 65535 {
+			return fmt.Errorf("配置错误：TENANT_SMTP_PORT 非法（%q）", smtpPortStr)
+		}
+		smtpPort = p
+	}
+
+	cfg.tenantEnabled = true
+	cfg.tenantStorePath = storePath
+	cfg.tenantJWTSecret = []byte(jwtSecret)
+	cfg.tenantPepper = []byte(pepper)
+	cfg.smtpHost = smtpHost
+	cfg.smtpPort = smtpPort
+	cfg.smtpUser = smtpUser
+	cfg.smtpPass = smtpPass
+	cfg.smtpFrom = smtpFrom
+	return nil
 }
 
 // ---------- broker（apiTokens Secret 化，路线丙）----------

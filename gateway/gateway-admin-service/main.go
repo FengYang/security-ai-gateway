@@ -280,6 +280,26 @@ func main() {
 	}
 	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, ah, sch, cs, bih, bs.legacyPort)
 
+	// 租户自助门户（M1+；可选启用）：启用后在 admin 端口上挂 /v1/tenant/*。
+	var tenantStore TenantStore
+	var tenantH *tenantHandler
+	if cfg.tenantEnabled {
+		ts, err := OpenTenantStore(cfg.tenantStorePath, true, cfg.tenantPepper)
+		if err != nil {
+			log.Fatalf("租户存储初始化失败（fail-closed）：%v", err)
+		}
+		tenantStore = ts
+		tenantH = newTenantHandler(ts, cfg.tenantJWTSecret,
+			cfg.smtpHost, cfg.smtpUser, cfg.smtpPass, cfg.smtpFrom, cfg.smtpPort)
+		tenantH.registerMux(adminMux)
+		defer func() { _ = ts.Close() }()
+		log.Printf("租户自助门户已启用：store=%s smtp_enabled=%v",
+			cfg.tenantStorePath, tenantH.smtpEnabled)
+	} else {
+		log.Printf("租户自助门户未启用（TENANT_STORE_PATH 未配置），/v1/tenant/* 端点不注册")
+	}
+	_ = tenantStore // 暂存引用，后续模块（M3/M5）使用
+
 	// P1-2 排障查询 API（M6，§6.3/§7.7）：恒注册；Tempo 未配置（ADMIN_TEMPO_URL）→ 503。
 	// 路由优先级：Go 1.22 ServeMux 下字面量 /trace/search 优先于 /trace/{request_id}。
 	th := newTraceHandler(os.Getenv("ADMIN_TEMPO_URL"), us)
