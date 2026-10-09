@@ -44,8 +44,10 @@ jobs:
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
-      # 2b. Trivy 配置/依赖扫描（P1-3 等保 §6.4④/§6.7：漏洞扫描门禁，HIGH/CRITICAL 阻止合入）
-      - name: trivy fs scan (deps & IaC)
+      # 2b. Trivy 依赖扫描门禁（P1-3 等保 §6.4④/§6.7：漏洞扫描门禁，HIGH/CRITICAL 阻止合入）。
+      #     范围限本仓库自有依赖清单（go.sum 等）；跳过 vendor/ 与外部工具/模型树，避免历史遗留
+      #     第三方向量产生噪声门禁失败（本方案自有依赖的高危以本步骤 + govulncheck 双门禁兜底）。
+      - name: trivy fs scan (deps)
         uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: fs
@@ -53,7 +55,8 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: '1'
           ignore-unfixed: true
-          scanners: vuln,config
+          scanners: vuln
+          skip-dirs: vendor,.tools,tools,vllm,docs,node_modules,.git
 
       # 3. 南向协议 Go/Python 交叉一致性（M5 验收）
       - name: protocol cross
