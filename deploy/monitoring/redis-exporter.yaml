@@ -1,0 +1,76 @@
+# redis-exporter（P1-3 等保 §6.4 ①，限流 fail-open 风险闭环）
+#
+# 背景：Higress 插件链 cluster-key-rate-limit 的 failStrategy=FAIL_CLOSE，但**限流后端 Redis
+# 不可用时插件 fail-open**（降级为单层防护）。须有独立检测信号驱动 RedisDown /
+# RateLimitDegraded 告警（见 security-prometheusrule.yaml）。
+#
+# 抓取：Prometheus 按 Pod 注解 prometheus.io/scrape=true 发现（见 prometheus.yaml job=otpmask）。
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-exporter
+  namespace: otpmask
+  labels:
+    app: redis-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-exporter
+  template:
+    metadata:
+      labels:
+        app: redis-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9121"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: redis-exporter
+        image: oliver006/redis_exporter:v1.62.0
+        args:
+        # Redis 地址按实际部署替换（当前与 Higress 限流共用实例）。
+        - --redis.addr=redis://redis.otpmask.svc.cluster.local:6379
+        ports:
+        - name: metrics
+          containerPort: 9121
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: 9121
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-exporter
+  namespace: otpmask
+  labels:
+    app: redis-exporter
+spec:
+  selector:
+    app: redis-exporter
+  ports:
+  - name: metrics
+    port: 9121
+    targetPort: 9121

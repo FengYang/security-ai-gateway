@@ -38,6 +38,19 @@ data:
     global:
       scrape_interval: 15s
       evaluation_interval: 15s
+      # 外部标签：多集群聚合与告警去重（M12）。
+      external_labels:
+        cluster: otpmask
+    # 告警投递接线（P1-3 等保 §6.7/§10.3，M12）：规则命中 → Alertmanager → 值班系统。
+    alerting:
+      alertmanagers:
+      - static_configs:
+        - targets: ["alertmanager.otpmask.svc.cluster.local:9093"]
+    # 规则加载说明：本栈为原生 Prometheus Deployment（无 prometheus-operator），
+    # 故 PrometheusRule CR（security-prometheusrule.yaml、slo-*.yaml、billing-*.yaml）
+    # 需由 operator 渲染；原生环境下按 Prometheus 文本格式转为 ConfigMap 并挂载后启用：
+    #   rule_files:
+    #   - /etc/prometheus/rules/*.rules.yml
     scrape_configs:
     - job_name: otpmask
       kubernetes_sd_configs:

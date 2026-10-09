@@ -1,0 +1,145 @@
+# Alertmanager（P1-3 等保 §6.3/§6.4/§10.3，M12 集中告警与可观测强化）
+#
+# 定位：收敛 Prometheus 告警规则的投递路由——安全告警（WAF/IDS/鉴权失败）、
+# 可用性告警（Redis 不可用/限流降级）、时间同步告警（NTP 偏差影响 TOTP 校时）。
+#
+# 部署：kubectl apply -k deploy/monitoring
+# 接线：Prometheus 通过 prometheus.yml 的 alerting.alertmanagers 指向本 Service（见 prometheus.yaml）。
+#
+# 【运维必做】接收集（receivers.webhook_configs.url）为占位地址，上线前按实际值班系统替换：
+#   安全告警 → 安全值班（sec-oncall）；严重告警 → 值班主管（ops-critical）。
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: otpmask
+data:
+  alertmanager.yml: |
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: ops-default
+      group_by: [alertname, service, severity]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+      # 安全类告警（category=security）：独立投递安全值班，缩短重复间隔。
+      - matchers:
+        - category = "security"
+        receiver: sec-oncall
+        group_wait: 10s
+        repeat_interval: 1h
+        continue: true
+      # 严重告警：并行投递值班主管（continue 保证安全路由不被吞掉）。
+      - matchers:
+        - severity = "critical"
+        receiver: ops-critical
+        group_wait: 10s
+        repeat_interval: 1h
+        continue: true
+    receivers:
+    - name: ops-default
+      webhook_configs:
+      - url: http://alert-relay.otpmask.svc.cluster.local:19099/alert/default
+        send_resolved: true
+    - name: ops-critical
+      webhook_configs:
+      - url: http://alert-relay.otpmask.svc.cluster.local:19099/alert/critical
+        send_resolved: true
+    - name: sec-oncall
+      webhook_configs:
+      - url: http://alert-relay.otpmask.svc.cluster.local:19099/alert/security
+        send_resolved: true
+    # 抑制：同 alertname+service 下 critical 存在时抑制 warning，避免告警风暴。
+    inhibit_rules:
+    - source_matchers:
+      - severity = "critical"
+      target_matchers:
+      - severity = "warning"
+      equal: [alertname, service]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: otpmask
+  labels:
+    app: alertmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: alertmanager
+        image: quay.io/prometheus/alertmanager:v0.27.0
+        args:
+        - --config.file=/etc/alertmanager/alertmanager.yml
+        - --storage.path=/alertmanager
+        - --web.listen-address=:9093
+        ports:
+        - name: web
+          containerPort: 9093
+        volumeMounts:
+        - name: config
+          mountPath: /etc/alertmanager
+        - name: data
+          mountPath: /alertmanager
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9093
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 9093
+          initialDelaySeconds: 10
+          periodSeconds: 20
+      volumes:
+      - name: config
+        configMap:
+          name: alertmanager-config
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: otpmask
+  labels:
+    app: alertmanager
+spec:
+  selector:
+    app: alertmanager
+  ports:
+  - name: web
+    port: 9093
+    targetPort: 9093

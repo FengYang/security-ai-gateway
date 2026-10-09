@@ -1,0 +1,108 @@
+# 安全与可观测告警规则（P1-3 等保 §6.3/§6.4/§6.7，M12）
+#
+# 覆盖：
+#   ① 鉴权/授权拒绝激增（越权尝试）——gateway_admin_auth_rejected_total（已上线指标）
+#   ② 审计链写入失败（fail-closed 已拒变更，链路异常须即时处置）
+#   ③ Redis 不可用 / 限流降级（cluster-key-rate-limit fail-open 窗口，§6.4 ①②）
+#   ④ Falco 高危事件（HIDS，§6.4 ③）
+#   ⑤ 节点时钟偏差（NTP/TOTP 校时保障，§6.4/M12）
+#   ⑥ 容器异常重启（异常退出，§6.3 告警联动）
+#
+# 投递：Prometheus → Alertmanager（deploy/monitoring/alertmanager.yaml）→ 值班系统。
+# 标注：category=security 的告警路由至安全值班（sec-oncall）。
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: otpmask-security-alerts
+  namespace: otpmask
+  labels:
+    app: otpmask
+spec:
+  groups:
+  - name: otpmask.security
+    rules:
+    # ① 鉴权/授权拒绝激增：疑似越权扫描或令牌失效风暴。
+    - alert: AdminAuthRejectedSpike
+      expr: increase(gateway_admin_auth_rejected_total[5m]) > 20
+      for: 2m
+      labels:
+        severity: warning
+        category: security
+        service: gateway-admin-service
+      annotations:
+        summary: "管理面鉴权/授权拒绝激增（5 分钟 > 20 次）"
+        description: "疑似越权扫描或令牌失效；按 X-Request-ID 与源 IP 排查（§6.2 越权矩阵）。"
+
+    # ② 审计链写入失败：fail-closed 已拒绝业务变更，但审计链路异常须第一时间处置。
+    - alert: AuditChainWriteFailed
+      expr: increase(gateway_admin_broker_audit_write_failed_total[5m]) > 0
+      for: 1m
+      labels:
+        severity: critical
+        category: security
+        service: gateway-admin-service
+      annotations:
+        summary: "审计链写入失败（fail-closed 生效中）"
+        description: "审计链不可写将拒绝全部变更操作；检查审计文件权限/磁盘与 WORM 挂载。"
+
+    # ③a Redis 不可用：限流 fail-open 窗口起点（§6.4 ①）。
+    - alert: RedisDown
+      expr: redis_up == 0
+      for: 1m
+      labels:
+        severity: critical
+        category: security
+        service: redis
+      annotations:
+        summary: "Redis 不可用（限流进入 fail-open 窗口）"
+        description: "cluster-key-rate-limit 在 Redis 不可用时 fail-open（降级为单层防护）；本地 key-rate-limit 兜底生效中。"
+
+    # ③b 限流降级（§6.4 ②）：以 Redis 可用性为主信号。
+    # 注：Higress 插件未暴露标准"限流失败计数"指标名；部署后若插件暴露（如 higress_plugin_ratelimit_fail_total），
+    # 应追加为副信号并调整本规则表达式。
+    - alert: RateLimitDegraded
+      expr: redis_up == 0
+      for: 2m
+      labels:
+        severity: warning
+        category: security
+        service: higress
+      annotations:
+        summary: "限流能力降级（Redis 不可用超过 2 分钟）"
+        description: "核对本地 key-rate-limit 兜底是否生效；纳入 S13 告警接线演练门禁（§6.4 ⑤）。"
+
+    # ④ Falco 高危事件（容器逃逸/敏感文件访问/反向 shell/权限提升）。
+    - alert: FalcoCriticalEvent
+      expr: increase(falco_events_total{priority="Critical"}[5m]) > 0
+      for: 0m
+      labels:
+        severity: critical
+        category: security
+        service: falco
+      annotations:
+        summary: "Falco 检出高危运行时事件"
+        description: "按 §6.4 分级处置：隔离 Pod → 取证 → 复盘；事件与告警归档备测评。"
+
+    # ⑤ 节点时钟偏差：TOTP 对 ±30s 以上偏差失效，直接影响管理员 MFA 可用性。
+    - alert: NodeClockSkew
+      expr: abs(node_timex_offset_seconds) > 0.5
+      for: 5m
+      labels:
+        severity: warning
+        category: ntp
+        service: node
+      annotations:
+        summary: "节点时钟偏差超过 0.5 秒"
+        description: "检查 chrony/NTP 同步状态；偏差持续将影响 TOTP 校时（管理员 MFA 登录失败）。"
+
+    # ⑥ 容器异常重启：异常退出（§6.3 告警联动）。
+    - alert: PodCrashLooping
+      expr: increase(kube_pod_container_status_restarts_total{namespace="otpmask"}[15m]) > 3
+      for: 5m
+      labels:
+        severity: warning
+        category: availability
+        service: otpmask
+      annotations:
+        summary: "otpmask 命名空间容器频繁重启"
+        description: "检查 Pod 事件与退出码；安全相关异常退出须纳入安全事件台账。"
