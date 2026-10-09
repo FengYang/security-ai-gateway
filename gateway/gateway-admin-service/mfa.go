@@ -52,23 +52,23 @@ const (
 
 // TOTP / 锁定参数（详设 §6.1 R2-13）。
 const (
-	totpPeriod        = int64(30) // 步长 30s（RFC 6238）
-	totpDigits        = 6
-	totpWindow        = 1         // ±1 步容差
-	totpSecretLen     = 20        // 共享密钥 160 位（RFC 6238 推荐）
-	mfaMaxFails       = 5         // 连续失败锁定阈值
-	mfaLockSeconds    = 1800      // 锁定 30 分钟
-	emergencyCodeLen  = 16        // 应急码长度：16 位 hex（8 字节 = 64 位熵），不含连字符
-	emergencyCodeCnt  = 6         // enroll 生成一次性应急码枚数
-	breakGlassMaxLifetime = 900   // break_glass 令牌短时效 exp-iat ≤ 15min（authz.go）
+	totpPeriod            = int64(30) // 步长 30s（RFC 6238）
+	totpDigits            = 6
+	totpWindow            = 1    // ±1 步容差
+	totpSecretLen         = 20   // 共享密钥 160 位（RFC 6238 推荐）
+	mfaMaxFails           = 5    // 连续失败锁定阈值
+	mfaLockSeconds        = 1800 // 锁定 30 分钟
+	emergencyCodeLen      = 16   // 应急码长度：16 位 hex（8 字节 = 64 位熵），不含连字符
+	emergencyCodeCnt      = 6    // enroll 生成一次性应急码枚数
+	breakGlassMaxLifetime = 900  // break_glass 令牌短时效 exp-iat ≤ 15min（authz.go）
 )
 
 // 审计动作（内部落链，不经 audit-events 白名单约束）。
 const (
-	auditActionMFAEnroll          = "mfa_enroll"
-	auditActionMFAVerify          = "mfa_verify"
-	auditActionMFALocked          = "mfa_locked"
-	auditActionMFAEmergencyUsed   = "mfa_emergency_used"
+	auditActionMFAEnroll           = "mfa_enroll"
+	auditActionMFAVerify           = "mfa_verify"
+	auditActionMFALocked           = "mfa_locked"
+	auditActionMFAEmergencyUsed    = "mfa_emergency_used"
 	auditActionWhitelistEscalation = "whitelist_escalation"
 )
 
@@ -289,11 +289,11 @@ func (r *mfaRecord) consumeEmergencyLocked(code string) bool {
 
 // mfaHandler MFA 三端点（enroll/verify/status）。
 type mfaHandler struct {
-	store   *mfaStore
-	chain   *adminAuditChain // 未启用（nil）→ 端点 503 fail-closed（绑定动作须落审计链）
+	store     *mfaStore
+	chain     *adminAuditChain // 未启用（nil）→ 端点 503 fail-closed（绑定动作须落审计链）
 	jwtSecret []byte
-	issuer  string
-	audience string
+	issuer    string
+	audience  string
 }
 
 // handleEnroll POST /v1/adminext/mfa/enroll：绑定/换绑 TOTP（绑定落审计链）。
@@ -366,12 +366,12 @@ func (h *mfaHandler) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	b32 := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(secret)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"sub":            c.Sub,
-		"secret_base32":  b32,
-		"otpauth_url":    fmt.Sprintf("otpauth://totp/%s:%s?secret=%s&issuer=%s", "otpmask-admin", c.Sub, b32, "otpmask-admin"),
+		"sub":             c.Sub,
+		"secret_base32":   b32,
+		"otpauth_url":     fmt.Sprintf("otpauth://totp/%s:%s?secret=%s&issuer=%s", "otpmask-admin", c.Sub, b32, "otpmask-admin"),
 		"emergency_codes": emergPlain, // 仅此一次返回；链上/日志绝不记录（C-6）
-		"enrolled_at":    time.Now().Unix(),
-		"rebound":        already,
+		"enrolled_at":     time.Now().Unix(),
+		"rebound":         already,
 	})
 }
 
@@ -483,9 +483,9 @@ func (h *mfaHandler) handleVerify(w http.ResponseWriter, r *http.Request) {
 	h.appendAudit(c, r, auditActionMFAVerify, c.Sub, "ok")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"token":    signInternalToken(h.jwtSecret, nc),
-		"mfa_at":   now,
-		"expires":  nc.EXP,
+		"token":   signInternalToken(h.jwtSecret, nc),
+		"mfa_at":  now,
+		"expires": nc.EXP,
 	})
 }
 
@@ -505,9 +505,9 @@ func (h *mfaHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	c := claimsFrom(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"sub":          c.Sub,
-		"enrolled":     mfaState.enrolled(c.Sub),
-		"locked":       mfaState.locked(c.Sub),
+		"sub":                 c.Sub,
+		"enrolled":            mfaState.enrolled(c.Sub),
+		"locked":              mfaState.locked(c.Sub),
 		"break_glass_enabled": breakGlassEnabled(),
 	})
 }

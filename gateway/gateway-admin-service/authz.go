@@ -126,7 +126,7 @@ var (
 
 	// /v1/adminext/billing/* 写（billing:write；freeze/unfreeze 高敏 step-up，
 	// subscription/close-daily/close-monthly 会话级）。
-	epBillingWrite = endpointRule{domBilling, actWrite, []string{roleSystemAdmin}, mfaSessionFreshness}
+	epBillingWrite       = endpointRule{domBilling, actWrite, []string{roleSystemAdmin}, mfaSessionFreshness}
 	epBillingFreezeWrite = endpointRule{domBilling, actWrite, []string{roleSystemAdmin}, mfaStepUpFreshness}
 
 	// /v1/adminext/billing/verify-chain POST（billing:read 校验动作；映射表指定

@@ -1,8 +1,9 @@
 // mfa_test.go — P1-3 等保 §6.1 管理员双因素（W3/M2）单元测试（补齐遗留项 F-6）。
 //
 // 覆盖：TOTP 生成/容差/重放防护、应急码一次性、信封加密往返、
-//       mfaSatisfied 灰度与新鲜度语义、enroll→verify→status 闭环、
-//       锁定阈值、换绑再认证、fail-closed 503、审计落链。
+//
+//	mfaSatisfied 灰度与新鲜度语义、enroll→verify→status 闭环、
+//	锁定阈值、换绑再认证、fail-closed 503、审计落链。
 package main
 
 import (
