@@ -165,6 +165,11 @@ type TenantStore interface {
 	GetModelConfig(tenantID string) (*ModelConfig, error)
 	UpsertModelConfig(tx TenantTx, m *ModelConfig) error
 
+	// 套餐升级/降级待确认单（M7）
+	CreateSubscriptionRequest(tx TenantTx, r *SubscriptionRequest) error
+	ListSubscriptionRequests(tenantID string, limit int) ([]*SubscriptionRequest, error)
+	GetSubscriptionRequest(requestID string) (*SubscriptionRequest, error)
+
 	// 注册限流
 	IncRegisterRate(ip string, windowSec int) (int, error)
 
@@ -250,6 +255,11 @@ func OpenTenantStore(dsn string, wal bool, pepper []byte) (TenantStore, error) {
 	}
 	// 策略 overlay / 模型配置表（M5）：对齐 §3.5 ⑤⑥（含 M1 占位表迁移）
 	if err := ensurePolicySchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// 套餐待确认单表（M7）
+	if err := ensureSubscriptionSchema(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -789,6 +799,95 @@ func rowExists(tx TenantTx, query string, args ...any) (bool, error) {
 		return false, fmt.Errorf("tenant: count query: %w", err)
 	}
 	return n > 0, nil
+}
+
+// ---------- 套餐待确认单（M7，§6.8 D-9）----------
+
+// subscriptionDDL 套餐待确认单表（D-9：租户发起 → 管理员确认复用 handleBindSubscription）。
+const subscriptionDDL = `
+CREATE TABLE IF NOT EXISTS subscription_requests (
+  request_id TEXT PRIMARY KEY,
+  tenant_id  TEXT    NOT NULL,
+  from_plan  TEXT    NOT NULL,
+  to_plan    TEXT    NOT NULL,
+  direction  TEXT    NOT NULL,
+  status     TEXT    NOT NULL DEFAULT 'pending',
+  created_by TEXT    NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_subreq_tenant ON subscription_requests(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_subreq_status ON subscription_requests(status);
+`
+
+// SubscriptionRequest 套餐升级/降级待确认单。
+type SubscriptionRequest struct {
+	RequestID string
+	TenantID  string
+	FromPlan  string
+	ToPlan    string
+	Direction string // upgrade | downgrade
+	Status    string // pending | confirmed | rejected
+	CreatedBy string
+	CreatedAt int64
+}
+
+// ensureSubscriptionSchema 建表（M7 新表）。
+func ensureSubscriptionSchema(db *sql.DB) error {
+	if _, err := db.Exec(subscriptionDDL); err != nil {
+		return fmt.Errorf("tenant: init subscription schema: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTenantStore) CreateSubscriptionRequest(tx TenantTx, r *SubscriptionRequest) error {
+	if r == nil || r.RequestID == "" || r.TenantID == "" || r.ToPlan == "" {
+		return errors.New("tenant: subscription request id/tenant_id/to_plan are required")
+	}
+	_, err := tx.tx().Exec(`INSERT INTO subscription_requests
+		(request_id, tenant_id, from_plan, to_plan, direction, status, created_by, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.RequestID, r.TenantID, r.FromPlan, r.ToPlan, r.Direction, r.Status, r.CreatedBy, r.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("tenant: create subscription request: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTenantStore) ListSubscriptionRequests(tenantID string, limit int) ([]*SubscriptionRequest, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`SELECT request_id, tenant_id, from_plan, to_plan, direction, status, created_by, created_at
+		FROM subscription_requests WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?`, tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("tenant: list subscription requests: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*SubscriptionRequest
+	for rows.Next() {
+		var r SubscriptionRequest
+		if err := rows.Scan(&r.RequestID, &r.TenantID, &r.FromPlan, &r.ToPlan, &r.Direction,
+			&r.Status, &r.CreatedBy, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("tenant: scan subscription request: %w", err)
+		}
+		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteTenantStore) GetSubscriptionRequest(requestID string) (*SubscriptionRequest, error) {
+	var r SubscriptionRequest
+	err := s.db.QueryRow(`SELECT request_id, tenant_id, from_plan, to_plan, direction, status, created_by, created_at
+		FROM subscription_requests WHERE request_id = ?`, requestID).
+		Scan(&r.RequestID, &r.TenantID, &r.FromPlan, &r.ToPlan, &r.Direction,
+			&r.Status, &r.CreatedBy, &r.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant: get subscription request: %w", err)
+	}
+	return &r, nil
 }
 
 // ---------- 注册限流 ----------

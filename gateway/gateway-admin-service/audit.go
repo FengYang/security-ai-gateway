@@ -63,6 +63,9 @@ const (
 	auditActionPolicyUpdate      = "policy_update"
 	auditActionPolicyApply       = "policy_apply"
 	auditActionModelConfigUpdate = "model_config_update"
+	// P1-4 M7 套餐动作（附录 D）。
+	auditActionPlanUpgrade   = "plan_upgrade"
+	auditActionPlanDowngrade = "plan_downgrade"
 )
 
 // auditAnchorInterval 每追加 N 条事件锚定一次链尾哈希。
