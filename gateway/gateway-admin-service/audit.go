@@ -53,6 +53,7 @@ const (
 	auditActionCryptopProfileSwitch = "cryptop.profile.switch"
 	// P1-4 租户自助门户动作（附录 D 审计动作清单）。
 	auditActionTenantRegister = "tenant_register"
+	auditActionTenantLogin    = "tenant_login"
 	auditActionTenantLogout   = "tenant_logout"
 	auditActionPasswordReset  = "password_reset"
 	// P1-4 M3 API Key 动作（附录 D；只记 key_id + 指纹前 8，明文绝不入链）。

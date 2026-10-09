@@ -11,6 +11,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -297,6 +298,40 @@ func (h *tenantHandler) auditAppend(actor, action string) {
 	}
 }
 
+// emailFingerprint 邮箱指纹（SHA-256 前 8 位；审计不落明文邮箱，附录 D）。
+func emailFingerprint(email string) string {
+	sum := sha256.Sum256([]byte(email))
+	return hex.EncodeToString(sum[:])[:8]
+}
+
+// auditAppendTenantRegister 落 tenant_register（附录 D：Target=tenant_id；邮箱仅存哈希前缀 8 位）。
+func (h *tenantHandler) auditAppendTenantRegister(tenantID, email string) {
+	if h.audit == nil {
+		return
+	}
+	fp := emailFingerprint(email)
+	if err := h.audit.append(adminAuditEvent{
+		Actor: fp, Action: auditActionTenantRegister, Target: tenantID,
+		KeyFingerprint: fp, Result: "ok",
+	}); err != nil {
+		log.Printf("[tenant] 审计落链失败 action=tenant_register: %v", err)
+	}
+}
+
+// auditAppendLogin 落 tenant_login（附录 D：成功/失败均落链；失败记原因，绝不记密码）。
+// Result 取值：ok | bad_credentials | locked | pending | tenant_missing | quota_pending | inactive。
+func (h *tenantHandler) auditAppendLogin(email, tenantID, result string) {
+	if h.audit == nil {
+		return
+	}
+	if err := h.audit.append(adminAuditEvent{
+		Actor: emailFingerprint(email), Action: auditActionTenantLogin,
+		Target: tenantID, Result: result,
+	}); err != nil {
+		log.Printf("[tenant] 审计落链失败 action=tenant_login: %v", err)
+	}
+}
+
 // ---------- 注册 ----------
 
 // handleRegister 注册端点（§6.2）。
@@ -422,7 +457,7 @@ func (h *tenantHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err := h.mailer.SendVerifyEmail(req.Email, name, verifyToken); err != nil {
 		log.Printf("[tenant-register] 验证邮件发送失败: %v", err)
 	}
-	h.auditAppend(req.Email, auditActionTenantRegister)
+	// 注：`tenant_register` 审计按附录 D 落在 **verify 通过时**（见 handleVerify），此处不落链。
 
 	tenantWriteJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
 }
@@ -536,6 +571,7 @@ func (h *tenantHandler) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.auditAppendTenantRegister(tenant.ID, user.Email)
 	log.Printf("[tenant-verify] 验证完成 tenant=%s status=%s", tenant.ID, res.Status)
 	tenantWriteJSON(w, http.StatusOK, verifyResponse{
 		TenantID: tenant.ID, Status: res.Status, PlanID: freePlanID,
@@ -571,6 +607,7 @@ func (h *tenantHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	// 锁定检查（先于凭据校验，防锁定期间爆破）
 	if h.loginGuard.isLocked(req.Email) {
+		h.auditAppendLogin(req.Email, "", "locked")
 		tenantWriteError(w, http.StatusLocked, "账号已锁定，请稍后再试")
 		return
 	}
@@ -583,14 +620,17 @@ func (h *tenantHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if user == nil || !verifyPassword(user.PasswordHash, req.Password) {
 		h.loginGuard.onFail(req.Email)
+		h.auditAppendLogin(req.Email, "", "bad_credentials")
 		tenantWriteError(w, http.StatusUnauthorized, "邮箱或密码错误")
 		return
 	}
 	if user.Status == tenantUserStatusLocked {
+		h.auditAppendLogin(req.Email, user.TenantID, "locked")
 		tenantWriteError(w, http.StatusLocked, "账号已锁定，请联系管理员")
 		return
 	}
 	if user.Status == tenantUserStatusPending {
+		h.auditAppendLogin(req.Email, user.TenantID, "pending")
 		tenantWriteError(w, http.StatusUnauthorized, "邮箱未验证")
 		return
 	}
@@ -598,19 +638,23 @@ func (h *tenantHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	tenant, err := h.store.GetTenantByID(user.TenantID)
 	if err != nil || tenant == nil {
 		log.Printf("[tenant-login] 查询租户失败: %v", err)
+		h.auditAppendLogin(req.Email, "", "tenant_missing")
 		tenantWriteError(w, http.StatusUnauthorized, "邮箱或密码错误")
 		return
 	}
 	if tenant.Status == tenantStatusQuotaPending {
+		h.auditAppendLogin(req.Email, tenant.ID, "quota_pending")
 		tenantWriteError(w, http.StatusForbidden, "配额尚未就绪，请联系支持")
 		return
 	}
 	if tenant.Status != tenantStatusActive {
+		h.auditAppendLogin(req.Email, tenant.ID, "inactive")
 		tenantWriteError(w, http.StatusForbidden, "租户未激活")
 		return
 	}
 
 	h.loginGuard.onSuccess(req.Email)
+	h.auditAppendLogin(req.Email, user.TenantID, "ok")
 	log.Printf("[tenant-login] 登录成功 user_id=%d tenant=%s", user.ID, user.TenantID)
 	tenantWriteJSON(w, http.StatusOK, loginResponse{
 		TenantID:  user.TenantID,
