@@ -1,0 +1,9 @@
+# 日志栈入口：kubectl apply -k deploy/logging
+# P1-3 等保 §6.3 M11：L2 系统日志集中采集（Promtail DaemonSet）+ 集中存储（Loki）。
+# 查询与关联：Grafana 已接入 Loki 数据源（deploy/monitoring/grafana.yaml），
+# 与审计链/指标/P1-7 全流量日志按 request_id 联合查询。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- promtail.yaml
+- loki.yaml

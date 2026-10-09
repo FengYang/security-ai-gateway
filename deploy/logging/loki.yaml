@@ -1,0 +1,161 @@
+# Loki（P1-3 等保 §6.3，M11 L2 系统日志集中存储）
+#
+# 留存口径（§6.3）：
+#   热层 30 天本地（filesystem，本清单默认）；
+#   归档至 180 天（等保法定下限）依赖对象存储（S3 兼容 + 版本锁定/WORM），
+#   在 30 天热层基础上由对象存储生命周期执行——运维按实际 S3 端点补充
+#   `common.storage.s3` 与 retention 配置（本清单不硬编码凭据）。
+#   与审计链分层存储解耦，避免单点（审计链默认 365 天/硬底 180 天，见 auditretention.go）。
+#
+# 完整性：日志写入后不可修改由对象存储版本锁定保证；本地热层为可写缓存层。
+#
+# 部署：kubectl apply -k deploy/logging
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: otpmask
+data:
+  loki.yaml: |
+    auth_enabled: false
+    server:
+      http_listen_port: 3100
+      grpc_listen_port: 9095
+      log_level: info
+    common:
+      path_prefix: /loki
+      replication_factor: 1
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+    schema_config:
+      configs:
+      - from: 2024-01-01
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+    limits_config:
+      # 保留热层 30 天（归档 180 天由对象存储生命周期承接，见文件头说明）。
+      retention_period: 720h
+      ingestion_rate_mb: 16
+      ingestion_burst_size_mb: 32
+      max_query_series: 5000
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+    compactor:
+      working_directory: /loki/compactor
+      retention_enabled: true
+      delete_request_store: filesystem
+    ruler:
+      storage:
+        type: local
+        local:
+          directory: /loki/rules
+      rule_path: /loki/rules-temp
+    analytics:
+      reporting_enabled: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: otpmask
+  labels:
+    app: loki
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # 单副本 + PVC：避免滚动更新时双写同一卷。
+  selector:
+    matchLabels:
+      app: loki
+  template:
+    metadata:
+      labels:
+        app: loki
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: loki
+        image: grafana/loki:3.1.1
+        args:
+        - -config.file=/etc/loki/loki.yaml
+        ports:
+        - name: http
+          containerPort: 3100
+        - name: grpc
+          containerPort: 9095
+        volumeMounts:
+        - name: config
+          mountPath: /etc/loki
+        - name: data
+          mountPath: /loki
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3100
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: 3100
+          initialDelaySeconds: 45
+          periodSeconds: 20
+      volumes:
+      - name: config
+        configMap:
+          name: loki-config
+      - name: data
+        persistentVolumeClaim:
+          claimName: loki-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-data
+  namespace: otpmask
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 50Gi  # 容量估算见 §6.3（按上线后 1 周实测校准）。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: otpmask
+  labels:
+    app: loki
+spec:
+  selector:
+    app: loki
+  ports:
+  - name: http
+    port: 3100
+    targetPort: 3100
+  - name: grpc
+    port: 9095
+    targetPort: 9095

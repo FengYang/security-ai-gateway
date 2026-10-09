@@ -14,6 +14,13 @@ data:
       access: proxy
       url: http://prometheus:9090
       isDefault: true
+    # P1-3 M11：L2 系统日志数据源（与审计链/指标/全流量按 request_id 关联查询）。
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki.otpmask.svc.cluster.local:3100
+      jsonData:
+        maxLines: 5000
 ---
 apiVersion: v1
 kind: ConfigMap

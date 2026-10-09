@@ -1,0 +1,185 @@
+# Promtail（P1-3 等保 §6.3，M11 L2 系统日志集中采集）
+#
+# 采集范围（§6.3 ①-④）：
+#   ① 所有 Pod 容器日志（stdout/stderr，namespace=otpmask）
+#   ③ Higress 网关 access log（随 Pod stdout 一并采集，含 key-auth/waf/限流命中标记）
+#   ④ 节点 syslog（journal，安全相关）
+#   ② K8s 事件：Promtail 不原生采集 Event 资源；如需入库，另接 eventrouter/kube-event-exporter
+#      投递为日志（见部署指南 M11 章节，未在本清单硬编码）。
+#
+# 统一 JSON 字段（§6.3）：timestamp / level / service / instance_id / request_id / trace_id / message
+#   安全事件额外：actor / action / result / src_ip（由业务侧结构化输出提供，Promtail 仅解析与标注）。
+#
+# 部署：kubectl apply -k deploy/logging
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: promtail
+  namespace: otpmask
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otpmask-promtail
+rules:
+- apiGroups: [""]
+  resources: ["pods", "namespaces", "nodes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otpmask-promtail
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otpmask-promtail
+subjects:
+- kind: ServiceAccount
+  name: promtail
+  namespace: otpmask
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: otpmask
+data:
+  promtail.yaml: |
+    server:
+      http_listen_port: 9080
+      grpc_listen_port: 0
+      log_level: info
+    positions:
+      filename: /run/promtail/positions.yaml
+    clients:
+    - url: http://loki.otpmask.svc.cluster.local:3100/loki/api/v1/push
+      # 重试与背压：Loki 不可用时本地缓冲，避免采集器阻塞业务 Pod（§6.3 部署形态）。
+      backoff_config:
+        min_period: 500ms
+        max_period: 5m
+        max_retries: 10
+    scrape_configs:
+    # ① + ③：otpmask 命名空间全部 Pod 容器日志（含 Higress/ gateway/ tee-infer/ auth/ admin）。
+    - job_name: otpmask-pods
+      kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [otpmask]
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        target_label: container
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: service
+      - source_labels: [__meta_kubernetes_pod_uid, __meta_kubernetes_pod_container_name]
+        separator: /
+        target_label: __path__
+        replacement: /var/log/pods/*$1/*.log
+      pipeline_stages:
+      # 结构化 JSON 解析（§6.3 统一字段）；解析失败保留原始行（max_retries 不阻断采集）。
+      - json:
+          expressions:
+            level: level
+            service: service
+            instance_id: instance_id
+            request_id: request_id
+            trace_id: trace_id
+            actor: actor
+            action: action
+            result: result
+            src_ip: src_ip
+            message: message
+          drop_malformed: false
+      # 提升关键字段为标签（仅低基数项作标签，request_id/trace_id 保留在日志内容中供查询）。
+      - labels:
+          level:
+          service:
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+          action_on_failure: skip
+    # ④ 节点 syslog（journal）：安全相关（sshd/sudo/内核审计等）。
+    - job_name: node-journal
+      journal:
+        path: /var/log/journal
+        matches: "_SYSTEMD_UNIT=sshd.service + _COMM=sudo + _TRANSPORT=kernel"
+        labels:
+          job: node-journal
+      relabel_configs:
+      - source_labels: [__journal__hostname]
+        target_label: node
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: promtail
+  namespace: otpmask
+  labels:
+    app: promtail
+spec:
+  selector:
+    matchLabels:
+      app: promtail
+  template:
+    metadata:
+      labels:
+        app: promtail
+    spec:
+      serviceAccountName: promtail
+      tolerations:
+      - operator: Exists  # 采集节点日志需覆盖全部节点（含带污点的系统节点）。
+      containers:
+      - name: promtail
+        image: grafana/promtail:3.1.1
+        args:
+        - -config.file=/etc/promtail/promtail.yaml
+        env:
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        ports:
+        - name: http
+          containerPort: 9080
+        volumeMounts:
+        - name: config
+          mountPath: /etc/promtail
+        - name: run
+          mountPath: /run/promtail
+        - name: pods
+          mountPath: /var/log/pods
+          readOnly: true
+        - name: journal
+          mountPath: /var/log/journal
+          readOnly: true
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+      volumes:
+      - name: config
+        configMap:
+          name: promtail-config
+      - name: run
+        emptyDir: {}
+      - name: pods
+        hostPath:
+          path: /var/log/pods
+      - name: journal
+        hostPath:
+          path: /var/log/journal
