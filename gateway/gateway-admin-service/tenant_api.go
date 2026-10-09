@@ -97,6 +97,9 @@ func (h *tenantHandler) registerMux(mux *http.ServeMux) {
 
 	// 策略与模型（M5）
 	h.registerTenantPolicyMux(mux)
+
+	// 租户审计视图（M6）
+	h.registerTenantAuditMux(mux)
 }
 
 // registerCaptcha 在管理面 mux 注册验证码签发端点（Console 内部，authMiddleware）。
