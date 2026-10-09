@@ -91,13 +91,13 @@ func TestBillingCrossTenantIsolation(t *testing.T) {
 	adminTok := testSignToken(t, testSecret, claims{
 		Sub: testAdminUser, Role: roleAdmin, Iss: defaultIssuer, Aud: defaultAudience,
 	})
-	// 带租户声明的 auditor（t1）
-	auditorT1 := testSignToken(t, testSecret, claims{
-		Sub: "bob", Role: roleAuditor, Iss: defaultIssuer, Aud: defaultAudience, Tenant: "t1",
+	// 带租户声明的计费只读主体（t1）
+	readerT1 := testSignToken(t, testSecret, claims{
+		Sub: "bob", Role: roleBillingReader, Iss: defaultIssuer, Aud: defaultAudience, Tenant: "t1",
 	})
-	// 无租户声明的 auditor（旧令牌形态）
-	auditorNoTenant := testSignToken(t, testSecret, claims{
-		Sub: "carol", Role: roleAuditor, Iss: defaultIssuer, Aud: defaultAudience,
+	// 无租户声明的计费只读主体：用于验证"缺租户声明 → fail-closed 403"（§7.4 租户隔离）。
+	readerNoTenant := testSignToken(t, testSecret, claims{
+		Sub: "carol", Role: roleBillingReader, Iss: defaultIssuer, Aud: defaultAudience,
 	})
 
 	bills := billingAPIBase + "/bills"
@@ -113,28 +113,28 @@ func TestBillingCrossTenantIsolation(t *testing.T) {
 			t.Fatalf("期望 200，实际 %d", code)
 		}
 	})
-	t.Run("auditor 读自身租户 200", func(t *testing.T) {
-		if code := billingGet(t, env, auditorT1, bills+"?tenant=t1"); code != http.StatusOK {
+	t.Run("billing_reader 读自身租户 200", func(t *testing.T) {
+		if code := billingGet(t, env, readerT1, bills+"?tenant=t1"); code != http.StatusOK {
 			t.Fatalf("期望 200，实际 %d", code)
 		}
 	})
-	t.Run("auditor 跨租户 403", func(t *testing.T) {
-		if code := billingGet(t, env, auditorT1, bills+"?tenant=t2"); code != http.StatusForbidden {
+	t.Run("billing_reader 跨租户 403", func(t *testing.T) {
+		if code := billingGet(t, env, readerT1, bills+"?tenant=t2"); code != http.StatusForbidden {
 			t.Fatalf("期望 403，实际 %d", code)
 		}
 	})
-	t.Run("auditor 全量列举 403", func(t *testing.T) {
-		if code := billingGet(t, env, auditorT1, bills); code != http.StatusForbidden {
+	t.Run("billing_reader 全量列举 403", func(t *testing.T) {
+		if code := billingGet(t, env, readerT1, bills); code != http.StatusForbidden {
 			t.Fatalf("期望 403（禁止越权全量），实际 %d", code)
 		}
 	})
-	t.Run("auditor 缺租户声明 403", func(t *testing.T) {
-		if code := billingGet(t, env, auditorNoTenant, bills+"?tenant=t1"); code != http.StatusForbidden {
+	t.Run("缺租户声明 403（fail-closed）", func(t *testing.T) {
+		if code := billingGet(t, env, readerNoTenant, bills+"?tenant=t1"); code != http.StatusForbidden {
 			t.Fatalf("期望 403（fail-closed），实际 %d", code)
 		}
 	})
 	t.Run("账单详情跨租户 403 / 同租户与 admin 200", func(t *testing.T) {
-		if code := billingGet(t, env, auditorT1, bills+"/monthly-t2-2026-10"); code != http.StatusForbidden {
+		if code := billingGet(t, env, readerT1, bills+"/monthly-t2-2026-10"); code != http.StatusForbidden {
 			t.Fatalf("详情跨租户期望 403，实际 %d", code)
 		}
 		if code := billingGet(t, env, adminTok, bills+"/monthly-t2-2026-10"); code != http.StatusOK {
@@ -142,13 +142,13 @@ func TestBillingCrossTenantIsolation(t *testing.T) {
 		}
 	})
 	t.Run("账本查询隔离", func(t *testing.T) {
-		if code := billingGet(t, env, auditorT1, ledger+"?tenant=t1"); code != http.StatusOK {
+		if code := billingGet(t, env, readerT1, ledger+"?tenant=t1"); code != http.StatusOK {
 			t.Fatalf("账本同租户期望 200，实际 %d", code)
 		}
-		if code := billingGet(t, env, auditorT1, ledger+"?tenant=t2"); code != http.StatusForbidden {
+		if code := billingGet(t, env, readerT1, ledger+"?tenant=t2"); code != http.StatusForbidden {
 			t.Fatalf("账本跨租户期望 403，实际 %d", code)
 		}
-		if code := billingGet(t, env, auditorT1, ledger); code != http.StatusForbidden {
+		if code := billingGet(t, env, readerT1, ledger); code != http.StatusForbidden {
 			t.Fatalf("账本全量期望 403，实际 %d", code)
 		}
 	})
@@ -592,19 +592,19 @@ func TestBillingGetSubscription(t *testing.T) {
 	adminTok := testSignToken(t, testSecret, claims{
 		Sub: testAdminUser, Role: roleAdmin, Iss: defaultIssuer, Aud: defaultAudience,
 	})
-	auditorT1 := testSignToken(t, testSecret, claims{
-		Sub: "bob", Role: roleAuditor, Iss: defaultIssuer, Aud: defaultAudience, Tenant: "t1",
+	readerT1 := testSignToken(t, testSecret, claims{
+		Sub: "bob", Role: roleBillingReader, Iss: defaultIssuer, Aud: defaultAudience, Tenant: "t1",
 	})
 
 	path := billingAPIBase + "/subscription?tenant=t1"
 	if code := billingGet(t, env, adminTok, path); code != http.StatusOK {
 		t.Fatalf("admin GET 期望 200，实际 %d", code)
 	}
-	if code := billingGet(t, env, auditorT1, path); code != http.StatusOK {
-		t.Fatalf("auditor 自身租户 GET 期望 200，实际 %d", code)
+	if code := billingGet(t, env, readerT1, path); code != http.StatusOK {
+		t.Fatalf("billing_reader 自身租户 GET 期望 200，实际 %d", code)
 	}
-	// 跨租户：auditor(t1) 读 t2 → 403（fail-closed）
-	if code := billingGet(t, env, auditorT1, billingAPIBase+"/subscription?tenant=t2"); code != http.StatusForbidden {
+	// 跨租户：billing_reader(t1) 读 t2 → 403（fail-closed）
+	if code := billingGet(t, env, readerT1, billingAPIBase+"/subscription?tenant=t2"); code != http.StatusForbidden {
 		t.Fatalf("跨租户 GET 期望 403，实际 %d", code)
 	}
 	// 非 admin 且无令牌内 tenant 声明 → 403（不可越权查询）

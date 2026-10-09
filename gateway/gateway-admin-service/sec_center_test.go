@@ -85,7 +85,8 @@ func TestSecCenterAuditChainDisabledReturns503(t *testing.T) {
 	mux := newSecTestMux(cfg, nil, "") // 审计链未启用
 
 	for _, p := range []string{auditChainPath, auditChainVerifyPath, auditChainExportPath} {
-		rec := secGet(t, mux, cfg, testAdminUser, roleAdmin, p)
+		// verify/export 按 §6.2 表为 audit_admin 专属，须用 audit_admin 角色方可到达配置检查分支。
+		rec := secGet(t, mux, cfg, "audit-user", roleAuditAdmin, p)
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s 未启用审计链应 503（不静默返回空链），实际 %d", p, rec.Code)
 		}
@@ -98,14 +99,14 @@ func TestSecCenterAuditChainVerifyAndExport(t *testing.T) {
 	seedChain(t, chain, 2)
 	mux := newSecTestMux(cfg, chain, "")
 
-	rec := secGet(t, mux, cfg, testAdminUser, roleAdmin, auditChainVerifyPath)
+	rec := secGet(t, mux, cfg, "audit-user", roleAuditAdmin, auditChainVerifyPath)
 	var v auditChainVerifyView
 	_ = json.Unmarshal(rec.Body.Bytes(), &v)
 	if !v.OK || v.Events != 2 {
 		t.Fatalf("校验应 ok 且 2 条事件，实际 %+v", v)
 	}
 
-	rec = secGet(t, mux, cfg, testAdminUser, roleAdmin, auditChainExportPath)
+	rec = secGet(t, mux, cfg, "audit-user", roleAuditAdmin, auditChainExportPath)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("导出应 200，实际 %d", rec.Code)
 	}

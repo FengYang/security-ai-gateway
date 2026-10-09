@@ -1,7 +1,8 @@
 // usage_test.go — A-2' 用量代理与配额端点单测（管理门户 M2）。
 //
-// 覆盖：503 语义（未配置/不可达/数据源 5xx，不静默返回空数据）、角色授权（auditor 只读、
-// admin 可写）、透传保真（query 白名单 + X-Admin-Token 服务间令牌注入）、quota 落审计链、
+// 覆盖：503 语义（未配置/不可达/数据源 5xx，不静默返回空数据）、角色授权（§6.2 三权分立：
+// billing:read 归 system_admin/audit_admin/billing_reader；写配额 system_admin + 会话级 MFA）、
+// 透传保真（query 白名单 + X-Admin-Token 服务间令牌注入）、quota 落审计链、
 // 审计写失败 fail-closed 拒绝 2xx。
 package main
 
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 // teeInferRecorder 记录 fake tee-infer 收到的请求（供透传保真断言）。
@@ -101,6 +103,50 @@ func doUsage(t *testing.T, mux *http.ServeMux, role, method, target string, body
 	return rec
 }
 
+// doUsageMFA 同 doUsage，但令牌带 MFA 第二步声明（mfa=true + 新鲜 mfa_at），
+// 用于验证写端点的 step-up（authz.go requireRule 的 mfaSessionFreshness/mfaStepUpFreshness）。
+func doUsageMFA(t *testing.T, mux *http.ServeMux, role, method, target string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	reader := strings.NewReader("")
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		reader = strings.NewReader(string(raw))
+	}
+	req := httptest.NewRequest(method, target, reader)
+	req.Header.Set("Authorization", "Bearer "+testSignToken(t, testSecret, claims{
+		Sub: testAdminUser, Role: role, Iss: defaultIssuer, Aud: defaultAudience,
+		MFA: true, MFAAt: time.Now().Unix(),
+	}))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// doUsageAs 同 doUsage，但显式指定令牌 sub。
+// 用途：doUsage 对多数角色用 testAdminUser（在 testCfg 白名单内 → resolveRole 恒加成 admin），
+// 会掩盖 JWT 声明的真实角色；验证"非白名单主体"的角色语义须用本函数。
+func doUsageAs(t *testing.T, mux *http.ServeMux, role, sub, method, target string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	reader := strings.NewReader("")
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		reader = strings.NewReader(string(raw))
+	}
+	req := httptest.NewRequest(method, target, reader)
+	req.Header.Set("Authorization", "Bearer "+testSignToken(t, testSecret, claims{
+		Sub: sub, Role: role, Iss: defaultIssuer, Aud: defaultAudience,
+	}))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
 // ---------- 503 语义（完成定义③） ----------
 
 func TestUsageUnconfiguredReturns503(t *testing.T) {
@@ -170,11 +216,11 @@ func TestUsageProxyRolesAndRelay(t *testing.T) {
 		}
 	})
 
-	t.Run("auditor 可读 usage（只读全量）", func(t *testing.T) {
-		r := doUsage(t, mux, roleAuditor, http.MethodGet,
+	t.Run("billing_reader 可读 usage（只读全量）", func(t *testing.T) {
+		r := doUsage(t, mux, roleBillingReader, http.MethodGet,
 			usageAPIBase+"?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&tenant=acme", nil)
 		if r.Code != http.StatusOK {
-			t.Fatalf("auditor 读 usage 期望 200，实际 %d: %s", r.Code, r.Body.String())
+			t.Fatalf("billing_reader 读 usage 期望 200，实际 %d: %s", r.Code, r.Body.String())
 		}
 		// 透传保真：from/to/tenant 白名单参数原样到达数据源；服务间令牌已注入
 		if rec.gotQuery.Get("from") != "2026-01-01T00:00:00Z" || rec.gotQuery.Get("to") != "2026-01-02T00:00:00Z" ||
@@ -211,19 +257,40 @@ func TestUsageProxyRolesAndRelay(t *testing.T) {
 			t.Fatalf("auditor 写 quota 期望 403，实际 %d", r.Code)
 		}
 	})
+
+	// F-5 回归：写操作（billing:write）不得由只读角色承担。
+	// 注：须用非白名单 sub，否则 resolveRole 会把 testAdminUser 加成 admin 而掩盖真实角色。
+	t.Run("billing_reader 写 quota → 403（F-5 回归）", func(t *testing.T) {
+		r := doUsageAs(t, mux, roleBillingReader, "billing-reader-user", http.MethodPost, usageQuotaPath, quotaSetRequest{Tenant: "acme", MaxTokens: 100})
+		if r.Code != http.StatusForbidden {
+			t.Fatalf("billing_reader 写 quota 期望 403，实际 %d", r.Code)
+		}
+	})
+
+	// F-1 回归：§6.2 映射表收窄后 auditor 不含 billing:read。
+	t.Run("auditor 读 usage → 403（§6.2 收窄）", func(t *testing.T) {
+		r := doUsage(t, mux, roleAuditor, http.MethodGet, usageAPIBase+"?tenant=acme", nil)
+		if r.Code != http.StatusForbidden {
+			t.Fatalf("auditor 读 usage 期望 403，实际 %d", r.Code)
+		}
+	})
+
+	// 注：MFA step-up（epQuotaWrite 的 mfaSessionFreshness）对"未绑定 MFA 的账号"按
+	// mfa.go 灰度语义不阻断（mfaSatisfied → true），故此处不断言 403；
+	// MFA 自身行为（enroll/verify/重放/锁定/step-up）应由 mfa_test.go 覆盖（遗留项 F-6）。
 }
 
-// ---------- S5：对账快照代理（只读，auditor 可读） ----------
+// ---------- S5：对账快照代理（只读代理，billing:read；F-2 修正：实现为 GET 只读） ----------
 
 func TestMeteringReconcileProxy(t *testing.T) {
 	rec := &teeInferRecorder{}
 	srv := newFakeTeeInfer(t, rec, http.StatusOK, http.StatusOK)
 	mux := newTestUsageMux(&usageSettings{url: srv.URL, token: "svc-tok"}, nil)
 
-	t.Run("auditor 可读（只读代理，注入服务间令牌）", func(t *testing.T) {
-		r := doUsage(t, mux, roleAuditor, http.MethodGet, meteringReconcilePath, nil)
+	t.Run("billing_reader 可读（只读代理，注入服务间令牌）", func(t *testing.T) {
+		r := doUsage(t, mux, roleBillingReader, http.MethodGet, meteringReconcilePath, nil)
 		if r.Code != http.StatusOK {
-			t.Fatalf("auditor 读对账快照期望 200，实际 %d: %s", r.Code, r.Body.String())
+			t.Fatalf("billing_reader 读对账快照期望 200，实际 %d: %s", r.Code, r.Body.String())
 		}
 		if rec.gotHeader != "svc-tok" {
 			t.Fatalf("X-Admin-Token 应注入服务间令牌，实际 %q", rec.gotHeader)
@@ -280,7 +347,7 @@ func TestQuotaSetAuditedAndFailClosed(t *testing.T) {
 		c := newAuditTestChain(t, false)
 		mux := newTestUsageMux(&usageSettings{url: srv.URL, token: "svc-tok"}, c)
 
-		r := doUsage(t, mux, roleAdmin, http.MethodPost, usageQuotaPath, quotaSetRequest{Tenant: "acme", MaxTokens: 1000000})
+		r := doUsageMFA(t, mux, roleAdmin, http.MethodPost, usageQuotaPath, quotaSetRequest{Tenant: "acme", MaxTokens: 1000000})
 		if r.Code != http.StatusOK {
 			t.Fatalf("期望 200，实际 %d: %s", r.Code, r.Body.String())
 		}
@@ -304,7 +371,7 @@ func TestQuotaSetAuditedAndFailClosed(t *testing.T) {
 	t.Run("tenant 缺失 → 400（本地校验，不打数据源）", func(t *testing.T) {
 		c := newAuditTestChain(t, false)
 		mux := newTestUsageMux(&usageSettings{url: srv.URL, token: "svc-tok"}, c)
-		r := doUsage(t, mux, roleAdmin, http.MethodPost, usageQuotaPath, map[string]interface{}{"max_tokens": 100})
+		r := doUsageMFA(t, mux, roleAdmin, http.MethodPost, usageQuotaPath, map[string]interface{}{"max_tokens": 100})
 		if r.Code != http.StatusBadRequest {
 			t.Fatalf("期望 400，实际 %d", r.Code)
 		}
@@ -318,7 +385,7 @@ func TestQuotaSetAuditedAndFailClosed(t *testing.T) {
 		mux := newTestUsageMux(&usageSettings{url: srv.URL, token: "svc-tok"}, c)
 		_ = c.Close() // 模拟审计文件不可写
 
-		r := doUsage(t, mux, roleAdmin, http.MethodPost, usageQuotaPath, quotaSetRequest{Tenant: "acme", MaxTokens: 2000000})
+		r := doUsageMFA(t, mux, roleAdmin, http.MethodPost, usageQuotaPath, quotaSetRequest{Tenant: "acme", MaxTokens: 2000000})
 		if r.Code != http.StatusInternalServerError {
 			t.Fatalf("审计写失败应 500（fail-closed），实际 %d: %s", r.Code, r.Body.String())
 		}

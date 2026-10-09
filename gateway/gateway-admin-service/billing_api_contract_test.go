@@ -58,17 +58,24 @@ func TestBillingContractT4_3_1_RBACMatrix(t *testing.T) {
 
 	tokAdmin := testSignToken(t, testSecret, claims{Sub: testAdminUser, Role: roleAdmin, Iss: defaultIssuer, Aud: defaultAudience})
 	tokAuditor := testSignToken(t, testSecret, claims{Sub: "aud", Role: roleAuditor, Iss: defaultIssuer, Aud: defaultAudience, Tenant: "t1"})
+	tokAuditAdmin := testSignToken(t, testSecret, claims{Sub: "auditadmin", Role: roleAuditAdmin, Iss: defaultIssuer, Aud: defaultAudience, Tenant: "t1"})
 	tokReader := testSignToken(t, testSecret, claims{Sub: "fin", Role: roleBillingReader, Iss: defaultIssuer, Aud: defaultAudience, Tenant: "t1"})
 
 	readPaths := []string{"/plans", "/bills?tenant=t1", "/ledger?tenant=t1", "/subscription?tenant=t1"}
 	writePaths := []string{"/freeze", "/close-daily"}
 
-	// 读：三角色（admin/auditor/billing_reader）均 200
+	// 读：admin / audit_admin / billing_reader 均 200（§6.2 表：billing:read 归此三角色）
 	for _, p := range readPaths {
-		for name, tok := range map[string]string{"admin": tokAdmin, "auditor": tokAuditor, "billing_reader": tokReader} {
+		for name, tok := range map[string]string{"admin": tokAdmin, "audit_admin": tokAuditAdmin, "billing_reader": tokReader} {
 			if code := billingGet(t, env, tok, billingAPIBase+p); code != http.StatusOK {
 				t.Errorf("读矩阵：%s 读 %s 期望 200，实际 %d", name, p, code)
 			}
+		}
+	}
+	// 读：auditor 不含 billing:read（§6.2 表收窄）→ 403
+	for _, p := range readPaths {
+		if code := billingGet(t, env, tokAuditor, billingAPIBase+p); code != http.StatusForbidden {
+			t.Errorf("读矩阵：auditor 读 %s 期望 403（§6.2 收窄），实际 %d", p, code)
 		}
 	}
 	// 读：未认证 → 401（缺 Bearer）
