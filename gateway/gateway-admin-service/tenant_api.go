@@ -38,15 +38,18 @@ type tenantHandler struct {
 	jwtSecret  []byte // 租户会话令牌校验密钥（= cfg.jwtSecret，共享密钥，§6.1）
 	mailer     tenantMailer
 	captcha    *captchaStore
-	binder     quotaBinder // nil = billing 域未启用
-	issuer     keyIssuer   // nil = Key 签发通道未配置（§6.11）
+	binder     quotaBinder     // nil = billing 域未启用
+	issuer     keyIssuer       // nil = Key 签发通道未配置（§6.11）
+	usage      *usageHandler   // M4：tee-infer 用量代理（复用）
+	billing    *billingHandler // M4：账单查询/导出（复用；nil = billing 未启用）
 	audit      *adminAuditChain
 	loginGuard *loginGuard
 	resetGuard *intervalGuard
 }
 
 // newTenantHandler 构造租户 handler（captcha 仅在启用时创建）。
-func newTenantHandler(store TenantStore, cfg *config, binder quotaBinder, audit *adminAuditChain) *tenantHandler {
+func newTenantHandler(store TenantStore, cfg *config, binder quotaBinder,
+	usage *usageHandler, billH *billingHandler, audit *adminAuditChain) *tenantHandler {
 	// 注意：issuer 为接口，须显式判空赋值（避免 *httpKeyIssuer(nil) 造成 typed-nil 非空）
 	var issuer keyIssuer
 	if cfg.authServiceURL != "" {
@@ -59,6 +62,8 @@ func newTenantHandler(store TenantStore, cfg *config, binder quotaBinder, audit 
 		mailer:     newTenantMailer(cfg),
 		binder:     binder,
 		issuer:     issuer,
+		usage:      usage,
+		billing:    billH,
 		audit:      audit,
 		loginGuard: newLoginGuard(cfg.loginMaxFail, cfg.loginLockMin),
 		resetGuard: newIntervalGuard(cfg.passwordResetIntervalMin),
@@ -84,6 +89,9 @@ func (h *tenantHandler) registerMux(mux *http.ServeMux) {
 
 	// API Key 管理（M3）
 	h.registerKeyMux(mux)
+
+	// 用量与账单（M4）
+	h.registerTenantUsageMux(mux)
 }
 
 // registerCaptcha 在管理面 mux 注册验证码签发端点（Console 内部，authMiddleware）。
