@@ -1,0 +1,99 @@
+# 节点 OS 月度扫描（P1-3 等保 §6.4「主机加固与恶意代码防范（R2-07）」：CIS 类基线脚本 + 周期扫描留证；
+# 联动 §6.7「漏洞管理（R2-18）」：节点 OS 月度扫描，高危 7 天 / 中危 30 天 / 低危季度）
+#
+# 定位：以只读方式采集宿主根文件系统（hostPath / 只读），执行两项：
+#   ① baseline-check.sh —— 节点加固基线检查（非必要服务/高危端口/默认共享/SSH/内核参数/权限/审计/时间同步）
+#   ② Trivy rootfs 扫描   —— 节点 OS 软件包漏洞扫描（HIGH/CRITICAL）
+# 报告落节点本地 /var/log/otpmask/node-scan/（由节点侧日志采集/运维归档，作为运行态证据）。
+#
+# 【只读、无特权】本 Job 不申请 privileged / hostPID / hostNetwork，仅以 hostPath **只读** 挂载宿主根，
+# 与 Falco 的特权豁免（§6.4 R2-09）区分——契合"最小权限"原则。
+#
+# 【全节点覆盖说明】CronJob Pod 仅调度到一个节点，单次仅覆盖该节点。全节点覆盖两条路径（运维按
+# 《系统运维管理制度》执行）：(a) 逐节点复制本 Job 并加 `nodeSelector`；(b) 在每台节点直接执行
+# `bash baseline-check.sh`（节点内直跑模式，支持 --apply）并归档报告。二者产出同构报告。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-scan-sa
+  namespace: otpmask
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: node-scan-monthly
+  namespace: otpmask
+  labels:
+    otpmask.dev/security-tool: node-scan
+spec:
+  schedule: "0 3 1 * *"          # 每月 1 日 03:00（月度扫描）
+  timeZone: Asia/Shanghai
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 604800   # 报告已落节点磁盘，Job 对象保留 7 天后回收
+      template:
+        metadata:
+          labels:
+            otpmask.dev/security-tool: node-scan
+        spec:
+          serviceAccountName: node-scan-sa
+          restartPolicy: Never
+          # 允许调度到含污点的节点（含控制面/机密节点），使扫描可覆盖任意节点。
+          tolerations:
+            - operator: Exists
+          containers:
+            # ---------- ① 加固基线检查 ----------
+            - name: baseline
+              image: bash:5.2
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -u
+                  M="$(date -u +%Y%m)"
+                  echo "[node-scan] baseline root=/host -> /reports/baseline-${M}.json"
+                  bash /scripts/baseline-check.sh --root /host --json --out "/reports/baseline-${M}.json" \
+                    || echo "[node-scan] baseline 报告含 FAIL 项（详见报告，按 SLA 处置）"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - { name: host-root, mountPath: /host, readOnly: true }
+                - { name: reports,   mountPath: /reports }
+                - { name: scripts,   mountPath: /scripts, readOnly: true }
+            # ---------- ② 节点 OS 漏洞扫描 ----------
+            - name: trivy
+              image: aquasec/trivy:0.55.2
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  M="$(date -u +%Y%m)"
+                  echo "[node-scan] trivy rootfs /host -> /reports/trivy-${M}.json"
+                  trivy rootfs --scanners vuln --severity HIGH,CRITICAL \
+                    --format json --output "/reports/trivy-${M}.json" \
+                    --cache-dir /tmp/trivy /host \
+                    || echo "[node-scan] trivy 扫描完成（含 HIGH/CRITICAL 命中，按 SLA 处置）"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - { name: host-root, mountPath: /host, readOnly: true }
+                - { name: reports,   mountPath: /reports }
+                - { name: tmp,       mountPath: /tmp }
+          volumes:
+            - name: host-root
+              hostPath: { path: /, type: Directory }
+            # 报告落节点本地（rw）；日志采集/运维归档，作为等保运行态证据。
+            - name: reports
+              hostPath: { path: /var/log/otpmask/node-scan, type: DirectoryOrCreate }
+            - name: scripts
+              configMap: { name: node-hardening-scripts }
+            - name: tmp
+              emptyDir: {}

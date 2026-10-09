@@ -1,0 +1,52 @@
+# 机密计算运行时 RuntimeClass（P1-3 等保 §6.7「运行时」行 / §7.5，W11 / M9，GAP-08）
+#
+# 定位：为机密计算工作负载（TEE 推理链）提供 Pod 级强隔离运行时——Kata Containers 轻量虚拟机
+#      边界（内存加密 + 独立内核），与宿主/其他租户隔离，补足"进程级容器隔离"之上的运行时加固。
+#
+# 【前置：节点侧 handler 配置】RuntimeClass 的 handler 名须与节点 containerd 配置中的 runtime
+# 名称一致（由 K8s 集群/节点池运维侧提供），本文件只声明 K8s 侧对象与调度约束，不臆断节点配置：
+#   /etc/containerd/config.toml
+#     [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-qemu]
+#       runtime_type = "io.containerd.kata-qemu.v2"
+#   （nvidia-cc 机密计算节点由 NVIDIA CC / 云厂商机密节点池预置 handler，名称以节点实测为准）
+#
+# 绑定关系（§6.7 运行时行 + deploy/tee/overlays）：
+#   - nvidia-cc  → deploy/tee/overlays/nvidia-cc（NVIDIA Confidential Computing）打 runtimeClassName: nvidia-cc
+#   - kata-qemu  → 通用机密/隔离工作负载按需显式指定；TDX 机密节点池（gn8v-tee）由节点池提供隔离，
+#                  启用 Kata 前须先核对该节点池 handler 名称后再补 patch（不臆断）。
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-qemu
+  labels:
+    otpmask.dev/tier: confidential
+handler: kata-qemu
+overhead:
+  podFixed:
+    cpu: 250m
+    memory: 160Mi
+scheduling:
+  nodeSelector:
+    otpmask.dev/runtime: kata
+  tolerations:
+    - key: otpmask.dev/tee
+      operator: Exists
+      effect: NoSchedule
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia-cc
+  labels:
+    otpmask.dev/tier: confidential
+# 机密计算（NVIDIA CC）：handler 名以机密节点池 containerd 实测为准（见文件头前置说明）。
+handler: nvidia-cc
+scheduling:
+  # 与 deploy/tee/overlays/nvidia-cc 的节点标签一致（仅调度到机密 VM 节点）。
+  nodeSelector:
+    otpmask.dev/tee: nvidia-cc
+  tolerations:
+    - key: otpmask.dev/tee
+      operator: Exists
+      effect: NoSchedule

@@ -1,0 +1,104 @@
+# 准入策略（P1-3 等保 §6.7 / §7.5，W11 / M9，GAP-07）
+#
+# 定位：镜像供应链准入——拒绝「未签名」与「未固定 digest」镜像进入 otpmask 命名空间
+#      （§6.7「admission」行：准入策略拒绝未签名/未固定 digest 镜像）。
+# 引擎：Kyverno（原生 verifyImages 支持 cosign，声明式、无需独立 admission webhook 服务）。
+#       前置：`kubectl apply -k deploy/security` 执行前需先安装 Kyverno（见本文件末安装说明）。
+#
+# 与 CI 的分工（§6.7「镜像完整性」行）：
+#   - CI 侧（.github/workflows/ci.yml job supply-chain）：构建 → Trivy 镜像扫描门禁 →
+#     SBOM(SPDX) → cosign 签名（生产以 KMS 托管密钥签名）。
+#   - 集群侧（本策略）：入集群前校验 digest 固定 + cosign 签名，不合规则拒绝创建。
+#   两段合围构成「构建可信 → 准入可信」，对齐 SLSA L2（D-10 分阶段）。
+#
+# 【安全工具例外备案】（§6.4 R2-09 / CFM-03）：Falco HIDS 由第三方上游镜像（falcosecurity/*）
+# 运行且需特权/hostPath，与准入基线存在冲突——按「安全工具例外单独备案」豁免**仅限 Falco
+# DaemonSet**（标签 otpmask.dev/security-tool=falco），不扩散至其他工作负载；豁免清单归档至
+# 安全策略文件（W10-13《系统建设管理制度》供应链章节）。
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: otpmask-supply-chain
+  annotations:
+    policies.kyverno.io/title: OTP-Mask 镜像供应链准入
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    # 对齐：等保 2.0 三级 8.1.4.2（安全计算环境-入侵防范）/ GB/T 22239 供应链要求
+    otpmask.dev/spec: "P1-3 §6.7 / §7.5 (GAP-07)"
+spec:
+  # fail-closed：不符合即拒绝创建（§6.7 显式要求"拒绝"，非仅告警）。
+  validationFailureAction: Enforce
+  background: false          # verifyImages 需连接 registry 取签名，禁用 background 扫描
+  rules:
+    # ---------- 规则 1：镜像必须固定为 @sha256: digest（禁止可变 tag） ----------
+    - name: require-image-digest
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [otpmask]
+      exclude:
+        any:
+          # 安全工具例外备案：仅豁免 Falco DaemonSet（§6.4 R2-09）。
+          - resources:
+              kinds: [Pod]
+              selector:
+                matchLabels:
+                  otpmask.dev/security-tool: falco
+      validate:
+        message: >-
+          镜像必须固定为 @sha256: digest（禁止 :latest / 可变 tag），见 P1-3 §6.7「镜像完整性」。
+        pattern:
+          spec:
+            containers:
+              - image: "*@sha256:*"
+            =(initContainers):
+              - image: "*@sha256:*"
+            =(ephemeralContainers):
+              - image: "*@sha256:*"
+
+    # ---------- 规则 2：镜像必须通过 cosign 签名校验 ----------
+    - name: verify-image-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [otpmask]
+      verifyImages:
+        # 仅校验本方案自建镜像（第三方基础设施镜像由「镜像入私仓 + 重新签名」流程治理，
+        # 见《系统建设管理制度》供应链章节；Falco 按上条例外备案）。
+        - imageReferences:
+            - "otpmask/*"
+            - "security-ai-gateway/*"
+          # 签发主体/发行方与 CI 签名步骤（ci.yml job supply-chain）一致；
+          # 生产环境切换为 KMS 托管密钥签名时，将 keyless 替换为：
+          #   attestors:
+          #     - entries:
+          #         - keys:
+          #             publicKeys: "k8s://otpmask/cosign-pub"   # 公钥由 Secret 托管（C-6）
+          attestors:
+            - entries:
+                - keyless:
+                    subject: "https://github.com/otpmask/security-ai-gateway/.github/workflows/ci.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+          # 签名必须以 digest 形式绑定（与规则 1 联立，防止 tag 换指向绕过）。
+          mutateDigest: false
+          verifyDigest: true
+          required: true
+---
+# ---------------------------------------------------------------------------
+# 安装说明（运维执行，需集群管理员权限；非本 kustomization 的一部分）：
+#
+#   helm repo add kyverno https://kyverno.github.io/kyverno/
+#   helm install kyverno kyverno/kyverno -n kyverno --create-namespace
+#
+# 校验：
+#   kubectl get clusterpolicy otpmask-supply-chain
+#   # 拒绝用例（应报错）：kubectl run t --image=nginx:latest -n otpmask
+#   # 通过用例：镜像以 digest 引用且 cosign 校验通过
+#
+# 主密钥/公钥托管（C-6）：生产以 KMS 托管 cosign 私钥，公钥经 Secret 注入（k8s://otpmask/cosign-pub），
+# 严禁明文私钥入库；本文件默认 keyless（CI OIDC）以便 CI 可复现，生产按上注释切换。
+# ---------------------------------------------------------------------------

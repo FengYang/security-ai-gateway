@@ -1,0 +1,14 @@
+# 节点加固/月度扫描入口（P1-3 等保 §6.4 R2-07 / §6.7 R2-18）
+# 由 deploy/security/kustomization.yaml 纳管；亦可单测：kubectl kustomize deploy/security/node-hardening
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: otpmask
+resources:
+- node-scan-cronjob.yaml
+configMapGenerator:
+  # 注入加固基线脚本（单一来源，避免与 CronJob 内联脚本漂移）
+  - name: node-hardening-scripts
+    files:
+      - baseline-check.sh
+generatorOptions:
+  disableNameSuffixHash: true   # 名称稳定，供 node-scan cronjob 的 volume 引用

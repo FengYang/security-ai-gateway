@@ -44,6 +44,17 @@ jobs:
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
+      # 2b. Trivy 配置/依赖扫描（P1-3 等保 §6.4④/§6.7：漏洞扫描门禁，HIGH/CRITICAL 阻止合入）
+      - name: trivy fs scan (deps & IaC)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          scanners: vuln,config
+
       # 3. 南向协议 Go/Python 交叉一致性（M5 验收）
       - name: protocol cross
         run: python protocol/python/cross_test.py
@@ -145,3 +156,47 @@ jobs:
       #    依赖 kubectl/helm/docker，故与 e2e 同置自托管 runner
       - name: K8s manifests
         run: pwsh -NoProfile -File scripts/verify-k8s.ps1
+
+  # ---------------- job 3：镜像供应链（构建 → 扫描 → SBOM → 签名） ----------------
+  # P1-3 等保 §6.7（W11/M9）：镜像 digest + cosign 签名 + SBOM（SPDX）随镜像发布 + 扫描门禁。
+  # 说明：cosign 私钥生产环境由 KMS 托管；此处用 keyless（OIDC）示例，生产切换为 KMS 密钥签名。
+  #      镜像构建依赖较重（多阶段 Dockerfile），若宿主环境受限可整体迁移至 self-hosted runner。
+  supply-chain:
+    name: image supply chain (hosted)
+    runs-on: ubuntu-latest
+    needs: static-and-unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build image
+        # 构建上下文=仓库根，Dockerfile 指 gateway-admin-service（与 deploy/k8s 清单镜像一致）。
+        run: docker build -t security-ai-gateway/gateway-admin-service:ci -f gateway/gateway-admin-service/Dockerfile .
+
+      # 镜像漏洞扫描门禁（§6.4④：高危漏洞禁止合入）。
+      - name: trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: security-ai-gateway/gateway-admin-service:ci
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+      # SBOM（SPDX）生成并随构建产物归档（§6.7：SBOM 随镜像发布）。
+      - name: generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: security-ai-gateway/gateway-admin-service:ci
+          format: spdx-json
+          output-file: sbom-admin-service.spdx.json
+
+      - name: upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-admin-service
+          path: sbom-admin-service.spdx.json
+
+      # 镜像签名（cosign；生产以 KMS 托管密钥，admission 侧校验签名后方可入集群）。
+      - uses: sigstore/cosign-installer@v3
+      - name: cosign sign (keyless; 生产切 KMS)
+        run: cosign sign --yes security-ai-gateway/gateway-admin-service:ci

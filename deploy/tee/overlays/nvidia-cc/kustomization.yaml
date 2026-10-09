@@ -2,6 +2,8 @@
 # - 机密 VM 节点标签选择器 otpmask.dev/tee: "nvidia-cc"
 # - NVIDIA Remote Attestation Service（证明端点差异）
 # - 多卡扩展优先 Blackwell 及以上（NVLink 加密补齐，4.1.2）
+# - P1-3 等保 §6.7（W11/M9，GAP-08）：机密计算运行时 runtimeClassName: nvidia-cc
+#   （RuntimeClass 定义见 deploy/security/runtimeclass.yaml；handler 由机密节点池 containerd 预置）
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -21,6 +23,9 @@ patches:
       value:
         otpmask.dev/tee: "nvidia-cc"
     - op: add
+      path: /spec/template/spec/runtimeClassName
+      value: nvidia-cc
+    - op: add
       path: /spec/template/spec/tolerations
       value:
       - key: otpmask.dev/tee
@@ -35,8 +40,12 @@ patches:
       value:
         otpmask.dev/tee: "nvidia-cc"
     - op: add
+      path: /spec/template/spec/runtimeClassName
+      value: nvidia-cc
+    - op: add
       path: /spec/template/spec/tolerations
       value:
       - key: otpmask.dev/tee
         operator: Exists
         effect: NoSchedule
+

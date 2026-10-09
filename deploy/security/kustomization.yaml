@@ -1,7 +1,17 @@
 # 安全栈入口：kubectl apply -k deploy/security
-# P1-3 等保 §6.4（W6/M5）：主机与容器层运行时入侵检测（Falco HIDS）。
-# 与边界（WAF）和回溯（全流量审计）构成三层覆盖，替代独立 NIDS。
+#   - P1-3 等保 §6.4（W6/M5）：主机与容器层运行时入侵检测（Falco HIDS）；
+#     与边界（WAF）和回溯（全流量审计）构成三层覆盖，替代独立 NIDS。
+#   - P1-3 等保 §6.7（W11/M9）：供应链准入（admission）+ 机密计算运行时（RuntimeClass）
+#     + 节点加固基线与月度扫描（§6.4 R2-07 / §6.7 R2-18）。
+#
+# 前置与启用顺序（运维，见各文件注释）：
+#   1) admission-policy.yaml 为 Kyverno ClusterPolicy —— 需先安装 Kyverno 引擎；
+#      启用前须完成「镜像入私仓 + cosign 签名 + digest 固定」，否则会拒绝现有未签名工作负载。
+#   2) runtimeclass.yaml 依赖节点侧 containerd 已配置对应 handler（见文件头）。
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
 - falco.yaml
+- admission-policy.yaml
+- runtimeclass.yaml
+- node-hardening
