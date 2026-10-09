@@ -63,8 +63,11 @@ type sloDef struct {
 
 // sloStoreState 持久化状态。
 type sloStoreState struct {
-	SLOS           []sloDef `json:"slos"`
-	TracingTenants []string `json:"tracing_tenants"` // tracing allow-list（租户）
+	SLOS []sloDef `json:"slos"`
+	// TracingTenants tracing allow-list 的**本地缓存**。
+	// 事实源为 Collector ConfigMap（见 tracing_allowlist.go）；本字段仅作
+	// 未接线（非集群内）时的只读回显与最近一次成功应用的回执。
+	TracingTenants []string `json:"tracing_tenants"`
 }
 
 // sloHandler SLO 与 tracing 灰度端点集合。
@@ -75,9 +78,13 @@ type sloHandler struct {
 	promURL string
 	client  *http.Client
 	chain   *adminAuditChain
+	// applier Collector allow-list 应用器（事实源 = ConfigMap）。
+	// nil = 未接线（非 in-cluster 或初始化失败）→ 写端点 503 fail-closed。
+	applier *allowlistApplier
 }
 
 // newSLOHandler 装配 handler：加载持久化状态（文件损坏 → 空状态并告警，不拒绝启动）。
+// 同时尽力装配 Collector allow-list 应用器：非 in-cluster → applier 为 nil（写端点 503）。
 func newSLOHandler(file, promURL string, chain *adminAuditChain) *sloHandler {
 	h := &sloHandler{
 		path:    file,
@@ -91,6 +98,11 @@ func newSLOHandler(file, promURL string, chain *adminAuditChain) *sloHandler {
 				log.Printf("[adminext] SLO 状态文件损坏（按空状态处理）：%v", err)
 			}
 		}
+	}
+	if a, err := newAllowlistApplierFromEnv(); err != nil {
+		log.Printf("[adminext] Collector allow-list 未接线（%v）：POST /tracing/tenant 将返回 503", err)
+	} else {
+		h.applier = a
 	}
 	return h
 }
@@ -132,9 +144,25 @@ func (h *sloHandler) getSLO(w http.ResponseWriter, r *http.Request) {
 	state := h.state
 	h.mu.Unlock()
 
+	// tracing allow-list：已接线 → 读事实源（Collector ConfigMap）；未接线 → 本地缓存回显并如实标注。
+	tenants := state.TracingTenants
+	source := "local-cache"
+	wired := h.applier != nil
+	if h.applier != nil {
+		if cur, err := h.applier.current(r.Context()); err != nil {
+			log.Printf("[adminext] 读取 Collector allow-list 失败（回退本地缓存）：%v", err)
+			source = "local-cache(read-failed)"
+		} else {
+			tenants = cur
+			source = "collector-configmap"
+		}
+	}
+
 	out := map[string]any{
 		"slos":            state.SLOS,
-		"tracing_tenants": state.TracingTenants,
+		"tracing_tenants": tenants,
+		"tracing_wired":   wired,
+		"tracing_source":  source,
 		"fetched_at":      time.Now().UnixNano(),
 	}
 	// 错误预算余量：按调用者租户作用域（admin = 全租户）
@@ -222,7 +250,11 @@ func (h *sloHandler) postSLO(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-// handleTracingTenant POST /v1/adminext/tracing/tenant：租户级 tracing 灰度开关（admin，落审计链）。
+// handleTracingTenant POST /v1/adminext/tracing/tenant：租户级 tracing 灰度开关（admin）。
+//
+// 方案 B3（2026-10-08）：事实源 = Collector ConfigMap。流程为
+// 「读 ConfigMap → 增/删租户 → 渲染 → PATCH ConfigMap → 触发 otel-collector 滚动」，
+// **任一步失败即 503（fail-closed），不改本地缓存**——保证「返回 200 即代表已生效」。
 func (h *sloHandler) handleTracingTenant(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "仅支持 POST")
@@ -233,6 +265,11 @@ func (h *sloHandler) handleTracingTenant(w http.ResponseWriter, r *http.Request)
 	}
 	if h.chain == nil {
 		writeError(w, http.StatusServiceUnavailable, "审计链未启用（ADMIN_AUDIT_FILE 未配置），tracing 开关变更拒绝")
+		return
+	}
+	if h.applier == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"tracing 灰度未接线（非 in-cluster 或 K8s 客户端初始化失败）；Collector allow-list 无法应用")
 		return
 	}
 	var body struct {
@@ -250,19 +287,33 @@ func (h *sloHandler) handleTracingTenant(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	h.mu.Lock()
-	h.state.TracingTenants = setAllowList(h.state.TracingTenants, body.Tenant, body.Enabled)
-	err := h.persist()
-	h.mu.Unlock()
+	rev, restarted, tenants, err := h.applier.apply(r.Context(), body.Tenant, body.Enabled)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "tracing 开关持久化失败")
+		log.Printf("[adminext] tracing 灰度开关应用失败：tenant=%s enabled=%v err=%v", body.Tenant, body.Enabled, err)
+		writeError(w, http.StatusServiceUnavailable, "Collector allow-list 应用失败（未生效）: "+err.Error())
 		return
 	}
+
+	// 本地缓存仅作回执（事实源为 ConfigMap）；持久化失败不掩盖已生效结果，仅告警。
+	h.mu.Lock()
+	h.state.TracingTenants = append([]string(nil), tenants...)
+	perr := h.persist()
+	h.mu.Unlock()
+	if perr != nil {
+		log.Printf("[adminext] tracing allow-list 本地缓存写入失败（不影响已生效结果）：%v", perr)
+	}
+
 	h.audit(r, "tracing_tenant_update", body.Tenant)
-	log.Printf("[adminext] tracing 灰度开关更新：tenant=%s enabled=%v（Collector tail_sampling allow-list 待同步）",
-		body.Tenant, body.Enabled)
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
+	log.Printf("[adminext] tracing 灰度开关已应用：tenant=%s enabled=%v rev=%s restarted=%v tenants=%v",
+		body.Tenant, body.Enabled, rev, restarted, tenants)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":    "ok",
+		"applied":   true,
+		"rev":       rev,
+		"restarted": restarted,
+		"tenants":   tenants,
+	})
 }
 
 // audit 落审计链（action/target 留痕）。

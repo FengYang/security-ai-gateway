@@ -171,39 +171,21 @@ func TestSLO_PostInvalid(t *testing.T) {
 	}
 }
 
-// TestTracingTenant_Toggle 验证 tracing 灰度开关增删。
-func TestTracingTenant_Toggle(t *testing.T) {
+// TestTracingTenant_NotWired 验证未接线（非 in-cluster）时 POST → 503。
+// 方案 B3：事实源为 Collector ConfigMap，未接线即无法应用 → fail-closed，绝不"假装成功"。
+func TestTracingTenant_NotWired(t *testing.T) {
 	dir := t.TempDir()
 	chain, _ := newAdminAuditChain(filepath.Join(dir, "audit.jsonl"), "")
 	defer chain.Close()
 	h := newSLOHandler(filepath.Join(dir, "slo.json"), "", chain)
-
-	post := func(body string) int {
-		req := httptest.NewRequest(http.MethodPost, tracingTenantPath, strings.NewReader(body))
-		req = req.WithContext(withClaims(req.Context(), &claims{Sub: "admin", Role: roleAdmin}))
-		rr := httptest.NewRecorder()
-		h.handleTracingTenant(rr, req)
-		return rr.Code
+	if h.applier != nil {
+		t.Skip("测试环境意外具备 in-cluster 配置，跳过")
 	}
-	if code := post(`{"tenant":"t-001","enabled":true}`); code != http.StatusOK {
-		t.Fatalf("启用应 200，实际 %d", code)
-	}
-	h.mu.Lock()
-	list := append([]string(nil), h.state.TracingTenants...)
-	h.mu.Unlock()
-	if len(list) != 1 || list[0] != "t-001" {
-		t.Fatalf("启用后 allow-list 异常：%+v", list)
-	}
-	if code := post(`{"tenant":"t-001","enabled":false}`); code != http.StatusOK {
-		t.Fatalf("停用应 200，实际 %d", code)
-	}
-	h.mu.Lock()
-	list = append([]string(nil), h.state.TracingTenants...)
-	h.mu.Unlock()
-	if len(list) != 0 {
-		t.Fatalf("停用后 allow-list 应为空：%+v", list)
-	}
-	if code := post(`{"tenant":"","enabled":true}`); code != http.StatusBadRequest {
-		t.Fatalf("空 tenant 应 400，实际 %d", code)
+	req := httptest.NewRequest(http.MethodPost, tracingTenantPath, strings.NewReader(`{"tenant":"t-001","enabled":true}`))
+	req = req.WithContext(withClaims(req.Context(), &claims{Sub: "admin", Role: roleAdmin}))
+	rr := httptest.NewRecorder()
+	h.handleTracingTenant(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("未接线应 503，实际 %d", rr.Code)
 	}
 }
