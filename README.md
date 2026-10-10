@@ -25,7 +25,7 @@
 ```
 客户端 ──text──▶ Higress 网关 (otpmask Wasm 插件)
                      │ 1. /key/issue（OTP 密钥，经远程证明）
-                     │ 2. /embed（明文分词向量，内部可信域）
+                     │ 2. /embed（明文分词向量；可信区域随场景，见场景矩阵）
                      │ 3. 向量 + 文本 OTP-Mask 加密 → 南向协议请求（签名）
                      ▼
                tee-infer-service（TEE 飞地）
@@ -41,7 +41,7 @@
 | --- | --- | --- | --- |
 | `gateway/wasm/otpmask-plugin` | Higress Wasm（Go 1.24 wasip1） | 10000 | 网关插件：密钥签发、加密、协议构造、SSE 组装、JWT 鉴权 |
 | `gateway/auth-service` | Go | 19200 | JWT 签发/校验（HS256，租户鉴权，C-6） |
-| `gateway/embedding-service` | Go + tiktoken（cl100k_base） | 18080 | 文本 → token → 向量（明文，内部可信域） |
+| `gateway/embedding-service` | Go + tiktoken（cl100k_base） | 18080 | 文本 → token → 向量（明文；可信区域随场景，见场景矩阵） |
 | `gateway/tee-infer-service` | Go（模拟 TEE，MVP） | 19090 | 密态推理、密钥管理、guardrail、审计（内存/WORM）、指标；text 载荷 SSE 信封流 |
 | `gateway/vllm-adapter` | Go / Python | 19190 | vLLM 明文推理对接（路线 2 保留；路线 1 由 tee-infer 直连 vLLM OpenAI 兼容接口） |
 | `gateway/attest-verify` | Go | 19191 | 证明验证 sidecar（D2）：quote 解析 + 度量基线比对，localhost `/verify` |
@@ -101,7 +101,7 @@ powershell -NoProfile -File scripts/verify-k8s.ps1 -Kind
 
 ## 5. 安全模型摘要
 
-- **信任边界**：明文仅出现在 TEE 飞地（`tee-infer-service`）与内部 embedding 服务；网关 Wasm 插件与网络链路只接触密文。
+- **信任边界（按场景，勿普遍化）**：**仅在客户不信任基础设施的场景（密态轨 S2/S3）**，明文才收窄到 TEE 飞地（`tee-infer-service`）或客户可信域内的 tee-infer（S2）与内部 embedding 服务，网关与网络链路只接触密文。**明文路径 `/provider/*`（S1）属"客户自建可信内网"，明文在客户可信域内，不受"明文不出飞地"约束**。判断口径与唯一事实源见 `docs/GA-产品场景与可信区域矩阵.md` §0.1。
 - **威胁缓解**：完整性（HMAC 签名）、防重放（30s 窗口 + 去重）、租户隔离（独立 KeyManager）、内容安全（Guardrail fail-closed）、审计（哈希链）、降级策略（TEE 不可用 → 503 拒绝，绝不降级明文）。
 - **认证边界（MVP 已知项）**：`X-Tenant-ID` 与远程证明令牌为演示值；生产须由网关鉴权签发（JWT）并经 TEE 签名注入。
 - 完整威胁模型：`otp-mask-threat-model/`；审计结论：`docs/Phase3-M11-安全审计与渗透测试.md`（20/20 渗透通过，1 项 P2 已修复）。

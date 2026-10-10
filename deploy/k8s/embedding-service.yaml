@@ -1,4 +1,4 @@
-# embedding-service：文本 → token → 向量（明文，企业内部可信域）
+# embedding-service：文本 → token → 向量（明文；可信区域随场景，见《GA-产品场景与可信区域矩阵》）
 apiVersion: apps/v1
 kind: Deployment
 metadata:

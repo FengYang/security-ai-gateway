@@ -9,7 +9,7 @@
 | --- | --- | --- | --- |
 | 网关（Envoy + otpmask 插件） | `:10000` | 应用层推理入口（文本 → SSE） | `X-Tenant-ID` 租户头；`Authorization: Bearer <JWT>`（C-6 可选/强制） |
 | auth-service | `:19200` | JWT 签发/校验（租户鉴权，C-6） | 无（内部网络） |
-| embedding-service | `:18080` | 文本 → token/向量（内部可信域；路线 2 形态） | 无（内部网络） |
+| embedding-service | `:18080` | 文本 → token/向量（明文；可信区域随场景，见《GA-产品场景与可信区域矩阵》；路线 2 形态） | 无（内部网络） |
 | tee-infer-service | `:19090` | 证明握手 / 密钥签发 / 南向推理 / 治理面 | `X-Session-ID`（quote 会话）/ `X-Attest-Token`（MVP） |
 | vllm-adapter | `:19190` | 明文推理引擎接口（TEE 内；路线 2 保留） | 无（TEE 内网） |
 | attest-verify（P3，D2） | `127.0.0.1:19191` | TDX quote 验证 sidecar（`/verify`、`/healthz`） | `X-Verify-Token`（可选，回环绑定） |

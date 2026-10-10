@@ -1,6 +1,6 @@
 // Package main — embedding-service（M4 里程碑 + G2-1 修正：tiktoken 集成）
 //
-// 职责：文本 → token IDs → 词嵌入向量（明文，企业内部可信域）。
+// 职责：文本 → token IDs → 词嵌入向量（明文；可信区域随场景，见《GA-产品场景与可信区域矩阵》）。
 // 位置：网关侧独立服务（Sidecar），Wasm 插件经本地 HTTP 调用。
 //
 // 实现说明（诚实标注）：

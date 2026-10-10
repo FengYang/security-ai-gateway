@@ -9,7 +9,7 @@
 # 校验：T-12.4-1..3 经 make tlcp-verify（deploy/tlcp/verify.sh）。
 
 upstream higress-internal {
-    server 127.0.0.1:8443;       # Envoy/Higress HTTPS 监听（内网可信域）
+    server 127.0.0.1:8443;       # Envoy/Higress HTTPS 监听（回环地址，非信任边界；可信区域见《GA-产品场景与可信区域矩阵》）
     keepalive 32;
 }
 
