@@ -73,8 +73,24 @@ def _ssh(host, password, remote_cmd, timeout=600):
     return output.decode("utf-8", errors="replace")
 
 
-def run_script(local_py, *script_args, timeout=600):
-    """上传助手与目标脚本到节点，远程以 --remote 模式执行目标脚本。"""
+def _bundle_b64(local_dir):
+    """把目录打包为 gzip tar，返回 base64（随脚本一次性上传）。"""
+    import io
+    import tarfile
+
+    local_dir = os.path.abspath(local_dir)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        tar.add(local_dir, arcname=os.path.basename(local_dir))
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def run_script(local_py, *script_args, timeout=600, bundle_dir=None):
+    """上传助手与目标脚本到节点，远程以 --remote 模式执行目标脚本。
+
+    bundle_dir 非空时，把该目录打包上传并解压到远程工作目录，同时通过环境变量
+    K3S_BUNDLE_DIR 把解压后的绝对路径传给目标脚本（绝对路径）。
+    """
     host, password = _credentials()
     local_py = os.path.abspath(local_py)
     helper_path = os.path.abspath(__file__)
@@ -88,11 +104,22 @@ def run_script(local_py, *script_args, timeout=600):
     target_name = os.path.basename(local_py)
     quoted_args = " ".join("'" + a.replace("'", "'\\''") + "'" for a in script_args)
 
+    bundle_block = ""
+    env_prefix = ""
+    if bundle_dir:
+        bundle_name = os.path.basename(os.path.abspath(bundle_dir))
+        packed = _bundle_b64(bundle_dir)
+        bundle_block = (
+            f"echo '{packed}' | base64 -d | tar xz && "
+        )
+        env_prefix = f"K3S_BUNDLE_DIR='{REMOTE_WORKDIR}/{bundle_name}' "
+
     remote_cmd = (
         f"mkdir -p '{REMOTE_WORKDIR}' && cd '{REMOTE_WORKDIR}' && "
         f"echo '{helper_b64}' | base64 -d > '{helper_name}' && "
         f"echo '{target_b64}' | base64 -d > '{target_name}' && "
-        f"python3 '{target_name}' --remote {quoted_args}; "
+        f"{bundle_block}"
+        f"{env_prefix}python3 '{target_name}' --remote {quoted_args}; "
         f"echo __K3S_REMOTE_EXIT__$?"
     )
     out = _ssh(host, password, remote_cmd, timeout=timeout)
