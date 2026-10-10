@@ -4,17 +4,19 @@
 #   docker build -t security-ai-gateway/gateway-admin-service:latest -f gateway/gateway-admin-service/Dockerfile .
 #
 # 说明：
-#   - 该包仅依赖标准库（无内部/第三方 import），故只需 go.mod/go.sum + 本目录；
+#   - 依赖本目录 + `gateway/cryptop`（密码运行时）+ `protocol/go`（tracing/审计帧），故需 COPY 三处；
 #   - 运行镜像安装 ca-certificates：broker 需出网访问厂商 HTTPS 端点
 #     （NetworkPolicy 已限定仅 443 且排除集群内网段，见 deploy/k8s/gateway-admin-service.yaml）；
 #   - USER 65532 与清单 runAsUser/fsGroup 一致（least privilege；清单另置
 #     readOnlyRootFilesystem=true、capabilities.drop=[ALL]）→ 审计默认内存态，无需可写根目录。
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 ENV GOPROXY=https://goproxy.cn,direct
 COPY go.mod go.sum ./
 RUN go mod download
 COPY gateway/gateway-admin-service ./gateway/gateway-admin-service
+COPY gateway/cryptop ./gateway/cryptop
+COPY protocol ./protocol
 RUN CGO_ENABLED=0 go build -trimpath -o /out/gateway-admin-service ./gateway/gateway-admin-service
 
 FROM alpine:3.20

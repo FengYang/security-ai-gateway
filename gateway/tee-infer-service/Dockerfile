@@ -1,5 +1,5 @@
 # tee-infer-service 镜像（M5）
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 ENV GOPROXY=https://goproxy.cn,direct
 COPY go.mod go.sum ./
@@ -8,6 +8,7 @@ COPY cipher ./cipher
 COPY protocol ./protocol
 COPY internal ./internal
 COPY gateway/teecore ./gateway/teecore
+COPY gateway/cryptop ./gateway/cryptop
 COPY gateway/tee-infer-service ./gateway/tee-infer-service
 RUN CGO_ENABLED=0 go build -trimpath -o /out/tee-infer-service ./gateway/tee-infer-service
 
