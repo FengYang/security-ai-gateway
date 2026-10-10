@@ -46,11 +46,13 @@ data:
       alertmanagers:
       - static_configs:
         - targets: ["alertmanager.otpmask.svc.cluster.local:9093"]
-    # 规则加载说明：本栈为原生 Prometheus Deployment（无 prometheus-operator），
-    # 故 PrometheusRule CR（security-prometheusrule.yaml、slo-*.yaml、billing-*.yaml）
-    # 需由 operator 渲染；原生环境下按 Prometheus 文本格式转为 ConfigMap 并挂载后启用：
-    #   rule_files:
-    #   - /etc/prometheus/rules/*.rules.yml
+    # 规则加载（本栈为原生 Prometheus Deployment，无 prometheus-operator）：
+    # 规则以原生文本存于 prometheus-rules ConfigMap，挂载到 /etc/prometheus/rules/，
+    # 经下方 rule_files glob 加载（P1-2 SLO 告警，AC-01 修复）。
+    # PrometheusRule CR（security-/slo-/billing-*.yaml）仅供 Prometheus Operator 环境
+    # 显式 apply，本原生栈勿用（apply 会因 CRD 不存在而失败）。
+    rule_files:
+    - /etc/prometheus/rules/*.rules.yml
     scrape_configs:
     - job_name: otpmask
       kubernetes_sd_configs:
@@ -73,6 +75,93 @@ data:
       - source_labels: [__meta_kubernetes_pod_label_app]
         action: replace
         target_label: app
+---
+# P1-2：SLO/错误预算告警规则（原生 Prometheus 文本格式，AC-01 修复）。
+# 本栈无 prometheus-operator，PrometheusRule CR 无法被渲染，故规则以本 ConfigMap
+# 挂载到 /etc/prometheus/rules/，经 prometheus.yml 的 rule_files glob 自动加载。
+# Operator 环境的 CR 形式见 slo-prometheusrule.yaml；两边规则内容须保持一致。
+# runbook_url 现为相对占位，上线前替换为内部 wiki 绝对 URL。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: otpmask
+  labels:
+    app: otpmask
+data:
+  slo.rules.yml: |
+    groups:
+      - name: ai-slo.rules
+        interval: 30s
+        rules:
+          # ---- 可用性燃尽（critical）：1h 窗口燃尽率 ≥ 14.4 ----
+          - alert: AISLOAvailabilityBurnFast
+            expr: |
+              (
+                1 - (
+                  sum(rate(otpmask_inference_requests_total{result="ok"}[1h]))
+                  / clamp_min(sum(rate(otpmask_inference_requests_total[1h])), 1)
+                )
+              ) / 0.001 >= 14.4
+            for: 5m
+            labels:
+              severity: critical
+              category: slo
+              team: ai-gateway-ops
+            annotations:
+              summary: "AI 网关可用性错误预算燃尽过快（1h 燃尽率 ≥ 14.4）"
+              description: "近 1h 成功率低于 SLO 99.9% 对应的燃尽速率。当前燃尽率 {{ $value | printf \"%.2f\" }}。排查 tee-infer 错误率（otpmask_denies_total）与上游模型可用性。"
+              runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全链路tracing.md"
+
+          # ---- 可用性燃尽（warning）：6h 窗口燃尽率 ≥ 6 ----
+          - alert: AISLOAvailabilityBurnSlow
+            expr: |
+              (
+                1 - (
+                  sum(rate(otpmask_inference_requests_total{result="ok"}[6h]))
+                  / clamp_min(sum(rate(otpmask_inference_requests_total[6h])), 1)
+                )
+              ) / 0.001 >= 6
+            for: 30m
+            labels:
+              severity: warning
+              category: slo
+              team: ai-gateway-ops
+            annotations:
+              summary: "AI 网关可用性错误预算持续消耗（6h 燃尽率 ≥ 6）"
+              description: "近 6h 燃尽率 {{ $value | printf \"%.2f\" }}，持续消耗错误预算。核查租户侧错误分布与拒绝原因。"
+              runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全链路tracing.md"
+
+          # ---- 延迟 SLO（warning）：P99 首 token 时延 > 5s ----
+          - alert: AISLOTTFTp99Slow
+            expr: |
+              histogram_quantile(0.99,
+                sum(rate(otpmask_ttft_seconds_bucket[30m])) by (le)
+              ) > 5
+            for: 10m
+            labels:
+              severity: warning
+              category: slo
+              team: ai-gateway-ops
+            annotations:
+              summary: "P99 首 token 时延超过 5s"
+              description: "近 30 分钟 P99 TTFT = {{ $value | printf \"%.2f\" }}s，超过延迟 SLO 阈值 5s。排查上游模型排队/缓存命中率下降（otpmask_cache_lookups_total）/网络时延。"
+              runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全链路tracing.md"
+
+          # ---- 拒绝率（warning）：内容/安全拒绝占比 > 5% ----
+          - alert: AIGatewayDenyRateHigh
+            expr: |
+              sum(rate(otpmask_denies_total[10m]))
+              / clamp_min(sum(rate(otpmask_inference_requests_total[10m])), 1) > 0.05
+            for: 10m
+            labels:
+              severity: warning
+              category: slo
+              team: ai-gateway-ops
+            annotations:
+              summary: "请求拒绝率 > 5%"
+              description: "近 10 分钟拒绝率 {{ $value | humanizePercentage }}。按 reason 拆分（otpmask_denies_total）核实：内容安全拦截 / 配额 / 签名 / 重放。"
+              runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全链路tracing.md"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -106,6 +195,10 @@ spec:
           mountPath: /etc/prometheus/prometheus.yml
           subPath: prometheus.yml
           readOnly: true
+        # P1-2：SLO 告警规则（原生文本，AC-01 修复）。
+        - name: rules
+          mountPath: /etc/prometheus/rules
+          readOnly: true
         - name: data
           mountPath: /prometheus
         resources:
@@ -126,6 +219,10 @@ spec:
       - name: config
         configMap:
           name: prometheus-config
+      # P1-2：SLO 告警规则卷（prometheus-rules ConfigMap，AC-01 修复）。
+      - name: rules
+        configMap:
+          name: prometheus-rules
       - name: data
         persistentVolumeClaim:
           claimName: prometheus-data # C-9：TSDB 持久化（kind 需先装 local-path provisioner）
