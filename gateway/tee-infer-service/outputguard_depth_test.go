@@ -9,6 +9,7 @@ package main
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -85,11 +86,17 @@ func TestSourceInvariant_OutputDepthWiring(t *testing.T) {
 	s := string(src)
 	for _, want := range []string{
 		"validateOutputDepth(*outputGuardDepth, deriveOutputDepth(srv.outputGuardMode, srv.outputGuardMaskEnabled))",
-		"OutputDepth:   deriveOutputDepth(ogMode, s.outputGuardMaskEnabled),",
 		`" depth=" + deriveOutputDepth(req.Mode, s.outputGuardMaskEnabled)`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("main.go 缺少 S1-6 档位接线：%s", want)
 		}
+	}
+	// GET /config 快照的派生档位接线：**空白容忍匹配**——源文件经 gofmt 后会按最宽字段名对
+	// struct 字面量做列对齐（`OutputDepth:` 后补空格），旧的字面串断言会因**纯格式变更**误报
+	// （P1-2 M2 tracing 提交 `edc2935` 对齐 main.go 即触发该回归）。此处改用正则，只锁
+	// 「接线存在」语义、不锁空白，避免同类脆弱断言复发。
+	if !regexp.MustCompile(`OutputDepth:\s+deriveOutputDepth\(ogMode, s\.outputGuardMaskEnabled\),`).MatchString(s) {
+		t.Fatalf("main.go 缺少 S1-6 档位接线：OutputDepth: deriveOutputDepth(ogMode, s.outputGuardMaskEnabled),")
 	}
 }
