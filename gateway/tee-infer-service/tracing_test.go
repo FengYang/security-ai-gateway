@@ -3,11 +3,14 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -376,4 +379,204 @@ func TestIsAllowedAttribute(t *testing.T) {
 			t.Errorf("isAllowedAttribute(%q) = %v，期望 %v", k, got, expected)
 		}
 	}
+}
+
+// saveTeeTracing 保存并恢复 tee 包 tracing 全局态（含 otel 全局 provider/propagator）。
+// 供切换 TRACING_ENABLED 的用例在结束后恢复，避免污染同包其它用例（C-4/C-8）。
+func saveTeeTracing(t *testing.T) {
+	t.Helper()
+	globalTracing.mu.Lock()
+	origEnabled := globalTracing.enabled
+	origProvider := globalTracing.provider
+	origTracer := globalTracing.tracer
+	origTransport := globalTracing.stripTransport
+	globalTracing.mu.Unlock()
+	origTP := otel.GetTracerProvider()
+	origProp := otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		globalTracing.mu.Lock()
+		globalTracing.enabled = origEnabled
+		globalTracing.provider = origProvider
+		globalTracing.tracer = origTracer
+		globalTracing.stripTransport = origTransport
+		globalTracing.mu.Unlock()
+		otel.SetTracerProvider(origTP)
+		otel.SetTextMapPropagator(origProp)
+	})
+}
+
+// TestInitTracing_Disabled 验证 TRACING_ENABLED != "true" 时装配 NoOp（零开销，C-4/C-8）。
+func TestInitTracing_Disabled(t *testing.T) {
+	saveTeeTracing(t)
+	t.Setenv("TRACING_ENABLED", "false")
+
+	if err := initTracing(); err != nil {
+		t.Fatalf("关闭态初始化不应报错：%v", err)
+	}
+	if tracingEnabled() {
+		t.Error("关闭态 tracingEnabled 应为 false")
+	}
+	if _, ok := tracer().(noop.Tracer); !ok {
+		t.Error("关闭态 tracer 应为 NoOp")
+	}
+	if globalTracing.provider != nil {
+		t.Error("关闭态 provider 应为 nil")
+	}
+	if upstreamTransport() != http.DefaultTransport {
+		t.Error("关闭态上游传输应为默认传输（不剥离）")
+	}
+}
+
+// TestInitTracing_EnabledLazyProvider 验证启用态装配真实 provider + 剥离传输；
+// OTLP 出口惰性连接，不可达端点不阻塞；并覆盖 insecure 分支（§6.2 / D-3）。
+func TestInitTracing_EnabledLazyProvider(t *testing.T) {
+	saveTeeTracing(t)
+	t.Setenv("TRACING_ENABLED", "true")
+	t.Setenv("TRACING_OTLP_ENDPOINT", "") // 空 → 走默认 endpoint 分支
+	t.Setenv("TRACING_TLS_INSECURE", "true")
+
+	if err := initTracing(); err != nil {
+		t.Fatalf("启用态装配不应失败（惰性连接）：%v", err)
+	}
+	if !tracingEnabled() {
+		t.Error("启用态 tracingEnabled 应为 true")
+	}
+	if globalTracing.provider == nil {
+		t.Error("启用态 provider 不应为 nil")
+	}
+	if _, ok := tracer().(noop.Tracer); ok {
+		t.Error("启用态 tracer 不应为 NoOp")
+	}
+	if _, ok := upstreamTransport().(*stripTraceHeadersTransport); !ok {
+		t.Errorf("启用态上游传输应为剥离传输，实际 %T", upstreamTransport())
+	}
+
+	// shutdownTracing：覆盖非 nil provider 分支 + 复位
+	shutdownTracing()
+	if tracingEnabled() || globalTracing.provider != nil {
+		t.Fatal("shutdown 后应复位为关闭态")
+	}
+	if _, ok := tracer().(noop.Tracer); !ok {
+		t.Fatal("shutdown 后 tracer 应为 NoOp")
+	}
+	shutdownTracing() // 幂等：provider 为 nil 时不应 panic
+}
+
+// stubRoundTripper 记录收到的请求并返回固定响应（用于直接驱动 RoundTrip，不依赖真实网络）。
+type stubRoundTripper struct{ got *http.Request }
+
+func (s *stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.got = req
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader("ok")),
+	}, nil
+}
+
+// TestStripTraceHeadersTransport_NilHeaderDirect 验证 Header 为 nil 时直接透传、不 panic（§6.4 边界）。
+func TestStripTraceHeadersTransport_NilHeaderDirect(t *testing.T) {
+	stub := &stubRoundTripper{}
+	tr := &stripTraceHeadersTransport{base: stub}
+	req := &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "http", Host: "upstream.local"}, Header: nil}
+
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("nil header 不应报错：%v", err)
+	}
+	_ = resp.Body.Close()
+	if stub.got != req {
+		t.Error("nil header 时应原样透传请求")
+	}
+}
+
+// TestStripTraceHeadersTransport_NonCanonicalVariants 验证非规范大小写键驱动循环内删除分支（§6.4）。
+func TestStripTraceHeadersTransport_NonCanonicalVariants(t *testing.T) {
+	stub := &stubRoundTripper{}
+	tr := &stripTraceHeadersTransport{base: stub}
+	req := &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "http", Host: "u.local"}, Header: http.Header{}}
+	// 绕过 Header.Set 的规范化，构造非规范大小写键以进入兼容循环
+	req.Header["TraceParent"] = []string{"00-abc-def-01"}
+	req.Header["X-Request-Id"] = []string{"rid"} // 规范键：初始 Del 即删
+	req.Header["Content-Type"] = []string{"application/json"}
+
+	if _, err := tr.RoundTrip(req); err != nil {
+		t.Fatalf("RoundTrip 失败：%v", err)
+	}
+	if stub.got.Header.Get("X-Request-Id") != "" {
+		t.Error("X-Request-Id 应被剥离")
+	}
+	if stub.got.Header.Get("Content-Type") != "application/json" {
+		t.Error("Content-Type 不应被剥离")
+	}
+	// 原始请求不被修改（Clone 语义）
+	if req.Header.Get("X-Request-Id") != "rid" {
+		t.Error("原始请求头不应被修改")
+	}
+}
+
+// TestStartUpstreamSpan_RetryEvent 验证重试复用 span、以 is.retry + retry.start 事件区分（§7.4）。
+func TestStartUpstreamSpan_RetryEvent(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithBatcher(exp),
+	)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	globalTracing.mu.Lock()
+	origTracer, origEnabled := globalTracing.tracer, globalTracing.enabled
+	globalTracing.tracer, globalTracing.enabled = tp.Tracer(tracingServiceName), true
+	globalTracing.mu.Unlock()
+	defer func() {
+		globalTracing.mu.Lock()
+		globalTracing.tracer, globalTracing.enabled = origTracer, origEnabled
+		globalTracing.mu.Unlock()
+	}()
+
+	_, span := startUpstreamSpan(context.Background(), 123, true, "0123456789abcdef")
+	span.End()
+	_ = tp.ForceFlush(context.Background())
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("期望 1 条 span，实际 %d", len(spans))
+	}
+	if spans[0].Name != "upstream.model.call" {
+		t.Errorf("span 名异常：%q", spans[0].Name)
+	}
+	got := map[string]string{}
+	for _, a := range spans[0].Attributes {
+		got[string(a.Key)] = a.Value.Emit()
+	}
+	if got["is.retry"] != "true" {
+		t.Errorf("is.retry 应为 true，实际 %q", got["is.retry"])
+	}
+	if got["input.digest"] != "0123456789abcdef" {
+		t.Errorf("input.digest 异常：%q", got["input.digest"])
+	}
+	retryEvent := false
+	for _, e := range spans[0].Events {
+		if e.Name == "retry.start" {
+			retryEvent = true
+		}
+	}
+	if !retryEvent {
+		t.Error("重试应记录 retry.start 事件")
+	}
+}
+
+// TestSanitizingSpanProcessor_OnEndStrictPanics 验证 strict 模式 OnEnd 对非白名单属性 panic（D-4 二次校验）。
+func TestSanitizingSpanProcessor_OnEndStrictPanics(t *testing.T) {
+	p := &SanitizingSpanProcessor{Strict: true}
+	stub := tracetest.SpanStub{
+		Name:       "guardrail.check",
+		Attributes: []attribute.KeyValue{attribute.String("prompt", "secret")},
+	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("OnEnd strict 下非白名单属性应触发 panic")
+		}
+	}()
+	p.OnEnd(stub.Snapshot())
 }

@@ -149,3 +149,109 @@ func TestWithRouteChangeSpan_DisabledNoSpan(t *testing.T) {
 	coreTracing.tracer = noop.Tracer{}
 	coreTracing.mu.Unlock()
 }
+
+// saveCoreTracing 保存并恢复 core 包 tracing 全局态，供切换 TRACING_ENABLED 的用例使用（C-4）。
+func saveCoreTracing(t *testing.T) {
+	t.Helper()
+	coreTracing.mu.Lock()
+	origEnabled := coreTracing.enabled
+	origProvider := coreTracing.provider
+	origTracer := coreTracing.tracer
+	coreTracing.mu.Unlock()
+	t.Cleanup(func() {
+		coreTracing.mu.Lock()
+		coreTracing.enabled = origEnabled
+		coreTracing.provider = origProvider
+		coreTracing.tracer = origTracer
+		coreTracing.mu.Unlock()
+	})
+}
+
+// TestInitTracing_DisabledNoop 验证 TRACING_ENABLED != "true" 时装配 NoOp（零开销，C-4）。
+func TestInitTracing_DisabledNoop(t *testing.T) {
+	saveCoreTracing(t)
+	t.Setenv("TRACING_ENABLED", "false")
+
+	if err := InitTracing(); err != nil {
+		t.Fatalf("关闭态初始化不应报错：%v", err)
+	}
+	if coreTracingEnabled() {
+		t.Error("关闭态 coreTracingEnabled 应为 false")
+	}
+	if _, ok := coreTracer().(noop.Tracer); !ok {
+		t.Error("关闭态 tracer 应为 NoOp")
+	}
+	if coreTracing.provider != nil {
+		t.Error("关闭态 provider 应为 nil")
+	}
+}
+
+// TestInitTracing_EnabledLazyProvider 验证启用态装配真实 provider；OTLP 出口惰性连接，
+// 不可达端点不阻塞初始化（D-3 / §7.4）。
+func TestInitTracing_EnabledLazyProvider(t *testing.T) {
+	saveCoreTracing(t)
+	t.Setenv("TRACING_ENABLED", "true")
+	t.Setenv("TRACING_OTLP_ENDPOINT", "") // 空 → 走默认 endpoint（不可达，验证惰性初始化不阻塞）
+	t.Setenv("TRACING_TLS_INSECURE", "true")
+
+	if err := InitTracing(); err != nil {
+		t.Fatalf("启用态装配不应失败（惰性连接）：%v", err)
+	}
+	if !coreTracingEnabled() {
+		t.Error("启用态 coreTracingEnabled 应为 true")
+	}
+	if coreTracing.provider == nil {
+		t.Error("启用态 provider 不应为 nil")
+	}
+	if _, ok := coreTracer().(noop.Tracer); ok {
+		t.Error("启用态 tracer 不应为 NoOp")
+	}
+	ShutdownTracing() // 覆盖非 nil provider 分支
+}
+
+// TestShutdownTracing_ResetsToNoop 验证 Shutdown 复位为关闭态且可幂等重复调用。
+func TestShutdownTracing_ResetsToNoop(t *testing.T) {
+	saveCoreTracing(t)
+
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp))
+	coreTracing.mu.Lock()
+	coreTracing.provider = tp
+	coreTracing.tracer = tp.Tracer(coreTracingServiceName)
+	coreTracing.enabled = true
+	coreTracing.mu.Unlock()
+
+	ShutdownTracing()
+	if coreTracingEnabled() || coreTracing.provider != nil {
+		t.Fatal("Shutdown 后应复位为关闭态")
+	}
+	if _, ok := coreTracer().(noop.Tracer); !ok {
+		t.Fatal("Shutdown 后 tracer 应为 NoOp")
+	}
+	ShutdownTracing() // 幂等：provider 为 nil 时不应 panic
+}
+
+// TestStatusRecorder_Write 验证未显式 WriteHeader 时 Write 记 200，已设码时保持原码。
+func TestStatusRecorder_Write(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sr := &statusRecorder{ResponseWriter: rec}
+	n, err := sr.Write([]byte("hello"))
+	if err != nil || n != 5 {
+		t.Fatalf("Write 异常：n=%d err=%v", n, err)
+	}
+	if sr.code != http.StatusOK {
+		t.Errorf("未显式 WriteHeader 时 code 应为 200，实际 %d", sr.code)
+	}
+	if rec.Body.String() != "hello" {
+		t.Errorf("响应体应透传，实际 %q", rec.Body.String())
+	}
+
+	rec2 := httptest.NewRecorder()
+	sr2 := &statusRecorder{ResponseWriter: rec2, code: http.StatusCreated}
+	if _, err := sr2.Write([]byte("x")); err != nil {
+		t.Fatalf("Write 异常：%v", err)
+	}
+	if sr2.code != http.StatusCreated {
+		t.Errorf("已设码时不应被覆盖，实际 %d", sr2.code)
+	}
+}

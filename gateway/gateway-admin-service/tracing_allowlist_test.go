@@ -161,6 +161,7 @@ func TestRenderAllowlist_AnchorMissing(t *testing.T) {
 	}
 }
 
+// TestParseAllowlist_RoundTrip 验证渲染后解析往返一致、空列表解析为空。
 func TestParseAllowlist_RoundTrip(t *testing.T) {
 	out, _ := renderAllowlist(sampleCollectorCfg, []string{"t-001"})
 	got, err := parseAllowlist(out)
@@ -170,6 +171,68 @@ func TestParseAllowlist_RoundTrip(t *testing.T) {
 	empty, err := parseAllowlist(sampleCollectorCfg)
 	if err != nil || len(empty) != 0 {
 		t.Fatalf("空列表解析异常：%v %v", err, empty)
+	}
+}
+
+// TestParseAllowlist_EmptyAnchorValue 验证锚点后为空值时返回 nil,nil（未设置 = 空列表）。
+func TestParseAllowlist_EmptyAnchorValue(t *testing.T) {
+	cfg := "processors:\n  tail_sampling:\n    x: values: &tenant_allowlist\n"
+	got, err := parseAllowlist(cfg)
+	if err != nil || got != nil {
+		t.Fatalf("空值锚点应返回 nil,nil：err=%v got=%v", err, got)
+	}
+}
+
+// TestParseAllowlist_InvalidJSON 验证锚点后非合法 JSON 时 fail-closed 报错。
+func TestParseAllowlist_InvalidJSON(t *testing.T) {
+	cfg := "        values: &tenant_allowlist not-a-json"
+	if _, err := parseAllowlist(cfg); err == nil {
+		t.Fatal("非法 JSON 应报错（fail-closed）")
+	}
+}
+
+// TestParseAllowlist_AnchorMissing 验证锚点缺失时返回错误。
+func TestParseAllowlist_AnchorMissing(t *testing.T) {
+	if _, err := parseAllowlist("processors:\n  tail_sampling: {}\n"); err == nil {
+		t.Fatal("锚点缺失应报错")
+	}
+}
+
+// newFailingK8sServer 返回对任意请求一律 500 的仿真 K8s（用于失败路径编排）。
+func newFailingK8sServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "boom"})
+	}))
+}
+
+// TestAllowlistCurrent_GetError 验证读事实源失败时 current 返回错误（fail-closed）。
+func TestAllowlistCurrent_GetError(t *testing.T) {
+	srv := newFailingK8sServer(t)
+	defer srv.Close()
+	a := newTestApplier(srv, "otpmask")
+	if _, err := a.current(t.Context()); err == nil {
+		t.Fatal("ConfigMap GET 失败应返回错误")
+	}
+}
+
+// TestAllowlistApply_GetError 验证读事实源失败时 apply 返回错误（fail-closed）。
+func TestAllowlistApply_GetError(t *testing.T) {
+	srv := newFailingK8sServer(t)
+	defer srv.Close()
+	a := newTestApplier(srv, "otpmask")
+	if _, _, _, err := a.apply(t.Context(), "t-001", true); err == nil {
+		t.Fatal("ConfigMap GET 失败应返回错误")
+	}
+}
+
+// TestAllowlistApply_ParseError 验证事实源缺锚点时 apply 返回错误（不静默 no-op）。
+func TestAllowlistApply_ParseError(t *testing.T) {
+	_, srv := newFakeK8sServer(t, "otpmask", "otel-collector-config", "otel-collector.yaml", "otel-collector", "processors:\n  tail_sampling: {}\n")
+	defer srv.Close()
+	a := newTestApplier(srv, "otpmask")
+	if _, _, _, err := a.apply(t.Context(), "t-001", true); err == nil {
+		t.Fatal("缺锚点应返回错误")
 	}
 }
 
