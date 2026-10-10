@@ -1,11 +1,18 @@
 # P1-2 全链路 tracing —— M7 SLO 告警规则（PrometheusRule）
 #
-# 单一事实源：本文件（kind: PrometheusRule）。
-# 部署：kube-prometheus-stack / PrometheusOperator 环境下 `kubectl apply -f`。
+# 形态：本文件为 Prometheus Operator 环境的 CR 形式；原生栈对应规则文本在
+# prometheus.yaml 的 prometheus-rules ConfigMap（slo.rules.yml），两者同源维护。
 # 指标来源：tee-infer-service /metrics 暴露的 `otpmask_*` 体系（C-8：不改动既有 /metrics）。
 #
-# 与 `billing-prometheusrule.yaml` 一致：不入 kustomization（CRD 依赖 Operator 环境），
-# 由部署单位显式 apply；runbook_url 为相对占位，须替换为内部 wiki 绝对 URL。
+# 部署（两种环境二选一）：
+#   - 原生 Prometheus（本项目默认栈，无 Operator）：规则已内置 prometheus.yaml 的
+#     prometheus-rules ConfigMap（slo.rules.yml），随 `kubectl apply -k` 挂载并经
+#     rule_files 加载；本 CR 切勿接入 kustomization——无 Operator 时 apply 会因
+#     monitoring.coreos.com CRD 不存在而失败（AC-01 修复，2026-10-10）。
+#   - kube-prometheus-stack / Prometheus Operator 环境：由部署单位显式 `kubectl apply -f` 本文件。
+#
+# 本文件与 prometheus.yaml 内 slo.rules.yml 的规则内容须保持一致；
+# runbook_url 为相对占位，须替换为内部 wiki 绝对 URL。
 #
 # SLO 口径（§7.6/§7.9）：
 #   - 可用性 SLO = 成功率（result="ok"）；默认目标 99.9%（§7.9 冻结示例 target=0.999），
@@ -17,7 +24,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: ai-slo-alerts
-  namespace: security-ai-gateway
+  namespace: otpmask # 与监控栈统一（原为 security-ai-gateway，AC-01 修复对齐）
   labels:
     app: ai-gateway
     role: slo
