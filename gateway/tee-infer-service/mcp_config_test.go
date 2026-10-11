@@ -128,3 +128,67 @@ func TestMCPPolicyKeepsOldOnBadSignature(t *testing.T) {
 		t.Fatalf("应保留旧目录 v5，实得 v%d", v)
 	}
 }
+
+// TestMCPPolicyRejectsBadRequests T-9：handleMCPPolicy 边界（405 / 401 / 400 非法 JSON / 400 空对象）。
+func TestMCPPolicyRejectsBadRequests(t *testing.T) {
+	s, _, _ := mcpTestServer(t)
+
+	// 非 POST → 405
+	rec := httptest.NewRecorder()
+	s.handleMCPPolicy(rec, httptest.NewRequest(http.MethodGet, "/config/mcp/policy", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("非 POST 应 405，实得 %d", rec.Code)
+	}
+	// 无令牌 → 401
+	rec = httptest.NewRecorder()
+	s.handleMCPPolicy(rec, httptest.NewRequest(http.MethodPost, "/config/mcp/policy", bytes.NewReader([]byte(`{}`))))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("无令牌应 401，实得 %d", rec.Code)
+	}
+	// 令牌正确但 body 非法 JSON → 400
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/config/mcp/policy", bytes.NewReader([]byte(`{oops`)))
+	req.Header.Set(adminHeader, "tok")
+	s.handleMCPPolicy(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("非法 JSON 应 400，实得 %d", rec.Code)
+	}
+	// catalog/policy 皆缺 → 400
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/config/mcp/policy", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set(adminHeader, "tok")
+	s.handleMCPPolicy(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("catalog/policy 皆缺应 400，实得 %d", rec.Code)
+	}
+}
+
+// TestMCPPolicySingleSide T-9：单边下发（仅 catalog / 仅 policy）各自生效。
+func TestMCPPolicySingleSide(t *testing.T) {
+	s, sig, _ := mcpTestServer(t)
+	body, _ := json.Marshal(mcpPolicyRequest{Catalog: signedCatalog(t, sig, 1)})
+	req := httptest.NewRequest(http.MethodPost, "/config/mcp/policy", bytes.NewReader(body))
+	req.Header.Set(adminHeader, "tok")
+	rec := httptest.NewRecorder()
+	s.handleMCPPolicy(rec, req)
+	var got map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["catalog_applied"] != true {
+		t.Fatalf("仅 catalog 应 applied=true: %v", got)
+	}
+	if _, ok := got["policy_applied"]; ok {
+		t.Fatalf("仅 catalog 时不应出现 policy_applied: %v", got)
+	}
+
+	s2, sig2, _ := mcpTestServer(t)
+	body2, _ := json.Marshal(mcpPolicyRequest{Policy: signedPolicy(t, sig2, 1)})
+	req2 := httptest.NewRequest(http.MethodPost, "/config/mcp/policy", bytes.NewReader(body2))
+	req2.Header.Set(adminHeader, "tok")
+	rec2 := httptest.NewRecorder()
+	s2.handleMCPPolicy(rec2, req2)
+	var got2 map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &got2)
+	if got2["policy_applied"] != true {
+		t.Fatalf("仅 policy 应 applied=true: %v", got2)
+	}
+}

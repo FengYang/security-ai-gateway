@@ -580,35 +580,58 @@ func isSecureMCPPathStr(path string) bool {
 	return strings.HasPrefix(path, secureMCPPathPrefix)
 }
 
+// opaqueMCPAction handleOpaqueMCP 在给定配置/会话状态下的动作。
+type opaqueMCPAction int
+
+const (
+	opaqueMCPSeal      opaqueMCPAction = iota // 会话已就绪 → 直接密封
+	opaqueMCPHandshake                        // 需先走 quote 证明握手
+	opaqueMCPReject                           // fail-closed（非 quote 模式）
+)
+
+// decideOpaqueMCP 纯函数（T-9 抽离以单测）：按 AttestMode 与"会话是否已就绪"决定 MCP 敏感轨动作。
+// 不触 hostcall / 全局状态，hostcall 依赖下沉至 sealOpaqueMCP 薄壳。
+func decideOpaqueMCP(attestMode string, sessionValid bool) opaqueMCPAction {
+	if attestMode != "quote" {
+		return opaqueMCPReject // token 模式不支持不透明载荷（防明文降级，C-4）
+	}
+	if !sessionValid {
+		return opaqueMCPHandshake
+	}
+	return opaqueMCPSeal
+}
+
 // handleOpaqueMCP MCP 敏感轨：把请求体作为**不透明整体载荷**入段① K_enc 信封（**不解析** JSON 语义），
 // 与文本路径共用会话封装（Session.sealPayload），AAD 绑定 /v1/mcp。
 // 仅 quote 证明会话可用——无证明会话一律 fail-closed，防明文降级（C-4）。
 func handleOpaqueMCP(ctx wrapper.HttpContext, config PluginConfig, body []byte, log logs.Log) types.Action {
-	if config.AttestMode != "quote" {
+	switch decideOpaqueMCP(config.AttestMode, Session.valid()) {
+	case opaqueMCPReject:
 		return failClosed(log, "MCP 敏感轨须 quote 证明会话（token 模式不支持）")
-	}
-	seal := func() {
-		Session.sealPayload(protocol.EndpointMCP, body, func(sealed []byte, serr error) {
-			if serr != nil {
-				failClosed(log, "MCP 请求加密失败: "+serr.Error())
-				return
-			}
-			finishEncryptedRequestBody(ctx, config, sealed, log)
-		})
-	}
-	if !Session.valid() {
+	case opaqueMCPHandshake:
 		doAttestHandshake(config, log,
 			func(id string, sigRef, encRef, c2sRef, s2cRef cryptoclient.KeyRef) {
 				Session.set(id, sigRef, encRef, c2sRef, s2cRef)
-				seal()
+				sealOpaqueMCP(ctx, config, body, log)
 			},
 			func(msg string) {
 				failClosed(log, "quote 握手失败: "+msg)
 			})
-		return types.ActionPause
+	default:
+		sealOpaqueMCP(ctx, config, body, log)
 	}
-	seal()
 	return types.ActionPause
+}
+
+// sealOpaqueMCP 把不透明载荷密封为段① 信封并替换请求体（hostcall 薄壳，由 wasm-guard + 真机链路承载）。
+func sealOpaqueMCP(ctx wrapper.HttpContext, config PluginConfig, body []byte, log logs.Log) {
+	Session.sealPayload(protocol.EndpointMCP, body, func(sealed []byte, serr error) {
+		if serr != nil {
+			failClosed(log, "MCP 请求加密失败: "+serr.Error())
+			return
+		}
+		finishEncryptedRequestBody(ctx, config, sealed, log)
+	})
 }
 
 // onRequestBody 请求侧加密：支持文本（M4/M5）与向量（兼容）输入。
