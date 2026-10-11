@@ -26,6 +26,8 @@ import (
 
 	"security-ai-gateway/cipher/mask"
 	"security-ai-gateway/gateway/tee-infer-service/cacheengine"
+	"security-ai-gateway/gateway/tee-infer-service/mcpguard"
+	"security-ai-gateway/gateway/tee-infer-service/mcpproto"
 	"security-ai-gateway/gateway/tee-infer-service/model"
 	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/internal/memzero"
@@ -125,13 +127,19 @@ type teeServer struct {
 	km            *teecore.KeyManager       // 默认租户（向后兼容）
 	tkm           *teecore.TenantKeyManager // 二级租户 KEK + 三级会话管理器（P0-4 §6）
 	kSig          []byte
-	attest        string             // 远程证明共享令牌（MVP）
-	enclave       Enclave            // 飞地抽象
-	requireAttest bool               // 强制证明模式
-	adminToken    string             // 管理端点（/metrics /audit）认证令牌
-	model         model.Engine       // 明文域推理引擎
-	cmaasEngine   *model.CmaasEngine // 百炼 C-MaaS 引擎（P5；nil = 未配置，请求 fail-closed）
-	protoVersion  string             // 南向协议版本声明（C-4：默认 protocol.Version，部署/测试可覆盖）
+	attest        string  // 远程证明共享令牌（MVP）
+	enclave       Enclave // 飞地抽象
+	requireAttest bool    // 强制证明模式
+	adminToken    string  // 管理端点（/metrics /audit）认证令牌
+	// T-5：MCP 工具级治理（mcpsec 目录/策略 验签缓存 + TEE 内裁决引擎）。
+	// mcpKey 为空 → 不构造 → /config/mcp 端点不注册（fail-closed）。
+	mcpKey       []byte
+	mcpCache     *mcpguard.PolicyCache
+	mcpEngine    *mcpguard.Engine
+	mcpHandler   http.Handler       // T-4 MCP 协议层（按租户+敏感轨+RBAC 过滤；tools/call 经裁决）
+	model        model.Engine       // 明文域推理引擎
+	cmaasEngine  *model.CmaasEngine // 百炼 C-MaaS 引擎（P5；nil = 未配置，请求 fail-closed）
+	protoVersion string             // 南向协议版本声明（C-4：默认 protocol.Version，部署/测试可覆盖）
 	// 审计/日志留存期声明（天；0=未声明）。声明式，服务不删除审计数据。
 	auditRetentionDays int
 	// P2a：PII 处理模式（block = 拦截（默认，fail-closed）/ mask = 脱敏替换后放行）；
@@ -3654,6 +3662,7 @@ func limitBody(next http.Handler) http.Handler {
 func main() {
 	addr := flag.String("listen", ":19090", "监听地址")
 	sigKeyHex := flag.String("sig-key", "", "协议签名密钥 K_sig（32 字节 hex；默认随机生成并打印）")
+	mcpKeyHex := flag.String("mcp-key", "", "MCP 目录/策略验签密钥（32 字节 hex，与 gateway-core K_rx 同族）；为空则 /config/mcp 端点不注册（fail-closed）")
 	attestToken := flag.String("attest-token", "", "远程证明共享令牌（模拟）；默认随机生成并打印")
 	adminToken := flag.String("admin-token", "", "管理端点（/metrics /audit /usage）认证令牌；生产必填，为空 = 开发模式不拦截")
 	devMode := flag.Bool("dev-mode", false, "开发模式（威胁模型 GAP-01/GAP-05 逃生口）：显式声明后允许 mock 飞地与空管理令牌；生产严禁开启")
@@ -3927,6 +3936,24 @@ func main() {
 		guard:             newGuardrail(),
 		metrics:           newMetrics(),
 		disposition:       nilDisposition{}, // S4-4：默认永远放行；SaaS 构建由 initTenantDisposition 替换
+	}
+	// T-5：MCP 工具级治理接线（验签缓存 + TEE 内裁决引擎）。
+	// 约束：管理令牌或 MCP 密钥缺失 → 不构造 → /config/mcp 端点不注册（fail-closed）。
+	if *adminToken != "" && *mcpKeyHex != "" {
+		key, kerr := hex.DecodeString(*mcpKeyHex)
+		if kerr != nil || len(key) < 32 {
+			log.Fatalf("tee-infer: -mcp-key 须为 ≥32 字节的 hex: %v", kerr)
+		}
+		mc, mcErr := mcpguard.NewCache(key)
+		if mcErr != nil {
+			log.Fatalf("tee-infer: MCP 策略缓存构造失败: %v", mcErr)
+		}
+		srv.mcpKey = key
+		srv.mcpCache = mc
+		srv.mcpEngine = mcpguard.NewEngine(mc)
+		srv.mcpHandler = mcpproto.NewHandler(mcpproto.Deps{Guard: srv.mcpEngine, Cache: srv.mcpCache})
+	} else {
+		log.Printf("tee-infer: MCP 治理未启用（-admin-token 或 -mcp-key 缺失）→ /config/mcp 不注册")
 	}
 	// P0-2 §6.10：发布运行时快照（原子切换，请求内一致）。
 	srv.cacheRT.Store(cacheSt)
@@ -4218,6 +4245,13 @@ func main() {
 	mux.HandleFunc("/config/policy/rollback", srv.handlePolicyRollback) // POST 回滚（缺省=上一 active，可指定历史版本）
 	mux.HandleFunc("/reconcile", srv.handleReconcile)                   // S5 判据 6：对账快照（只读）
 	mux.HandleFunc("/reconcile/run", srv.handleReconcileRun)            // S5 判据 6：即时对账（管理令牌）
+	// T-5：MCP 治理端点（仅 -admin-token + -mcp-key 就绪时注册；命令族与 /config/* 一致）。
+	if srv.mcpCache != nil {
+		mux.HandleFunc("/config/mcp", srv.handleMCPConfig)        // GET 只读快照（管理令牌）
+		mux.HandleFunc("/config/mcp/policy", srv.handleMCPPolicy) // POST 目录/策略下发（管理令牌）
+		// 敏感轨请求路径：/mcp-servers/secure-tools* （与 otpmask 插件 opaque 分支 / T-3 Ingress 一致）
+		mux.HandleFunc("/mcp-servers/secure-tools", srv.handleMCPRequest)
+	}
 	// S4-4：租户处置状态机（SaaS 构建下注册 /config/tenant-disposition 端点；OSS 构建空操作）
 	initTenantDisposition(srv, mux)
 	mux.HandleFunc("/healthz", srv.handleHealthz)      // 探针与证明状态联动

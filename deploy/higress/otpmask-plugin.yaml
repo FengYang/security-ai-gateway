@@ -49,6 +49,7 @@ spec:
   # wasm hostcall `bad argument` → 插件 fail-closed（503，不降级）。本地集群实测于 2026-09-13。
   - ingress:
     - infer
+    - mcp-secure-tools
     config:
       mask_modulus: "4294967296"
       model: "mock"

@@ -26,6 +26,19 @@ const (
 	SensStrip SensitiveAction = "strip"
 )
 
+// 工具分轨（C-MCP-4 / §4.6.1）：public＝Higress MCP Server 非敏感轨（网关侧统一托管）；
+// secure＝段①不透明透传 → TEE 内终结并裁决的敏感轨。
+//
+// **重签说明（C-10）**：为工具设置 `Track` 会改变目录 canonical（`Track` 带 omitempty，
+// 仅非空时进 canonical）⇒ 该目录**必须重签**（`SignCatalog`），且 `Version` **单调递增**，
+// 否则分发/验签侧 `ValidCatalog` 将拒之。
+const (
+	// TrackPublic 非敏感轨。
+	TrackPublic = "public"
+	// TrackSecure 敏感轨（缺省值）。
+	TrackSecure = "secure"
+)
+
 // FieldConstraint 工具参数的强校验约束（JSON Schema 子集：type/required/pattern/whitelist）。
 type FieldConstraint struct {
 	Type           string          `json:"type,omitempty"` // string | number | boolean
@@ -37,12 +50,22 @@ type FieldConstraint struct {
 
 // TableTool 工具目录条目：**catalog_owner 仅目录归属，不参与授权判定**（评审 O-2）。
 type TableTool struct {
-	Name             string                     `json:"name"`
-	CatalogOwner     string                     `json:"catalog_owner"`
-	Transport        string                     `json:"transport,omitempty"` // 对应明文域 MCP Server
-	Schema           map[string]*FieldConstraint `json:"schema,omitempty"`
-	Required         []string                   `json:"required,omitempty"`
-	ResponseSensitive []string                  `json:"response_sensitive,omitempty"` // 响应脱敏字段名（Step3）
+	Name              string                      `json:"name"`
+	CatalogOwner      string                      `json:"catalog_owner"`
+	Track             string                      `json:"track,omitempty"`     // "public"|"secure"；空值视同 secure（fail-closed）；消费点须经 ToolTrack()
+	Transport         string                      `json:"transport,omitempty"` // 对应明文域 MCP Server
+	Schema            map[string]*FieldConstraint `json:"schema,omitempty"`
+	Required          []string                    `json:"required,omitempty"`
+	ResponseSensitive []string                    `json:"response_sensitive,omitempty"` // 响应脱敏字段名（Step3）
+}
+
+// ToolTrack 返回工具的有效分轨：空值 ⇒ secure（fail-closed）。
+// 消费点**统一经此读取**，禁止直读 Track 字段（保证缺省语义单点）。
+func (t TableTool) ToolTrack() string {
+	if t.Track == "" {
+		return TrackSecure
+	}
+	return t.Track
 }
 
 // ToolCatalog 工具目录（gateway-core 事实源，签名后经 GET /tools/policy 下发）。
@@ -61,10 +84,10 @@ type PolicyBinding struct {
 // RBACPolicy 租户×工具授权策略（MVP 单层 allowing-list，default deny 隐含）。
 // TenantRules[tenant][tool]：键存在即放行，值可为绑定（附带约束）。
 type RBACPolicy struct {
-	Version     int                             `json:"version"`
-	UpdatedAt   int64                           `json:"updated_at"`
+	Version     int                                  `json:"version"`
+	UpdatedAt   int64                                `json:"updated_at"`
 	TenantRules map[string]map[string]*PolicyBinding `json:"tenant_rules"`
-	Signature   []byte                          `json:"signature,omitempty"`
+	Signature   []byte                               `json:"signature,omitempty"`
 }
 
 // Signer 对称签名器（HMAC-SHA256，与路由签名同族的对称密钥）。
@@ -95,13 +118,28 @@ func (s *Signer) SignCatalog(c *ToolCatalog) error {
 	return nil
 }
 
-// Valid 校验目录签名。
+// ValidCatalog 校验目录：分轨字段合法 **且** 签名有效。
 func (s *Signer) ValidCatalog(c *ToolCatalog) bool {
+	if !validTracks(c) {
+		return false
+	}
 	canon, err := c.CanonicalBytes()
 	if err != nil {
 		return false
 	}
 	return verify(s.key, canon, c.Signature)
+}
+
+// validTracks 校验全部工具的分轨合法：空值合法（＝缺省 secure）；非空必须 ∈ {public,secure}。
+func validTracks(c *ToolCatalog) bool {
+	for i := range c.Tools {
+		switch c.Tools[i].Track {
+		case "", TrackPublic, TrackSecure:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // CanonicalBytes 生成不含签名的规范字节。

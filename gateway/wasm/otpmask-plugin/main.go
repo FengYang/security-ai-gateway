@@ -563,8 +563,60 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig, log log
 	return types.HeaderContinue
 }
 
+// secureMCPPathPrefix MCP 敏感轨入口路径前缀（与 deploy/higress/ingress-mcp.yaml 的 mcp-secure-tools 一致）。
+const secureMCPPathPrefix = "/mcp-servers/secure-tools"
+
+// isSecureMCPPath 依据**请求路径**判定是否走 MCP 不透明分支（§3.2.2：禁止内容嗅探）。
+func isSecureMCPPath(ctx wrapper.HttpContext) bool {
+	path, err := proxywasm.GetHttpRequestHeader(":path")
+	if err != nil {
+		return false
+	}
+	return isSecureMCPPathStr(path)
+}
+
+// isSecureMCPPathStr 纯函数：路径是否属 MCP 敏感轨（抽离以单测）。
+func isSecureMCPPathStr(path string) bool {
+	return strings.HasPrefix(path, secureMCPPathPrefix)
+}
+
+// handleOpaqueMCP MCP 敏感轨：把请求体作为**不透明整体载荷**入段① K_enc 信封（**不解析** JSON 语义），
+// 与文本路径共用会话封装（Session.sealPayload），AAD 绑定 /v1/mcp。
+// 仅 quote 证明会话可用——无证明会话一律 fail-closed，防明文降级（C-4）。
+func handleOpaqueMCP(ctx wrapper.HttpContext, config PluginConfig, body []byte, log logs.Log) types.Action {
+	if config.AttestMode != "quote" {
+		return failClosed(log, "MCP 敏感轨须 quote 证明会话（token 模式不支持）")
+	}
+	seal := func() {
+		Session.sealPayload(protocol.EndpointMCP, body, func(sealed []byte, serr error) {
+			if serr != nil {
+				failClosed(log, "MCP 请求加密失败: "+serr.Error())
+				return
+			}
+			finishEncryptedRequestBody(ctx, config, sealed, log)
+		})
+	}
+	if !Session.valid() {
+		doAttestHandshake(config, log,
+			func(id string, sigRef, encRef, c2sRef, s2cRef cryptoclient.KeyRef) {
+				Session.set(id, sigRef, encRef, c2sRef, s2cRef)
+				seal()
+			},
+			func(msg string) {
+				failClosed(log, "quote 握手失败: "+msg)
+			})
+		return types.ActionPause
+	}
+	seal()
+	return types.ActionPause
+}
+
 // onRequestBody 请求侧加密：支持文本（M4/M5）与向量（兼容）输入。
 func onRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, log logs.Log) types.Action {
+	// MCP 敏感轨：按**路径**分流为不透明整体载荷（先于文本/向量解析，禁止内容嗅探）。
+	if isSecureMCPPath(ctx) {
+		return handleOpaqueMCP(ctx, config, body, log)
+	}
 	if tReq, err := parseTextRequest(body); err == nil {
 		return handleTextRequest(ctx, config, tReq, log)
 	}

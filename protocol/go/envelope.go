@@ -97,6 +97,9 @@ const (
 	EndpointKeyIssue = "/key/issue"
 	// EndpointInfer 推理端点（请求、单响应与 SSE 分片均入信封）。
 	EndpointInfer = "/v1/infer"
+	// EndpointMCP MCP 敏感轨端点：请求为**不透明整体载荷**——原始 MCP(JSON-RPC) 字节整体入信封，
+	// 插件不解析其语义；AAD 绑定本端点（与 /v1/infer 域分离）。
+	EndpointMCP = "/v1/mcp"
 )
 
 // EnvelopeNonce 由计数器确定性派生 12 字节 GCM nonce。

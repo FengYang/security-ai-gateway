@@ -91,3 +91,42 @@ func TestCanonicalStableAcrossLiteralRebuild(t *testing.T) {
 		t.Fatal("逐字重建应验签通过（canonical 确定性）")
 	}
 }
+
+func TestToolTrackDefaultSecure(t *testing.T) {
+	cases := map[string]string{
+		"":          TrackSecure, // 缺省 ⇒ secure（fail-closed）
+		TrackPublic: TrackPublic,
+		TrackSecure: TrackSecure,
+	}
+	for in, want := range cases {
+		if got := (TableTool{Name: "t", Track: in}).ToolTrack(); got != want {
+			t.Fatalf("ToolTrack(Track=%q) = %q, 期望 %q", in, got, want)
+		}
+	}
+}
+
+func TestValidCatalogRejectsInvalidTrack(t *testing.T) {
+	s := testSigner(t)
+
+	// 非法分轨：即便签名正确也必须被拒。
+	bad := NewToolCatalog(1, 1000)
+	bad.Tools = []TableTool{{Name: "db_query", CatalogOwner: "tenant-a", Track: "internal"}}
+	if err := s.SignCatalog(bad); err != nil {
+		t.Fatal(err)
+	}
+	if s.ValidCatalog(bad) {
+		t.Fatal("非法 Track 应被 ValidCatalog 拒绝（即便签名有效）")
+	}
+
+	// 合法分轨：空 / public / secure 均应通过。
+	for _, tr := range []string{"", TrackPublic, TrackSecure} {
+		ok := NewToolCatalog(1, 1000)
+		ok.Tools = []TableTool{{Name: "db_query", CatalogOwner: "tenant-a", Track: tr}}
+		if err := s.SignCatalog(ok); err != nil {
+			t.Fatal(err)
+		}
+		if !s.ValidCatalog(ok) {
+			t.Fatalf("合法 Track=%q 应通过校验", tr)
+		}
+	}
+}

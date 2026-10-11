@@ -49,6 +49,7 @@ spec:
   matchRules:
   - ingress:
     - infer
+    - mcp-secure-tools
     config:
       allow:
       - otpmask-customer-a
@@ -93,6 +94,7 @@ spec:
   matchRules:
   - ingress:
     - infer
+    - mcp-secure-tools
     config:
       allow:
       - "0.0.0.0/0" # 生产改为内网/管理网段 CIDR
@@ -171,6 +173,7 @@ spec:
   matchRules:
   - ingress:
     - infer
+    - mcp-secure-tools
     config: &tenant_qps
       rule_name: otpmask-tenant-qps # 租户总配额（/infer 与 /provider/* 共用同一计数器）
       rule_items:
@@ -223,6 +226,7 @@ spec:
   matchRules:
   - ingress:
     - infer
+    - mcp-secure-tools
     config:
       # allow_origins 必须是**字符串列表**（`["*"]` 或具体源）；写成 `- prefix: "*"` 会被插件
       # 判为非法预检（实测 204 且**不带任何 CORS 头**，网关日志 `cors.preflight.invalid`）
