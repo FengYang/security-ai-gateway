@@ -63,37 +63,16 @@ docs/benchmark/*
 # GF.4.3 语义分类器评测结果（量化证据，随门禁 #1 入库；语料本身不入库，靠 SHA-256 复现）
 !docs/benchmark/guardrail-classifier/
 !docs/benchmark/guardrail-classifier/*.json
-# P0-5 TEE 威胁模型三份核心交付物 + 研发计划（2026-10-06 补充入库，与代码同步版本管理）
+# P0-5 TEE 威胁模型三份核心交付物（对外安全交付物；2026-10-06 入库）
+# 注：研发计划、评审/整改/评估/摸底报告、问题跟踪、设计本体等属内部过程性文档，
+# 按《GA-文档体系规范》§1.3 不入库（2026-10-11 出库 B6 批）
 !docs/详细设计/
 docs/详细设计/*
-!docs/详细设计/GA-AI网关能力补齐--研发计划与进度跟踪.md
 !docs/详细设计/P0/
 docs/详细设计/P0/*
 !docs/详细设计/P0/GA-AI网关能力补齐方案--P0--TEE威胁模型.md
 !docs/详细设计/P0/GA-AI网关能力补齐方案--P0--安全白皮书大纲.md
 !docs/详细设计/P0/GA-AI网关能力补齐方案--P0--侧信道风险披露说明.md
-# P0-3 Token 计费体系完善（详设 + 问题修复跟踪 + 全面评估报告 + 性能基准报告）：与代码同步版本管理（2026-10-08 补充入库）
-!docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善.md
-!docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善-问题修复跟踪.md
-!docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善-全面评估报告.md
-!docs/详细设计/P0/PERF-BILLING-性能基准报告.md
-!docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善-T9计费页面交付与fork集成说明.md
-!docs/详细设计/P0/GA-AI网关能力补齐方案--P0--Token计费体系完善-T9计费页面UI回归手册.md
-# P1-2 全链路 tracing 接入与运维手册（2026-10-08 补充入库，与代码同步版本管理）
-!docs/详细设计/P1/
-docs/详细设计/P1/*
-!docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全链路tracing-接入与运维手册.md
-# P1-4 多租户自助门户：本体 + 多角色评审报告（第1-3轮）+ 第3轮评审问题整改报告
-# （2026-10-09 补充入库，与代码同步版本管理；对应第3轮整改 U-4）
-!docs/详细设计/P1/GA-AI网关能力补齐方案--P1--多租户自助门户.md
-!docs/详细设计/P1/GA-AI网关能力补齐方案--P1--多租户自助门户-多角色评审报告-第1轮.md
-!docs/详细设计/P1/GA-AI网关能力补齐方案--P1--多租户自助门户-多角色评审报告-第2轮.md
-!docs/详细设计/P1/GA-AI网关能力补齐方案--P1--多租户自助门户-多角色评审报告-第3轮.md
-!docs/详细设计/P1/GA-AI网关能力补齐方案--P1--多租户自助门户-第3轮评审问题整改报告.md
-!docs/详细设计/P1/GA-AI网关能力补齐方案--P1--多租户自助门户-M8-M9-Console侧实施规格.md
-!docs/详细设计/P1/GA-AI网关能力补齐方案--P1--多租户自助门户-交付自检与收尾报告.md
-# P1-3 等保合规：实现情况摸底与排期报告（2026-10-09，只读摸底留证）
-!docs/详细设计/P1/GA-AI网关能力补齐方案--P1--等保合规资质路径-实现情况摸底与排期报告.md
 # 合规映射资产（等保/金融/GDPR 逐条 + 四态 + 证据锚点）属内部资产：含缺口清单与适用性判定，
 # 随代码对外发布会暴露我方缺口，故整体不入库（本地/交付环境为权威；Phase 3 一键报告脚本读本地源）
 docs/compliance/
@@ -182,6 +161,9 @@ higress-standalone/secrets/higress-console-adminext-users.yaml
 
 # ===== 归档的 HTML 导出快照（含大体积字体/echarts 资产，权威文本版在 docs/*.md）=====
 docs/archive/html-snapshots/
+
+# ===== 对外竞争力分析 HTML（活文档，含大体积字体/echarts，沿用 HTML 件不入库惯例）=====
+docs/ai-gateway-competitive-analysis/
 
 # ===== 管理门户 vendor-fork 本地工具（JDK/Maven settings 等，不入库）=====
 .tools/
