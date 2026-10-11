@@ -1,88 +1,50 @@
-# MCP 统一代理（GF.3.1）：**待重写骨架**（勿直接 apply）
+# MCP Server 统一托管配置基线（P1：Higress 引入）
 #
-# ⚠️ 【2026-09-12 修正：形态级不符，非版本号问题】
-# 本文件原写法为 `WasmPlugin` + 指向 `plugins/mcp/<旧版本>` 的插件 URL +
-# `mcpServerConfig` / `registryConfig` 内联配置。经核实（镜像插件目录 + 官方文档）：
-#   1. 镜像内**不存在**名为 `mcp` 的插件 → 该 URL 必然 404（wasm 加载失败、静默放行）；
-#   2. 2.x 的 MCP Server 统一托管**不是 WasmPlugin 形态**，而是 **ConfigMap `higress-config`
-#      的 `mcpServer` 段**（`sse_path_suffix` / `enable` / `redis` / `match_list` / `servers[]`），
-#      且 **依赖 Redis**（安装时需 `global.enableRedis=true`，Redis 用于 MCP 会话缓存）；
-#   3. 镜像内确有 `mcp-server 2.0.1` 插件，但其用途/字段不同（`server.type`（如 `mcp-proxy`）、
-#      `server.transport`（`http`/`sse`）、`server.timeout`、`server.passthroughAuthHeader`、
-#      `tools[]`、`securitySchemes` 等，属 REST→MCP / MCP 代理配置），**与本文件原字段不兼容**。
-# 结论：**本文件当前不可直接 apply**。下面只给出**已核实**的骨架（ConfigMap 段与 McpBridge
-# 服务来源字段均取自官方文档），其余待 GF.3.1 设计时补齐后再启用。
+# ⚠️ 本文件是**声明式基线片段**，**不是**"整份 ConfigMap"：
+#   `higress-config` 由 Helm 管理，且其 `higress` 字段还含 `tracing` 等**运行期追加**内容
+#   （由 scripts/higress-tracing.py 写入）。直接 `kubectl apply` 整份 ConfigMap 会**覆盖 `higress` 键**
+#   → 丢失 tracing 等既有配置（已知风险）。
 #
-# 设计意图（保留，不改）：MCP 工具/MCP 服务经网关统一接入，走 text 载荷进入段① 加密链，
-# 使 MCP 流量与普通 LLM 流量一样被 key-auth / 限流 / 计量 / 审计 / 加密覆盖；实际 MCP Server
-# 部署在 tee-infer 之后的**明文域**（可信区域随场景：S3＝不可信，S2＝客户可信域；见《GA-产品场景与可信区域矩阵》§0.1），网关只做 MCP 协议接入与段① 加密转发，
-# 不直接暴露明文工具；fail-closed：与 otpmask 链一致，配置错误即拒绝，不降级明文。
+# ✅ 正确用法（二选一）：
+#   1) **推荐**：由 `scripts/higress-mcp.py --profile native|secure` **合并**本片段到现有 higress-config
+#      （get → 解析 YAML → 仅合并/新增 `mcpServer` 键 → replace → 重启网关；其余键原样保留）
+#   2) 干净环境（确认无 tracing 等既有段）可手工把下方 `mcpServer` 段并入其 `higress` 字段
+#
+# 依据：Higress《MCP Server 快速开始》（需 Higress **2.1.0+**；本集群实测 2.2.5）
+# 字段语义与取舍见《GA-Higress-MCP接入与打通-技术实现方案》§4.1 / §4.3。
+# 生效前提：Higress 需具备 Redis（见方案 §4.3：R1 复用现有 / R2 官方 helm enableRedis）。
+#
+# ============================================================================
+# 片段：mcpServer 段   （profile = native，对应情况① 客户自建可信内网）
+# ============================================================================
+mcpServer:
+  enable: true
+  # MCP 客户端 SSE 后缀；官方客户端 URL 契约：http://<gateway>/mcp-servers/<name>/sse
+  sse_path_suffix: /sse
+  # Redis：官方列为必填。⚠️ 注意：MCP 2026-07-28 已**无状态化**（移除协议级会话），
+  # 故 Redis 的**实际用途需重新核实**（方案 §4.3 / 待实测 U-1）。核实前按官方保留。
+  redis:
+    # R1（复用现有，默认）：指向集群内既有 Redis
+    address: redis-ratelimit.otpmask.svc.cluster.local:6379
+    # R2（官方形态）改为：redis-stack-server.higress-system.svc.cluster.local:6379
+    username: ""
+    password: ""
+    db: 0
+  # ⚠️ 官方文档**未给出**该字段的语义定义（方案 待核实 U-6）——保持空，不臆测其含义。
+  match_list: []
+  # DB 类 MCP Server 在此配置；REST/OpenAPI 类在**控制台 MCP 管理界面**配置（方案 §4.5）。
+  servers: []
 
-# ---------------------------------------------------------------------------
-# A. 全局 MCP Server 配置（ConfigMap `higress-config`，higress-system）
-#    官方要求：MCP Server 依赖 Redis 做会话缓存；`match_list` 用于识别 MCP 会话路径并保持会话粘性。
-#    以下为**骨架**，address 须按实际部署填写；启用前请核对 `sse_path_suffix` 与应用约定一致。
-# ---------------------------------------------------------------------------
-# apiVersion: v1
-# kind: ConfigMap
-# metadata:
-#   name: higress-config
-#   namespace: higress-system
-# data:
-#   higress: |-
-#     mcpServer:
-#       enable: true
-#       sse_path_suffix: /sse
-#       redis:
-#         address: redis-ratelimit.<namespace>.svc.cluster.local:6379   # 可复用限流用 Redis
-#         username: ""
-#         password: ""
-#         db: 0
-#       match_list:
-#       - match_rule_domain: "*"
-#         match_rule_path: /mcp
-#         match_rule_type: "prefix"
-#       servers: []      # REST API 类型 MCP Server 在控制台配置；数据库类型在此配置
-
-# ---------------------------------------------------------------------------
-# B. MCP 后端服务来源（McpBridge，已核实字段：type/name/domain/port/protocol +
-#    mcpServerBaseUrl / mcpServerExportDomains / enableMCPServer（仅 nacos3））
-#    说明：若后端 MCP Server 在集群内以 Service 暴露，用 dns 类型；固定 IP 用 static。
-# ---------------------------------------------------------------------------
-# apiVersion: networking.higress.io/v1
-# kind: McpBridge
-# metadata:
-#   name: default                     # 注意：仅 higress 安装命名空间下名为 default 的 McpBridge 生效
-#   namespace: higress-system
-# spec:
-#   registries:
-#   - type: dns
-#     name: mcp-toolbox
-#     domain: mcp-toolbox.otpmask.svc.cluster.local
-#     port: 8080
-#     protocol: HTTP
-#     mcpServerBaseUrl: /mcp-server                 # 暴露的 URL 前缀（可选）
-#     mcpServerExportDomains: ["gateway.example.com"]  # 暴露域名（可选，不填为全部域名）
-
-# ---------------------------------------------------------------------------
-# C. 若确需以 `mcp-server` 插件形态接入（REST→MCP 或 mcp-proxy），
-#    须按官方《MCP Server 插件配置》补齐 schema 后再启用；最小骨架如下（字段未完整核实，勿启用）：
-# ---------------------------------------------------------------------------
-# apiVersion: extensions.higress.io/v1alpha1
-# kind: WasmPlugin
-# metadata:
-#   name: mcp-server
-#   namespace: higress-system
-# spec:
-#   url: http://localhost:8002/plugins/mcp-server/2.0.1/plugin.wasm   # 镜像实际版本
-#   failStrategy: FAIL_CLOSED
-#   matchRules:
-#   - ingress:
-#     - infer
-#     config:
-#       server:
-#         type: mcp-proxy          # 待核实：mcp-proxy 的完整必填字段
-#         transport: http          # http(StreamableHTTP) | sse
-#         timeout: 5000
-#         passthroughAuthHeader: false
-#       # tools: []                 # 待核实：工具级配置与 securitySchemes
+# ============================================================================
+# profile = secure（对应情况② 客户不信任基础设施）的差异说明
+# ----------------------------------------------------------------------------
+# secure **不改变** `mcpServer` 段本身，而是在其之上追加三步（由 higress-mcp.py --profile secure 执行）：
+#   ① 注册 MCP 后端服务来源 → deploy/higress/mcp-bridge-registries.yaml「MCP 后端」段（当前为注释骨架，
+#      待真实后端就位后启用）
+#   ② 新增敏感轨 Ingress（secure-tools → tee-infer）→ deploy/higress/ingress-mcp.yaml
+#   ③ 下发 mcpsec 策略到 TEE 并校验 mcpguard 就绪门控（fail-closed）
+#
+# 分轨语义（红线 V-4 的结构性保障，方案 §3.2.2）：
+#   public-tools → Higress MCP Server（明文轨，仅注册**非敏感**工具）
+#   secure-tools → otpmask 段① → TEE（密态轨，仅注册**敏感**工具）
+#   两轨工具集合**不相交** ⇒ 敏感参数不可能以明文经过网关。

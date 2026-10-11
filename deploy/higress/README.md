@@ -25,6 +25,7 @@
 | Pod 限额与资源预留 | 实测 requests/limits：tee-infer 100m/128Mi → 2000m/1Gi；embedding 50m/64Mi → 500m/256Mi；admin-svc 100m/128Mi → 1000m/512Mi；Higress gateway 由 chart 默认值提供 | 2026-09-13（P0b-1 本地） |
 | 镜像可达性 | **受限网络事实**：`registry.k8s.io` 与 `docker.io` 在集群内**被拒**（connection refused）→ k8s 组件镜像须改源（本次用 `registry.cn-hangzhou.aliyuncs.com/google_containers/*`），监控栈镜像须宿主预拉 + 节点导入；`higress-registry.cn-hangzhou.cr.aliyuncs.com` 可达 | 2026-09-13（P0b-1 本地） |
 | 变更记录 | 2026-09-13：建立基线（P0b-1 本地 kind）。**待替换**：P0b-2 真实集群（单机 x86+k3s 或 3 节点）实测后另记 | 2026-09-13 |
+| 变更记录（新增） | **2026-10-10**：真实集群（k3s `192.168.31.168`）实测 **Higress `higress-2.2.5`**（helm release 6；`global.local=true`；网关端口 30000/30001）。上表 v2.1.5 为 P0b-1 历史值；**启用 MCP 能力须 ≥ 2.2.4** | 2026-10-10 |
 
 ## 1. 迁移原理
 
@@ -41,7 +42,8 @@
 ## 2. 安装步骤
 
 ```bash
-# 1. 安装 Higress 控制面 + 数据面（官方 Helm；版本对齐镜像 v2.1.5）
+# 1. 安装 Higress 控制面 + 数据面（官方 Helm；**现网实测 v2.2.5**）
+#    注：**v2.2.4 起支持 MCP Server**（MCP 2026-07-28 无状态 + 兼容旧协议），故启用 MCP 须 ≥ 2.2.4
 helm repo add higress.io https://higress.io/helm-charts
 helm install higress -n higress-system --create-namespace higress.io/higress \
   --set global.local=true
@@ -65,6 +67,18 @@ kubectl get wasmplugins -n higress-system
 # 7.（GF.2）生态扩展插件 + 网关 HPA（在 GF.1 验证通过后启用）
 kubectl apply -f deploy/higress/security-plugins-extended.yaml   # WAF(非 CRS 形态，当前不拦截)/Bot/OAuth(骨架)
 kubectl apply -f deploy/higress/gateway-hpa.yaml                 # 网关 HPA（依赖 metrics-server）
+
+# 8.（P1 新增）启用 Higress 原生 MCP Server（**情况① native**：客户自建可信内网）
+#    前置：Higress 需具备 Redis ——默认**复用** otpmask/redis-ratelimit（方案 §4.3 R1）；
+#    亦可用官方 `--set global.enableRedis=true` 生成 redis-stack-server（R2）
+python3 scripts/higress-mcp.py --profile native --dry-run   # 先预览将写入的 mcpServer 段（不改配置）
+python3 scripts/higress-mcp.py --profile native             # 合并写入 higress-config + 重启网关 + 冒烟
+#    回滚（删除 mcpServer 并重启）：python3 scripts/higress-mcp.py --rollback
+#    说明：脚本**只合并/删除 `data.higress.mcpServer` 键**，保留 tracing 等既有键（防覆盖丢失）
+
+# 9.（情况② secure，P2 阶段）分轨路由与 MCP 后端来源（**当前为骨架，启用前须闭环 U-4 + 真实 MCP 后端**）
+# kubectl apply -f deploy/higress/ingress-mcp.yaml       # 含 secure-tools（可启用）+ public-tools（注释态）
+# 另需把 deploy/higress/mcp-bridge-registries.yaml 的「MCP 后端」段按实际后端取消注释
 ```
 
 ## 3. 灰度切换（生产）

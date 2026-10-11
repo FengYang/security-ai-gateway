@@ -663,6 +663,37 @@ kubectl apply -f deploy/higress/security-plugins.yaml
 kubectl apply -f deploy/higress/security-plugins-extended.yaml
 ```
 
+#### 8.3.4 启用 Higress MCP Server（P1；**需 Higress ≥ 2.2.4**）
+
+> 依据《GA-Higress-MCP接入与打通-技术实现方案》v1.5 §4 / §8。能力本体见《P1--MCP协议网关》。
+> **前置**：Higress 需具备 Redis —— 默认**复用** `otpmask/redis-ratelimit`（方案 §4.3 R1）；
+> 亦可用官方安装参数 `--set global.enableRedis=true` 生成 `redis-stack-server`（R2）。
+
+```bash
+# 1) 预览将写入的 mcpServer 段（不改任何配置）
+python3 scripts/higress-mcp.py --profile native --dry-run
+
+# 2) 启用（合并写入 higress-config 的 mcpServer 键 + 滚动重启网关 + 冒烟）
+python3 scripts/higress-mcp.py --profile native
+
+# 3) 回滚（删除 mcpServer 键 + 重启，等价"一键关闭"）
+python3 scripts/higress-mcp.py --rollback
+```
+
+| 项 | 说明 |
+|---|---|
+| 写入语义 | 脚本**只合并/删除 `data.higress.mcpServer` 键**，保留 `tracing` 等既有键（防整份覆盖丢失） |
+| 情况①（native） | 即本条；Higress 原生 MCP Server 提供完整协议面 |
+| 情况②（secure） | 分轨：`public-tools`（Higress）/ `secure-tools`（段① → TEE）。路由见 `deploy/higress/ingress-mcp.yaml`；**`--profile secure` 尚未实现**（依赖段① 不透明载荷 + TEE 内 MCP 协议层，属 P2） |
+| 完整握手 | 需先**注册 MCP 服务**（`mcpServer.servers[]` 或控制台 MCP 管理界面），见方案 §4.5 |
+| 客户端接入 | `http://<gateway>/mcp-servers/<name>/sse`（官方契约） |
+
+#### 8.3.5 已知前置缺口（**部署密态轨前必须闭环**）
+
+| 缺口 | 现象（P0 实测） | 处置 |
+|---|---|---|
+| **`cryptop` 服务未部署** | 网关 Pod 仅 `higress-gateway` 1 容器；全集群无 `cryptop*`；未监听 19097 → **段① 加密链路前置不满足** | 按 `deploy/higress/cryptopsvc-sidecar-patch.yaml` 注入；**属既有密态链路缺口，非 MCP 方案引入**（方案 RK-9） |
+
 ### 8.4 第四步：监控部署
 
 ```bash

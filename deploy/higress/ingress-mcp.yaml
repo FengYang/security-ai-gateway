@@ -1,0 +1,76 @@
+# MCP 路由（分轨：secure-tools 敏感轨 / public-tools 非敏感轨）
+#
+# 依据：《GA-Higress-MCP接入与打通-技术实现方案》v1.5
+#   · §3.2.2 分轨＝**按 MCP Server 名 / 入口路径**（不依赖运行时 header 覆盖）
+#   · §4.4   两轨客户端 URL 与"对外 URL ↔ 内部端点"映射
+#   · §3.3   情况② 新增两条 Ingress
+#
+# 官方客户端 URL 契约：http://<gateway>/mcp-servers/<server-name>/sse
+#
+# 分轨语义（红线 V-4 的结构性保障）：
+#   public-tools → Higress MCP Server（明文轨，仅注册**非敏感**工具）
+#   secure-tools → otpmask 段① → TEE（密态轨，仅注册**敏感**工具）
+#   两轨工具集合**不相交** ⇒ 敏感参数不可能以明文经过网关。
+#
+# 插件链：两轨均经 cors / key-auth / ip-restriction / rate-limit；
+#   **secure-tools 额外挂 otpmask**（段① 加密）——插件 matchRules 见 deploy/higress/security-plugins.yaml。
+---
+# ============================================================================
+# 敏感轨：/mcp-servers/secure-tools → tee-infer（段① 加密 → TEE 内 MCP 终结）
+# ============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-secure-tools
+  namespace: higress-system
+  annotations:
+    # 与 ingress-infer.yaml 同型：目标解析为 McpBridge dns registry 物化的簇
+    # （registry 名 tee-infer → 簇 outbound|19090||tee-infer.dns）
+    higress.io/destination: tee-infer.dns:19090
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /mcp-servers/secure-tools
+        pathType: Prefix
+        backend:
+          # 必须用 McpBridge **resource** backend（见 ingress-infer.yaml 注释：
+          # 用 service backend 会被展开成 <name>.<ns>.svc.cluster.local → cluster_not_found）
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+# ============================================================================
+# 非敏感轨：/mcp-servers/public-tools → Higress MCP Server（内置托管）
+# ----------------------------------------------------------------------------
+# ⚠️ **当前为注释骨架；启用前须先闭环 待实测 U-4**：
+#   官方客户端 URL 为 `/mcp-servers/<name>/sse`，若 Higress MCP Server 已由**内置路由**承载该前缀，
+#   则**本 Ingress 不需要**（叠加可能与内置路由冲突）；若确需显式路由，后端指向「MCP 后端」registry
+#   （deploy/higress/mcp-bridge-registries.yaml 的 `mcp-tools`，该项亦为注释骨架，待真实后端就位）。
+#   故本段**默认不启用**，待 U-4 实测结论 + 真实 MCP 后端就位后再取消注释。
+# ============================================================================
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: mcp-public-tools
+#   namespace: higress-system
+#   annotations:
+#     higress.io/destination: mcp-tools.dns:8080
+# spec:
+#   ingressClassName: higress
+#   rules:
+#   - http:
+#       paths:
+#       - path: /mcp-servers/public-tools
+#         pathType: Prefix
+#         backend:
+#           resource:
+#             apiGroup: networking.higress.io
+#             kind: McpBridge
+#             name: default
+#   tls:
+#   - secretName: default
