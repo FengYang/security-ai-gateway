@@ -133,10 +133,22 @@ type Metrics interface {
 type Config struct {
 	TimeoutMS   uint32 // 单次调用超时（R-3：50ms）；0 取 50
 	MaskVersion string // → X-OTPMask-MaskVersion（仅掩码流；空则不发送）
+	// ProbeTimeoutMS 就绪探测（LoadCapabilities）的独立超时，**不占 R-3 的 50ms 热路径预算**；
+	// 0 取 DefaultProbeTimeoutMS。
+	ProbeTimeoutMS uint32
+	// ProbeRetries 就绪探测总尝试次数（含首次）；<=0 取 DefaultProbeRetries。
+	ProbeRetries int
 }
 
-// DefaultTimeoutMS R-3 单次调用超时。
+// DefaultTimeoutMS R-3 单次调用超时（稳态密码调用，热路径）。
 const DefaultTimeoutMS uint32 = 50
+
+// DefaultProbeTimeoutMS 就绪探测独立预算。真机实测（2026-10-11）：探测发生在插件配置加载期，
+// 冷/重配场景需 >50ms；沿用 R-3 的 50ms 会 504 → cryptoReady 恒 false → 全链路 fail-closed。
+const DefaultProbeTimeoutMS uint32 = 2000
+
+// DefaultProbeRetries 就绪探测默认总尝试次数（含首次）；有界，避免一次抖动即永久 fail-closed。
+const DefaultProbeRetries = 3
 
 // Client cryptop sidecar 客户端（唯一 HTTP 面，§4.7）。
 type Client struct {
@@ -144,7 +156,10 @@ type Client struct {
 	br      *Breaker
 	m       Metrics
 	timeout uint32
-	maskVer string
+	// probe/probeRetries 仅供 LoadCapabilities 使用（见 DefaultProbeTimeoutMS 说明）。
+	probe        uint32
+	probeRetries int
+	maskVer      string
 
 	caps Capabilities
 }
@@ -155,7 +170,15 @@ func New(tr Transport, br *Breaker, m Metrics, cfg Config) *Client {
 	if to == 0 {
 		to = DefaultTimeoutMS
 	}
-	c := &Client{tr: tr, br: br, m: m, timeout: to, maskVer: cfg.MaskVersion}
+	probe := cfg.ProbeTimeoutMS
+	if probe == 0 {
+		probe = DefaultProbeTimeoutMS
+	}
+	attempts := cfg.ProbeRetries
+	if attempts <= 0 {
+		attempts = DefaultProbeRetries
+	}
+	c := &Client{tr: tr, br: br, m: m, timeout: to, probe: probe, probeRetries: attempts, maskVer: cfg.MaskVersion}
 	if br != nil && m != nil {
 		br.OnStateChange(m.CircuitOpen) // #5 唯一生产者
 	}
@@ -207,8 +230,9 @@ func (c *Client) call(op, path string, hdrs [][2]string, req any, cb func(body [
 	}
 }
 
-// callGet 与 call 同，但用 GET（仅 /v1/capabilities）。
-func (c *Client) callGet(op, path string, cb func(body []byte, err error)) {
+// callGet 与 call 同，但用 GET（仅 /v1/capabilities）；timeout 显式传入，
+// 以便就绪探测使用独立预算（probe）而非热路径的 R-3 50ms。
+func (c *Client) callGet(op, path string, timeout uint32, cb func(body []byte, err error)) {
 	if c.m != nil {
 		c.m.Call(op)
 	}
@@ -225,7 +249,7 @@ func (c *Client) callGet(op, path string, cb func(body []byte, err error)) {
 		}
 		c.result(op, true)
 		cb(resp, nil)
-	}, c.timeout)
+	}, timeout)
 	if derr != nil {
 		c.result(op, false)
 		cb(nil, fmt.Errorf("%w: %v", ErrTransport, derr))
@@ -568,19 +592,35 @@ func (c *Client) Batch(ops []Op, cb func(results []OpResult, err error)) {
 }
 
 // LoadCapabilities GET /v1/capabilities（§4.3.1）：启动期载入 profile/suite/mask_prg。
+//
+// 就绪探测使用**独立预算**（probe，缺省 DefaultProbeTimeoutMS=2000ms）而非热路径的 R-3 50ms，
+// 且有界重试（probeRetries，缺省 3 次）——该调用发生在插件配置加载期，冷/重配场景需 >50ms
+// （真机实测 2026-10-11），用 50ms 会 504 → cryptoReady 恒 false → 全链路 fail-closed。
+//
+// 重试为**立即重试**（proxy-wasm 无 sleep）。失败语义不变：全部尝试失败才回调错误，
+// 未成功前 cryptoReady=false，密码路径一律 fail-closed（C-4，无本地回退）。
 func (c *Client) LoadCapabilities(cb func(caps Capabilities, err error)) {
-	c.callGet(OpRand, pathCapabilities, func(body []byte, err error) {
-		if err != nil {
-			cb(Capabilities{}, err)
+	c.loadCapsAttempt(c.probeRetries, cb)
+}
+
+// loadCapsAttempt 就绪探测单次尝试（remaining = 剩余总尝试次数，含本次）。
+func (c *Client) loadCapsAttempt(remaining int, cb func(caps Capabilities, err error)) {
+	c.callGet(OpRand, pathCapabilities, c.probe, func(body []byte, err error) {
+		if err == nil {
+			var caps Capabilities
+			if e := c.decode("capabilities", body, &caps); e == nil {
+				c.caps = caps
+				cb(caps, nil)
+				return
+			} else {
+				err = e
+			}
+		}
+		if remaining > 1 {
+			c.loadCapsAttempt(remaining-1, cb)
 			return
 		}
-		var caps Capabilities
-		if e := c.decode("capabilities", body, &caps); e != nil {
-			cb(Capabilities{}, e)
-			return
-		}
-		c.caps = caps
-		cb(caps, nil)
+		cb(Capabilities{}, err)
 	})
 }
 

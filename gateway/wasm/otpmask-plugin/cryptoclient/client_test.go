@@ -18,8 +18,10 @@ type mockTransport struct {
 	resp    string
 	err     error
 
-	calls   []mockCall
-	failWith error // 非 nil 时 Post 直接返回该错误（模拟不可达）
+	calls    []mockCall
+	timeouts []uint32 // 每次调用的 timeoutMs（断言探测预算用）
+	statuses []int    // 按调用次序返回的状态码（用尽后回落 status/200）
+	failWith error    // 非 nil 时 Post 直接返回该错误（模拟不可达）
 }
 
 type mockCall struct {
@@ -28,21 +30,33 @@ type mockCall struct {
 	body []byte
 }
 
-func (m *mockTransport) Post(path string, hdr [][2]string, body []byte, cb ResponseCallback, _ uint32) error {
+func (m *mockTransport) Post(path string, hdr [][2]string, body []byte, cb ResponseCallback, to uint32) error {
 	m.calls = append(m.calls, mockCall{path: path, hdr: hdr, body: body})
+	m.timeouts = append(m.timeouts, to)
+	return m.respond(cb)
+}
+
+func (m *mockTransport) Get(path string, hdr [][2]string, cb ResponseCallback, to uint32) error {
+	m.calls = append(m.calls, mockCall{path: path, hdr: hdr})
+	m.timeouts = append(m.timeouts, to)
+	return m.respond(cb)
+}
+
+// respond 按 failWith / statuses / status 顺序产生响应（状态码 0 视同 200）。
+func (m *mockTransport) respond(cb ResponseCallback) error {
 	if m.failWith != nil {
 		return m.failWith
 	}
 	st := m.status
+	if len(m.statuses) > 0 {
+		st = m.statuses[0]
+		m.statuses = m.statuses[1:]
+	}
 	if st == 0 {
 		st = 200
 	}
 	cb(st, http.Header{}, []byte(m.resp))
 	return nil
-}
-
-func (m *mockTransport) Get(path string, hdr [][2]string, cb ResponseCallback, _ uint32) error {
-	return m.Post(path, hdr, nil, cb, 0)
 }
 
 // recMetrics 记录 #13/#14/#5。
@@ -424,6 +438,59 @@ func TestLoadCapabilities(t *testing.T) {
 	}
 	if m.calls[0].path != pathCapabilities {
 		t.Fatalf("path=%s", m.calls[0].path)
+	}
+}
+
+// TestLoadCapabilitiesProbeTimeout 断言就绪探测用**独立预算**（ProbeTimeoutMS），
+// 而稳态密码调用仍守 R-3 的 TimeoutMS（50ms）。
+func TestLoadCapabilitiesProbeTimeout(t *testing.T) {
+	m := &mockTransport{resp: `{"profile":"intl","suite":1,"mask_prg":"hmac-sha256"}`}
+	c, _ := newClient(m, Config{TimeoutMS: 50, ProbeTimeoutMS: 1234, ProbeRetries: 1})
+	var err error
+	c.LoadCapabilities(func(_ Capabilities, e error) { err = e })
+	if err != nil {
+		t.Fatalf("LoadCapabilities: %v", err)
+	}
+	if len(m.timeouts) != 1 || m.timeouts[0] != 1234 {
+		t.Fatalf("探测超时应为 1234，得 %v", m.timeouts)
+	}
+	// 稳态调用仍用 50ms
+	m.resp = `{"digest":"QQ=="}`
+	c.Hash([]byte("x"), func(_ []byte, _ error) {})
+	if last := m.timeouts[len(m.timeouts)-1]; last != 50 {
+		t.Fatalf("稳态调用超时应为 50，得 %d", last)
+	}
+}
+
+// TestLoadCapabilitiesRetry 断言就绪探测的**有界重试**：
+// 首次失败、二次成功 → 整体成功；连续失败 → 恰好 DefaultProbeRetries 次后报错。
+func TestLoadCapabilitiesRetry(t *testing.T) {
+	// 首次 504、二次成功
+	m := &mockTransport{statuses: []int{504}, resp: `{"profile":"intl","suite":1,"mask_prg":"hmac-sha256"}`}
+	c, _ := newClient(m, Config{})
+	var caps Capabilities
+	var err error
+	c.LoadCapabilities(func(cc Capabilities, e error) { caps, err = cc, e })
+	if err != nil {
+		t.Fatalf("重试后应成功，得 %v", err)
+	}
+	if caps.Profile != "intl" {
+		t.Fatalf("caps 解析错: %+v", caps)
+	}
+	if len(m.calls) != 2 {
+		t.Fatalf("应尝试 2 次，得 %d", len(m.calls))
+	}
+
+	// 连续失败 → 恰好 DefaultProbeRetries 次
+	m2 := &mockTransport{status: 504, resp: `{}`}
+	c2, _ := newClient(m2, Config{})
+	var err2 error
+	c2.LoadCapabilities(func(_ Capabilities, e error) { err2 = e })
+	if err2 == nil {
+		t.Fatal("连续失败应报错")
+	}
+	if len(m2.calls) != DefaultProbeRetries {
+		t.Fatalf("应尝试 %d 次，得 %d", DefaultProbeRetries, len(m2.calls))
 	}
 }
 
