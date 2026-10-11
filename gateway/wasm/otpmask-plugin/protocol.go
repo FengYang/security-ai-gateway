@@ -29,9 +29,26 @@ type plainRequest struct {
 
 // chatMsg 消息项（统一 text 载荷 = OpenAI messages；与 tee-infer-service/model.ChatMessage JSON 同构，
 // 见 tee-infer-service/main.go handleTextInfer json.Unmarshal 消费）。不改 import，避免 wasm 膨胀/耦合。
+// P1-1 G-8 / M8-1：扩展 tool_calls/tool_call_id（承载模型发起的工具调用与工具结果）。
+// 向后兼容：缺省无这些字段时序列化逐字节不变（omitempty）。
 type chatMsg struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string         `json:"role"`
+	Content    string         `json:"content"`
+	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+// chatToolCall 模型发起的工具调用（与 tee-infer-service/model.ToolCall 同构；M8-1）。
+type chatToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function chatToolCallFunc `json:"function"`
+}
+
+// chatToolCallFunc 工具调用函数体：name + JSON 字符串形态的 arguments。
+type chatToolCallFunc struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // textRequest 明文请求（文本输入，M4；P2 扩展可选 stream/engine_type）。
@@ -48,7 +65,7 @@ type textRequest struct {
 
 // embedResponse embedding-service 响应。
 type embedResponse struct {
-	Tokens  []uint32  `json:"tokens"`
+	Tokens  []uint32   `json:"tokens"`
 	Vectors [][]uint64 `json:"vectors"`
 }
 
@@ -89,13 +106,15 @@ func parsePlainRequest(body []byte) (*plainRequest, error) {
 	return &req, nil
 }
 
-// validRole 角色白名单：仅 system/user/assistant；未知角色 fail-closed（与 tee model.normalizeRole 一致）。
+// validRole 角色白名单：system/user/assistant/tool；未知角色 fail-closed（M8-1 放开 tool）。
 func validRole(r string) bool {
-	return r == "system" || r == "user" || r == "assistant"
+	return r == "system" || r == "user" || r == "assistant" || r == "tool"
 }
 
 // parseTextRequest 解析文本明文请求（双形态，统一 text 载荷 = OpenAI messages）：
 //   - messages 优先：非空则逐项校验角色（未知角色 fail-closed），原样作为统一载荷；
+//     M8-1：`tool` 角色已放开（承载工具结果），但须携带非空 `tool_call_id`（否则 fail-closed，
+//     防无主结果注入）；`assistant.tool_calls` 随消息原样透传（由 TEE 内裁决）。
 //   - 否则回退 text：兼容既有单 text 调用。
 func parseTextRequest(body []byte) (*textRequest, error) {
 	var req textRequest
@@ -106,6 +125,9 @@ func parseTextRequest(body []byte) (*textRequest, error) {
 		for _, m := range req.Messages {
 			if !validRole(m.Role) {
 				return nil, fmt.Errorf("otpmask: 未知消息角色 %q（fail-closed）", m.Role)
+			}
+			if m.Role == "tool" && m.ToolCallID == "" {
+				return nil, fmt.Errorf("otpmask: tool 角色缺 tool_call_id（fail-closed）")
 			}
 		}
 		return &req, nil

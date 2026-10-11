@@ -38,9 +38,61 @@ func TestParseTextRequestTextFallback(t *testing.T) {
 }
 
 func TestParseTextRequestUnknownRole(t *testing.T) {
-	body := []byte(`{"messages":[{"role":"tool","content":"x"}]}`)
+	body := []byte(`{"messages":[{"role":"weird","content":"x"}]}`)
 	if _, err := parseTextRequest(body); err == nil {
 		t.Fatal("未知角色应 fail-closed（拒绝）")
+	}
+}
+
+// TestParseTextRequestToolRoleMissingCallID M8-1：tool 角色缺 tool_call_id → fail-closed。
+func TestParseTextRequestToolRoleMissingCallID(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"tool","content":"x"}]}`)
+	if _, err := parseTextRequest(body); err == nil {
+		t.Fatal("tool 角色缺 tool_call_id 应 fail-closed")
+	}
+}
+
+// TestParseTextRequestToolRoleAccepted M8-1：tool 角色带 tool_call_id → 放行。
+func TestParseTextRequestToolRoleAccepted(t *testing.T) {
+	req, err := parseTextRequest([]byte(`{"messages":[{"role":"tool","content":"ok","tool_call_id":"call_1"}]}`))
+	if err != nil {
+		t.Fatalf("带 tool_call_id 的 tool 角色应放行: %v", err)
+	}
+	if len(req.Messages) != 1 || req.Messages[0].Role != "tool" || req.Messages[0].ToolCallID != "call_1" {
+		t.Fatalf("tool 角色解析不符: %+v", req.Messages)
+	}
+}
+
+// TestMarshalMessagesToolCallsPassthrough M8-1：assistant.tool_calls 原样透传。
+func TestMarshalMessagesToolCallsPassthrough(t *testing.T) {
+	req := &textRequest{Messages: []chatMsg{
+		{Role: "assistant", ToolCalls: []chatToolCall{{
+			ID: "call_1", Type: "function",
+			Function: chatToolCallFunc{Name: "query", Arguments: `{"q":"x"}`},
+		}}},
+	}}
+	b, err := marshalMessages(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []chatMsg
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || len(got[0].ToolCalls) != 1 || got[0].ToolCalls[0].Function.Name != "query" {
+		t.Fatalf("tool_calls 未透传: %s", b)
+	}
+}
+
+// TestMarshalMessagesBackwardCompat 缺省无 tool_calls → 序列化逐字节不变。
+func TestMarshalMessagesBackwardCompat(t *testing.T) {
+	req := &textRequest{Messages: []chatMsg{{Role: "user", Content: "hi"}}}
+	b, err := marshalMessages(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `[{"role":"user","content":"hi"}]` {
+		t.Fatalf("旧载荷序列化被改变: %s", b)
 	}
 }
 

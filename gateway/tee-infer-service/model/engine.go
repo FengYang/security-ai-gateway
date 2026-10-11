@@ -22,9 +22,26 @@ import (
 )
 
 // ChatMessage OpenAI 兼容消息（text 载荷，D1）。
+// P1-1 G-8 / M8-1：扩展 tool_calls/tool_call_id（承载模型发起的工具调用与工具结果）。
+// 向后兼容：缺省无这些字段时序列化逐字节不变（omitempty）。
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// ToolCall 模型发起的工具调用（OpenAI 兼容 function 形态；M8-1，与插件 chatToolCall 同构）。
+type ToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function ToolCallFunc `json:"function"`
+}
+
+// ToolCallFunc 工具调用函数体：name + JSON 字符串形态的 arguments。
+type ToolCallFunc struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // upstreamHTTPTransport 上游模型出站 HTTP 传输。

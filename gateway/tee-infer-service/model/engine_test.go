@@ -218,3 +218,44 @@ func TestLocalEngineGenerate(t *testing.T) {
 		t.Fatalf("回显不符: %v", got)
 	}
 }
+
+// ---------- P1-1 G-8 / M8-1：统一 text 载荷 tool_calls 扩展（向后兼容） ----------
+
+// TestChatMessageToolCallsRoundTrip tool_calls / tool_call_id 序列化往返保真。
+func TestChatMessageToolCallsRoundTrip(t *testing.T) {
+	in := []ChatMessage{
+		{Role: "assistant", ToolCalls: []ToolCall{{
+			ID: "call_1", Type: "function",
+			Function: ToolCallFunc{Name: "query", Arguments: `{"q":"x"}`},
+		}}},
+		{Role: "tool", Content: "ok", ToolCallID: "call_1"},
+	}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []ChatMessage
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 || len(out[0].ToolCalls) != 1 {
+		t.Fatalf("tool_calls 往返失败: %+v", out)
+	}
+	if out[0].ToolCalls[0].Function.Name != "query" || out[0].ToolCalls[0].Function.Arguments != `{"q":"x"}` {
+		t.Fatalf("ToolCall 字段不符: %+v", out[0].ToolCalls[0])
+	}
+	if out[1].Role != "tool" || out[1].ToolCallID != "call_1" {
+		t.Fatalf("tool 角色往返失败: %+v", out[1])
+	}
+}
+
+// TestBackwardCompatNoToolCalls 缺省无 tool_calls/tool_call_id → 序列化逐字节不变（向后兼容）。
+func TestBackwardCompatNoToolCalls(t *testing.T) {
+	raw, err := json.Marshal([]ChatMessage{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `[{"role":"user","content":"hi"}]` {
+		t.Fatalf("旧载荷序列化被改变: %s", raw)
+	}
+}

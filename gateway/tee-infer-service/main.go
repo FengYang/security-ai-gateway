@@ -1342,6 +1342,14 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		http.Error(w, "text 载荷无效（须为非空 messages JSON）", http.StatusBadRequest)
 		return
 	}
+	// T-5 步 5 / P1-1 G-8（M8-2，场景 A：模型发起工具调用）：
+	// 统一 text 载荷内的 assistant.tool_calls 一律经 TEE 内 mcpguard 裁决
+	// （裁决必须在 TEE 内，C-MCP-3；网关不做明文裁决）。未就绪/越权/参数非法 → fail-closed。
+	if err := s.evaluateMCPToolCalls(ctx, tenant, req.RequestID, payloadSHA, msgs); err != nil {
+		endSpanDenied(inferSpan, "mcp_tool_deny")
+		http.Error(w, "工具调用未通过授权（fail-closed）", http.StatusForbidden)
+		return
+	}
 	// M9-4 Guardrail：明文检测（C-MaaS 官方明示不提供内容安全，本网关补位）。
 	// P2a：pii-mode=mask 时 PII 脱敏替换后放行（数据保护类）；SQL 注入/提示注入
 	// 在任何模式下均拦截（攻击类，fail-closed）。
@@ -1702,6 +1710,60 @@ func (s *teeServer) newRequestOutputGuard(tenant, requestID string) (*outputGuar
 		MaskRegexps:   maskRes,
 	}, withCategoryGate(s.l1Classifier(), disabled), withCategoryGate(s.outputGuardL2, disabled),
 		s.metrics, s.audit, tenant, requestID)
+}
+
+// mcpToolCallRef 从 assistant.tool_calls 抽取的调用引用（工具名 + 原始 arguments JSON 串）。
+type mcpToolCallRef struct {
+	Name      string
+	Arguments string
+}
+
+// collectMCPToolCalls 汇总统一 text 载荷内全部 assistant.tool_calls（保持出现顺序）。
+func collectMCPToolCalls(msgs []model.ChatMessage) []mcpToolCallRef {
+	var out []mcpToolCallRef
+	for i := range msgs {
+		for _, tc := range msgs[i].ToolCalls {
+			out = append(out, mcpToolCallRef{Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+		}
+	}
+	return out
+}
+
+// evaluateMCPToolCalls 对统一 text 载荷内 assistant.tool_calls 逐个做 TEE 内裁决
+// （T-5 步 5 / P1-1 G-8 M8-2，场景 A）。**不改裁决算法，只接线**。
+// fail-closed：MCP 治理未启用、策略未就绪（O-3）、参数非法或裁决拒绝 → 返回 error（上层拒绝整请求）。
+// 向后兼容：载荷无 tool_calls 时直接返回 nil（零行为变化）。
+func (s *teeServer) evaluateMCPToolCalls(ctx context.Context, tenant, requestID, payloadSHA string,
+	msgs []model.ChatMessage) error {
+	calls := collectMCPToolCalls(msgs)
+	if len(calls) == 0 {
+		return nil
+	}
+	// 治理未启用 / 策略未就绪 → fail-closed（不降级放行）。
+	if s.mcpEngine == nil || s.mcpCache == nil || !s.mcpCache.Ready() {
+		s.denyAndAuditCtx(ctx, tenant, requestID, "mcp_guard_not_ready", payloadSHA)
+		log.Printf("[tee] MCP 治理未就绪，拒绝含 tool_calls 的请求 tenant=%s req=%s calls=%d",
+			tenant, requestID, len(calls))
+		return errors.New("mcp: 治理未就绪（fail-closed）")
+	}
+	for _, c := range calls {
+		args := map[string]any{}
+		if strings.TrimSpace(c.Arguments) != "" {
+			if err := json.Unmarshal([]byte(c.Arguments), &args); err != nil {
+				s.denyAndAuditCtx(ctx, tenant, requestID, "mcp_guard_bad_args", payloadSHA)
+				return fmt.Errorf("mcp: 工具 %q 参数非法", c.Name)
+			}
+		}
+		dec := s.mcpEngine.Evaluate(tenant, requestID, c.Name, args)
+		if !dec.Allow {
+			// 拒绝细节不外泄（Reason/ParamsHash 仅入审计/log）。
+			s.denyAndAuditCtx(ctx, tenant, requestID, "mcp_tool_deny", payloadSHA)
+			log.Printf("[tee] MCP 工具裁决拒绝（场景A）tenant=%s req=%s tool=%s reason=%s hash=%s",
+				tenant, requestID, c.Name, dec.Reason, dec.ParamsHash)
+			return fmt.Errorf("mcp: 工具 %q 未授权", c.Name)
+		}
+	}
+	return nil
 }
 
 // streamTextInfer 流式生成并逐块写出加密 SSE（seq 严格递增；finish 分片终止）。
