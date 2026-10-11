@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"security-ai-gateway/gateway/gateway-core/internal/policyaudit"
 	"security-ai-gateway/gateway/mcpsec"
 )
 
@@ -114,5 +115,66 @@ func TestToolPolicyRBACRoundtrip(t *testing.T) {
 	_ = json.Unmarshal(g.Body.Bytes(), &got)
 	if !s.msigner.ValidPolicy(&got) || got.Version != p.Version {
 		t.Fatalf("GET policy 校验失败: version=%d", got.Version)
+	}
+}
+
+// TestToolPolicyTrackChangeAudited T-6：Track 有效轨变更（secure→public）须独立留痕
+// （action=mcp_track_changed，含旧→新轨/版本区间，链式哈希可校验）。
+func TestToolPolicyTrackChangeAudited(t *testing.T) {
+	s := testServer()
+	// 首次：两工具均未标注 → 有效轨 secure（默认敏感）；无前值 ⇒ 不产生变更事件
+	first := `{"kind":"catalog","data":{"tools":[{"name":"db_query","catalog_owner":"tenant-a"},{"name":"kv_get","catalog_owner":"tenant-a"}]}}`
+	if rec := doToolPolicy(s, first, "tok"); rec.Code != http.StatusCreated {
+		t.Fatalf("首次签发应 201，got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if s.audit.Len() != 0 {
+		t.Fatalf("首次签发无前值不应留痕，got %d", s.audit.Len())
+	}
+	// 第二次：两工具显式改为 public → 有效轨 secure→public，各自留痕
+	second := `{"kind":"catalog","data":{"tools":[{"name":"db_query","catalog_owner":"tenant-a","track":"public"},{"name":"kv_get","catalog_owner":"tenant-a","track":"public"}]}}`
+	if rec := doToolPolicy(s, second, "tok"); rec.Code != http.StatusCreated {
+		t.Fatalf("二次签发应 201，got %d body=%s", rec.Code, rec.Body.String())
+	}
+	evs := s.audit.List(0)
+	if len(evs) != 2 {
+		t.Fatalf("应产生 2 条 mcp_track_changed 事件，got %d", len(evs))
+	}
+	for i, e := range evs {
+		if e.Action != policyaudit.ActionMCPTrackChanged || e.Field != "track" ||
+			e.OldValue != "secure" || e.NewValue != "public" {
+			t.Fatalf("第 %d 条 Track 变更事件字段不符: %+v", i, e)
+		}
+		if e.VersionFrom != 1 || e.VersionTo != 2 {
+			t.Fatalf("版本区间应为 1→2，got %d→%d", e.VersionFrom, e.VersionTo)
+		}
+	}
+	// 哈希链：首条为创世（prev_hash 空），其后各条串接前一事件哈希。
+	if evs[0].PrevHash != "" {
+		t.Fatalf("创世事件 prev_hash 应为空，got %q", evs[0].PrevHash)
+	}
+	if len(evs[1].PrevHash) != 64 {
+		t.Fatalf("第 2 条链哈希（prev_hash）应为 64 hex，got %q", evs[1].PrevHash)
+	}
+	if evs[0].RuleID != "db_query" || evs[1].RuleID != "kv_get" {
+		t.Fatalf("留痕工具名/顺序不符: %q, %q", evs[0].RuleID, evs[1].RuleID)
+	}
+	if ok, at := s.audit.Verify(); !ok {
+		t.Fatalf("审计链校验应通过，断点 %d", at)
+	}
+}
+
+// TestToolPolicyNoTrackChangeNoAudit T-6：有效轨未变化（显式 secure ↔ 缺省 "" 皆 secure）不留痕。
+func TestToolPolicyNoTrackChangeNoAudit(t *testing.T) {
+	s := testServer()
+	a := `{"kind":"catalog","data":{"tools":[{"name":"t1","catalog_owner":"o","track":"secure"}]}}`
+	if rec := doToolPolicy(s, a, "tok"); rec.Code != http.StatusCreated {
+		t.Fatalf("首次签发应 201，got %d", rec.Code)
+	}
+	b := `{"kind":"catalog","data":{"tools":[{"name":"t1","catalog_owner":"o"}]}}`
+	if rec := doToolPolicy(s, b, "tok"); rec.Code != http.StatusCreated {
+		t.Fatalf("二次签发应 201，got %d", rec.Code)
+	}
+	if s.audit.Len() != 0 {
+		t.Fatalf("有效轨未变化不应留痕，got %d", s.audit.Len())
 	}
 }

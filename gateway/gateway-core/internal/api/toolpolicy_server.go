@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
+	"security-ai-gateway/gateway/gateway-core/internal/policyaudit"
 	"security-ai-gateway/gateway/mcpsec"
 )
 
@@ -44,6 +46,10 @@ func (s *Server) handleToolPolicy(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_request", "catalog 数据非法")
 			return
 		}
+		// T-6：敏感度（Track）变更须独立留痕（防静默改判 → 工具跨轨迁移，§4.6.2）。
+		// 重签落库前先按**有效轨**（ToolTrack()：空值视同 secure）算出跨轨迁移记录。
+		prev := s.store.GetToolCatalog()
+		trackChanges := diffTrackChanges(prev, &c)
 		c.Version = s.policyVersion("catalog")
 		c.UpdatedAt = now
 		c.Signature = nil
@@ -52,6 +58,12 @@ func (s *Server) handleToolPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.store.SaveToolCatalog(&c)
+		// 审计落链 fail-closed（对齐 applyTable 口径）：变更不留痕即不可接受。
+		if err := s.appendTrackAudit(r, prev, &c, trackChanges); err != nil {
+			writeError(w, http.StatusInternalServerError, "audit_failed",
+				fmt.Sprintf("工具目录已在控制面生效但敏感度变更审计写入失败（fail-closed；请人工核查审计文件后决定是否重试）: %v", err))
+			return
+		}
 		writeJSON(w, http.StatusCreated, &c)
 	case "policy":
 		var p mcpsec.RBACPolicy
@@ -92,4 +104,64 @@ func (s *Server) handleGetToolPolicy(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request", "kind 仅支持 catalog|policy")
 	}
+}
+
+// trackChange 一条工具敏感度（Track）跨轨迁移记录。
+type trackChange struct {
+	Tool string
+	From string // 有效轨（ToolTrack()）
+	To   string
+}
+
+// diffTrackChanges 比较新旧目录的**有效轨**（ToolTrack()：空值视同 secure），
+// 返回同一工具发生跨轨迁移的记录。新增/删除工具不算 Track 变更（不在此列）。
+func diffTrackChanges(prev, next *mcpsec.ToolCatalog) []trackChange {
+	if prev == nil || next == nil {
+		return nil
+	}
+	old := make(map[string]string, len(prev.Tools))
+	for i := range prev.Tools {
+		old[prev.Tools[i].Name] = prev.Tools[i].ToolTrack()
+	}
+	var out []trackChange
+	for i := range next.Tools {
+		t := next.Tools[i]
+		was, ok := old[t.Name]
+		if !ok {
+			continue // 新增工具：非 Track 变更
+		}
+		if now := t.ToolTrack(); now != was {
+			out = append(out, trackChange{Tool: t.Name, From: was, To: now})
+		}
+	}
+	return out
+}
+
+// appendTrackAudit 逐条敏感度变更写入控制面审计链（action=mcp_track_changed，T-6 / §4.6.2）。
+// 无变更 → 不产生事件（版本单调推进本身由目录签名保障）。
+// 含 hash 无明文：事件进哈希链（prev_hash 串接，可经 audit-verify "core" schema 复算），
+// 仅记工具标识与轨取值，**不落**工具 schema/参数明文。
+func (s *Server) appendTrackAudit(r *http.Request, prev, next *mcpsec.ToolCatalog, changes []trackChange) error {
+	if len(changes) == 0 {
+		return nil
+	}
+	from := 0
+	if prev != nil {
+		from = prev.Version
+	}
+	actor := actorOf(r)
+	reqID := r.Header.Get("X-Request-ID")
+	for _, c := range changes {
+		ev := policyaudit.Event{
+			Actor: actor, Action: policyaudit.ActionMCPTrackChanged,
+			VersionFrom: from, VersionTo: next.Version,
+			RuleID: c.Tool, Change: policyaudit.ChangeUpdated, Field: "track",
+			OldValue: c.From, NewValue: c.To,
+			RequestID: reqID, Result: policyaudit.ResultOK,
+		}
+		if _, err := s.audit.Append(ev); err != nil {
+			return err
+		}
+	}
+	return nil
 }
