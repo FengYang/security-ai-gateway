@@ -49,14 +49,16 @@ func penServer(t *testing.T, tenant, tool string, denyParams []string, kenc []by
 	eng := mcpguard.NewEngine(mc)
 	sess := &teeSession{ID: sid, K_enc: kenc, Completed: true, CreatedAt: time.Now()}
 	sess.sendCounter = 1
-	return &teeServer{
+	s := &teeServer{
 		adminToken: "tok", mcpKey: key, mcpCache: mc, mcpEngine: eng,
-		mcpHandler: mcpproto.NewHandler(mcpproto.Deps{Guard: eng, Cache: mc}),
-		sessions:   map[string]*teeSession{sid: sess},
-		audit:      newAuditChain(),
-		usage:      make(map[string]*usageRecord),
-		metrics:    newMetrics(),
+		sessions: map[string]*teeSession{sid: sess},
+		audit:    newAuditChain(),
+		usage:    make(map[string]*usageRecord),
+		metrics:  newMetrics(),
 	}
+	// V-6：审计回调（与 main.go 生产接线同构）
+	s.mcpHandler = mcpproto.NewHandler(mcpproto.Deps{Guard: eng, Cache: mc, Audit: s.mcpCallAudit})
+	return s
 }
 
 // penSeal 以段① c2s 信封密封载荷并构造请求（同一 (kenc,sid,counter,pt) → 密文确定，便于重放用例）。

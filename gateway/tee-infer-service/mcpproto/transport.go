@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // JSON-RPC 2.0 保留错误码（MCP 规范保留段 -32020..-32099）。
@@ -44,11 +47,19 @@ func transportConsistency(r *http.Request) (int, string, bool) {
 	var env struct {
 		Method string `json:"method"`
 		Params struct {
-			Name string `json:"name"`
+			Name string         `json:"name"`
+			Meta map[string]any `json:"_meta"`
 		} `json:"params"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return CodeInconsistent, "malformed json-rpc", true
+	}
+	// 步 5（§5.7.2）：`_meta.protocolVersion` 版本校验 → 不符 → **-32022**。
+	// 注：stateless 服务端下 SDK 自行协商（不返回 -32022），故本校验须由本层显式实现。
+	if v, _ := env.Params.Meta[mcp.MetaKeyProtocolVersion].(string); v != "" {
+		if !slices.Contains(mcp.SupportedProtocolVersions(), v) {
+			return CodeUnsupportedVersion, "unsupported protocol version", true
+		}
 	}
 	if env.Method != m {
 		return CodeInconsistent, "Mcp-Method ≠ body.method", true

@@ -25,6 +25,12 @@ func (s *teeServer) handleMCPRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := tenantOf(r)
+	// V-7 就绪门控：治理未启用 / 策略未就绪 → **503**（fail-closed，不降级放行）。
+	if s.mcpCache == nil || !s.mcpCache.Ready() {
+		s.denyAndAudit(tenant, "", "mcp_guard_not_ready", payloadHashHex(body))
+		http.Error(w, "MCP 策略未就绪（fail-closed 503）", http.StatusServiceUnavailable)
+		return
+	}
 	sess := s.sessionByID(r)
 	if sess == nil {
 		s.denyAndAudit(tenant, "", "mcp_no_session", payloadHashHex(body))

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -262,5 +263,49 @@ func TestIntegrationDiscoverListCall(t *testing.T) {
 
 	if r2, err2 := cs.CallTool(ctx, &mcp.CallToolParams{Name: "secure_no"}); err2 == nil && r2 != nil && !r2.IsError {
 		t.Fatal("未暴露/未授权工具应被拒绝")
+	}
+}
+
+// TestTransportVersionUnsupported -32022（§12.2 T-4 步 5 / §5.7.2 步 5）：
+// `_meta.protocolVersion` 不受支持 → CodeUnsupportedVersion；受支持版本放行。
+func TestTransportVersionUnsupported(t *testing.T) {
+	bad := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"` +
+		mcp.MetaKeyProtocolVersion + `":"1999-01-01"}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(bad))
+	req.Header.Set(hdrMcpMethod, "tools/list")
+	if code, msg, isBad := transportConsistency(req); !isBad || code != CodeUnsupportedVersion {
+		t.Fatalf("不受支持版本应 -32022，实得 bad=%v code=%d msg=%s", isBad, code, msg)
+	}
+	ok := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"` +
+		mcp.MetaKeyProtocolVersion + `":"2026-07-28"}}}`)
+	req2 := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(ok))
+	req2.Header.Set(hdrMcpMethod, "tools/list")
+	if code, msg, isBad := transportConsistency(req2); isBad {
+		t.Fatalf("受支持版本不应被拒: code=%d msg=%s", code, msg)
+	}
+}
+
+// TestNewHandlerRejectsUnsupportedVersion 端到端：经 NewHandler → JSON-RPC -32022（HTTP 200，§5.7.3 分层）。
+func TestNewHandlerRejectsUnsupportedVersion(t *testing.T) {
+	srv := httptest.NewServer(NewHandler(readyDeps(t, "ta")))
+	defer srv.Close()
+
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"` +
+		mcp.MetaKeyProtocolVersion + `":"1999-01-01"}}}`)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(hdrMcpMethod, "tools/list")
+	req.Header.Set("X-Tenant-ID", "ta")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("JSON-RPC error 应 HTTP 200，实得 %d", resp.StatusCode)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(raw), "-32022") {
+		t.Fatalf("应含 -32022，实得 %s", raw)
 	}
 }

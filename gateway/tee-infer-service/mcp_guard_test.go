@@ -96,7 +96,8 @@ func lastDenyReason(srv *teeServer) string {
 	return out
 }
 
-// TestMCPToolCallsFailClosedWhenNotReady 治理未启用（mcpEngine/cache 为 nil）→ 含 tool_calls 请求 403 + 审计。
+// TestMCPToolCallsFailClosedWhenNotReady 治理未启用（mcpEngine/cache 为 nil）→ 含 tool_calls 请求
+// **503**（V-7：就绪门控，不降级）+ 审计。
 func TestMCPToolCallsFailClosedWhenNotReady(t *testing.T) {
 	srv, ts := newM9Server(t)
 	sessionID, ksig, kenc := setupTestSession(t, ts)
@@ -107,8 +108,8 @@ func TestMCPToolCallsFailClosedWhenNotReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("治理未就绪应 403（fail-closed），got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("治理未就绪应 503（fail-closed），got %d", resp.StatusCode)
 	}
 	if got := lastDenyReason(srv); got != "mcp_guard_not_ready" {
 		t.Fatalf("审计 result 应为 mcp_guard_not_ready，got %q", got)

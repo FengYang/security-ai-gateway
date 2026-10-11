@@ -1346,6 +1346,12 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	// 统一 text 载荷内的 assistant.tool_calls 一律经 TEE 内 mcpguard 裁决
 	// （裁决必须在 TEE 内，C-MCP-3；网关不做明文裁决）。未就绪/越权/参数非法 → fail-closed。
 	if err := s.evaluateMCPToolCalls(ctx, tenant, req.RequestID, payloadSHA, msgs); err != nil {
+		// V-7：治理未就绪 → **503**（不降级）；裁决拒绝/参数非法 → 403。
+		if errors.Is(err, errMCPNotReady) {
+			endSpanDenied(inferSpan, "mcp_guard_not_ready")
+			http.Error(w, "MCP 策略未就绪（fail-closed 503）", http.StatusServiceUnavailable)
+			return
+		}
 		endSpanDenied(inferSpan, "mcp_tool_deny")
 		http.Error(w, "工具调用未通过授权（fail-closed）", http.StatusForbidden)
 		return
@@ -1729,22 +1735,35 @@ func collectMCPToolCalls(msgs []model.ChatMessage) []mcpToolCallRef {
 	return out
 }
 
+// errMCPNotReady MCP 治理未就绪（V-7：就绪门控 → **503**，不降级放行）。
+var errMCPNotReady = errors.New("mcp: 治理未就绪（fail-closed 503）")
+
+// mcpCallAudit 敏感轨 tools/call 审计（T-9 / V-6）：唯一生产者＝tee-infer；
+// 仅记决策元数据与参数 hash（无明文参数）。
+func (s *teeServer) mcpCallAudit(tenant, tool, decision, paramsHash, reason string, policyVersion int) {
+	s.audit.append(AuditEvent{
+		TenantID: tenant, Action: "mcp_tool_call", Result: decision,
+		PayloadSHA: paramsHash, HashAlg: hashAlgTag(),
+		MCPTool: tool, MCPReason: reason, MCPPolicyVersion: policyVersion,
+	})
+}
+
 // evaluateMCPToolCalls 对统一 text 载荷内 assistant.tool_calls 逐个做 TEE 内裁决
 // （T-5 步 5 / P1-1 G-8 M8-2，场景 A）。**不改裁决算法，只接线**。
-// fail-closed：MCP 治理未启用、策略未就绪（O-3）、参数非法或裁决拒绝 → 返回 error（上层拒绝整请求）。
-// 向后兼容：载荷无 tool_calls 时直接返回 nil（零行为变化）。
+// fail-closed：MCP 治理未启用、策略未就绪（O-3）→ errMCPNotReady（上层 503）；
+// 参数非法或裁决拒绝 → 普通 error（上层 403）。向后兼容：无 tool_calls 时零行为变化。
 func (s *teeServer) evaluateMCPToolCalls(ctx context.Context, tenant, requestID, payloadSHA string,
 	msgs []model.ChatMessage) error {
 	calls := collectMCPToolCalls(msgs)
 	if len(calls) == 0 {
 		return nil
 	}
-	// 治理未启用 / 策略未就绪 → fail-closed（不降级放行）。
+	// 治理未启用 / 策略未就绪 → fail-closed 503（不降级放行，V-7）。
 	if s.mcpEngine == nil || s.mcpCache == nil || !s.mcpCache.Ready() {
 		s.denyAndAuditCtx(ctx, tenant, requestID, "mcp_guard_not_ready", payloadSHA)
 		log.Printf("[tee] MCP 治理未就绪，拒绝含 tool_calls 的请求 tenant=%s req=%s calls=%d",
 			tenant, requestID, len(calls))
-		return errors.New("mcp: 治理未就绪（fail-closed）")
+		return errMCPNotReady
 	}
 	for _, c := range calls {
 		args := map[string]any{}
@@ -4013,7 +4032,9 @@ func main() {
 		srv.mcpKey = key
 		srv.mcpCache = mc
 		srv.mcpEngine = mcpguard.NewEngine(mc)
-		srv.mcpHandler = mcpproto.NewHandler(mcpproto.Deps{Guard: srv.mcpEngine, Cache: srv.mcpCache})
+		srv.mcpHandler = mcpproto.NewHandler(mcpproto.Deps{
+			Guard: srv.mcpEngine, Cache: srv.mcpCache, Audit: srv.mcpCallAudit, // V-6：唯一生产者＝tee-infer
+		})
 	} else {
 		log.Printf("tee-infer: MCP 治理未启用（-admin-token 或 -mcp-key 缺失）→ /config/mcp 不注册")
 	}

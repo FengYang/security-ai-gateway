@@ -32,10 +32,16 @@ const (
 	hdrMcpName   = "Mcp-Name"
 )
 
+// CallAudit tools/call 审计回调（T-9 / V-6）。**仅**携带 hash 与决策元数据，不含明文参数；
+// 唯一生产者＝tee-infer（本包只回调，不落链）。
+type CallAudit func(tenant, tool, decision, paramsHash, reason string, policyVersion int)
+
 // Deps 依赖注入：mcpguard 引擎（裁决）与策略缓存（目录/策略/版本）。
 type Deps struct {
 	Guard *mcpguard.Engine
 	Cache *mcpguard.PolicyCache
+	// Audit 可选：tools/call 审计回调（nil = 不审计；生产由 tee-infer 注入，见 V-6）。
+	Audit CallAudit
 }
 
 // NewHandler 返回可挂在 tee-infer mux 上的 MCP HTTP handler。
@@ -105,6 +111,14 @@ func callTool(d Deps, tenant string, req *mcp.CallToolRequest) (*mcp.CallToolRes
 		_ = json.Unmarshal(req.Params.Arguments, &params)
 	}
 	dec := d.Guard.Evaluate(tenant, requestIDOf(req), req.Params.Name, params)
+	// V-6：每次 tools/call（放行/拒绝）产一条审计事件；仅 hash，无明文参数。
+	if d.Audit != nil {
+		decision, reason := "allow", ""
+		if !dec.Allow {
+			decision, reason = "deny", string(dec.Reason)
+		}
+		d.Audit(tenant, req.Params.Name, decision, dec.ParamsHash, reason, dec.PolicyVersion)
+	}
 	if !dec.Allow {
 		return denied(), nil
 	}

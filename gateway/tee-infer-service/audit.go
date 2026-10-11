@@ -88,6 +88,11 @@ type AuditEvent struct {
 	// **证据字段，不进 hash()**（保持 WORM 旧链逐字节不变）。
 	// omitempty：tracing 未启用或无 trace 时不写入，旧行零差异。
 	TraceID string `json:"trace_id,omitempty"`
+	// T-9 / V-6：MCP 敏感轨 tools/call 审计证据字段（**证据字段，不进 hash()**，C-4；
+	// 仅记决策元数据与参数 hash，**无明文**）。omitempty：旧 WORM 行零差异。
+	MCPTool          string `json:"mcp_tool,omitempty"`
+	MCPReason        string `json:"mcp_reason,omitempty"`
+	MCPPolicyVersion int    `json:"mcp_policy_version,omitempty"`
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。
