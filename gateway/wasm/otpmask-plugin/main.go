@@ -580,6 +580,30 @@ func isSecureMCPPathStr(path string) bool {
 	return strings.HasPrefix(path, secureMCPPathPrefix)
 }
 
+// ctxKeySecureMCP 本轮请求属 MCP 敏感轨（请求体阶段置位；响应阶段据此选信封 endpoint）。
+const ctxKeySecureMCP = "otpmask-secure-mcp"
+
+// markSecureMCP 标记本轮请求为 MCP 敏感轨。
+func markSecureMCP(ctx wrapper.HttpContext) { ctx.SetContext(ctxKeySecureMCP, true) }
+
+// isSecureMCPMarked 读取 MCP 敏感轨标记（响应阶段用）。
+func isSecureMCPMarked(ctx wrapper.HttpContext) bool {
+	v, _ := ctx.GetContext(ctxKeySecureMCP).(bool)
+	return v
+}
+
+// responseEnvelopeEndpoint 响应阶段应使用的信封 endpoint（纯函数，便于单测）。
+//
+// ⚠️ AAD 绑定 endpoint（protocol.EnvelopeAAD）⇒ 请求与响应的 endpoint **必须一致**，
+// 否则 AES-GCM 认证失败。MCP 敏感轨请求侧用 EndpointMCP（sealOpaqueMCP），
+// 故响应侧亦须用 EndpointMCP；文本/向量轨用 EndpointInfer。
+func responseEnvelopeEndpoint(secureMCP bool) string {
+	if secureMCP {
+		return protocol.EndpointMCP
+	}
+	return protocol.EndpointInfer
+}
+
 // opaqueMCPAction handleOpaqueMCP 在给定配置/会话状态下的动作。
 type opaqueMCPAction int
 
@@ -638,6 +662,7 @@ func sealOpaqueMCP(ctx wrapper.HttpContext, config PluginConfig, body []byte, lo
 func onRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, log logs.Log) types.Action {
 	// MCP 敏感轨：按**路径**分流为不透明整体载荷（先于文本/向量解析，禁止内容嗅探）。
 	if isSecureMCPPath(ctx) {
+		markSecureMCP(ctx) // 供响应阶段选信封 endpoint（EndpointMCP）
 		return handleOpaqueMCP(ctx, config, body, log)
 	}
 	if tReq, err := parseTextRequest(body); err == nil {
@@ -1274,13 +1299,21 @@ func processOutputBodyAsync(ctx wrapper.HttpContext, config PluginConfig, body [
 		return
 	}
 	if config.AttestMode == "quote" && !pendingVectorsPlain {
-		// quote 单信封：信封解密（经 sidecar /v1/open，异步）→ 南向协议响应（走既有验签/解密）。
+		// quote 单信封：信封解密（经 sidecar /v1/open，异步）→ 明文响应。
+		// ⚠️ endpoint 必须与**请求侧一致**（AAD 绑定 endpoint，见 responseEnvelopeEndpoint）：
+		//    MCP 敏感轨 = EndpointMCP（不透明载荷，解密后即 JSON-RPC/SSE 明文 → 直出）；
+		//    其余轨     = EndpointInfer（南向协议响应，走既有验签/解掩码）。
 		// 明文响应拒绝（fail-closed，防降级攻击）；向量明文直通请求（演示链兼容）除外。
-		Session.openPayload(protocol.EndpointInfer, body, func(pt []byte, oerr error) {
+		secureMCP := isSecureMCPMarked(ctx)
+		Session.openPayload(responseEnvelopeEndpoint(secureMCP), body, func(pt []byte, oerr error) {
 			if oerr != nil {
 				Session.clear()
-				log.Errorf("otpmask-plugin: fail-closed 拒绝响应: 推理响应解密失败（疑似降级攻击）: %v", oerr)
+				log.Errorf("otpmask-plugin: fail-closed 拒绝响应: 响应解密失败（疑似降级攻击）: %v", oerr)
 				cb(nil, false, false)
+				return
+			}
+			if secureMCP {
+				cb(pt, false, true) // MCP 明文直出（JSON-RPC/SSE，不经南向协议解析）
 				return
 			}
 			continueOutputBody(ctx, config, pt, log, cb)
