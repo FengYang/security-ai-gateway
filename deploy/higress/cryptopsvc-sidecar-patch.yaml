@@ -5,8 +5,9 @@
 #     --patch-file deploy/higress/cryptopsvc-sidecar-patch.yaml
 # 或 apply 前用 kustomize 叠加。回滚：kubectl rollout undo deployment/higress-gateway。
 #
-# 配套：① WasmPlugin CR（otpmask-plugin.yaml）crypto_service=cryptop-svc.static；
-#       ② McpBridge static 注册（mcp-bridge-registries.yaml，127.0.0.1:19097）。
+# 配套：① WasmPlugin CR（otpmask-plugin.yaml）crypto_service=cryptop-svc.static + crypto_service_port=19097；
+#       ② McpBridge static 注册（mcp-bridge-registries.yaml）：**domain 须写 `127.0.0.1:19097`（host:port）**，
+#          写裸 `127.0.0.1` 会被 Higress 2.2.5 controller 拒（`invalid endpoint ... with static type`，实测 2026-10-11）。
 apiVersion: v1
 kind: Secret
 metadata:
