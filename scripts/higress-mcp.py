@@ -13,11 +13,19 @@ higress-mcp.py —— 启用 / 回滚 Higress 原生 MCP Server（`higress-confi
   3) 滚动重启 gateway 并等待 Ready；
   4) 冒烟：断言 `mcpServer.enable=true` 已加载 + 探测 MCP 入口（信息性）。
 
-`--profile secure`（情况② 客户不信任基础设施）**尚未实现**：依赖 F-9（段① 不透明载荷）
-与 F-10（TEE 内 MCP 协议层），属方案 P2 阶段——本脚本遇 secure 明确报错退出，不静默降级。
+`--profile secure`（情况② 客户不信任基础设施）：在 native 流程**之上**追加 4 步
+（**不改 native 行为**，沿用 --dry-run/--rollback 语义）：
+  5) 敏感轨链路校验：Ingress `mcp-secure-tools` 生效 + WasmPlugin `otpmask` 覆盖该路由名；
+  6) 策略下发：`POST <tee>/config/mcp/policy`（body 取自 --mcp-policy-file，含已签名 {catalog,policy}）；
+  7) 就绪校验：`GET <tee>/config/mcp` 且断言 ready=true；
+  8) 冒烟：向 `/mcp-servers/secure-tools` 投递非段① 信封的不透明字节 → 断言 fail-closed。
+  dry-run：以上 4 步**仅列出、不做任何集群读写**（保证"列出 4 步且零变更"）。
 
 参数：
-  --profile native|secure  必填（secure 暂未实现）
+  --profile native|secure  必填
+  --tee-url                tee-infer 基址（缺省按 Running pod IP + 19090 自动发现）
+  --tee-token              tee-infer 管理令牌（X-Admin-Token）；或用 env OTP_TEE_ADMIN_TOKEN
+  --mcp-policy-file        secure 步骤② 请求体 JSON（{catalog?, policy?}，已签名对象）
   --dry-run                只打印将要写入的 mcpServer 段与差异，不做任何变更
   --rollback               删除 `mcpServer` 键并重启（等价"一键关闭"）
   --redis-address          默认 redis-ratelimit.otpmask.svc.cluster.local:6379（方案 §4.3 R1）
@@ -29,6 +37,7 @@ higress-mcp.py —— 启用 / 回滚 Higress 原生 MCP Server（`higress-confi
 注意：`higress-config` 的 `higress` 字段还含 tracing 等**运行期追加**内容，故本脚本只
       **合并/删除 `mcpServer` 键**，绝不以整份 ConfigMap 覆盖（防丢 tracing）。
 """
+import json
 import os
 import sys
 import time
@@ -42,6 +51,14 @@ DEFAULT_REDIS = "redis-ratelimit.otpmask.svc.cluster.local:6379"
 REDIS_SVC_NS = "otpmask"
 REDIS_SVC_NAME = "redis-ratelimit"
 GW_PORT = "30000"
+
+# ---- secure 分支（情况② 敏感轨）常量 ----
+TEE_SVC_NS = "otpmask"
+TEE_SVC_LABEL = "app=tee-infer-service"
+TEE_SVC_PORT = "19090"
+SECURE_INGRESS = "mcp-secure-tools"   # deploy/higress/ingress-mcp.yaml
+SECURE_PATH = "/mcp-servers/secure-tools"
+OTPMASK_PLUGIN = "otpmask"            # deploy/higress/otpmask-plugin.yaml（matchRules 含 SECURE_INGRESS）
 
 
 def _run(cmd, timeout=300):
@@ -236,6 +253,151 @@ def smoke(sse_suffix):
 
 
 # --------------------------------------------------------------------------- #
+# secure 追加步骤（情况② 敏感轨；native 之上追加，不改 native 行为）
+# --------------------------------------------------------------------------- #
+def tee_base_url(override):
+    """tee-infer 基址：--tee-url 覆盖；否则按 Running pod IP + 容器端口发现（与 native 冒烟同法，
+    经节点可达 pod IP，避免 ClusterIP 在集群外不可达）。"""
+    if override:
+        return override.rstrip("/")
+    out, err, rc = _run(
+        f"kubectl get pods -n {TEE_SVC_NS} -l {TEE_SVC_LABEL} "
+        "--field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}'"
+    )
+    ip = out.strip()
+    if rc != 0 or not ip:
+        raise SystemExit(f"未发现运行中的 tee-infer pod（ns={TEE_SVC_NS}）：{err.strip()[:200]}")
+    return f"http://{ip}:{TEE_SVC_PORT}"
+
+
+def tee_http(base, path, method="GET", token="", body_file=None, timeout=15):
+    """对 tee-infer 发一次请求，返回 (body, http_code)。"""
+    hdr = f"-H 'X-Admin-Token: {token}'" if token else ""
+    data = f"--data-binary @{body_file}" if body_file else ""
+    cmd = (
+        f"curl -s -w '\\n%{{http_code}}' --connect-timeout {timeout} -X {method} {hdr} "
+        f"-H 'Content-Type: application/json' {data} {base}{path}"
+    )
+    out, err, rc = _run(cmd, timeout=timeout + 5)
+    if rc != 0:
+        return f"curl rc={rc}: {err.strip()[:120]}", ""
+    parts = out.rsplit("\n", 1)
+    if len(parts) != 2:
+        return out.strip(), ""
+    return parts[0].strip(), parts[1].strip()
+
+
+def check_secure_route(dry_run):
+    """① 敏感轨链路校验：Ingress 生效 + otpmask 插件覆盖该路由名。"""
+    print("\n=== [secure] 1/4 敏感轨链路校验 ===")
+    print(f"   断言：Ingress {SECURE_INGRESS}（ns {CM_NS}）path={SECURE_PATH}")
+    print(f"         WasmPlugin {OTPMASK_PLUGIN}（ns {CM_NS}）matchRules 含路由名 {SECURE_INGRESS}")
+    if dry_run:
+        print("   [dry-run] 未执行（零变更）")
+        return
+    path, err, rc = _run(
+        f"kubectl get ingress {SECURE_INGRESS} -n {CM_NS} "
+        "-o jsonpath='{.spec.rules[0].http.paths[0].path}'"
+    )
+    if rc != 0 or path.strip() != SECURE_PATH:
+        raise SystemExit(
+            f"敏感轨 Ingress 未就绪（实得 path={path.strip()!r}，期望 {SECURE_PATH}）：{err.strip()[:200]}"
+        )
+    print(f"   Ingress OK：{path.strip()}")
+    rules, err, rc = _run(f"kubectl get wasmplugin {OTPMASK_PLUGIN} -n {CM_NS} -o yaml")
+    if rc != 0 or SECURE_INGRESS not in rules:
+        raise SystemExit(
+            f"otpmask 插件未覆盖敏感轨路由（matchRules 未见 {SECURE_INGRESS}）：{err.strip()[:200]}"
+        )
+    print(f"   插件覆盖 OK：{SECURE_INGRESS}")
+
+
+def push_mcp_policy(base, token, policy_file, dry_run):
+    """② 策略下发：POST /config/mcp/policy（body 须含已签名 catalog/policy）。"""
+    print("\n=== [secure] 2/4 策略下发（POST /config/mcp/policy）===")
+    print(f"   body 来源：--mcp-policy-file={policy_file or '(未提供)'}（须为 {{catalog?, policy?}} 已签名 JSON）")
+    if dry_run:
+        print("   [dry-run] 未执行（零变更）")
+        return
+    if not policy_file:
+        raise SystemExit("缺少 --mcp-policy-file（含已签名 {catalog, policy} 的 JSON）")
+    if not os.path.exists(policy_file):
+        raise SystemExit(f"策略文件不存在：{policy_file}")
+    body, code = tee_http(base, "/config/mcp/policy", "POST", token, policy_file)
+    if code != "200":
+        raise SystemExit(f"MCP 策略下发失败（HTTP {code}）：{body[:200]}")
+    print(f"   下发响应：{body[:300]}")
+
+
+def verify_mcp_ready(base, token, dry_run):
+    """③ 就绪校验：GET /config/mcp 且断言 ready=true（fail-closed：未就绪不得宣告成功）。"""
+    print("\n=== [secure] 3/4 就绪校验（GET /config/mcp）===")
+    if dry_run:
+        print("   断言：ready=true")
+        print("   [dry-run] 未执行（零变更）")
+        return
+    body, code = tee_http(base, "/config/mcp", "GET", token)
+    if code != "200":
+        raise SystemExit(f"就绪快照读取失败（HTTP {code}）：{body[:200]}")
+    try:
+        snap = json.loads(body)
+    except ValueError:
+        raise SystemExit(f"就绪快照非 JSON：{body[:200]}")
+    if not snap.get("ready"):
+        raise SystemExit(f"MCP 策略未就绪（ready={snap.get('ready')}）：{snap}")
+    print(f"   就绪 OK：{snap}")
+
+
+def smoke_secure(dry_run):
+    """④ 冒烟：向敏感轨投递**非段① 信封的不透明字节** → 断言 fail-closed（非 2xx）。
+
+    说明：完整「段① 信封（opaque 载荷）搬运」需客户端侧会话握手（ECDH/K_enc），
+    超出本部署脚本范围；此处以「不透明字节被拒」验证敏感轨已挂载且**不降级明文**。
+    """
+    print("\n=== [secure] 4/4 冒烟（opaque 载荷 / fail-closed）===")
+    if dry_run:
+        print(f"   将向 http://<gateway-pod-ip>:{GW_PORT}{SECURE_PATH} 投递非段① 信封的不透明字节，")
+        print("   断言 HTTP 非 2xx（fail-closed；明文/裸字节不得被放行）。")
+        print("   [dry-run] 未执行（零变更）")
+        return
+    pod, _, _ = _run(
+        f"kubectl get pods -n {CM_NS} -l app=higress-gateway "
+        "--field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}'"
+    )
+    pod = pod.strip()
+    ip, _, _ = _run(f"kubectl get pod {pod} -n {CM_NS} -o jsonpath='{{.status.podIP}}'")
+    ip = ip.strip()
+    code, _, _ = _run(
+        f"curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 3 -X POST "
+        f"-H 'Content-Type: application/octet-stream' --data-binary 'otpmask-opaque-probe' "
+        f"http://{ip}:{GW_PORT}{SECURE_PATH}",
+        timeout=15,
+    )
+    code = code.strip()
+    if code.startswith("2"):
+        raise SystemExit(f"冒烟失败：不透明载荷未被拒绝（HTTP {code}）——敏感轨 fail-closed 未生效")
+    print(f"   不透明载荷被拒（HTTP {code}）→ 敏感轨已挂载且 fail-closed ✓")
+
+
+def run_secure_steps(dry_run, tee_url, tee_token, policy_file):
+    """在 native 流程之上叠加 4 个敏感轨步骤（dry-run 仅列出，零变更）。"""
+    print("\n== [secure] 敏感轨追加步骤（4 步）==")
+    if dry_run:
+        check_secure_route(True)
+        push_mcp_policy(None, None, policy_file, True)
+        verify_mcp_ready(None, None, True)
+        smoke_secure(True)
+        print("\n[dry-run] secure 追加步骤已列出（未做任何集群读写）")
+        return
+    base = tee_base_url(tee_url)
+    print(f"-- tee-infer 基址: {base}")
+    check_secure_route(False)
+    push_mcp_policy(base, tee_token, policy_file, False)
+    verify_mcp_ready(base, tee_token, False)
+    smoke_secure(False)
+
+
+# --------------------------------------------------------------------------- #
 # 入口
 # --------------------------------------------------------------------------- #
 def remote_main(argv):
@@ -244,6 +406,9 @@ def remote_main(argv):
     do_rollback = "--rollback" in argv
     redis_addr = _opt(argv, "--redis-address", DEFAULT_REDIS)
     sse_suffix = _opt(argv, "--sse-suffix", "/sse")
+    tee_url = _opt(argv, "--tee-url")
+    tee_token = _opt(argv, "--tee-token", os.environ.get("OTP_TEE_ADMIN_TOKEN", ""))
+    mcp_policy_file = _opt(argv, "--mcp-policy-file")
 
     if do_rollback:
         changed = rollback(dry_run)
@@ -256,14 +421,8 @@ def remote_main(argv):
 
     if not profile:
         raise SystemExit("用法：--profile native|secure（或 --rollback）")
-    if profile == "secure":
-        raise SystemExit(
-            "profile=secure（情况② 客户不信任基础设施）**尚未实现**：依赖 F-9（段① 不透明载荷）"
-            "与 F-10（TEE 内 MCP 协议层），属方案 P2 阶段。\n"
-            "本次 P1 仅交付 native；请勿在未实现时启用，以免产生「看似配好、实则无密态」的误判。"
-        )
-    if profile != "native":
-        raise SystemExit(f"未知 profile: {profile}（仅支持 native）")
+    if profile not in ("native", "secure"):
+        raise SystemExit(f"未知 profile: {profile}（仅支持 native|secure）")
 
     print("=== Step 1: Redis 前置校验 ===")
     check_redis(redis_addr)
@@ -271,14 +430,22 @@ def remote_main(argv):
     print("\n=== Step 2: 合并写入 mcpServer 段 ===")
     changed = write_mcp_server(redis_addr, sse_suffix, dry_run)
     if not changed:
-        print("\n[dry-run] 结束（未变更）")
+        if profile == "native":
+            print("\n[dry-run] 结束（未变更）")
+            return
+        # secure dry-run：native 基础段未变更，但仍须**列出** 4 个追加步骤（验收：列出 4 步且零变更）
+    else:
+        print("\n=== Step 3: 重启 gateway ===")
+        restart_gateway()
+
+        print("\n=== Step 4: 冒烟 ===")
+        smoke(sse_suffix)
+
+    if profile == "secure":
+        run_secure_steps(dry_run, tee_url, tee_token, mcp_policy_file)
+        if changed:
+            print("\n完成：MCP Server（secure / 情况②）已启用（native 基础 + 敏感轨 4 步）。")
         return
-
-    print("\n=== Step 3: 重启 gateway ===")
-    restart_gateway()
-
-    print("\n=== Step 4: 冒烟 ===")
-    smoke(sse_suffix)
 
     print("\n完成：MCP Server（native / 情况①）已启用。"
           "注意：完整 MCP 握手需注册 MCP 服务（方案 §4.5 / F-2，受 U-4 约束）。")
