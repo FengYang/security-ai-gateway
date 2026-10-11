@@ -40,6 +40,10 @@ tee otpmask_attest_token_traffic_total conditional
 tee otpmask_recompute_ops_total conditional
 tee otpmask_recompute_duration_ms_total conditional
 
+# ---- MCP secure track (T-7; source=tee; mcp_method dimension: server/discover|tools/list|tools/call) ----
+# Lazy: emitted only when the secure track is enabled (-mcp-key + -admin-token) and a first MCP call occurs -> conditional
+tee otpmask_mcp_requests_total conditional
+
 # ---- B1 strong-label (GB 45438-2025); tee = issuer, plugins = fallback injectors ----
 # enabled gauge is always rendered when compiled in (like otpmask_output_guard_mode);
 # requests/frames counters are lazy (first labeled request).

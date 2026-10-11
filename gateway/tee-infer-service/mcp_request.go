@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 
@@ -36,6 +37,8 @@ func (s *teeServer) handleMCPRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "MCP 请求须为加密信封（fail-closed）", http.StatusBadRequest)
 		return
 	}
+	// T-7：按 mcp_method 维度计数（口径＝调用计数；解密后 JSON-RPC 明文在手，直接取 method）。
+	s.metrics.incMCPMethod(mcpMethodOf(pt))
 
 	// 交 T-4 MCP 协议层：body 换为解密后的 JSON-RPC（客户端原头透传，含 X-Tenant-ID）。
 	req2 := r.Clone(r.Context())
@@ -81,3 +84,15 @@ func (c *captureWriter) statusCode() int {
 }
 
 func (c *captureWriter) body() []byte { return c.buf.Bytes() }
+
+// mcpMethodOf 从解密后的 JSON-RPC 报文取 method 字段（T-7：mcp_method 维度计数）。
+// 非 JSON 对象 / 无 method → 空串（上层跳过计数，不臆造 label 值）。
+func mcpMethodOf(raw []byte) string {
+	var env struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return ""
+	}
+	return env.Method
+}

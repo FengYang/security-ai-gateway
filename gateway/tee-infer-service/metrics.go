@@ -114,6 +114,9 @@ type otpmaskMetrics struct {
 	// P0-2 §9.1 #20：TTFT 首帧时延（histogram，按 mode|cache=hit|miss；M4）
 	ttftMu sync.Mutex
 	ttft   map[string]*histogram
+	// T-7：MCP 敏感轨方法调用计数（按 mcp_method：server/discover|tools/list|tools/call）。
+	// 口径＝调用计数，不含 token 计费（P0-3 边界）；懒注册（无调用则无样本，故清单标 conditional）。
+	mcpMethod map[string]int64
 }
 
 func newMetrics() *otpmaskMetrics {
@@ -153,6 +156,7 @@ func newMetrics() *otpmaskMetrics {
 		ogL2DurationSec:    newHistogram(l2DurationSecBuckets),
 		contentLabelFrames: make(map[string]int64),
 		cryptopCompatMode:  make(map[string]int64),
+		mcpMethod:          make(map[string]int64),
 	}
 }
 
@@ -184,6 +188,17 @@ func (m *otpmaskMetrics) setOGRestartDetected(v int64) {
 func (m *otpmaskMetrics) incOGRequest(mode, field string) {
 	m.mu.Lock()
 	m.ogRequests[mode+"|"+field]++
+	m.mu.Unlock()
+}
+
+// incMCPMethod 记录一次 MCP 敏感轨方法调用（按 mcp_method：server/discover|tools/list|tools/call）。
+// T-7：口径＝调用计数（不含 token 计费）。
+func (m *otpmaskMetrics) incMCPMethod(method string) {
+	if method == "" {
+		return
+	}
+	m.mu.Lock()
+	m.mcpMethod[method]++
 	m.mu.Unlock()
 }
 
@@ -447,6 +462,8 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	writeCounter(w, "otpmask_attest_token_traffic_total", "token 证明模式流量", m.tokenTraffic, []string{"tenant"})
 	writeCounter(w, "otpmask_recompute_ops_total", "补算调用计数（按算子）", m.recomputeOps, []string{"op"})
 	writeCounter(w, "otpmask_recompute_duration_ms_total", "补算耗时累计（按算子，毫秒）", m.recomputeDur, []string{"op"})
+	// T-7 MCP 敏感轨（source=tee）：按 mcp_method 维度（server/discover|tools/list|tools/call）。
+	writeCounter(w, "otpmask_mcp_requests_total", "MCP 敏感轨方法调用计数（按 mcp_method）", m.mcpMethod, []string{"mcp_method"})
 	// ---- GA-输出侧内容审查（OG-3 M1 骨架；§4.10 唯一目录）----
 	writeCounter(w, "otpmask_output_guard_requests_total", "输出侧内容审查请求计数（按模式与字段）", m.ogRequests, []string{"mode", "field"})
 	writeCounter(w, "otpmask_output_guard_l1_hit_total", "L1 规则层命中次数（按类目与字段）", m.ogL1Hit, []string{"category", "field"})
