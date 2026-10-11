@@ -15,11 +15,19 @@ metadata:
   namespace: higress-system
 type: Opaque
 # ⚠️ 开发演示值（intl 32B hex）；生产由部署流水线替换（勿提交真实密钥）。
+# ⚠️ KeyRef 集合必须覆盖插件的密码总线契约（T-2/GF3 实测 2026-10-11）：
+#    - `otpmask/route-verify/v1`：路由表/限流表验签 K_rx（**与 gateway-core 的 core-sig-key 同值**；
+#       缺此项 ⇒ cryptop `/v1/hmac` 返回 404 unknown_key_ref ⇒ 插件报 bad_signature ⇒ 路由表永不入缓存
+#       ⇒ 全路径 fail-closed「无可用路由」）
+#    - `otpmask/jwt/v1`：门户 JWT（HS256）验签密钥（JWT 流程启用时必需）
+#    另：`session/sig/v1`、`session/hmac/v1` 为既有会话/掩码路径使用。
 stringData:
   static-keys.json: |
     {
       "session/sig/v1": "3031323334353637383961626364656630313233343536373839616263646566",
-      "session/hmac/v1": "3031323334353637383961626364656630313233343536373839616263646566"
+      "session/hmac/v1": "3031323334353637383961626364656630313233343536373839616263646566",
+      "otpmask/route-verify/v1": "3031323334353637383961626364656630313233343536373839616263646566",
+      "otpmask/jwt/v1": "3031323334353637383961626364656630313233343536373839616263646566"
     }
 ---
 apiVersion: apps/v1

@@ -45,19 +45,19 @@ import (
 )
 
 const (
-	hdrOtpRoute     = "X-Otp-Route"     // 处方（推路径 L1，JWT）
-	hdrOtpEngine    = "X-Otp-Engine"    // 决策输出：目标引擎（供 Envoy 路由规则）
-	hdrOtpTarget    = "X-Otp-Target"    // 决策输出：显式目标端点
-	hdrOtpModel     = "X-Otp-Model"     // 可选输入：模型维度（请求头阶段可得）
-	hdrOtpEndpoint  = "X-Otp-Endpoint"  // P0-1 新增：选中的端点名称（多端点路由决策输出）
-	hdrOtpStrategy  = "X-Otp-Strategy"  // P0-1 新增：使用的路由策略（tracing 关联用）
-	hdrOtpCanary    = "X-Otp-Canary"    // P0-1 新增：灰度分组（tracing 关联用）
-	hdrRequestID    = "X-Request-Id"    // Envoy 生成的请求 ID（日志-trace 关联用）
+	hdrOtpRoute    = "X-Otp-Route"    // 处方（推路径 L1，JWT）
+	hdrOtpEngine   = "X-Otp-Engine"   // 决策输出：目标引擎（供 Envoy 路由规则）
+	hdrOtpTarget   = "X-Otp-Target"   // 决策输出：显式目标端点
+	hdrOtpModel    = "X-Otp-Model"    // 可选输入：模型维度（请求头阶段可得）
+	hdrOtpEndpoint = "X-Otp-Endpoint" // P0-1 新增：选中的端点名称（多端点路由决策输出）
+	hdrOtpStrategy = "X-Otp-Strategy" // P0-1 新增：使用的路由策略（tracing 关联用）
+	hdrOtpCanary   = "X-Otp-Canary"   // P0-1 新增：灰度分组（tracing 关联用）
+	hdrRequestID   = "X-Request-Id"   // Envoy 生成的请求 ID（日志-trace 关联用）
 	// P2-1 流式重试（Envoy 层）：重试归因头 + 开关头。
 	// X-Otpmask-Retry-Attempt：首次=1，重发>=2（TEE 侧识别不计费，与非流式重试对齐）。
 	// X-Otpmask-Stream-Retry：流式重试总开关（on/off），便于 Envoy/TEE 侧识别。
-	hdrRetryAttempt  = "X-Otpmask-Retry-Attempt"
-	hdrStreamRetry   = "X-Otpmask-Stream-Retry"
+	hdrRetryAttempt = "X-Otpmask-Retry-Attempt"
+	hdrStreamRetry  = "X-Otpmask-Stream-Retry"
 )
 
 // routeRuntimeState 路由运行时状态：验签密钥 + 路由表缓存 + 拉取参数（由 parseConfig 初始化）。
@@ -75,7 +75,7 @@ type routeRuntimeState struct {
 	lastRejectVersion int    // 最近一次被拒版本号
 	// P1-2：处方头防重放守卫（JTI 消费记录）。nil = 未启用（与 P0 行为一致）。
 	// Wasm 单线程环境，无需加锁。
-	replayGuard *rxroute.ReplayGuard
+	replayGuard   *rxroute.ReplayGuard
 	replayEnabled bool
 	// P1-2：防重放统计（可观测）
 	replayRejectCount int64 // 累计重放拒绝次数
@@ -254,7 +254,9 @@ func finishRouteDecision(ctx wrapper.HttpContext, log logs.Log, tenant, model, r
 		log.Warnf("otpmask-plugin: 路由降级 L2（处方缺失/失效）tenant=%q model=%q engine=%q", tenant, model, d.Engine)
 	case routecache.SourceNone:
 		// 缓存未命中即 fail-closed（拉取由周期 tick 任务承担，见 routefetch.go）。
-		failClosed(log, failReason)
+		// 诊断增强（2026-10-11 真机定位）：带上解析到的 (tenant, model)，便于识别“输入侧未命中”
+		//（例如请求头阶段未取到租户 / 模型），而非把一切归因于路由表本身。
+		failClosed(log, failReason+" [tenant="+tenant+" model="+model+"]")
 		return false
 	}
 	if d.Engine != "" {
