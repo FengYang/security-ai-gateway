@@ -110,7 +110,14 @@ func NewServer(p cryptop.Provider, cfg Config) (*Server, error) {
 	}
 
 	m := newMetrics()
-	store := keystore.NewMemStore(p, m)
+	// 密钥目录选型（P1-5 M4/B-6.1-5）：sm-module 档走 moduleStore（密钥入模块、
+	// 只持 token）；intl/sm-software 档走 memStore（既有路径零改动）。
+	var store keystore.KeyStore
+	if mbp, ok := p.(cryptop.ModuleBackendProvider); ok {
+		store = keystore.NewModuleStore(mbp.ModuleBackend(), m)
+	} else {
+		store = keystore.NewMemStore(p, m)
+	}
 	s := &Server{
 		p:    p,
 		keys: store,

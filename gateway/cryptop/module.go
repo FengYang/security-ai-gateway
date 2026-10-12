@@ -66,6 +66,17 @@ func NewModuleProviderWithBackend(b cryptopmodule.ModuleBackend, cfg *cryptopmod
 	return newModuleProvider(b, cfg)
 }
 
+// ModuleBackendProvider 暴露 sm-module 后端的 Provider 能力（M4 装配用：
+// keystore moduleStore / 密封密钥模块路径经此获取后端，无需感知具体类型）。
+type ModuleBackendProvider interface {
+	Provider
+	// ModuleBackend 返回本 Provider 承载的模块后端。
+	ModuleBackend() cryptopmodule.ModuleBackend
+}
+
+// ModuleBackend 实现 ModuleBackendProvider（M4）。
+func (p *moduleProvider) ModuleBackend() cryptopmodule.ModuleBackend { return p.backend }
+
 // ---- Provider 20 方法 ----
 
 func (p *moduleProvider) Profile() Profile       { return ProfileSMModule }

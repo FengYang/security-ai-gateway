@@ -8,6 +8,8 @@ package cryptopsvc
 // 有密钥运算（hmac/seal/sign/...）的模块档路径随 M4 密钥托管导入后覆盖。
 
 import (
+	"bytes"
+	"encoding/base64"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -102,18 +104,53 @@ func TestModuleAssemblyFailClosed(t *testing.T) {
 	}
 }
 
-// TestModuleAssemblyKeyedOpsPendingM4 记录当前边界：有密钥运算在 sm-module 档
-// 依赖 M4 的模块密钥导入（静态密钥入模块）；本测试锁定"未导入时 fail-closed
-// 报错而非静默错乱"的现状，M4 落地后改为正向断言。
-func TestModuleAssemblyKeyedOpsPendingM4(t *testing.T) {
-	_, ts, _ := newModuleTestServer(t)
-	// 未导入的 key_ref 在 sm-module 档必须明确失败（模块内查无此对象），
-	// 不得静默走软件路径（C-3）。
-	code, _ := postJSON(t, ts, "/v1/hmac", map[string]any{
-		"key_ref": "static/aead",
-		"data":    b64([]byte("x")),
+// TestModuleAssemblyKeyedOps M4 落地后有密钥运算在 sm-module 档可用：
+// 静态密钥经 moduleStore 导入模块（B-6.1-5），/v1/hmac 在模块内执行。
+func TestModuleAssemblyKeyedOps(t *testing.T) {
+	b := cryptopmodule.NewMockBackend()
+	cfgM := cryptopmodule.DefaultConfig()
+	cfgM.Backend = cryptopmodule.BackendMock
+	cfgM.MaxSessions = 4
+	prov, err := cryptop.NewModuleProviderWithBackend(b, cfgM)
+	if err != nil {
+		t.Fatalf("NewModuleProviderWithBackend: %v", err)
+	}
+	s, err := NewServer(prov, Config{
+		Profile:     cryptop.ProfileSMModule,
+		CallTimeout: time.Second,
+		StaticKeys: map[string][]byte{
+			"static/hmac": bytes.Repeat([]byte{0xCD}, 16), // sm-module 对称键长 16
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewServer(sm-module+static): %v", err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	t.Cleanup(func() { _ = b.Close() })
+
+	code, resp := postJSON(t, ts, "/v1/hmac", map[string]any{
+		"key_ref": "static/hmac",
+		"data":    b64([]byte("module-hmac")),
 	}, nil)
-	if code == 200 {
-		t.Fatal("sm-module 档未导入的 key_ref 不应成功（M4 密钥导入前 fail-closed）")
+	if code != 200 {
+		t.Fatalf("sm-module 档 /v1/hmac 应可用（静态密钥已入模块，HTTP %d）", code)
+	}
+	macB64, _ := resp["mac"].(string)
+	if macB64 == "" {
+		t.Fatalf("响应缺 mac: %v", resp)
+	}
+	// 与软件档逐字节一致（跨档 KAT：HMAC-SM3）。
+	sw, err := cryptop.New(cryptop.ProfileSMSW)
+	if err != nil {
+		t.Fatalf("cryptop.New(sm-software): %v", err)
+	}
+	want := sw.HMAC(bytes.Repeat([]byte{0xCD}, 16), []byte("module-hmac"))
+	got, err := base64.StdEncoding.DecodeString(macB64)
+	if err != nil {
+		t.Fatalf("mac base64 解码: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("模块档 HMAC 与软件档不一致（KAT）")
 	}
 }

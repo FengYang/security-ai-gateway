@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -63,11 +64,7 @@ type MockEnclave struct {
 }
 
 func NewMockEnclave() (*MockEnclave, error) {
-	sealKey, err := loadSealKey(mockSealKeyEnv)
-	if err != nil {
-		return nil, err
-	}
-	keyRing, err := loadSealKeyHistory(mockSealKeyEnv + "_HISTORY")
+	sealKey, keyRing, err := loadSealKeyMaterial()
 	if err != nil {
 		return nil, err
 	}
@@ -84,6 +81,36 @@ func NewMockEnclave() (*MockEnclave, error) {
 		signKey:     signKey,
 		platform:    "mock",
 	}, nil
+}
+
+// loadSealKeyMaterial 按进程 profile 选择密封密钥材料（P1-5 M4，2026-10-12）：
+//   - sm-module（进程 provider 实现 cryptop.ModuleBackendProvider）：模块 KEK 路径——
+//     主密钥为模块对象 token（AEAD 经模块执行，C-4/C-5）；历史密钥环暂不支持
+//     （模块多对象环待后端持久查找 API，S3-b 真机期补）；
+//   - 其余档：既有 env/随机路径（loadSealKey/loadSealKeyHistory，**零改动**）。
+func loadSealKeyMaterial() (sealKey []byte, keyRing [][]byte, err error) {
+	if mbp, ok := cryptoProvider.(cryptop.ModuleBackendProvider); ok {
+		tok, err := NewModuleSealKeySource(mbp.ModuleBackend()).Load(context.Background())
+		if err != nil {
+			return nil, nil, err
+		}
+		return tok, nil, nil
+	}
+	sealKey, err = loadSealKey(mockSealKeyEnv)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyRing, err = loadSealKeyHistory(mockSealKeyEnv + "_HISTORY")
+	if err != nil {
+		return nil, nil, err
+	}
+	return sealKey, keyRing, nil
+}
+
+// isModuleProvider 进程 provider 是否为 sm-module 模块档（token 语义判定）。
+func isModuleProvider(p cryptop.Provider) bool {
+	_, ok := p.(cryptop.ModuleBackendProvider)
+	return ok
 }
 
 // loadSealKey 读取密封密钥（按环境变量名取；空则随机生成）。长度随 profile（intl=32B / sm=16B）。
@@ -156,18 +183,32 @@ func sealWithContext(sealKey, plaintext []byte, context string) ([]byte, error) 
 // unsealWithContext 解封 suite 版本化密封数据（B5-a）：
 // 首字节为已知 suite → 先按新格式解（AEAD tag 认证判别）；
 // 任一失败回退旧格式（无前缀，恒 AES-256-GCM，B-5.4-1 fail-safe）。
-// 候选密钥：当前 sealKey 优先，历史密钥环按序；仅尝试长度与套件匹配者。
+// 候选密钥：当前 sealKey 优先，历史密钥环按序；仅尝试长度与套件匹配者
+// （sm-module 档 sealKey 为模块 token，豁免长度匹配——openWithSuite 内判定）。
+//
+// 候选 provider 顺序（P1-5 M4）：**进程 provider 优先**（sm-module 档即模块，
+// AEAD 在模块内执行），套件对应固定档次之（跨档复算，G-3a 双读语义不变）。
 //
 // 双读统计：成功使用非主 profile 套件 / 旧格式回退时，调用 enclaveDualReadInc（若已绑定）。
 func unsealWithContext(sealKey []byte, keyRing [][]byte, ciphertext []byte, context string) ([]byte, error) {
 	if len(ciphertext) > 0 {
-		if prov, ok := providerForSuite(ciphertext[0]); ok {
-			if plain, err := openWithSuite(prov, ciphertext[1:], sealKey, keyRing, context); err == nil {
-				// suite 版本化：若 suite 与主 profile 不一致，则为双读。
-				if enclaveDualReadInc != nil && prov.Profile() != hashProvForProfile() {
+		if _, ok := providerForSuite(ciphertext[0]); ok {
+			// 主候选：进程 provider（sm-module 档 = 模块；其余档与固定档等价）。
+			if plain, err := openWithSuite(cryptoProvider, ciphertext[1:], sealKey, keyRing, context); err == nil {
+				// suite 版本化：若使用的 provider 与主 profile 不一致，则为双读。
+				if enclaveDualReadInc != nil && cryptoProvider.Profile() != hashProvForProfile() {
 					enclaveDualReadInc()
 				}
 				return plain, nil
+			}
+			// 次候选：套件对应固定档（与进程 provider 不同时；跨档复算路径）。
+			if prov, _ := providerForSuite(ciphertext[0]); prov != cryptoProvider {
+				if plain, err := openWithSuite(prov, ciphertext[1:], sealKey, keyRing, context); err == nil {
+					if enclaveDualReadInc != nil && prov.Profile() != hashProvForProfile() {
+						enclaveDualReadInc()
+					}
+					return plain, nil
+				}
 			}
 		}
 	}
@@ -191,6 +232,8 @@ func hashProvForProfile() cryptop.Profile {
 
 // openWithSuite 按指定 suite 解析 body（AAD‖nonce‖ct），校验上下文绑定后
 // 依次尝试匹配长度的候选密钥；全失败返回最后错误。
+// sm-module 档（prov 为模块 provider）时 sealKey/keyRing 为模块 token，
+// **豁免长度匹配**（token 非明秘密，长度与套件无关；B-6.1-4）。
 func openWithSuite(prov cryptop.Provider, body, sealKey []byte, keyRing [][]byte, context string) ([]byte, error) {
 	hs, ns := prov.HashSize(), prov.NonceSize()
 	if len(body) < hs+ns+16 { // GCM tag 至少 16 字节
@@ -203,12 +246,13 @@ func openWithSuite(prov cryptop.Provider, body, sealKey []byte, keyRing [][]byte
 		return nil, errors.New("enclave: 密封上下文不匹配")
 	}
 	wantKeyLen := prov.SymmetricKeySize()
+	tokenMode := isModuleProvider(prov) // sm-module：token 语义，豁免长度匹配
 	candidates := make([][]byte, 0, 1+len(keyRing))
-	if len(sealKey) == wantKeyLen {
+	if len(sealKey) == wantKeyLen || tokenMode {
 		candidates = append(candidates, sealKey)
 	}
 	for _, k := range keyRing {
-		if len(k) == wantKeyLen {
+		if len(k) == wantKeyLen || tokenMode {
 			candidates = append(candidates, k)
 		}
 	}

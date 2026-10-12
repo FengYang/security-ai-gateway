@@ -17,6 +17,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+
+	"github.com/emmansun/gmsm/sm2"
 )
 
 // MockBackend 内存 mock 后端（实现 ModuleBackend）。
@@ -393,6 +395,31 @@ func (m *MockBackend) GenerateKey(spec, alias string) (KeyRef, error) {
 		return nil, err
 	}
 	return m.register(&mockKey{bytes: b, alg: alg, usage: "dek"}, alias), nil
+}
+
+// ImportKey 导入外部密钥字节（M4：静态密钥/仪式导入路径）。
+// 字节仅瞬态经适配层进入模块内对象，不缓存（B-6.1-1）。
+func (m *MockBackend) ImportKey(spec string, key []byte, alias string) (KeyRef, error) {
+	switch spec {
+	case "", "sm4-128", "sm4":
+		if len(key) != mockSymKeySize {
+			return nil, fmt.Errorf("mock: SM4 密钥长度 %d != %d", len(key), mockSymKeySize)
+		}
+		cp := append([]byte(nil), key...)
+		return m.register(&mockKey{bytes: cp, alg: "sm4", usage: "dek"}, alias), nil
+	case "sm2-sign", "sm2-ecdh":
+		if len(key) != mockPrivSize {
+			return nil, fmt.Errorf("mock: SM2 私钥长度 %d != %d", len(key), mockPrivSize)
+		}
+		// 校验可解析（fail-fast；不缓存明文于适配层）。
+		if _, err := sm2.NewPrivateKey(append([]byte(nil), key...)); err != nil {
+			return nil, fmt.Errorf("mock: SM2 私钥不可解析: %w", err)
+		}
+		cp := append([]byte(nil), key...)
+		return m.register(&mockKey{bytes: cp, alg: "sm2", usage: UsageSign}, alias), nil
+	default:
+		return nil, fmt.Errorf("mock: 未知 spec=%q", spec)
+	}
 }
 
 func (m *MockBackend) DestroyKey(keyRef KeyRef) error {

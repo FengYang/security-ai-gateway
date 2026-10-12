@@ -249,6 +249,53 @@ func TestMockKeyLifecycleAndErrors(t *testing.T) {
 	}
 }
 
+func TestMockImportKey(t *testing.T) {
+	m := initMock(t)
+	// SM4 导入：返回 token；导入的密钥可用于 Seal/Open（M4 静态密钥路径）。
+	raw := bytes.Repeat([]byte{0x5A}, 16)
+	tok, err := m.ImportKey("sm4-128", raw, "imported-1")
+	if err != nil {
+		t.Fatalf("ImportKey(sm4): %v", err)
+	}
+	if len(tok) == 0 || bytes.Equal(tok, raw) {
+		t.Fatal("ImportKey 应返回非明密 token")
+	}
+	nonce := bytes.Repeat([]byte{0x03}, 12)
+	ct, err := m.Seal(tok, nonce, []byte("imported"), nil)
+	if err != nil {
+		t.Fatalf("Seal(imported): %v", err)
+	}
+	pt, err := m.Open(tok, nonce, ct, nil)
+	if err != nil || string(pt) != "imported" {
+		t.Fatalf("Open(imported): %v %q", err, pt)
+	}
+	// 长度不符 → 拒绝（fail-closed）。
+	if _, err := m.ImportKey("sm4-128", []byte("short"), "x"); err == nil {
+		t.Fatal("非法长度导入应失败")
+	}
+	// SM2 私钥导入：可签名。
+	priv, _, err := mockGenerateKeyPair()
+	if err != nil {
+		t.Fatalf("mockGenerateKeyPair: %v", err)
+	}
+	sm2Tok, err := m.ImportKey("sm2-sign", priv, "imported-sm2")
+	if err != nil {
+		t.Fatalf("ImportKey(sm2): %v", err)
+	}
+	sig, err := m.Sign(sm2Tok, []byte("m"), "")
+	if err != nil {
+		t.Fatalf("Sign(imported sm2): %v", err)
+	}
+	if len(sig) == 0 {
+		t.Fatal("签名不应为空")
+	}
+	// 不可解析私钥 → 拒绝。
+	bad := bytes.Repeat([]byte{0xFF}, 32)
+	if _, err := m.ImportKey("sm2-sign", bad, "bad"); err == nil {
+		t.Fatal("不可解析 SM2 私钥应导入失败")
+	}
+}
+
 func TestMockFaultInjection(t *testing.T) {
 	m := initMock(t)
 	ref, _ := m.GenerateKey("sm4-128", "f-1")

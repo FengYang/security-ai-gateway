@@ -210,6 +210,10 @@ type ModuleBackend interface {
 	WrapKey(kekRef KeyRef, dek []byte) ([]byte, error)
 	// UnwrapKey 以 KEK 解封 DEK。
 	UnwrapKey(kekRef KeyRef, wrapped []byte) ([]byte, error)
+	// ImportKey 将外部密钥字节导入模块（密钥导入/ceremony 路径；M4）。
+	// spec ∈ {"sm4-128"/""（对称）, "sm2-sign"/"sm2-ecdh"（非对称私钥）}；
+	// 字节仅瞬态经适配层进入模块，**不得缓存**（B-6.1-1）。
+	ImportKey(spec string, key []byte, alias string) (KeyRef, error)
 	// GenerateKey 生成对称密钥对象（spec 如 "sm4-128"；alias 为模块内对象名，可空）。
 	GenerateKey(spec, alias string) (KeyRef, error)
 	// DestroyKey 销毁模块内密钥对象（GM2-02）。
