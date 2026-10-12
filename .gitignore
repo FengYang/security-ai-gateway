@@ -200,3 +200,19 @@ gateway/wasm/*/routeengine/cover
 
 # ===== 基准测试结果数据（非源码，不入库）=====
 deploy/tlcp/bench-*.txt
+
+# ===== 文档目录：自 2026-10-13 起移交独立文档库（docs/.git），主库不再跟踪 =====
+# 说明：docs/ 已初始化为独立 git 库，主库整体忽略该目录。
+# 例外：下列 8 个配置/证据文件此前已入库且由主库继续跟踪（promtool 校验与
+#       guardrail_eval_test.go 读取需要），git 忽略规则对已跟踪文件无效，故不受影响：
+#   docs/benchmark/guardrail-classifier/keyword-baseline.json
+#   docs/output-guard/.promtool-rules.yaml
+#   docs/output-guard/GA-输出侧-S0①对照表与四指标上界.json
+#   docs/output-guard/GA-输出侧-告警规则-PrometheusRule.yaml
+#   docs/output-guard/GA-输出侧-告警规则-promtool-test.yaml
+#   docs/output-guard/outputguard-eval93-outputs.json
+#   docs/output-guard/outputguard-eval93.json
+#   docs/output-guard/outputguard-eval94.json
+# 注意：上方第 55–75 行的 *.md 豁免项（!docs/API-参考.md 等）对新增文件不再生效，
+#       保留仅为历史兼容——对应文件已移出主库跟踪，改由文档库跟踪。
+docs/
