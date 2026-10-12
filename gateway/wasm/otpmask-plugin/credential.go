@@ -47,10 +47,10 @@ type credentialRuntime struct {
 // credRuntime 全局凭据运行态（与 routeRuntime 同风格）。
 var credRuntime credentialRuntime
 
-// credFetchLoopOnce 保证 tick 仅注册一次（parseConfig 可能因配置热更新重复调用）。
-var credFetchLoopOnce sync.Once
-
-// initCredentialRuntime 装配凭据运行态并注册周期拉取（幂等；未启用则零影响）。
+// initCredentialRuntime 装配凭据运行态并注册周期拉取（未启用则零影响）。
+//
+// ⚠️ tick 注册**不可用 sync.Once 去重**：wasm-go 的 OnPluginStart 每次执行（含配置热更新）
+// 都会清空全局 tick 注册表，要求 parseConfig 重新登记（详见 routefetch.go 的注释）。
 func initCredentialRuntime(c PluginConfig) {
 	credRuntime.enabled = c.CredentialEnabled
 	credRuntime.service = c.CredentialService
@@ -69,11 +69,9 @@ func initCredentialRuntime(c PluginConfig) {
 		proxywasm.LogInfof("otpmask-plugin: 段① 凭据运行态拉取未启用（使用静态 config）")
 		return
 	}
-	credFetchLoopOnce.Do(func() {
-		wrapper.RegisterTickFunc(credRuntime.intervalMs, fetchCredentialOnce)
-		proxywasm.LogInfof("otpmask-plugin: 凭据周期拉取已注册 period_ms=%d name=%s channel=%s",
-			credRuntime.intervalMs, credRuntime.name, orStr(credRuntime.channelName, "off"))
-	})
+	wrapper.RegisterTickFunc(credRuntime.intervalMs, fetchCredentialOnce)
+	proxywasm.LogInfof("otpmask-plugin: 凭据周期拉取已注册 period_ms=%d name=%s channel=%s（每次插件启动/热更新重新注册）",
+		credRuntime.intervalMs, credRuntime.name, orStr(credRuntime.channelName, "off"))
 	// 冷启动：tick 首个回调要等一个周期，配置加载期先立即拉一次（失败由后续 tick 兜底）。
 	fetchCredentialOnce()
 }

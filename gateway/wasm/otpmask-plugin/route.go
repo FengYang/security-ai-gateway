@@ -495,20 +495,18 @@ func recordRouteResult(ctx wrapper.HttpContext, status int) {
 // 路由运行时周期任务（§6.9 降级重评估 + §10 快照可观测）
 // ============================================================
 
-// routeRuntimeLoopOnce 保证运行时 tick 仅注册一次（parseConfig 可能被热更新重复调用）。
-var routeRuntimeLoopOnce sync.Once
-
 // routeRuntimeTickIntervalMs 降级/快照评估周期（毫秒）。
 // 取 10s：远小于 §6 故障检测目标（<10s 由被动 EWMA + 主动探测承担），
 // 且作为纯本地计算开销可忽略。
 const routeRuntimeTickIntervalMs = 10000
 
-// ensureRouteRuntimeLoop 注册路由运行时周期任务（幂等）。
+// ensureRouteRuntimeLoop 注册路由运行时周期任务。
+//
+// ⚠️ **不可用 sync.Once 去重**：wasm-go 的 OnPluginStart 每次执行（含配置热更新）都会清空
+// 全局 tick 注册表，要求 parseConfig 重新登记（详见 routefetch.go 的 ensureRouteFetchLoop 注释）。
 func ensureRouteRuntimeLoop() {
-	routeRuntimeLoopOnce.Do(func() {
-		wrapper.RegisterTickFunc(routeRuntimeTickIntervalMs, routeRuntimeTick)
-		proxywasm.LogInfof("otpmask-plugin: 路由运行时周期任务已注册 period_ms=%d", routeRuntimeTickIntervalMs)
-	})
+	wrapper.RegisterTickFunc(routeRuntimeTickIntervalMs, routeRuntimeTick)
+	proxywasm.LogInfof("otpmask-plugin: 路由运行时周期任务已注册 period_ms=%d（每次插件启动/热更新重新注册）", routeRuntimeTickIntervalMs)
 }
 
 // routeRuntimeTick 周期任务：对每个已建引擎重评估三级降级级别并输出运行时快照。

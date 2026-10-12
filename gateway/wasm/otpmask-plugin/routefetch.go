@@ -15,7 +15,6 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"sync"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
@@ -23,19 +22,24 @@ import (
 	"security-ai-gateway/gateway/wasm/otpmask-plugin/routecache"
 )
 
-// routeFetchLoopOnce 保证 tick 仅注册一次（parseConfig 可能因配置热更新被重复调用）。
-var routeFetchLoopOnce sync.Once
-
-// ensureRouteFetchLoop 注册周期拉取任务（幂等）。
+// ensureRouteFetchLoop 注册周期拉取任务。
+//
+// ⚠️ **不可用 sync.Once 去重**（wasm-go v1.1.2 生命周期，2026-10-12 集群实测 + SDK 源码取证）：
+// OnPluginStart 每次执行（含 ECDS 配置热更新产生的新插件上下文）都会先把 SDK 的
+// globalOnTickFuncs 清空（plugin_wrapper.go OnPluginStart: `globalOnTickFuncs = nil`），
+// 随后由 parseConfig 重新登记并把 tick 绑到新上下文。Once 在 VM 内只执行一次，
+// 热更新后会跳过重注册 ⇒ 新上下文零 tick ⇒ 路由表周期拉取永久停止、内存缓存不再回填
+// （实测：热更新后持续 fail-closed「无可用路由」）。
+//
+// 不会重复登记：defaultConfigDisable + 单条 matchRule ⇒ parseConfig 每次 OnPluginStart 仅调用一次。
+// 同范式见 gateway/wasm/rpm-shadow-plugin/fetch.go 的 ensureFetchTick。
 func ensureRouteFetchLoop() {
-	routeFetchLoopOnce.Do(func() {
-		interval := routeRuntime.pollIntervalMs
-		if interval < 100 {
-			interval = 100
-		}
-		wrapper.RegisterTickFunc(interval, fetchRouteTableOnce)
-		proxywasm.LogInfof("otpmask-plugin: 路由表周期拉取已注册 period_ms=%d", interval)
-	})
+	interval := routeRuntime.pollIntervalMs
+	if interval < 100 {
+		interval = 100
+	}
+	wrapper.RegisterTickFunc(interval, fetchRouteTableOnce)
+	proxywasm.LogInfof("otpmask-plugin: 路由表周期拉取已注册 period_ms=%d（每次插件启动/热更新重新注册）", interval)
 }
 
 // fetchRouteTableOnce 拉取一次路由表并写入运行时缓存（tick 触发；同时覆盖冷启动场景）。

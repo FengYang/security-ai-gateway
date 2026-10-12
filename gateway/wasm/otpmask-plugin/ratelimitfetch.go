@@ -14,7 +14,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"sync"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	logs "github.com/higress-group/wasm-go/pkg/log"
@@ -80,19 +79,17 @@ func initRateLimitRuntime(config PluginConfig, log logs.Log) {
 		config.GatewayCoreService, config.GatewayCorePort, config.PollIntervalSeconds)
 }
 
-// rateLimitFetchLoopOnce 保证 tick 仅注册一次（parseConfig 可能因热更新重复调用）。
-var rateLimitFetchLoopOnce sync.Once
-
-// ensureRateLimitFetchLoop 注册周期拉取任务（幂等）。
+// ensureRateLimitFetchLoop 注册周期拉取任务。
+//
+// ⚠️ **不可用 sync.Once 去重**：wasm-go 的 OnPluginStart 每次执行（含配置热更新）都会清空
+// 全局 tick 注册表，要求 parseConfig 重新登记（详见 routefetch.go 的 ensureRouteFetchLoop 注释）。
 func ensureRateLimitFetchLoop() {
-	rateLimitFetchLoopOnce.Do(func() {
-		interval := rateLimitRuntime.pollIntervalMs
-		if interval < 100 {
-			interval = 100
-		}
-		wrapper.RegisterTickFunc(interval, fetchRateLimitOnce)
-		proxywasm.LogInfof("otpmask-plugin: 限流表周期拉取已注册 period_ms=%d", interval)
-	})
+	interval := rateLimitRuntime.pollIntervalMs
+	if interval < 100 {
+		interval = 100
+	}
+	wrapper.RegisterTickFunc(interval, fetchRateLimitOnce)
+	proxywasm.LogInfof("otpmask-plugin: 限流表周期拉取已注册 period_ms=%d（每次插件启动/热更新重新注册）", interval)
 }
 
 // fetchRateLimitOnce 拉取一次限流表（tick 触发，同时覆盖冷启动）。

@@ -58,19 +58,17 @@ func initKeyRevocationRuntime(config PluginConfig, log logs.Log) {
 		config.KeyRevocationService, config.KeyRevocationPort, intervalSec)
 }
 
-// keyRevocationLoopOnce 保证 tick 仅注册一次（parseConfig 可能因热更新重复调用）。
-var keyRevocationLoopOnce sync.Once
-
-// ensureKeyRevocationLoop 注册周期拉取任务（幂等）。
+// ensureKeyRevocationLoop 注册周期拉取任务。
+//
+// ⚠️ **不可用 sync.Once 去重**：wasm-go 的 OnPluginStart 每次执行（含配置热更新）都会清空
+// 全局 tick 注册表，要求 parseConfig 重新登记（详见 routefetch.go 的 ensureRouteFetchLoop 注释）。
 func ensureKeyRevocationLoop(intervalSec int64) {
-	keyRevocationLoopOnce.Do(func() {
-		interval := intervalSec * 1000
-		if interval < 100 {
-			interval = 100
-		}
-		wrapper.RegisterTickFunc(interval, fetchKeyRevocationsOnce)
-		proxywasm.LogInfof("otpmask-plugin: 租户 Key 吊销周期拉取已注册 period_ms=%d", interval)
-	})
+	interval := intervalSec * 1000
+	if interval < 100 {
+		interval = 100
+	}
+	wrapper.RegisterTickFunc(interval, fetchKeyRevocationsOnce)
+	proxywasm.LogInfof("otpmask-plugin: 租户 Key 吊销周期拉取已注册 period_ms=%d（每次插件启动/热更新重新注册）", interval)
 }
 
 // fetchKeyRevocationsOnce 增量拉取一次（tick 触发，覆盖冷启动）。
