@@ -51,11 +51,58 @@ func newModuleProviderFromEnv() (Provider, error) {
 		return nil, fmt.Errorf("%w: sm-module 生产路径禁止 mock 后端（MODULE_BACKEND=mock）；功能验证请使用 NewModuleProviderWithBackend",
 			cryptopmodule.ErrNotImplemented)
 	}
-	b, err := cryptopmodule.NewBackend(cfg)
+	return buildModuleProvider(cfg)
+}
+
+// buildModuleProvider 按配置构造 sm-module Provider；若启用主备（failover/degrade 且
+// 配了备模块），则以 FailoverBackend 包裹后端，使 20 方法零改动获得主备/熔断（M5）。
+//
+// 主/备后端由调用方 Init（FailoverBackend.Init 仅做能力复核 + 启动探针，不重复 Init）。
+func buildModuleProvider(cfg *cryptopmodule.Config) (Provider, error) {
+	primary, err := cryptopmodule.NewBackend(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return newModuleProvider(b, cfg)
+	var fm *cryptopmodule.FailoverManager
+	if cryptopmodule.NeedsBackup(cfg) {
+		if err := primary.Init(cfg); err != nil {
+			return nil, err
+		}
+		bcfg := cryptopmodule.BackupConfigFrom(cfg)
+		backup, err := cryptopmodule.NewBackend(bcfg)
+		if err != nil {
+			return nil, err
+		}
+		if err := backup.Init(bcfg); err != nil {
+			return nil, err
+		}
+		fm = cryptopmodule.NewFailoverManager(primary, backup, cryptopmodule.FailoverConfigFrom(cfg), nil)
+	}
+	eff := cryptopmodule.ModuleBackend(primary)
+	if fm != nil {
+		eff = cryptopmodule.NewFailoverBackend(fm)
+	}
+	return newModuleProvider(eff, cfg)
+}
+
+// NewModuleProviderWithFailover 以显式主/备后端构造 sm-module Provider（测试 / 适配层功能验证）。
+//
+// 主/备后端由调用方 Init；本函数仅包裹 FailoverBackend 并装配。
+// **禁止用于生产合规声明**——mock 后端的 ComplianceNote 已如实标注"不满足密评"。
+func NewModuleProviderWithFailover(primary, backup cryptopmodule.ModuleBackend, cfg *cryptopmodule.Config, sink cryptopmodule.MetricsSink) (Provider, error) {
+	if primary == nil || cfg == nil {
+		return nil, fmt.Errorf("cryptop: NewModuleProviderWithFailover 需要 primary 与配置")
+	}
+	fm := cryptopmodule.NewFailoverManager(primary, backup, cryptopmodule.FailoverConfigFrom(cfg), sink)
+	if err := primary.Init(cfg); err != nil {
+		return nil, fmt.Errorf("cryptop: 主模块初始化失败: %w", err)
+	}
+	if backup != nil {
+		if err := backup.Init(cfg); err != nil {
+			return nil, fmt.Errorf("cryptop: 备模块初始化失败: %w", err)
+		}
+	}
+	return newModuleProvider(cryptopmodule.NewFailoverBackend(fm), cfg)
 }
 
 // NewModuleProviderWithBackend 以显式后端构造 sm-module Provider。
