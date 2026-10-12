@@ -127,6 +127,8 @@ logs/
 # ===== 构建/调试残留（不入库）=====
 security-ai-gateway-linux.tar.gz
 higress-standalone/req.json
+# 本地构建与验收证据产物（交叉编译二进制 / pcap / 证据 txt，本地保留不入库）
+tmp_build/
 
 # 本地工具链（w64devkit 编译器套装，本地保留，不入库）
 /tools/
@@ -184,6 +186,8 @@ tmp_*.py
 # P1-2 实测一次性运维脚本（_ 前缀，本地保留不入库；
 # 固化版见 scripts 下无下划线的同名脚本，如 higress-tracing.py / tempo-verify.py）
 scripts/_*.py
+# MCP 接入实测/回滚一次性脚本（_ 前缀，同约定不入库；含内网地址与本地令牌，勿随仓库开源）
+scripts/_*.sh
 
 # ===== 覆盖率输出目录（运行时生成，不入库）=====
 cover/
