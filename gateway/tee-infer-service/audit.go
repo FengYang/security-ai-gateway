@@ -129,15 +129,19 @@ func (e *AuditEvent) hashWithErr() (string, error) {
 }
 
 // auditChain 哈希链审计存储。
-// 支持两种后端：
+// 支持多种后端：
 // - 内存模式（默认）：与 MVP 行为一致
-// - WORM 文件模式：JSON Lines 只追加（O_APPEND），启动时从文件恢复链，
-// 提供 anchor 锚定（链尾哈希落盘，独立文件）与 verify 篡改检测
+// - WORM 后端（WormBackend 接口）：fileWorm（本地 JSONL）/ 对象存储 WORM 等，
+//   只追加语义，启动时从文件恢复链，提供 anchor 锚定与 verify 篡改检测
+//
+// T5（GAP-09）新增：fail-closed 模式与 WormBackend 抽象。
+// - append 签名不变（既有 30 处调用点零改动，方案甲）
+// - appendOrFail：业务变更类落链点调用，写失败且 failClosed=true 时返回 error
 type auditChain struct {
 	mu      sync.Mutex
 	events  []AuditEvent
 	lastHex string
-	file    *os.File  // 非 nil = WORM 持久化模式（只追加）
+	file    *os.File  // 非 nil = 旧 WORM 持久化模式（只追加；向后兼容，保留供 load/恢复用）
 	anchor  *os.File  // 非 nil = 锚定文件（只追加）
 	tsa     TSASigner // RFC 3161 可信时间戳服务
 	// S5：本进程实例标识（构造时生成，写入每条事件的 instance_id 证据字段）。
@@ -146,10 +150,57 @@ type auditChain struct {
 	// P0-2 §9.1 #16 / B-7.5-1：审计链写入失败回调（不阻塞缓存写入）。
 	// 启动期一次性设置（SetWriteFailureHook），此后只读。
 	onWriteFail func()
+	// ---- P1-8 T5（GAP-09）fail-closed 与 WormBackend ----
+	// worm：WORM 持久化后端（nil = 纯内存模式，不落盘）。
+	// 与旧 file 字段的关系：file 保留供 load 恢复用；写入走 worm 接口。
+	worm WormBackend
+	// failClosed：true = 写失败时拒绝业务请求（fail-closed）；
+	// false = 写失败仅告警（fail-open，兼容旧行为）。
+	// 启动期设置，运行时可通过 SetFailClosed 动态切换（灰度/回退）。
+	failClosed bool
+	// onWormWriteFail：WORM 写入失败回调（M-7 指标，policy=fail_closed|fail_open）。
+	// 唯一生产点：appendOrFail。append 内部的旧 file 写入失败仍走 onWriteFail。
+	onWormWriteFail func(policy string)
+	// onFailClosedReject：fail-closed 模式下因写失败拒绝请求的计数（M-8 指标）。
+	// 唯一生产点：appendOrFail。
+	onFailClosedReject func()
 }
 
 // SetWriteFailureHook 设置审计链写入失败回调（启动期调用；P0-2 §9.1 #16）。
 func (c *auditChain) SetWriteFailureHook(fn func()) { c.onWriteFail = fn }
+
+// ---- P1-8 T5（GAP-09）fail-closed 与 WormBackend 设置 ----
+
+// SetWormBackend 设置 WORM 持久化后端（nil = 纯内存）。
+// 启动期一次性设置，此后只读。
+func (c *auditChain) SetWormBackend(wb WormBackend) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.worm = wb
+}
+
+// SetFailClosed 设置 fail-closed 模式（可运行时动态切换，用于灰度/回退）。
+// true = WORM 写失败时拒绝业务请求；false = 仅告警（默认，兼容旧行为）。
+func (c *auditChain) SetFailClosed(v bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failClosed = v
+}
+
+// FailClosed 返回当前 fail-closed 模式。
+func (c *auditChain) FailClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.failClosed
+}
+
+// SetWormWriteFailHook 设置 WORM 写入失败回调（M-7 指标，policy=fail_closed|fail_open）。
+// 启动期一次性设置。
+func (c *auditChain) SetWormWriteFailHook(fn func(policy string)) { c.onWormWriteFail = fn }
+
+// SetFailClosedRejectHook 设置 fail-closed 拒绝回调（M-8 指标）。
+// 启动期一次性设置。
+func (c *auditChain) SetFailClosedRejectHook(fn func()) { c.onFailClosedReject = fn }
 
 // newInstanceID 生成本进程实例标识（"inst-" + 8 hex）。
 func newInstanceID() string { return "inst-" + randHex(8) }
@@ -247,6 +298,66 @@ func (c *auditChain) append(e AuditEvent) AuditEvent {
 	c.events = append(c.events, e)
 	c.lastHex = e.hash()
 	return e
+}
+
+// appendOrFail 追加审计事件（业务变更类落链点专用）。
+//
+// 与 append 的差异：
+//   - 写 WORM 失败时，按 failClosed 决定是否返回 error：
+//     - failClosed=true → 返回 error（调用方应拒绝业务请求，M-8 计数）
+//     - failClosed=false → 仅告警 + 落内存链（兼容旧行为，M-7 计数 policy=fail_open）
+//   - 返回落链后的终态事件（与 append 一致）+ error。
+//
+// 指标唯一生产点（M-7 / M-8，D-11 去重）：
+//   - M-7 otpmask_worm_write_failed_total{policy}：onWormWriteFail(policy)
+//   - M-8 otpmask_audit_failclosed_rejected_total：onFailClosedReject()
+//
+// 注意：
+//   - append 签名不变（既有 30 处调用点零改动，方案甲）
+//   - 仅"业务变更类落链点"调用本函数；查询/观测/启动类继续用 append
+//   - worm 为 nil（纯内存）时始终成功（无持久化失败场景）
+func (c *auditChain) appendOrFail(e AuditEvent) (AuditEvent, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e.PrevHash = c.lastHex
+	e.Timestamp = time.Now().UnixNano()
+	if e.EventID == "" {
+		e.EventID = fmt.Sprintf("evt-%d", e.Timestamp)
+	}
+	if e.InstanceID == "" {
+		e.InstanceID = c.instanceID
+	}
+	// R-12：算法非法即不落链（fail-safe 保链完整）
+	if _, herr := e.hashWithErr(); herr != nil {
+		log.Printf("[audit] 事件哈希算法非法，拒绝落链: %v", herr)
+		return e, herr
+	}
+	// 写 WORM 后端（若有）
+	var writeErr error
+	if c.worm != nil {
+		if werr := c.worm.Append(e); werr != nil {
+			writeErr = werr
+			log.Printf("[audit] WORM 写入失败（审计完整性受损）: %v", werr)
+			policy := "fail_open"
+			if c.failClosed {
+				policy = "fail_closed"
+			}
+			if c.onWormWriteFail != nil {
+				c.onWormWriteFail(policy) // M-7 唯一计数点
+			}
+		}
+	}
+	// fail-closed：写失败且开启 failClosed → 不落入内存链（保持链一致），返回 error
+	if writeErr != nil && c.failClosed {
+		if c.onFailClosedReject != nil {
+			c.onFailClosedReject() // M-8 唯一计数点
+		}
+		return e, fmt.Errorf("audit: WORM 写入失败，fail-closed 拒绝: %w", writeErr)
+	}
+	// 正常路径（或 fail-open 下写失败仍落内存链）
+	c.events = append(c.events, e)
+	c.lastHex = e.hash()
+	return e, nil
 }
 
 // AnchorRecord 锚定记录。
