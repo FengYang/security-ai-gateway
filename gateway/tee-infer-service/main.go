@@ -961,7 +961,8 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "响应加密失败（fail-closed）", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
+		// 自定义 media type：避免 Envoy wasm wrapper 对 octet-stream 的二进制 body 跳过响应回调
+		w.Header().Set("Content-Type", "application/x-otpmask")
 		_, _ = w.Write(sealed)
 		return
 	}
@@ -1196,7 +1197,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "响应加密失败（fail-closed）", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Type", "application/x-otpmask")
 		_, _ = w.Write(sealed)
 		return
 	}
