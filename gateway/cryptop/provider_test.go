@@ -40,7 +40,8 @@ func TestProfileCompliance(t *testing.T) {
 	}
 }
 
-// TestNewProfileDispatch 分派语义：intl 与 sm-software 可用；sm-module 明确"未实现"（不静默回退）。
+// TestNewProfileDispatch 分派语义：intl 与 sm-software 可用；sm-module 在无厂商
+// 配置时明确失败（fail-closed 启动拒，不静默回退——P1-5 M2/C-3）。
 func TestNewProfileDispatch(t *testing.T) {
 	for _, prof := range conformanceProfiles {
 		p, err := New(prof)
@@ -48,8 +49,15 @@ func TestNewProfileDispatch(t *testing.T) {
 			t.Fatalf("%s 应可用，实际 err=%v", prof, err)
 		}
 	}
-	if _, err := New(ProfileSMModule); !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("sm-module 应返回 ErrNotImplemented（待认证密码模块接入），实际 %v", err)
+	// sm-module 生产路径：未配置厂商库 → 错误（绝不返回可用 Provider）。
+	_, err := New(ProfileSMModule)
+	if err == nil {
+		t.Fatal("sm-module 无厂商配置时应失败（fail-closed）")
+	}
+	// 显式 mock 后端在生产路径同样被拒（防软件实现冒充合规，P4）。
+	t.Setenv("MODULE_BACKEND", "mock")
+	if _, err := New(ProfileSMModule); err == nil {
+		t.Fatal("sm-module 生产路径应拒绝 mock 后端")
 	}
 	if _, err := New("bogus"); !errors.Is(err, ErrUnknownProfile) {
 		t.Errorf("未知 profile 应返回 ErrUnknownProfile，实际 %v", err)

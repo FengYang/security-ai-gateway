@@ -32,7 +32,8 @@ const (
 )
 
 var (
-	// ErrNotImplemented 该 profile 或该原语尚未实现（本轮 sm-software / sm-module 均未实现）。
+	// ErrNotImplemented 该 profile 或该原语尚未实现。
+	// （sm-software 已实现；sm-module 的生产路径见 New——厂商 SDK 未接入时返回明确错误。）
 	ErrNotImplemented = errors.New("cryptop: 该 profile 或原语尚未实现")
 	// ErrUnknownProfile 未知 profile。
 	ErrUnknownProfile = errors.New("cryptop: 未知 profile")
@@ -132,8 +133,10 @@ func New(profile Profile) (Provider, error) {
 		// 仅限功能验证与过渡（见 Profile.ComplianceNote）。
 		return newSMProvider(), nil
 	case ProfileSMModule:
-		// 认证密码模块/密码服务接入后实现；**绝不回退到软件实现冒充合规**。
-		return nil, ErrNotImplemented
+		// 认证密码模块/密码服务（P1-5 M2）：经 env 配置构造后端（sdf/pkcs11）。
+		// 厂商 SDK 未接入/配置缺失/能力不足 → 错误（调用方启动拒），
+		// **绝不回退到软件实现冒充合规**（C-3）。
+		return newModuleProviderFromEnv()
 	default:
 		return nil, ErrUnknownProfile
 	}
