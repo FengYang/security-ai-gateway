@@ -17,7 +17,7 @@ patches:
       path: /spec/template/spec/containers/0/env/0
       value:
         name: ENCLAVE_MODE
-        value: "sgx"
+        value: "tdx"
     - op: add
       path: /spec/template/spec/nodeSelector
       value:
