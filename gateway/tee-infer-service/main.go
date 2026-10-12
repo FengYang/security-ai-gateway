@@ -3758,7 +3758,9 @@ func main() {
 	auditFile := flag.String("audit-file", "", "审计事件 WORM 文件路径（JSON Lines 只追加；为空 = 内存模式）")
 	auditAnchor := flag.String("audit-anchor", "", "审计锚定文件路径（链尾哈希追加；仅 audit-file 开启时生效）")
 	auditRetention := flag.Int("audit-retention-days", defaultAuditRetentionDays, "审计/日志留存期声明（天；0=不声明；>0 须 ≥180 法定硬底）。仅声明：服务不删除审计数据（保 WORM 链完整），删除由存储层生命周期策略按本值执行")
-	tsaMode := flag.String("tsa", "mock", "RFC 3161 可信时间戳服务：mock（本地自签）| off（不绑定 TST，）")
+	tsaMode := flag.String("tsa", "mock", "RFC 3161 可信时间戳服务：mock（本地自签）| rfc3161（外部 TSA）| off（不绑定 TST）")
+	tsaRFC3161URL := flag.String("tsa-rfc3161-url", "", "外部 RFC 3161 TSA 服务 URL（-tsa rfc3161 时必填）")
+	tsaRFC3161RootCert := flag.String("tsa-rfc3161-root-cert", "", "外部 TSA 根证书路径（PEM；空=使用系统根证书池，生产环境建议显式配置）")
 	requireAttest := flag.Bool("require-attest", false, "强制证明模式")
 	enclaveMode := flag.String("enclave", "mock", "飞地实现：mock|tdx|sgx")
 	sealFile := flag.String("seal-file", "", "飞地密封数据文件（主密钥/K_sig 经 Seal 持久化；为空 = 内存模式，重启重新生成）")
@@ -3954,7 +3956,7 @@ func main() {
 	}
 
 	// C-5：审计 WORM 持久化——指定 -audit-file 时启用文件追加与启动恢复
-	// RFC 3161 可信时间戳（-tsa mock|off）
+	// RFC 3161 可信时间戳（-tsa mock|rfc3161|off）
 	var tsa TSASigner
 	switch *tsaMode {
 	case "mock":
@@ -3963,10 +3965,28 @@ func main() {
 			log.Fatalf("初始化 TSA 失败: %v", err)
 		}
 		tsa = t
+	case "rfc3161":
+		if *tsaRFC3161URL == "" {
+			log.Fatal("外部 TSA（rfc3161）须指定 -tsa-rfc3161-url")
+		}
+		var rootCertPEM []byte
+		if *tsaRFC3161RootCert != "" {
+			data, err := os.ReadFile(*tsaRFC3161RootCert)
+			if err != nil {
+				log.Fatalf("读取 TSA 根证书失败: %v", err)
+			}
+			rootCertPEM = data
+		}
+		t, err := NewHTTPTSA(*tsaRFC3161URL, rootCertPEM)
+		if err != nil {
+			log.Fatalf("初始化外部 TSA 失败: %v", err)
+		}
+		tsa = t
+		log.Printf("外部 TSA 已就绪: %s（根证书: %s）", *tsaRFC3161URL, orDefault(*tsaRFC3161RootCert, "系统根证书池"))
 	case "off":
 		tsa = nil
 	default:
-		log.Fatalf("未知 TSA 模式: %q（mock|off）", *tsaMode)
+		log.Fatalf("未知 TSA 模式: %q（mock|rfc3161|off）", *tsaMode)
 	}
 	var audit *auditChain
 	if *auditFile != "" {
@@ -4021,6 +4041,10 @@ func main() {
 	}
 	// T-5：MCP 工具级治理接线（验签缓存 + TEE 内裁决引擎）。
 	// 约束：管理令牌或 MCP 密钥缺失 → 不构造 → /config/mcp 端点不注册（fail-closed）。
+	// P1-8 T5：审计 fail-closed 指标回调接入（M-7/M-8，source=tee）。
+	// 唯一生产点 = auditChain.appendOrFail（audit.go:319）。
+	srv.audit.SetWormWriteFailHook(func(policy string) { srv.metrics.incWormWriteFail(policy) })
+	srv.audit.SetFailClosedRejectHook(func() { srv.metrics.incAuditFailClosedReject() })
 	if *adminToken != "" && *mcpKeyHex != "" {
 		key, kerr := hex.DecodeString(*mcpKeyHex)
 		if kerr != nil || len(key) < 32 {

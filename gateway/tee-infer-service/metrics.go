@@ -77,6 +77,9 @@ type otpmaskMetrics struct {
 	ogBlocked          map[string]int64 // category|mode|field（命中且动作=block，enforcing）
 	ogMasked           map[string]int64 // category|field（命中且动作=mask/rewrite）
 	ogFirstChunkSkipL2 int64            // S3-2 策略 C：首段安全后跳过 L2 的请求数（gauge）
+	// P1-8 安全加固（M-7/M-8，source=tee）：审计 WORM 写入失败与 fail-closed 拒绝
+	wormWriteFail          map[string]int64 // policy（fail_closed|fail_open）：M-7 otpmask_worm_write_failed_total
+	auditFailClosedReject  int64            // M-8 otpmask_audit_failclosed_rejected_total
 	ogCanaryProbe      int64            // P0-3 策略 C：canary 探测句走完整 L2 的次数
 	ogCanaryReattach   int64            // P0-3 策略 C：canary 命中底线触发回挂的次数
 	ogPolicyRollback   map[string]int64 // reason（策略热加载回退事件）
@@ -199,6 +202,26 @@ func (m *otpmaskMetrics) incMCPMethod(method string) {
 	}
 	m.mu.Lock()
 	m.mcpMethod[method]++
+	m.mu.Unlock()
+}
+
+// incWormWriteFail 记录一次 WORM 写入失败（M-7，policy=fail_closed|fail_open）。
+func (m *otpmaskMetrics) incWormWriteFail(policy string) {
+	if policy == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.wormWriteFail == nil {
+		m.wormWriteFail = make(map[string]int64)
+	}
+	m.wormWriteFail[policy]++
+	m.mu.Unlock()
+}
+
+// incAuditFailClosedReject 记录一次因审计写失败触发 fail-closed 拒绝（M-8）。
+func (m *otpmaskMetrics) incAuditFailClosedReject() {
+	m.mu.Lock()
+	m.auditFailClosedReject++
 	m.mu.Unlock()
 }
 
@@ -453,6 +476,12 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	}
 	fmt.Fprintf(w, "# HELP otpmask_audit_retention_days 审计/日志留存期声明值（天；0=未声明）。声明式：服务不删除审计数据（WORM 链完整），删除由存储层生命周期策略按本值执行\n# TYPE otpmask_audit_retention_days gauge\n")
 	fmt.Fprintf(w, "otpmask_audit_retention_days %d\n", m.auditRetentionDays)
+	// P1-8 M-7/M-8：审计 WORM 写入失败与 fail-closed 拒绝（source=tee）
+	writeCounter(w, "otpmask_worm_write_failed_total", "WORM 写入失败次数（policy=fail_closed 表示因写失败触发 fail-closed 拒绝；policy=fail_open 表示仅告警未拒答）", m.wormWriteFail, []string{"policy"})
+	if m.auditFailClosedReject > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_audit_failclosed_rejected_total 审计 fail-closed 模式下因 WORM 写入失败拒绝的请求数\n# TYPE otpmask_audit_failclosed_rejected_total counter\n")
+		fmt.Fprintf(w, "otpmask_audit_failclosed_rejected_total %d\n", m.auditFailClosedReject)
+	}
 	writeCounter(w, "otpmask_key_issue_total", "密钥签发计数（按租户）", m.keyIssues, []string{"tenant"})
 	writeCounter(w, "otpmask_reconcile_mismatch_total", "审计-计量对账不一致次数（按差异分类）", m.reconcile, []string{"reason"})
 	writeCounter(w, "otpmask_shadow_would_reject_total", "影子命中计数（只计数不拒绝；按租户与维度）", m.shadowWouldReject, []string{"tenant", "rule"})
