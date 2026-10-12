@@ -859,6 +859,8 @@ kubectl rollout history deployment/tee-infer-service -n otpmask
 | GF5 真机验收（R1-A/B/C） | [GF5-真机验收模板.md](GF5-真机验收模板.md) | 性能决策门 / C-MaaS 验证 / 规格 |
 | TEE 虚拟机验证准备包 | [GA-TEE虚拟机验证准备包.md](GA-TEE虚拟机验证准备包.md) | 租用 TEE 云主机后的验证清单与判据 |
 | P0-2 语义缓存性能基准（BM-1..BM-8） | [GA-AI网关能力补齐-性能基准报告.md](GA-AI网关能力补齐-性能基准报告.md) | 基准方法与实测（本地实测 + 待真机分账） |
+| GA-Higress-MCP 任务验收留证（T-1…T-9 / V-1…V-9） | [GA-Higress-MCP-任务验收留证.md](verify/mcp/GA-Higress-MCP-任务验收留证.md) | MCP 接入与打通整体验收证据：进程内测试 + 真机 V-1/V-2/V-3/V-7/V-9、红线 V-4/V-5 采样与**验收方 2026-10-12 签字记录（§17，已通过）**；本地留存（不随仓库开源） |
+| GA-Higress-MCP T-9 测试与渗透留证 | [GA-Higress-MCP-T-9-测试与渗透-验收留证.md](verify/mcp/GA-Higress-MCP-T-9-测试与渗透-验收留证.md) | T-9 单元级断言与渗透用例（进程内端到端，含红线 §10.1 判据③）；本地留存（不随仓库开源） |
 
 ---
 
