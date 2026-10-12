@@ -206,6 +206,13 @@ tlcp-verify:
 	ENVELOPE_FILE="$${ENVELOPE_FILE:-}" TONGSUO_BIN="$${TONGSUO_BIN:-tongsuo}" \
 	bash deploy/tlcp/verify.sh
 
+# tlcp-certgen-prod —— 生产证书生成（P1-5 S3-c/M7-1；有效期默认 365 天，符合密评 ≤1 年建议 R2-09）。
+# 私钥须随后改由密钥托管/Secret 注入并禁止入库（§6.6 证书管理）。
+#   make tlcp-certgen-prod [TLCP_DAYS=365] [TLCP_CN=tlcp-gateway.local]
+.PHONY: tlcp-certgen-prod
+tlcp-certgen-prod:
+	go run ./deploy/tlcp/certgen/ -out deploy/tlcp/certs -days "$${TLCP_DAYS:-365}" -cn "$${TLCP_CN:-tlcp-gateway.local}"
+
 # drill —— §13 国密切换演练（T-13.1 脚本化；§13.2 八步编排）。
 # 环境特定步骤经环境变量注入，缺省 SKIP：
 #   PLUGIN_PROBE_URL=<插件探活 URL> DRILL_FUNCTION_CMD=<功能回归命令> \

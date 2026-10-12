@@ -106,3 +106,26 @@ tracing:
   # Collector 地址（单实例：otel-collector:4317；HA：转发层 loadbalancingexporter）
   collectorHost: otel-collector
   collectorPort: 4317
+
+# P1-5 S3-c：TLCP 国密前置（§6.6；沿用 P0-4 §12.4 双层架构）
+# 默认关闭（现网零变化：网关仍走标准 TLS 入口）。启用后 TLCP 终止于前置 Tongsuo 网关，
+# 内层仍标准 TLS1.3 → Higress/Envoy。
+tlcp:
+  enabled: false            # true 时启用国密前置（Tongsuo 网关，TLCP 终止）
+  host: ""                  # 前置网关地址（供验证/文档引用；属前置层，非本 Chart 内嵌）
+  port: 443
+  # 证书（make tlcp-certgen-prod 产物；生产有效期 ≤1 年，私钥须托管、禁止入库，§6.6）
+  signCertSecret: ""        # sign.crt/sign.key 所在 Secret
+  encCertSecret: ""         # enc.crt/enc.key 所在 Secret
+  caSecret: ""              # ca.crt 所在 Secret
+  # 真实 IP/协议透传（B-12.4-1；不透传则限流/审计按网关 IP 计，风险 R-13）
+  passRealIP: true
+  # 灰度：按域名/租户灰度；回滚 = 切回标准 TLS 入口（DNS/前置网关配置）
+  canary:
+    enabled: false
+    byHost: ""              # 灰度域名（逗号分隔）
+    byTenant: ""            # 灰度租户（逗号分隔）
+  # SM2 双向认证（强合规租户，§6.6.1/G-7 三级身份鉴别）
+  mutualTLS:
+    enabled: false
+    clientCASecret: ""      # 客户端 CA（引用名）

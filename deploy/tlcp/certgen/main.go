@@ -53,6 +53,10 @@ func main() {
 	if *days <= 0 {
 		fatal("days 必须为正数")
 	}
+	// R2-09/P1-5 §6.6：生产证书有效期须 ≤ 1 年（密评建议），默认 3650 天仅测试用。
+	if *days > 397 {
+		fmt.Fprintf(os.Stderr, "certgen: 警告 days=%d 远超密评建议（生产 ≤ 1 年，R2-09）；仅测试可用，生产请用 make tlcp-certgen-prod\n", *days)
+	}
 	dnsNames := []string{*commonName}
 	for _, d := range splitList(*dns) {
 		dnsNames = append(dnsNames, d)
