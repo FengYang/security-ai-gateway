@@ -74,6 +74,17 @@ spec:
       crypto_service_port: "19097"
       crypto_profile: "intl"
       mask_prg: "hmac-sha256"
+      # ---- P1-8 T1：attest-verify sidecar（证明验证出插件，完整验证链）----
+      # 未配置（默认）= 走原 CryptoClient 验签路径（行为与改造前完全一致）。
+      # 启用后：证明验证全部经 attest-verify sidecar /verify（含签名链 + report_data + 度量基线），
+      # 插件侧只做 nonce 回显（公开值），其余 fail-closed。
+      # 簇经 McpBridge static 注册（见 mcp-bridge-registries.yaml，127.0.0.1:19191），
+      # 名口径 outbound|19191||attest-verify.static；sidecar 容器经
+      # attest-verify-sidecar-patch.yaml 注入网关 Deployment。
+      # attest_verify_service: "attest-verify.static"
+      # attest_verify_port: "19191"
+      # attest_verify_token: "__ATTEST_VERIFY_TOKEN__"
+      # attest_verify_timeout_ms: "2000"
       # ---- 段① 凭据运行态拉取（Phase 1 门禁 #8 / GF.2.5）----
       # 启用后：插件按 credential_interval 周期从管理面**只读**端点
       # （GET /v1/adminext/credentials/<credential_name>）拉取 sig_key/attest_token，

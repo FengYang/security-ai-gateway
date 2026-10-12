@@ -125,7 +125,10 @@ static_resources:
                         "crypto_service": "cryptop-svc.dns",
                         "crypto_service_port": 19097,
                         "crypto_profile": "intl",
-                        "mask_prg": "hmac-sha256"
+                        "mask_prg": "hmac-sha256",
+                        "attest_verify_service": "",
+                        "attest_verify_port": 19191,
+                        "attest_verify_timeout_ms": 2000
                       }
           - name: envoy.filters.http.router
             typed_config:

@@ -178,6 +178,17 @@ spec:
     port: 19097
     type: static
     protocol: HTTP
+  # attest-verify sidecar（P1-8 T1 部署接线）：与网关同 Pod，用 static 指 127.0.0.1
+  # （非跨 Pod 服务，不能写集群 FQDN）；生成簇名 outbound|19191||attest-verify.static。
+  # ⚠️ 实测（Higress 2.2.5，2026-10-11）：`type: static` 的 `domain` **必须写成 `host:port`**
+  #    （`127.0.0.1:19191`）；写裸 IP 会被 controller 拒绝：
+  #    `error invalid endpoint:<值> with static type` ⇒ 簇不物化、插件证明验证 fail-closed。
+  # 容器注入见 attest-verify-sidecar-patch.yaml。
+  - name: attest-verify
+    domain: 127.0.0.1:19191
+    port: 19191
+    type: static
+    protocol: HTTP
   # ---- MCP 后端（非敏感轨：Higress MCP Server 的工具上游）----
   # 用途：为 `/mcp-servers/public-tools` 提供工具后端（方案 §3.2.2 非敏感轨）。
   #

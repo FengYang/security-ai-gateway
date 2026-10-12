@@ -1,0 +1,71 @@
+# attest-verify sidecar 注入补丁（P1-8 T1 部署接线：证明验证与网关同 Pod，quote 验证不出 Pod）
+#
+# 用法（strategic merge patch；Higress 独立部署网关 Deployment 名缺省 higress-gateway）：
+#   kubectl -n higress-system patch deployment higress-gateway \
+#     --patch-file deploy/higress/attest-verify-sidecar-patch.yaml
+# 或 apply 前用 kustomize 叠加。回滚：kubectl rollout undo deployment/higress-gateway。
+#
+# 配套：① WasmPlugin CR（otpmask-plugin.yaml）attest_verify_service=attest-verify.static + attest_verify_port=19191；
+#       ② McpBridge static 注册（mcp-bridge-registries.yaml）：**domain 须写 `127.0.0.1:19191`（host:port）**，
+#          写裸 `127.0.0.1` 会被 Higress 2.2.5 controller 拒（`invalid endpoint ... with static type`，实测 2026-10-11）。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: attest-verify-token
+  namespace: higress-system
+type: Opaque
+# ⚠️ 开发演示值；生产由部署流水线替换（勿提交真实令牌）。
+# 令牌用于 X-Verify-Token 头校验，防同机其他进程滥用验证接口。
+stringData:
+  token: "dev-attest-verify-token-placeholder"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: higress-gateway
+  namespace: higress-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: attest-verify
+        image: otpmask/attest-verify:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - "-listen"
+        - "127.0.0.1:19191"
+        - "-verifier"
+        - "builtin"
+        # dcap 模式（生产真机）将上方改为 dcap，并按需配置：
+        # - "-allowlist"
+        # - "/etc/attest-verify/allowlist.json"
+        # - "-measurement-mode"
+        # - "enforce"
+        env:
+        - name: ATTEST_VERIFY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: attest-verify-token
+              key: token
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 500m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop: ["ALL"]
+        # 度量白名单 ConfigMap 挂载（dcap 模式启用时取消注释，需先创建对应 ConfigMap）
+        # volumeMounts:
+        # - name: attest-allowlist
+        #   mountPath: /etc/attest-verify
+        #   readOnly: true
+      # volumes:
+      # - name: attest-allowlist
+      #   configMap:
+      #     name: attest-verify-allowlist
