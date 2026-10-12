@@ -12,7 +12,10 @@
 //	#6 cryptop_key_refs{scope}                 活跃 KeyRef 数（KeyStore.Register/Destroy）
 //	#7 cryptop_key_rotations_total{scope}      轮换（**仅 scope∈{session,static}**；tenant_master 归 tee）
 //	#8 cryptop_key_destroy_total{scope}        销毁（**仅 scope∈{session,static}**；tenant_master 归 tee）
-//	#9 cryptop_profile_info{profile,meets_mpy,compliance_note}  P4 如实标注（gauge=1）
+//	#9 cryptop_profile_info{profile,meets_mpy,compliance_note,active}  P4 如实标注（gauge=1；
+//	    **多序列**：每个出现过的 profile 一条序列，active="true" 者为**真实生效档位**——
+//	    degrade 时配置档（sm-module）与生效档（sm-software）各占一条，绝不复用同一序列
+//    表达两个档位（P1-5 §6.4 R-S3-3 / R-28，2026-10-12 多序列化）
 //	#11 cryptop_mask_stream_values_total       /v1/mask/stream 累计元素
 //	#15 cryptop_compat_mode{feature}           兼容/桥接模式（mask_prg=bridge → 1）
 //
@@ -44,9 +47,16 @@ type metrics struct {
 	maskVals  int64            // #11
 	compat    map[string]int64 // feature（#15：0/1）
 
-	profile       string // #9
-	meetsMPY      bool
+	// profiles #9 多序列（key=profile；R-28 2026-10-12 由单值扩展）。
+	// 每个被 setProfileInfo 登记过的 profile 一条序列；active=true 为真实生效档位。
+	profiles map[string]profileReg
+}
+
+// profileReg #9 单条序列的登记内容（R-S3-3：档位声明与生效状态分离表达）。
+type profileReg struct {
+	meetsMPY       bool
 	complianceNote string
+	active         bool // true = 当前真实生效档位（degrade 时随生效档迁移）
 }
 
 func newMetrics() *metrics {
@@ -58,6 +68,7 @@ func newMetrics() *metrics {
 		rotations: map[string]int64{},
 		destroys:  map[string]int64{},
 		compat:    map[string]int64{},
+		profiles:  map[string]profileReg{},
 	}
 }
 
@@ -135,13 +146,30 @@ func (m *metrics) setCompatMode(feature string, on bool) {
 	m.mu.Unlock()
 }
 
-// setProfileInfo #9 生产语句：NewServer。
+// setProfileInfo #9 生产语句：NewServer（R-28 多序列化，2026-10-12）。
+//
+// 语义：登记并**激活** p 的 profile 序列；其余已登记序列一律降为 active=false——
+// 配置档（如 sm-module）与生效档（degrade 后的 sm-software）因此各占一条序列，
+// 满足 R-S3-3「不得用同一序列同时表达 sm-module 与 sm-software」。
+// degrade 路径在 provider 实际切换后再次调用本方法即可（生效档迁移，配置档保留可见）。
 func (m *metrics) setProfileInfo(p cryptop.Provider) {
 	m.mu.Lock()
-	m.profile = string(p.Profile())
-	m.meetsMPY = p.Profile().MeetsMPY()
-	m.complianceNote = p.ComplianceNote()
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	if m.profiles == nil {
+		m.profiles = map[string]profileReg{}
+	}
+	for k, r := range m.profiles {
+		if r.active {
+			r.active = false
+			m.profiles[k] = r
+		}
+	}
+	name := string(p.Profile())
+	m.profiles[name] = profileReg{
+		meetsMPY:       p.Profile().MeetsMPY(),
+		complianceNote: p.ComplianceNote(),
+		active:         true,
+	}
 }
 
 // ---- 渲染 ----
@@ -172,10 +200,20 @@ func (m *metrics) render(w io.Writer) {
 	writeGaugeMap(w, "cryptop_key_refs", "活跃 KeyRef 数（按 scope；内存泄漏观测）", m.keyRefs, []string{"scope"})
 	writeCounter(w, "cryptop_key_rotations_total", "密钥轮换计数（按 scope；tenant_master 由 tee 发射）", m.rotations, []string{"scope"})
 	writeCounter(w, "cryptop_key_destroy_total", "密钥销毁计数（按 scope；tenant_master 由 tee 发射）", m.destroys, []string{"scope"})
-	// #9 profile 如实标注（gauge=1；meets_mpy 与 compliance_note 为标签）。
-	fmt.Fprintf(w, "# HELP cryptop_profile_info 当前 profile 合规标注（gauge=1，P4 如实标注）\n# TYPE cryptop_profile_info gauge\n")
-	fmt.Fprintf(w, "cryptop_profile_info{profile=%q,meets_mpy=%q,compliance_note=%q} 1\n",
-		m.profile, boolStr(m.meetsMPY), m.complianceNote)
+	// #9 profile 如实标注（多序列 gauge=1；active="true" 为真实生效档位，R-28/R-S3-3）。
+	if len(m.profiles) > 0 {
+		names := make([]string, 0, len(m.profiles))
+		for name := range m.profiles {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		fmt.Fprintf(w, "# HELP cryptop_profile_info 当前 profile 合规标注（gauge=1，P4 如实标注；active=true 为真实生效档位）\n# TYPE cryptop_profile_info gauge\n")
+		for _, name := range names {
+			r := m.profiles[name]
+			fmt.Fprintf(w, "cryptop_profile_info{profile=%q,meets_mpy=%q,compliance_note=%q,active=%q} 1\n",
+				name, boolStr(r.meetsMPY), r.complianceNote, boolStr(r.active))
+		}
+	}
 	writeCounterInt(w, "cryptop_mask_stream_values_total", "/v1/mask/stream 累计下发掩码元素数（容量观测）", m.maskVals)
 	writeGaugeMap(w, "cryptop_compat_mode", "兼容/桥接模式开启标志（feature=mask_bridge；1=on/0=off）", m.compat, []string{"feature"})
 }
