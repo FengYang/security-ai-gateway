@@ -388,12 +388,7 @@ func doAttestHandshake(config PluginConfig, log logs.Log,
 					onFail(fmt.Sprintf("attest 返回 %d", statusCode))
 					return
 				}
-				var ar struct {
-					Status    string         `json:"status"`
-					SessionID string         `json:"session_id"`
-					ServerPub string         `json:"server_pub"`
-					Proof     map[string]any `json:"proof"`
-				}
+				var ar attestResponse
 				if err := json.Unmarshal(body, &ar); err != nil {
 					onFail("解析 attest 响应失败: " + err.Error())
 					return
@@ -404,42 +399,25 @@ func doAttestHandshake(config PluginConfig, log logs.Log,
 					return
 				}
 				// 验证链（含 report_data = H(nonce‖server_pub) 绑定，防握手公钥替换）
-				verifyPluginProof(ar.Proof, nonce, serverPub, config.ExpectedAppHash, func(verr error) {
-					if verr != nil {
-						onFail("证明链验证失败: " + verr.Error())
-						return
-					}
-					// 客户端 ECDH + 会话密钥派生在 sidecar 内完成（密钥字节不出 sidecar，C-5）
-					CryptoClient.SessionBegin(serverPub, nonce, peerPubAlg(),
-						func(sigRef, encRef cryptoclient.KeyRef, clientPub []byte, serr error) {
-							if serr != nil {
-								onFail("session/begin 失败: " + serr.Error())
-								return
-							}
-							deriveDirSubkeys(encRef, func(c2sRef, s2cRef cryptoclient.KeyRef, derr error) {
-								if derr != nil {
-									onFail("方向子密钥派生失败: " + derr.Error())
-									return
-								}
-								compBody, _ := json.Marshal(map[string]string{
-									"session_id": ar.SessionID,
-									"client_pub": hex.EncodeToString(clientPub),
-								})
-								cerr := client.Post("/attest/complete", [][2]string{{"Content-Type", "application/json"}}, compBody,
-									func(code int, _ http.Header, _ []byte) {
-										if code != 200 {
-											onFail(fmt.Sprintf("attest/complete 返回 %d", code))
-											return
-										}
-										log.Infof("otpmask-plugin: 挑战-响应握手完成 session=%s（4 KeyRef 就绪）", shortID(ar.SessionID))
-										onDone(ar.SessionID, sigRef, encRef, c2sRef, s2cRef)
-									}, 5000)
-								if cerr != nil {
-									onFail("调用 attest/complete 失败: " + cerr.Error())
-								}
-							})
-						})
-				})
+				// 双路径：配置了 attest_verify_service → 走 sidecar（完整验证链）；
+				//        未配置 → 走原 CryptoClient 验签路径（行为与改造前完全一致）。
+				if config.AttestVerifyService != "" {
+					verifyPluginProofViaSidecar(config, ar.Proof, nonce, serverPub, func(verr error) {
+						if verr != nil {
+							onFail("证明链验证失败（sidecar）: " + verr.Error())
+							return
+						}
+						continueHandshake(config, log, ar, nonce, serverPub, client, onDone, onFail)
+					})
+				} else {
+					verifyPluginProof(ar.Proof, nonce, serverPub, config.ExpectedAppHash, func(verr error) {
+						if verr != nil {
+							onFail("证明链验证失败: " + verr.Error())
+							return
+						}
+						continueHandshake(config, log, ar, nonce, serverPub, client, onDone, onFail)
+					})
+				}
 			}, 5000)
 		if err != nil {
 			onFail("调用 attest 失败: " + err.Error())
@@ -564,4 +542,114 @@ func shortID(s string) string {
 		return s[:8]
 	}
 	return s
+}
+
+// ---------- P1-8 T1：attest-verify sidecar 路径 ----------
+
+// attestResponse /attest 响应结构（与 doAttestHandshake 内联结构对齐，抽为命名类型供复用）。
+type attestResponse struct {
+	Status    string         `json:"status"`
+	SessionID string         `json:"session_id"`
+	ServerPub string         `json:"server_pub"`
+	Proof     map[string]any `json:"proof"`
+}
+
+// verifyPluginProofViaSidecar 走 attest-verify sidecar 做完整证明验证：
+//  1. nonce 回显 == 客户挑战（公开值，本地 bytes.Equal）——sidecar 不感知 nonce，插件侧自检；
+//  2. 其余（report_data 绑定、签名链、度量基线）全部经 sidecar /verify。
+//
+// fail-closed：sidecar 调用失败 / 验证拒绝 → done(err)，无本地回退。
+func verifyPluginProofViaSidecar(config PluginConfig, proof map[string]any,
+	challenge, serverPub []byte, done func(err error)) {
+
+	if proof == nil {
+		done(errors.New("attest: 空证明载荷"))
+		return
+	}
+
+	// 1. nonce 回显校验（公开值，本地比较）
+	nonceHex, _ := proof["nonce"].(string)
+	gotNonce, err := hex.DecodeString(nonceHex)
+	if err != nil {
+		done(errors.New("attest: nonce 非 hex"))
+		return
+	}
+	if !bytes.Equal(gotNonce, challenge) {
+		done(errors.New("attest: nonce 回显不匹配"))
+		return
+	}
+
+	// 2. 组装 sidecar 期望的 proof wire：tee-infer 输出 hex 字段，而 sidecar 的
+	//    Proof 结构体 []byte 字段按 Go 默认 base64 解码 ⇒ 此处 hex→base64 转码（非密码操作）。
+	wire, werr := sidecarProofWire(proof)
+	if werr != nil {
+		done(werr)
+		return
+	}
+
+	// 3. report_data = H(nonce ‖ server_pub)（防握手公钥替换）。
+	//    ⚠️ sidecar 侧做的是**直接比较**（不自行哈希），故此处须经 cryptop sidecar 求值后传入，
+	//    与本地路径 verifyPluginProof 一致。
+	reportDataInput := make([]byte, 0, len(challenge)+len(serverPub))
+	reportDataInput = append(reportDataInput, challenge...)
+	reportDataInput = append(reportDataInput, serverPub...)
+	CryptoClient.Hash(reportDataInput, func(wantReportData []byte, herr error) {
+		if herr != nil {
+			done(herr)
+			return
+		}
+		// 4. 调用 sidecar /verify
+		port := effectiveAttestVerifyPort(config.AttestVerifyPort)
+		timeout := effectiveAttestVerifyTimeout(config.AttestVerifyTimeoutMS)
+		VerifyProof(config.AttestVerifyService, port, timeout, config.AttestVerifyToken,
+			wire, wantReportData, func(result *AttestVerifyResult, verr error) {
+				if verr != nil {
+					done(verr)
+					return
+				}
+				_ = result // 验证通过即 ok；measurements 可用于日志，当前省略
+				done(nil)
+			})
+	})
+}
+
+// continueHandshake 验证通过后的握手继续：session/begin → 方向子密钥 → attest/complete。
+// 从 doAttestHandshake 中抽离，供两条验证路径复用，避免代码重复。
+func continueHandshake(config PluginConfig, log logs.Log,
+	ar attestResponse,
+	nonce, serverPub []byte,
+	client wrapper.HttpClient,
+	onDone func(id string, sigRef, encRef, c2sRef, s2cRef cryptoclient.KeyRef),
+	onFail func(msg string)) {
+
+	// 客户端 ECDH + 会话密钥派生在 sidecar 内完成（密钥字节不出 sidecar，C-5）
+	CryptoClient.SessionBegin(serverPub, nonce, peerPubAlg(),
+		func(sigRef, encRef cryptoclient.KeyRef, clientPub []byte, serr error) {
+			if serr != nil {
+				onFail("session/begin 失败: " + serr.Error())
+				return
+			}
+			deriveDirSubkeys(encRef, func(c2sRef, s2cRef cryptoclient.KeyRef, derr error) {
+				if derr != nil {
+					onFail("方向子密钥派生失败: " + derr.Error())
+					return
+				}
+				compBody, _ := json.Marshal(map[string]string{
+					"session_id": ar.SessionID,
+					"client_pub": hex.EncodeToString(clientPub),
+				})
+				cerr := client.Post("/attest/complete", [][2]string{{"Content-Type", "application/json"}}, compBody,
+					func(code int, _ http.Header, _ []byte) {
+						if code != 200 {
+							onFail(fmt.Sprintf("attest/complete 返回 %d", code))
+							return
+						}
+						log.Infof("otpmask-plugin: 挑战-响应握手完成 session=%s（4 KeyRef 就绪）", shortID(ar.SessionID))
+						onDone(ar.SessionID, sigRef, encRef, c2sRef, s2cRef)
+					}, 5000)
+				if cerr != nil {
+					onFail("调用 attest/complete 失败: " + cerr.Error())
+				}
+			})
+		})
 }

@@ -149,6 +149,14 @@ type PluginConfig struct {
 	// P2-1 流式重试最大次数（仅头注入控制，实际以 Envoy 配置为准）。
 	// 缺省 0（关闭）；建议与 Envoy retry_policy.num_retries 保持一致。
 	StreamRetryMaxAttempts int64 `json:"stream_retry_max_attempts"`
+	// ---- P1-8 T1：attest-verify sidecar 接线（证明验证出插件，经 sidecar 完整验证链）----
+	// 未配置 = 走原 CryptoClient 验签路径（行为与改造前完全一致）。
+	// 配置后 = 证明验证全部经 attest-verify sidecar /verify（含签名链 + report_data + 度量基线），
+	// 插件侧只做 nonce 回显（公开值，本地比较），其余 fail-closed。
+	AttestVerifyService    string `json:"attest_verify_service"`     // sidecar cluster 名（如 attest-verify.static）
+	AttestVerifyPort       int64  `json:"attest_verify_port"`        // sidecar 端口（缺省 19191）
+	AttestVerifyToken      string `json:"attest_verify_token"`       // 共享验证令牌（X-Verify-Token，可选）
+	AttestVerifyTimeoutMS  int64  `json:"attest_verify_timeout_ms"`  // 调用超时（缺省 2000ms；quote 验证比密码操作重）
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -205,6 +213,11 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	// P2-1 流式重试（Envoy 层）：默认关闭（false/0 = 与现有行为一致）。
 	config.StreamRetryEnabled = json.Get("stream_retry_enabled").Bool()
 	config.StreamRetryMaxAttempts = json.Get("stream_retry_max_attempts").Int()
+	// P1-8 T1：attest-verify sidecar 接线（未配置 = 行为与改造前完全一致）。
+	config.AttestVerifyService = json.Get("attest_verify_service").String()
+	config.AttestVerifyPort = json.Get("attest_verify_port").Int()
+	config.AttestVerifyToken = json.Get("attest_verify_token").String()
+	config.AttestVerifyTimeoutMS = json.Get("attest_verify_timeout_ms").Int()
 	if config.CryptoProfile == "" {
 		config.CryptoProfile = "intl"
 	}
