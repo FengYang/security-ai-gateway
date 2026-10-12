@@ -6,6 +6,10 @@ package main
 // B-4.6-1/R-7）。profile 取自环境变量 `CRYPTO_PROFILE`（§12.3 `crypto_profile`，
 // 须与 sidecar 一致，R-17 延伸）。
 //
+// **sm-module 装配（P1-5 M3，2026-10-12）**：`CRYPTO_PROFILE=sm-module` 时由 `cryptop.New`
+// 经 `MODULE_*` 环境变量构造模块后端（sdf/pkcs11）；厂商 SDK 未接入/配置缺失 → panic
+// （启动拒，C-3）。本文件对 sm-module **零代码改动**（env 驱动 + 启动拒即装配校验）。
+//
 // **零行为变更约束（intl）**：intl 档下 Provider 与现役 stdlib 逐字节等价
 // （HMAC-SHA256 / SHA-256），故替换后既有 token/签名/指纹不变。
 //

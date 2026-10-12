@@ -43,7 +43,9 @@ func defaultCryptoProvider() cryptop.Provider {
 // initCryptoRuntime 按配置装配进程级 provider 与掩码 PRG 档。
 //
 // 校验（R-2/R-14/R-21）：
-//   - profile 非法 / sm-module（ErrNotImplemented）→ 返回错误（**启动拒**，绝不回退软件实现冒充合规）；
+//   - profile 非法 → 返回错误（**启动拒**）；
+//   - `sm-module`（P1-5 M3）：经 `MODULE_*` 环境变量构造模块后端；厂商 SDK 未接入/
+//     配置缺失 → `cryptop.New` 返回错误 → **启动拒**，绝不回退软件实现冒充合规（C-3）；
 //   - `mask_prg=bridge` 且 profile=intl → 返回错误（R-21①，intl 无 SM4 实现）；
 //   - `mask_prg=bridge` 且 profile=sm-* → 允许，但**启动告警**（R-21②）。
 func initCryptoRuntime(profile, maskPRG string) error {

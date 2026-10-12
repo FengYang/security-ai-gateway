@@ -9,7 +9,13 @@
 //	           [-mask-prg hmac-sha256|sm4|bridge] [-call-timeout-ms 50]
 //	环境变量 CRYPTO_STATIC_KEYS = JSON {"<KeyRef>":"<hex>",...}（crypto_static_keys）
 //
-// 失败一律启动拒（log.Fatal exit 1）：非法 profile / sm-module 未实现 / R-14/R-16/R-20/R-21，
+// sm-module 装配（P1-5 M3，2026-10-12）：-profile sm-module 时 cryptop.New 经 MODULE_*
+// 环境变量构造模块后端（sdf/pkcs11；键名见 gateway/cryptop/module/config.go，
+// 如 MODULE_BACKEND/MODULE_LIB_PATH/MODULE_PIN_REF/MODULE_MAX_SESSIONS/...）。
+// 厂商 SDK 未接入/配置缺失 → New 返回错误 → 启动拒（log.Fatal），绝不静默回退
+// 软件实现冒充合规（C-3）。
+//
+// 失败一律启动拒（log.Fatal exit 1）：非法 profile / sm-module 配置缺失 / R-14/R-16/R-20/R-21，
 // 绝不静默回退软件实现冒充合规。
 package main
 
