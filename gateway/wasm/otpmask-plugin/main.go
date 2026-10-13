@@ -157,6 +157,13 @@ type PluginConfig struct {
 	AttestVerifyPort       int64  `json:"attest_verify_port"`        // sidecar 端口（缺省 19191）
 	AttestVerifyToken      string `json:"attest_verify_token"`       // 共享验证令牌（X-Verify-Token，可选）
 	AttestVerifyTimeoutMS  int64  `json:"attest_verify_timeout_ms"`  // 调用超时（缺省 2000ms；quote 验证比密码操作重）
+
+	// ---- P1-7 T2b（§6.5 / D-13）：数据面未达 TEE 流量上报通道（插件侧）----
+	// 仅当 audit_report_token 配置时启用（缺省关闭，零行为变化，符合插件惯例）。
+	// 令牌须与 tee-infer 的 -audit-report-token（及 -audit-report-tenants 绑定集合）一致。
+	AuditReportToken    string `json:"audit_report_token"`     // 独立只读上报令牌（X-Admin-Token）
+	AuditReportFlushMs  int64  `json:"audit_report_flush_ms"`  // tick 批量投递间隔（缺省 1000ms）
+	AuditReportQueueMax int64  `json:"audit_report_queue_max"` // 有界队列容量（缺省 32，§6.5 队列三要素）
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -218,6 +225,10 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.AttestVerifyPort = json.Get("attest_verify_port").Int()
 	config.AttestVerifyToken = json.Get("attest_verify_token").String()
 	config.AttestVerifyTimeoutMS = json.Get("attest_verify_timeout_ms").Int()
+	// P1-7 T2b：数据面未达 TEE 流量上报通道（仅 token 配置时启用）。
+	config.AuditReportToken = json.Get("audit_report_token").String()
+	config.AuditReportFlushMs = json.Get("audit_report_flush_ms").Int()
+	config.AuditReportQueueMax = json.Get("audit_report_queue_max").Int()
 	if config.CryptoProfile == "" {
 		config.CryptoProfile = "intl"
 	}
@@ -302,6 +313,8 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	initKeyRevocationRuntime(*config, log)
 	// P0-4 §12.3：装配 cryptop sidecar 客户端 + 启动期载入 capabilities（R-18）。
 	initCryptoRuntime(*config, log)
+	// P1-7 T2b：数据面未达 TEE 流量上报通道（仅 audit_report_token 配置时启用；缺省零行为变化）。
+	initAuditReportChannel(*config)
 	log.Infof("otpmask-plugin: 配置已加载 config_version=%q mask_modulus=%d model=%q embedding=%s:%d tee=%s:%d require_auth=%v",
 		orStr(config.ConfigVersion, "unset"), config.MaskModulus, config.Model, config.EmbeddingService, config.EmbeddingPort,
 		config.TEEService, config.TEEPort, config.RequireAuth)
@@ -573,6 +586,8 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig, log log
 		ctx.NeedPauseStreamingResponse()
 		ctx.SetContext(ctxKeyStreamPaused, true)
 	}
+	// P1-7 T2b：数据面未达 TEE 流量上报（缓存命中 / 非推理两触发点；通道未启用=零行为变化）。
+	maybeReportDataPlane(ctx, config)
 	return types.HeaderContinue
 }
 

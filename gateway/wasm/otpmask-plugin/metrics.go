@@ -110,6 +110,12 @@ var (
 	// proxy-wasm Counter 不支持自定义标签，故拆为两个独立 Counter。
 	metricRouteTokensInput  = &pwCounter{name: "otpmask_route_tokens_input_total"}
 	metricRouteTokensOutput = &pwCounter{name: "otpmask_route_tokens_output_total"}
+	// P1-7 T2b（§6.5 A3-14）：数据面未达 TEE 流量上报通道可观测。
+	// sent=成功投递条数；dropped=队列溢出丢弃（reason=queue_full，不可补链，如实可见）；
+	// fail=投递被服务端非 200 拒绝/网络失败（重新入队重试，连续失败终丢弃）。
+	metricAuditReportSent    = &pwCounter{name: "otpmask_audit_report_sent_total"}
+	metricAuditReportDropped = &pwCounter{name: "otpmask_audit_report_dropped_total"}
+	metricAuditReportFail    = &pwCounter{name: "otpmask_audit_report_fail_total"}
 )
 
 // ============================================================
