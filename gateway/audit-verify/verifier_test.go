@@ -36,6 +36,11 @@ const (
 	teeEventC   = `{"event_id":"evt-3","timestamp":1700000000000000002,"tenant_id":"acme","user_id":"","request_id":"req-3","action":"infer","tokens_in":12,"tokens_out":34,"result":"ok","payload_hash":"aabbccdd","prev_hash":""}`
 	// 第三条管理面事件（三事件链用于"中间篡改"用例：只有存在后继事件，篡改才会在下一条暴露）。
 	adminEventC = `{"event_id":"evt-3","timestamp":1700000000000000003,"actor":"carol","action":"quota_set","tenant":"acme","max_tokens":1000,"request_id":"req-3","result":"ok","prev_hash":"` + vecAdminTarget + `"}`
+	// P1-7 全流量审计改造（T10，MOD8）：tee 基线事件叠加**全部** P1-7 证据字段
+	// （path/path_mode/ttft_ms/dur_ms/http_status/hit_policies/origin/sampled/
+	// mcp_session_id/reporter_id/tenant_id_resolution，及 P1-2 的 trace_id 与既有证据字段）。
+	// 这些字段均为 omitempty 证据字段、**不进 hash()**（C-3/D-1）；其存在不得改变哈希。
+	teeEventCWithEvidence = `{"event_id":"evt-3","timestamp":1700000000000000002,"tenant_id":"acme","user_id":"","request_id":"req-3","action":"infer","tokens_in":12,"tokens_out":34,"result":"ok","payload_hash":"aabbccdd","prev_hash":"","path":"/v1/infer","path_mode":"encrypted","ttft_ms":123,"dur_ms":456,"http_status":200,"hit_policies":"guardrail_pii,rpm_limit","origin":"data-plane","sampled":false,"mcp_session_id":"sess-9","reporter_id":"reporter-1","tenant_id_resolution":"header","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","instance_id":"inst-1","category":"would_reject_A1-07","mode":"enforcing","policy_version":"v2","filtered_tokens":7,"is_retry":true,"engine_type":"vllm","model":"glm-5.2","transformed_hash":"deadbeef","cache_hit":false,"key_fp":"kf","metering_mode":"estimate","shadow_rule":"rpm","mcp_tool":"tools/call","mcp_reason":"rbac","mcp_policy_version":3,"old_version":"v1","sha256":"abc"}`
 )
 
 func TestVectorAdminSchema(t *testing.T) {
@@ -82,6 +87,38 @@ func TestVectorTeeSchema(t *testing.T) {
 	}
 	if got != vecTee {
 		t.Errorf("tee schema 哈希与固定向量不符\n got=%s\nwant=%s", got, vecTee)
+	}
+}
+
+// TestTeeSchemaIgnoresP17EvidenceFields T10（MOD8）回归向量：
+// P1-7 新增证据字段（path/path_mode/ttft_ms/dur_ms/http_status/hit_policies/origin/
+// sampled/mcp_session_id/reporter_id/tenant_id_resolution 及 P1-2 trace_id 等）**不进 hash()**；
+// 叠加这些字段的事件，其哈希必须与仅 10 核心字段的固定向量 vecTee 完全一致。
+// 若有人误将任一证据字段加入 schema.go 的 tee schema，本测试立即失败（双实现漂移防护，C-3/D-1）。
+func TestTeeSchemaIgnoresP17EvidenceFields(t *testing.T) {
+	schema, err := SchemaFor("tee")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 基线（仅 10 核心字段）须等于固定向量。
+	base, err := decodeEvent([]byte(teeEventC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := schema.Hash(base); got != vecTee {
+		t.Fatalf("基线哈希应等于 vecTee，得 %s", got)
+	}
+	// 含全部 P1-7 证据字段：哈希必须不变。
+	withEvidence, err := decodeEvent([]byte(teeEventCWithEvidence))
+	if err != nil {
+		t.Fatalf("解码含证据字段事件失败: %v", err)
+	}
+	got, err := schema.Hash(withEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != vecTee {
+		t.Fatalf("含 P1-7 证据字段后哈希改变（违反 C-3/D-1 不进 hash 约束）\n got=%s\nwant=%s", got, vecTee)
 	}
 }
 
