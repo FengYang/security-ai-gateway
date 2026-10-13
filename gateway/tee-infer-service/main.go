@@ -2343,7 +2343,12 @@ type secConfigView struct {
 	SystemPromptSet  bool   `json:"system_prompt_set"`
 	AuditEnabled     bool   `json:"audit_enabled"`
 	// 审计/日志留存期声明（天；0=未声明）。声明式，删除由存储层生命周期策略执行。
-	AuditRetentionDays int               `json:"audit_retention_days"`
+	AuditRetentionDays int `json:"audit_retention_days"`
+	// P1-7 T0（D-17 / A4-01）：审计 WORM 落盘强度只读视图（启动期定档）。
+	AuditFsyncMode     string            `json:"audit_fsync_mode"`     // batch | per_event | ""（内存模式）
+	AuditFsyncEvery    int               `json:"audit_fsync_every"`    // batch 档：每 N 条
+	AuditFsyncInterval string            `json:"audit_fsync_interval"` // batch 档：每 T（Go Duration 字符串）
+	AuditFsyncCount    uint64            `json:"audit_fsync_count"`    // 累计 fsync 次数
 	Guardrail          guardrailSnapshot `json:"guardrail"`
 	// GA-输出侧内容审查（OG-3）：当前模式与策略版本（只读；运行时覆盖/持久化归 OG-8）。
 	OutputGuard outputGuardSnapshot `json:"output_guard"`
@@ -2455,6 +2460,15 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		SystemPromptSet:    s.systemPrompt != "",
 		AuditEnabled:       s.audit != nil,
 		AuditRetentionDays: s.auditRetentionDays,
+	}
+	// P1-7 T0（D-17）：落盘强度档位与累计 fsync 次数（内存模式 → 保持空值）。
+	if s.audit != nil {
+		if m, e, iv, cnt, ok := s.audit.WormFsyncInfo(); ok {
+			view.AuditFsyncMode = m
+			view.AuditFsyncEvery = e
+			view.AuditFsyncInterval = iv
+			view.AuditFsyncCount = cnt
+		}
 	}
 	if v, ok := s.piiModeOverride.Load().(string); ok && v != "" {
 		view.PIIModeSource = "runtime"
@@ -3924,6 +3938,21 @@ func limitBody(next http.Handler) http.Handler {
 	})
 }
 
+// auditFsyncConfigFromFlag 解析 -audit-fsync 档位（P1-7 T0 / D-17）。
+// batch（默认）= 每 1000 条或每 1 秒 fsync（先到者触发）；per_event = 每事件 fsync（合规档）。
+func auditFsyncConfigFromFlag(v string) (WormFsyncConfig, error) {
+	switch v {
+	case "", "batch":
+		return defaultWormFsyncConfig(), nil
+	case "per_event":
+		c := defaultWormFsyncConfig()
+		c.Mode = FsyncPerEvent
+		return c, nil
+	default:
+		return WormFsyncConfig{}, fmt.Errorf("未知 -audit-fsync 档位: %q（batch|per_event）", v)
+	}
+}
+
 func main() {
 	addr := flag.String("listen", ":19090", "监听地址")
 	sigKeyHex := flag.String("sig-key", "", "协议签名密钥 K_sig（32 字节 hex；默认随机生成并打印）")
@@ -3940,6 +3969,7 @@ func main() {
 	cmaasModel := flag.String("cmaas-model", "", "C-MaaS 缺省模型 code（cmaas-glm-5.2 等；请求未指定模型时使用）")
 	auditFile := flag.String("audit-file", "", "审计事件 WORM 文件路径（JSON Lines 只追加；为空 = 内存模式）")
 	auditAnchor := flag.String("audit-anchor", "", "审计锚定文件路径（链尾哈希追加；仅 audit-file 开启时生效）")
+	auditFsync := flag.String("audit-fsync", "batch", "审计 WORM 落盘强度（P1-7 T0 / D-17）：batch=每 1000 条或每 1 秒 fsync（默认；掉电最多丢最近 1000 条/1 秒）｜per_event=每事件 fsync（合规档，须重估 V-10 p99）")
 	auditAnchorInterval := flag.Duration("audit-anchor-interval", time.Hour, "审计周期锚定间隔（T10，MOD8；默认 1h；仅 -audit-anchor 配置时生效）。锚定链尾哈希供 audit-verify 复核截断（D-9）")
 	auditReportToken := flag.String("audit-report-token", "", "数据面上报只读令牌（A3-11：缺省即拒绝注册 /audit/report，fail-closed，不回落 -admin-token）")
 	auditReportTenants := flag.String("audit-report-tenants", "", "上报令牌可声明的 tenant_id 集合（逗号分隔；插件侧 A3-10 租户归属校验；缺省=网关级，服务端解析租户 D-18）")
@@ -4176,14 +4206,21 @@ func main() {
 	}
 	var audit *auditChain
 	if *auditFile != "" {
-		audit, err = newAuditChainWORM(*auditFile, *auditAnchor)
+		fsyncCfg, ferr := auditFsyncConfigFromFlag(*auditFsync)
+		if ferr != nil {
+			log.Fatalf("审计落盘强度配置非法（fail-closed 拒绝启动）: %v", ferr)
+		}
+		audit, err = newAuditChainWORMWithConfig(*auditFile, *auditAnchor, fsyncCfg)
 		if err != nil {
 			log.Fatalf("初始化 WORM 审计失败（fail-closed 拒绝启动）: %v", err)
 		}
 		audit.tsa = tsa
 		rec := audit.anchorNow()
-		log.Printf("审计模式: WORM 文件=%s 锚定=%s 恢复事件=%d（锚定 %s, TST=%v）",
-			*auditFile, orDefault(*auditAnchor, "-"), audit.len(), orDefault(chainHashOf(rec), "-"), rec != nil && rec.TST != nil)
+		// P1-7 T0（D-17）：落盘强度档位在启动日志暴露（单一计数点归属 fileWorm）。
+		on, oe, oi, _, _ := audit.WormFsyncInfo()
+		log.Printf("审计模式: WORM 文件=%s 锚定=%s 恢复事件=%d（锚定 %s, TST=%v）落盘强度 fsync=%s(每%d条/每%s)",
+			*auditFile, orDefault(*auditAnchor, "-"), audit.len(), orDefault(chainHashOf(rec), "-"), rec != nil && rec.TST != nil,
+			on, oe, oi)
 	} else {
 		audit = newAuditChainWithTSA(tsa)
 	}

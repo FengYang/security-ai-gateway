@@ -1,0 +1,29 @@
+# P1-7 T0（D-14）：tee-infer 审计 WORM 持久卷声明。
+#
+# 单写者形态：ReadWriteOnce（RWO）——同一时刻仅允许单一节点挂载，天然约束
+# 单一写入者；配合 Deployment 的 replicas=1 + strategy=Recreate（见 tee-infer-service.yaml）
+# 与「persistence.enabled 时关闭 tee-infer HPA」（见 hpa.yaml），避免多副本/滚动更新
+# 造成「双写同一文件」→ 行序交错/覆盖（A4-07）。
+# 注：Deployment 无 StatefulSet 的 OnDelete 语义，此处用 Recreate 等价实现
+# 「先停旧 Pod 再起新 Pod」，同样杜绝滚动更新双写窗口。
+#
+# ⚠️ 准入③：StorageClass 与容量须由运维拍板（本模板尊重集群默认或显式指定）。
+{{- if .Values.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tee-infer-audit-pvc
+  namespace: {{ include "otpmask.namespace" . }}
+  labels:
+    app: tee-infer-service
+    {{- include "otpmask.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.accessMode }}
+  {{- if .Values.persistence.storageClass }}
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}

@@ -185,9 +185,10 @@ type auditChain struct {
 	mu      sync.Mutex
 	events  []AuditEvent
 	lastHex string
-	file    *os.File  // 非 nil = 旧 WORM 持久化模式（只追加；向后兼容，保留供 load/恢复用）
-	anchor  *os.File  // 非 nil = 锚定文件（只追加）
-	tsa     TSASigner // RFC 3161 可信时间戳服务
+	// 说明（P1-7 T0 / A4-01）：原 `file *os.File` 字段已移除——WORM 写盘收口到 `worm`
+	// （fileWorm，唯一句柄）；文件读取（load 恢复）走 os.ReadFile，无需常驻句柄。
+	anchor *os.File  // 非 nil = 锚定文件（只追加）
+	tsa    TSASigner // RFC 3161 可信时间戳服务
 	// S5：本进程实例标识（构造时生成，写入每条事件的 instance_id 证据字段）。
 	// 只读，构造后不再变更。
 	instanceID string
@@ -196,14 +197,15 @@ type auditChain struct {
 	onWriteFail func()
 	// ---- P1-8 T5（GAP-09）fail-closed 与 WormBackend ----
 	// worm：WORM 持久化后端（nil = 纯内存模式，不落盘）。
-	// 与旧 file 字段的关系：file 保留供 load 恢复用；写入走 worm 接口。
+	// P1-7 T0（A4-01）统一写盘入口：append() 与 appendOrFail() **均经此落盘**
+	// （既有 30 处落链点 + T2a 上报通道全走 append），fsync 与行序一致性由后端保证。
 	worm WormBackend
 	// failClosed：true = 写失败时拒绝业务请求（fail-closed）；
 	// false = 写失败仅告警（fail-open，兼容旧行为）。
 	// 启动期设置，运行时可通过 SetFailClosed 动态切换（灰度/回退）。
 	failClosed bool
 	// onWormWriteFail：WORM 写入失败回调（M-7 指标，policy=fail_closed|fail_open）。
-	// 唯一生产点：appendOrFail。append 内部的旧 file 写入失败仍走 onWriteFail。
+	// 唯一生产点：appendOrFail。append 的写失败仍走 onWriteFail（保持 fail-open 语义）。
 	onWormWriteFail func(policy string)
 	// onFailClosedReject：fail-closed 模式下因写失败拒绝请求的计数（M-8 指标）。
 	// 唯一生产点：appendOrFail。
@@ -246,6 +248,19 @@ func (c *auditChain) SetWormWriteFailHook(fn func(policy string)) { c.onWormWrit
 // 启动期一次性设置。
 func (c *auditChain) SetFailClosedRejectHook(fn func()) { c.onFailClosedReject = fn }
 
+// WormFsyncInfo 返回 WORM 落盘强度档位与累计 fsync 次数（只读；P1-7 T0 / D-17，供 /config 暴露）。
+// ok=false 表示当前非 fileWorm 后端（纯内存或其它后端），调用方按「未启用」如实呈现。
+func (c *auditChain) WormFsyncInfo() (mode string, every int, interval string, count uint64, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fw, isFile := c.worm.(*fileWorm)
+	if !isFile || fw == nil {
+		return "", 0, "", 0, false
+	}
+	m, e, iv := fw.FsyncConfig()
+	return m, e, iv.String(), fw.SyncCount(), true
+}
+
 // newInstanceID 生成本进程实例标识（"inst-" + 8 hex）。
 func newInstanceID() string { return "inst-" + randHex(8) }
 
@@ -257,22 +272,32 @@ func newAuditChainWithTSA(tsa TSASigner) *auditChain {
 	return &auditChain{tsa: tsa, instanceID: newInstanceID()}
 }
 
-// newAuditChainWORM 构造 WORM 持久化审计链：打开（或创建）事件文件并恢复既有链。
+// newAuditChainWORM 构造 WORM 持久化审计链（默认落盘强度 = D-17 档：每 1000 条或 1 秒）。
 // 文件以 O_APPEND 只追加打开，任何历史行被篡改都会在 verify() 中断链。
 func newAuditChainWORM(path, anchorPath string) (*auditChain, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	return newAuditChainWORMWithConfig(path, anchorPath, defaultWormFsyncConfig())
+}
+
+// newAuditChainWORMWithConfig 构造 WORM 持久化审计链并指定落盘强度（P1-7 T0 / D-17）。
+//
+// 装配形态（A4-01「统一写盘入口」）：
+//   - 事件文件的**唯一写盘句柄**是 fileWorm（挂到 c.worm）；append() 与 appendOrFail() 均经其落盘；
+//   - 不再保留第二个 *os.File 句柄直写事件文件——避免「双句柄写同一文件」导致的行序交错/覆盖（A4-07）；
+//   - load() 用 os.ReadFile 做启动恢复，不依赖常驻句柄。
+func newAuditChainWORMWithConfig(path, anchorPath string, cfg WormFsyncConfig) (*auditChain, error) {
+	wb, err := newFileWormWithConfig(path, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("audit: 打开事件文件失败: %w", err)
+		return nil, err
 	}
-	c := &auditChain{file: f, instanceID: newInstanceID()}
+	c := &auditChain{worm: wb, instanceID: newInstanceID()}
 	if err := c.load(path); err != nil {
-		_ = f.Close()
+		_ = wb.Close()
 		return nil, err
 	}
 	if anchorPath != "" {
 		a, err := os.OpenFile(anchorPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
-			_ = f.Close()
+			_ = wb.Close()
 			return nil, fmt.Errorf("audit: 打开锚定文件失败: %w", err)
 		}
 		c.anchor = a
@@ -334,9 +359,10 @@ func (c *auditChain) append(e AuditEvent) AuditEvent {
 		log.Printf("[audit] 事件哈希算法非法，拒绝落链: %v", herr)
 		return e
 	}
-	if c.file != nil {
-		line, _ := json.Marshal(e)
-		if _, err := c.file.Write(append(line, '\n')); err != nil {
+	// P1-7 T0（A4-01）：统一写盘入口——append 亦经 fileWorm 落盘（fsync/行序由后端保证）。
+	// 保持既有 fail-open 语义：写失败仅告警 + onWriteFail（不返回 error、不触发 M-7/M-8）。
+	if c.worm != nil {
+		if err := c.worm.Append(e); err != nil {
 			// WORM 写入失败：告警日志（审计完整性受损，不应静默忽略）+ 指标回调（§9.1 #16）
 			log.Printf("[audit] WORM 写入失败（审计完整性受损）: %v", err)
 			if c.onWriteFail != nil {
@@ -480,8 +506,8 @@ func (c *auditChain) verifyTST(rec *AnchorRecord) error {
 func (c *auditChain) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.file != nil {
-		_ = c.file.Close()
+	if c.worm != nil {
+		_ = c.worm.Close()
 	}
 	if c.anchor != nil {
 		_ = c.anchor.Close()

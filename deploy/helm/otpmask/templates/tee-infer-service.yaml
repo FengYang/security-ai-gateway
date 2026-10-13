@@ -8,7 +8,15 @@ metadata:
     app: tee-infer-service
     {{- include "otpmask.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.teeInfer.replicas }}
+  # P1-7 T0（D-14）：启用审计持久化（persistence.enabled）时为**单写者形态**——
+  # replicas=1 + Recreate（Deployment 无法表达 StatefulSet 的 OnDelete；Recreate
+  # 等价于「先停旧 Pod 再起新 Pod」，同样杜绝滚动更新双写窗口）。未启用时沿用
+  # teeInfer.replicas（多副本 + HPA）。
+  replicas: {{ if .Values.persistence.enabled }}1{{ else }}{{ .Values.teeInfer.replicas }}{{ end }}
+  {{- if .Values.persistence.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app: tee-infer-service
@@ -32,6 +40,15 @@ spec:
         - "$(SIG_KEY)"
         - "-attest-token"
         - "$(ATTEST_TOKEN)"
+        {{- if .Values.persistence.enabled }}
+        # P1-7 T0（D-14/D-17）：审计 WORM 持久化 + 落盘强度档位（单一计数点归属 fileWorm）。
+        - "-audit-file"
+        - "{{ .Values.persistence.auditFile }}"
+        - "-audit-anchor"
+        - "{{ .Values.persistence.auditAnchor }}"
+        - "-audit-fsync"
+        - "{{ .Values.persistence.fsync }}"
+        {{- end }}
         {{- if .Values.teeInfer.engineUrl }}
         - "-engine-url"
         - "{{ .Values.teeInfer.engineUrl }}"
@@ -82,6 +99,18 @@ spec:
           runAsNonRoot: true
           capabilities:
             drop: ["ALL"]
+        {{- if .Values.persistence.enabled }}
+        # P1-7 T0：审计 WORM 事件文件与锚定文件所在持久卷（只追加）。
+        volumeMounts:
+        - name: audit-data
+          mountPath: {{ .Values.persistence.mountPath }}
+        {{- end }}
+      {{- if .Values.persistence.enabled }}
+      volumes:
+      - name: audit-data
+        persistentVolumeClaim:
+          claimName: tee-infer-audit-pvc
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

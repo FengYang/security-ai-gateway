@@ -82,6 +82,18 @@ teeInfer:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 1000m, memory: 512Mi }
 
+# P1-7 T0：审计 WORM 持久化（D-14 单写者形态 / D-17 落盘强度）。
+# ⚠️ 准入③：本段默认值（尤其 storageClass / size / 单写者）须与运维确认后方可上生产。
+persistence:
+  enabled: true                 # 启用 -audit-file/-audit-anchor + PVC（D-14 默认生产形态）
+  size: 20Gi                    # 归档前 WORM 事件文件容量（按留存期与日量估算）
+  storageClass: ""              # 空 = 集群默认 StorageClass（须由运维拍板 StorageClass）
+  accessMode: ReadWriteOnce     # RWO：单写者单副本（D-14）
+  mountPath: /var/lib/otpmask/audit
+  auditFile: /var/lib/otpmask/audit/audit.jsonl
+  auditAnchor: /var/lib/otpmask/audit/anchor.jsonl
+  fsync: batch                  # batch（每 1000 条或每 1 秒）| per_event（合规档，D-17）
+
 # 水平扩缩容（autoscaling/v2，需 metrics-server）
 hpa:
   enabled: true
