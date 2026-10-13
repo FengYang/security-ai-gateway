@@ -1,0 +1,171 @@
+# P1-7 全流量审计改造 —— T7（MOD5 容量管控与告警）PrometheusRule
+#
+# 形态：与 slo/security/billing 规则同源——本文件为 Prometheus Operator 环境的 CR 形式；
+# 原生栈对应规则文本在 prometheus.yaml 的 prometheus-rules ConfigMap（audit-capacity.rules.yml），
+# 两者须一致维护。指标来源：tee-infer-service /metrics 暴露的审计专用指标族
+# （otpmask_audit_bytes、otpmask_audit_events、otpmask_audit_write_failures_total 等；
+#  C-9：既有指标族逐项不变，本文件仅引用新增的审计容量/分层/归档附加族与既有 audit/audit_events 族）。
+#
+# 部署（两种环境二选一，AC-01 同 slo 文件约束）：
+#   - 原生 Prometheus（本项目默认栈）：规则内置 prometheus.yaml 的 prometheus-rules ConfigMap，
+#     随 kustomize 挂载经 rule_files 加载；本 CR 切勿接入 kustomization（无 Operator 时 apply 失败）。
+#   - kube-prometheus-stack / Prometheus Operator：由部署单位显式 `kubectl apply -f` 本文件。
+#
+# 7 类告警（§8 集成清单 / 文档 v1.12 修正交叉引用）：
+#   ① 容量水位（70% / 85% / 95% 三档 severity）
+#   ② WORM 写失败 > 0
+#   ③ 链断裂（审计链长度单调递减，C-4「服务不删审计」被破坏或遭篡改）
+#   ④ 归档失败 > 0
+#   ⑤ 重复率异常（三元组去重占比超阈，疑似数据面重放）
+#   ⑥ 数据面上报丢弃率 > 0 即告警（A3-14：丢弃即可观测、可告警）
+#   ⑦ TEE 侧非登记 result 取值（A3-20/R-17：不改链、不拒落链，仅登记告警）
+# 注：文档 §7.0 T7 任务行旧称「5 类」，本文件以 §8 集成清单的「7 类」为准（容量水位按三档 severity 计为一类）。
+#
+# runbook_url 为相对占位，须替换为内部 wiki 绝对 URL。
+#
+# 阈值说明：
+#   - 容量水位以「审计已写入字节数（otpmask_audit_bytes，gauge）」对配置上限求比。
+#     默认上限 128 GiB（137438953472 B）= 典型审计 PVC 容量，部署单位须按实际 PVC 调整常量。
+#   - 其余阈值均取「增量 > 0 即告警」，契合 A3-14/A3-20「任何异常即暴露」原则。
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ai-audit-capacity-alerts
+  namespace: otpmask # 与监控栈统一（AC-01 对齐）
+  labels:
+    app: ai-gateway
+    role: audit
+spec:
+  groups:
+    - name: ai-audit-capacity.rules
+      interval: 30s
+      rules:
+        # ---- ① 容量水位 warning：已用 ≥ 70% ----
+        - alert: AuditCapacityWarning
+          expr: |
+            otpmask_audit_bytes / 137438953472 > 0.70
+          for: 15m
+          labels:
+            severity: warning
+            category: audit
+            team: ai-gateway-ops
+          annotations:
+            summary: "审计存储容量水位 ≥ 70%"
+            description: "审计已写入字节数 {{ $value | humanize1024 }}B 已达配置上限（默认 128 GiB）的 70%。核查留存期与分层清理（温层默认 30d / 冷层仅命中），必要时缩短温层天数（D-16 优先缩短温层而非恢复归档降采样）。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全流量审计改造.md"
+
+        # ---- ① 容量水位 critical：已用 ≥ 85% ----
+        - alert: AuditCapacityCritical
+          expr: |
+            otpmask_audit_bytes / 137438953472 > 0.85
+          for: 10m
+          labels:
+            severity: critical
+            category: audit
+            team: ai-gateway-ops
+          annotations:
+            summary: "审计存储容量水位 ≥ 85%（紧急）"
+            description: "审计已写入字节数已达配置上限的 85%。距容量耗尽仅余 15%，须在耗尽前扩容 PVC 或收紧留存/清理策略，避免 WORM 写入失败触发 fail-closed 拒绝（C-4/M-8）。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全流量审计改造.md"
+
+        # ---- ① 容量水位 page：已用 ≥ 95% ----
+        - alert: AuditCapacityPage
+          expr: |
+            otpmask_audit_bytes / 137438953472 > 0.95
+          for: 5m
+          labels:
+            severity: page
+            category: audit
+            team: ai-gateway-ops
+          annotations:
+            summary: "审计存储容量水位 ≥ 95%（立即处理）"
+            description: "审计已写入字节数已达配置上限的 95%。随时可能写满导致审计链路断裂与 fail-closed 拒绝。立即扩容或紧急清理，并排查异常高写入（otpmask_audit_bytes 速率 / 重复率）。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全流量审计改造.md"
+
+        # ---- ② WORM 写失败 > 0（审计完整性受损）----
+        - alert: AuditWriteFailure
+          expr: |
+            increase(otpmask_audit_write_failures_total[10m]) > 0
+            or increase(otpmask_worm_write_failed_total[10m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+            category: audit
+            team: ai-gateway-ops
+          annotations:
+            summary: "审计 WORM 写入失败（写入钩子触发）"
+            description: "近 10m 内 WORM 写入失败计数增量 > 0（otpmask_audit_write_failures_total 及/或 otpmask_worm_write_failed_total）。审计链路出现缺口，触发 fail-closed 的租户将被拒绝。立即排查磁盘/权限/ inode，并跑 audit-verify 校验断链位置（A3-04）。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全流量审计改造.md"
+
+        # ---- ③ 链断裂：审计链长度单调递减（C-4 被破坏或遭篡改）----
+        - alert: AuditChainBroken
+          expr: |
+            deriv(otpmask_audit_events[1h]) < 0
+          for: 10m
+          labels:
+            severity: critical
+            category: audit
+            team: ai-gateway-ops
+          annotations:
+            summary: "审计哈希链长度下降（疑似链断裂/篡改/误删）"
+            description: "otpmask_audit_events 近 1h 导数 < 0，违反「WORM 链只增不减（C-4）」。可能：存储被误删、链文件损坏、或遭篡改。立即隔离节点并用 audit-verify 从创世块逐事件校验（A3-04），确认断链区间与 prev_hash 连续性。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全流量审计改造.md"
+
+        # ---- ④ 归档失败 > 0（分层/冷层不下沉，合规留存缺口）----
+        - alert: AuditArchiveFailure
+          expr: |
+            increase(otpmask_audit_archive_failures_total[10m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+            category: audit
+            team: ai-gateway-ops
+          annotations:
+            summary: "审计归档/分层迁移失败"
+            description: "近 10m 内归档失败计数增量 > 0（otpmask_audit_archive_failures_total）。温层全量/冷层仅命中下沉受阻，将导致合规留存期不满足。核查归档后端（对象存储/T0 供给）可达性与凭据，失败事件将于下次周期锚定补归档。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全流量审计改造.md"
+
+        # ---- ⑤ 重复率异常：归档三元组去重占比超阈（疑似数据面重放）----
+        - alert: AuditDuplicateRateAnomaly
+          expr: |
+            (
+              sum(rate(otpmask_audit_duplicate_requests_total[10m]))
+              / clamp_min(sum(rate(otpmask_inference_requests_total[10m])), 1)
+            ) > 0.05
+          for: 15m
+          labels:
+            severity: warning
+            category: audit
+            team: ai-gateway-ops
+          annotations:
+            summary: "审计归档重复率异常（> 5%）"
+            description: "近 10m 三元组（instance_id,request_id,action）去重占比 {{ $value | humanizePercentage }} 超过 5%，疑似数据面上报端重放或同一请求被多实例重复落链。核查上报端幂等窗口与实例时钟/去重键。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全流量审计改造.md"
+
+        # ---- ⑥ 数据面上报丢弃率 > 0 即告警（A3-14：丢弃可观测、可告警）----
+        - alert: AuditReportDropped
+          expr: |
+            sum(increase(otpmask_audit_report_dropped_total[10m])) by (reason) > 0
+          for: 5m
+          labels:
+            severity: warning
+            category: audit
+            team: ai-gateway-ops
+          annotations:
+            summary: "数据面上报队列丢弃（审计缺口风险）"
+            description: "近 10m 内数据面上报被丢弃（reason={{ $labels.reason }}，otpmask_audit_report_dropped_total）。任何丢弃都会造成审计缺口，须排查数据面到 tee-infer 的通道（队列满/发送失败/校验失败/重放失败），确保审计全量可达（D-13 多层防护）。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全流量审计改造.md"
+
+        # ---- ⑦ 非登记 result 取值（A3-20/R-17：不改链、不拒落链，仅登记告警）----
+        - alert: AuditUnregisteredResult
+          expr: |
+            increase(otpmask_audit_unregistered_result_total[10m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+            category: audit
+            team: ai-gateway-ops
+          annotations:
+            summary: "TEE 侧出现非登记 result 取值"
+            description: "近 10m 内审计事件 result 字段出现未登记取值（otpmask_audit_unregistered_result_total）。不改链、不拒落链（A3-20），但可能意味着新增代码路径或上游写入异常，须核对 result 枚举登记（R-17）与上游调用方。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全流量审计改造.md"

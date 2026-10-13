@@ -328,6 +328,109 @@ data:
       "uid": "otpmask-slo",
       "version": 1
     }
+  otpmask-audit.json: |
+    {
+      "annotations": {"list": []},
+      "editable": true,
+      "graphTooltip": 0,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "bytes", "min": 0}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "id": 1,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [{"expr": "otpmask_audit_bytes", "legendFormat": "已写入字节数", "refId": "A"}],
+          "title": "审计已写入字节数（容量水位）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short", "min": 0}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "id": 2,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}, "stack": "normal"},
+          "targets": [{"expr": "sum by (tier) (otpmask_audit_records_tier)", "legendFormat": "{{tier}}", "refId": "A"}],
+          "title": "各层记录数（hot/warm/cold）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short", "min": 0}, "overrides": []},
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+          "id": 3,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [{"expr": "otpmask_audit_events", "legendFormat": "chain length", "refId": "A"}],
+          "title": "审计哈希链长度",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short", "min": 0}, "overrides": []},
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+          "id": 4,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [{"expr": "sum(rate(otpmask_audit_write_failures_total[5m]))", "legendFormat": "WORM 写失败/s", "refId": "A"}],
+          "title": "WORM 写失败速率",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short", "min": 0}, "overrides": []},
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+          "id": 5,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [{"expr": "sum(rate(otpmask_audit_archive_failures_total[5m]))", "legendFormat": "归档失败/s", "refId": "A"}],
+          "title": "归档失败速率",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short", "min": 0}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+          "id": 6,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [{"expr": "sum by (reason) (rate(otpmask_audit_report_dropped_total[5m]))", "legendFormat": "{{reason}}", "refId": "A"}],
+          "title": "数据面上报丢弃速率（按 reason，A3-14）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short", "min": 0}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+          "id": 7,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "sum(rate(otpmask_audit_duplicate_requests_total[5m]))", "legendFormat": "归档去重/s", "refId": "A"},
+            {"expr": "sum(rate(otpmask_audit_redact_truncated_total[5m]))", "legendFormat": "脱敏截断/s", "refId": "B"},
+            {"expr": "sum(rate(otpmask_audit_unregistered_result_total[5m]))", "legendFormat": "非登记result/s", "refId": "C"}
+          ],
+          "title": "去重 / 脱敏截断 / 非登记result 速率",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short", "min": 0}, "overrides": []},
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 24},
+          "id": 8,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [{"expr": "sum(rate(otpmask_audit_sampled_total[5m]))", "legendFormat": "读取/导出降采样/s", "refId": "A"}],
+          "title": "读取/导出侧降采样速率（未命中事件，仅合规档）",
+          "type": "timeseries"
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["otpmask", "audit"],
+      "templating": {"list": []},
+      "time": {"from": "now-6h", "to": "now"},
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "OTP-Mask 审计容量/分层看板（P1-7）",
+      "uid": "otpmask-audit",
+      "version": 1
+    }
 ---
 apiVersion: apps/v1
 kind: Deployment
