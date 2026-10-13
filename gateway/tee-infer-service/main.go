@@ -131,6 +131,13 @@ type teeServer struct {
 	enclave       Enclave // 飞地抽象
 	requireAttest bool    // 强制证明模式
 	adminToken    string  // 管理端点（/metrics /audit）认证令牌
+	// P1-7 T2a（§6.5 A3-11）：数据面上报独立只读令牌（仅可达 /audit/report，不回落 -admin-token）。
+	// auditReportTenants 非空 → 插件侧模式（令牌绑定 tenant 集合，A3-10 租户归属校验）；
+	// 为空 → 网关/回灌侧模式（服务端解析租户，D-18）。
+	auditReportToken   string
+	auditReportTenants map[string]bool
+	// auditReports 数据面上报的窗口内幂等状态（复用 shadowReportState 机制，独立键命名空间）。
+	auditReports *shadowReportState
 	// T-5：MCP 工具级治理（mcpsec 目录/策略 验签缓存 + TEE 内裁决引擎）。
 	// mcpKey 为空 → 不构造 → /config/mcp 端点不注册（fail-closed）。
 	mcpKey       []byte
@@ -142,6 +149,13 @@ type teeServer struct {
 	protoVersion string             // 南向协议版本声明（C-4：默认 protocol.Version，部署/测试可覆盖）
 	// 审计/日志留存期声明（天；0=未声明）。声明式，服务不删除审计数据。
 	auditRetentionDays int
+	// P1-7 T5/T6（MOD4 分层存储）：分层声明与归档后端。
+	retention   RetentionPolicy // 热/温/冷分层 + 未命中采样率
+	archiveSink tierSink        // 归档写入后端（默认 localFSArchiveSink；对象存储待 T0 供给）
+	archiveRoot string          // 归档根目录（本地文件系统实现用）
+	archiveMu   sync.Mutex      // 归档水位/已归档集合读写保护（重入幂等，A3-24）
+	// P1-7 T9：留存声明运行时读写保护（/audit/retention PUT 与 archiveOnce 读取并发）。
+	retentionMu sync.RWMutex
 	// P2a：PII 处理模式（block = 拦截（默认，fail-closed）/ mask = 脱敏替换后放行）；
 	// SQL 注入/提示注入在任何模式下均拦截。
 	piiMode string
@@ -895,6 +909,9 @@ func sessionPlaintextDev() bool {
 }
 
 func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
+	reqStart := time.Now() // T3a：总耗时基准（dur_ms 证据字段）
+	// T3a：注入请求路径证据元数据（path/path_mode 经 context 传递）。
+	r = r.WithContext(withAuditReqMeta(r.Context(), r.URL.Path, auditPathMode(r.URL.Path)))
 	// 会话模式（X-Session-ID 有效会话）或 MVP token 模式，二选一通过
 	sess := s.sessionByID(r)
 	if sess == nil && !s.checkAttest(r) {
@@ -912,7 +929,7 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 		pt, oerr := sess.openPayload(protocol.EndpointKeyIssue, body)
 		if oerr != nil {
 			if !sessionPlaintextDev() {
-				s.denyAndAudit(tenantOf(r), "", "keyissue_envelope_error", payloadSHA)
+				s.denyAndAudit(r, tenantOf(r), "", "keyissue_envelope_error", payloadSHA)
 				http.Error(w, "会话请求须为加密信封（fail-closed）", http.StatusBadRequest)
 				return
 			}
@@ -938,10 +955,13 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	defer wipe(seed)
 	log.Printf("[tee] 密钥签发 tenant=%s req=%s master=%d", tenant, req.RequestID[:8], masterID)
-	// M9-3：审计
+	// M9-3：审计（T3a：补 path/path_mode/http_status/dur_ms 证据字段）
+	keyMeta := auditReqMetaFromCtx(r.Context())
 	s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: req.RequestID, Action: "key_issue",
 		Result: "ok", PayloadSHA: payloadSHA, HashAlg: hashAlgTag(),
+		Path: keyMeta.Path, PathMode: keyMeta.PathMode,
+		HTTPStatus: http.StatusOK, DurMS: msElapsed(reqStart.UnixNano(), time.Now().UnixNano()),
 	})
 	// M10：指标
 	s.metrics.incKeyIssue(tenant)
@@ -957,7 +977,7 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 	if sess != nil {
 		sealed, serr := sess.sealPayload(protocol.EndpointKeyIssue, respJSON)
 		if serr != nil {
-			s.denyAndAudit(tenant, req.RequestID, "keyissue_seal_error", payloadSHA)
+			s.denyAndAudit(r, tenant, req.RequestID, "keyissue_seal_error", payloadSHA)
 			http.Error(w, "响应加密失败（fail-closed）", http.StatusInternalServerError)
 			return
 		}
@@ -990,6 +1010,9 @@ func retryAttemptFromHeader(r *http.Request) int {
 
 // handleInfer 推理入口。
 func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
+	reqStart := time.Now() // T3a：总耗时基准（dur_ms 证据字段；不新增埋点，与既有 TTFT 基准口径一致）
+	// T3a：注入请求路径证据元数据（path/path_mode 经 context 传递至各落链点）。
+	r = r.WithContext(withAuditReqMeta(r.Context(), r.URL.Path, auditPathMode(r.URL.Path)))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("读取请求失败: %v", err), http.StatusBadRequest)
@@ -1004,7 +1027,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		pt, oerr := sess.openPayload(protocol.EndpointInfer, body)
 		if oerr != nil {
 			if !sessionPlaintextDev() {
-				s.denyAndAudit(tenant, "", "envelope_error", payloadSHA)
+				s.denyAndAudit(r, tenant, "", "envelope_error", payloadSHA)
 				http.Error(w, "推理请求须为加密信封（fail-closed）", http.StatusBadRequest)
 				return
 			}
@@ -1014,14 +1037,14 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	}
 	req, err := protocol.DecodeRequest(body)
 	if err != nil {
-		s.denyAndAudit(tenant, "", "decode_error", payloadSHA)
+		s.denyAndAudit(r, tenant, "", "decode_error", payloadSHA)
 		http.Error(w, fmt.Sprintf("协议解码失败: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	// 验签
 	if !cryptoops.VerifyRequest(s.sessionK_sig(r), req) {
-		s.denyAndAudit(tenant, req.RequestID, "bad_signature", payloadSHA)
+		s.denyAndAudit(r, tenant, req.RequestID, "bad_signature", payloadSHA)
 		http.Error(w, "签名无效", http.StatusUnauthorized)
 		return
 	}
@@ -1033,7 +1056,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 	if replayErr != nil {
-		s.denyAndAudit(tenant, req.RequestID, "replay", payloadSHA)
+		s.denyAndAudit(r, tenant, req.RequestID, "replay", payloadSHA)
 		http.Error(w, replayErr.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1041,7 +1064,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	// S4-4：租户处置状态检查（SaaS 模式；OSS 下永远放行）。
 	if s.disposition != nil {
 		if allowed, reason := s.disposition.Check(tenant); !allowed {
-			s.denyAndAudit(tenant, req.RequestID, "tenant_disposition", payloadSHA)
+			s.denyAndAudit(r, tenant, req.RequestID, "tenant_disposition", payloadSHA)
 			http.Error(w, reason, http.StatusForbidden)
 			return
 		}
@@ -1049,7 +1072,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 
 	// 双路线路由校验
 	if err := s.route.ValidateRequest(tenant, req.Model, req.EngineType, req.AttestType); err != nil {
-		s.denyAndAudit(tenant, req.RequestID, "route_rejected", payloadSHA)
+		s.denyAndAudit(r, tenant, req.RequestID, "route_rejected", payloadSHA)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1078,7 +1101,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	// P0-4 §6：按租户 KEK 域回溯请求 seed（无签发记录 -> 拒绝）
 	seed, masterID, ok := s.tkm.LookupDetail(tenant, hex.EncodeToString(req.Nonce))
 	if !ok {
-		s.denyAndAudit(tenant, req.RequestID, "unknown_nonce", payloadSHA)
+		s.denyAndAudit(r, tenant, req.RequestID, "unknown_nonce", payloadSHA)
 		http.Error(w, "nonce 未知（密钥未签发或已过期）", http.StatusBadRequest)
 		return
 	}
@@ -1174,6 +1197,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		vecEng = protocol.EngineTypeTEEGPU
 	}
 	s.recordModelUsage(tenant, vecEng, req.Model, len(req.CipherVectors), len(tokens))
+	vecMeta := auditReqMetaFromCtx(inferCtx) // T3a：路径证据元数据
 	vecEv := s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: req.RequestID, Action: "infer",
 		TokensIn: len(req.CipherVectors), TokensOut: len(tokens),
@@ -1182,6 +1206,10 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 		Model:      req.Model,
 		IsRetry:    isRetry,                      // GA-计费 P0-3：重试归因（A-23/A-29）
 		TraceID:    traceIDFromContext(inferCtx), // P1-2：trace_id 证据字段
+		// T3a：路径/状态/耗时证据字段（dur_ms 自请求入口；向量路径无逐帧 TTFT，ttft 取总耗时口径）。
+		Path: vecMeta.Path, PathMode: vecMeta.PathMode,
+		HTTPStatus: http.StatusOK,
+		DurMS:      msElapsed(reqStart.UnixNano(), time.Now().UnixNano()),
 	})
 	go s.billing.notify(vecEv) // GA-计费 P1-1：Webhook（nil = no-op）
 	endSpanOK(inferSpan)       // P1-2：主 span 正常结束
@@ -1193,7 +1221,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	if sess != nil {
 		sealed, serr := sess.sealPayload(protocol.EndpointInfer, enc)
 		if serr != nil {
-			s.denyAndAudit(tenant, req.RequestID, "envelope_seal_error", payloadSHA)
+			s.denyAndAudit(r, tenant, req.RequestID, "envelope_seal_error", payloadSHA)
 			http.Error(w, "响应加密失败（fail-closed）", http.StatusInternalServerError)
 			return
 		}
@@ -1553,7 +1581,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		}
 		// X-3：输出侧整流拦截优先于引擎 error 判定——按实际下发回冲（block+genErr 同此）。
 		if out.Blocked {
-			s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
+			s.applyOutputBlockBilling(ctx, reqStart, tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
 				s.countTokens(inputText.String()), out, isRetry, traceIDFromContext(ctx))
 			endSpanDenied(inferSpan, "content_filter")
 			return
@@ -1577,6 +1605,10 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 				MeteringMode:    s.meteringMode(),
 				IsRetry:         isRetry,                 // GA-计费 P0-3：重试归因
 				TraceID:         traceIDFromContext(ctx), // P1-2：trace_id 证据字段
+				// T3a：路径/状态/耗时（流式已提交 200，部分输出后引擎失败）。
+				Path: auditReqMetaFromCtx(ctx).Path, PathMode: auditReqMetaFromCtx(ctx).PathMode,
+				HTTPStatus: http.StatusOK,
+				DurMS:      msElapsed(reqStart.UnixNano(), time.Now().UnixNano()),
 			})
 			go s.billing.notify(ev) // GA-计费 P1-1：Webhook（nil = no-op；异步不阻塞主链）
 		} else {
@@ -1593,7 +1625,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		if cacheReplayMode != "" && st != nil && st.engine != nil {
 			st.engine.RecordReplay(cacheReplayMode, "ok") // §9.1 #22（回放完成，内容随后被拦）
 		}
-		s.applyOutputBlockBilling(tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
+		s.applyOutputBlockBilling(ctx, reqStart, tenant, req.RequestID, payloadSHA, txHash, engType, req.Model,
 			s.countTokens(inputText.String()), out, isRetry, traceIDFromContext(ctx))
 		endSpanDenied(inferSpan, "content_filter")
 		return
@@ -1613,6 +1645,10 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 			EngineType: engType, Model: req.Model, TransformedHash: txHash,
 			CacheHit: true, MeteringMode: s.meteringMode(), IsRetry: isRetry,
 			TraceID: traceIDFromContext(ctx), // P1-2：trace_id 证据字段
+			// T3a：路径/状态/耗时 + 命中策略（负向缓存命中，§3.4 判定式）。
+			Path: auditReqMetaFromCtx(ctx).Path, PathMode: auditReqMetaFromCtx(ctx).PathMode,
+			HTTPStatus: http.StatusOK, HitPolicies: "cache_negative",
+			DurMS: msElapsed(reqStart.UnixNano(), time.Now().UnixNano()),
 		})
 		go s.billing.notify(ev)
 		s.metrics.incRequest(tenant, "ok")
@@ -1649,6 +1685,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	if fp, ok := eng.(interface{ LastKeyFingerprint() string }); ok {
 		keyFP = fp.LastKeyFingerprint()
 	}
+	txtMeta := auditReqMetaFromCtx(ctx) // T3a：路径证据元数据
 	ev := s.audit.append(AuditEvent{
 		TenantID: tenant, RequestID: req.RequestID, Action: "infer",
 		TokensIn: tokensIn, TokensOut: tokensOut,
@@ -1662,6 +1699,11 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 		MeteringMode:    s.meteringMode(),        // GF.2.4：计量口径标记（estimate=未校准）
 		IsRetry:         isRetry,                 // GA-计费 P0-3：重试归因（A-23/A-29）
 		TraceID:         traceIDFromContext(ctx), // P1-2：trace_id 证据字段
+		// T3a：路径/状态/TTFT/总耗时证据字段（取自 handler 既有计时变量 reqStart/out.TTFTms）。
+		Path: txtMeta.Path, PathMode: txtMeta.PathMode,
+		HTTPStatus: http.StatusOK,
+		TTFTMs:     int(out.TTFTms),
+		DurMS:      msElapsed(reqStart.UnixNano(), time.Now().UnixNano()),
 	})
 	go s.billing.notify(ev) // GA-计费 P1-1：Webhook（nil = no-op；异步不阻塞主链）
 	s.metrics.incRequest(tenant, "ok")
@@ -1835,6 +1877,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 		return nil
 	}
 	// I1：构造请求级输出侧审查管线（mode=off 返回 nil → 下方走原路径，零行为变化）。
+	ogMeta := auditReqMetaFromCtx(ctx) // T3a：输出侧落链点路径证据元数据
 	og, ogErr := s.newRequestOutputGuard(tenant, requestID)
 	if ogErr != nil {
 		return ogErr // fail-closed：模式非法不得静默放行（启动期已校验，此处兜底）
@@ -1960,6 +2003,10 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 				OGMode:         s.currentOutputGuardMode(),
 				FilteredTokens: filtered,
 				MeteringMode:   s.meteringMode(),
+				// T3a：路径/状态/耗时 + 命中策略（输出侧整流命中，§3.4 判定式）。
+				Path: ogMeta.Path, PathMode: ogMeta.PathMode,
+				HTTPStatus: http.StatusOK, HitPolicies: "output_blocked",
+				DurMS: msElapsed(reqStart.UnixNano(), time.Now().UnixNano()),
 			})
 		}
 		return genErr
@@ -2040,6 +2087,10 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 				OGCategory:   cat,
 				OGMode:       s.currentOutputGuardMode(),
 				MeteringMode: s.meteringMode(),
+				// T3a：路径/状态/耗时 + 命中策略（输出侧遮蔽命中，§3.4 判定式）。
+				Path: ogMeta.Path, PathMode: ogMeta.PathMode,
+				HTTPStatus: http.StatusOK, HitPolicies: "output_masked",
+				DurMS: msElapsed(reqStart.UnixNano(), time.Now().UnixNano()),
 			})
 		}
 	}
@@ -2066,7 +2117,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 //     配额即释放）；审计 output_blocked 已由 streamTextInfer 落链（含 filtered_tokens）。
 //   - 部分截断（有下发）：输入保留（已发送并消耗），输出仅按实际下发计费；
 //     infer 审计 result=content_filter（供 from/to 出账聚合）。
-func (s *teeServer) applyOutputBlockBilling(tenant, requestID, payloadSHA, transformedHash,
+func (s *teeServer) applyOutputBlockBilling(ctx context.Context, reqStart time.Time, tenant, requestID, payloadSHA, transformedHash,
 	engType, modelName string, tokensIn int, out streamOutcome, isRetry bool, traceID string) {
 	delivered := out.EmittedTokens
 	if delivered <= 0 {
@@ -2087,6 +2138,10 @@ func (s *teeServer) applyOutputBlockBilling(tenant, requestID, payloadSHA, trans
 		MeteringMode: s.meteringMode(),
 		IsRetry:      isRetry, // GA-计费 P0-3：重试归因
 		TraceID:      traceID, // P1-2：trace_id 证据字段
+		// T3a：路径/状态/耗时 + 命中策略（输出侧整流部分截断，§3.4 判定式）。
+		Path: auditReqMetaFromCtx(ctx).Path, PathMode: auditReqMetaFromCtx(ctx).PathMode,
+		HTTPStatus: http.StatusOK, HitPolicies: "output_blocked",
+		DurMS: msElapsed(reqStart.UnixNano(), time.Now().UnixNano()),
 	})
 	go s.billing.notify(ev)
 	s.metrics.incRequest(tenant, "content_filter")
@@ -2095,19 +2150,26 @@ func (s *teeServer) applyOutputBlockBilling(tenant, requestID, payloadSHA, trans
 }
 
 // denyAndAudit 拒绝路径：用量 deny 计数 + 审计事件（result=拒绝原因）+ 指标。
-func (s *teeServer) denyAndAudit(tenant, requestID, reason, payloadSHA string) {
-	s.denyAndAuditCtx(context.Background(), tenant, requestID, reason, payloadSHA)
+// r 提供请求上下文（T3a：path/path_mode 证据字段经 r.Context() 传递；nil 时退化为无路径元数据）。
+func (s *teeServer) denyAndAudit(r *http.Request, tenant, requestID, reason, payloadSHA string) {
+	var ctx context.Context
+	if r != nil {
+		ctx = r.Context()
+	}
+	s.denyAndAuditCtx(ctx, tenant, requestID, reason, payloadSHA)
 }
 
-// denyAndAuditCtx 拒绝并写入审计链（带 ctx 版本，trace_id 证据字段，D-5）。
-// tracing 未启用时 trace_id 为空，omitempty 不序列化，旧行零差异。
+// denyAndAuditCtx 拒绝并写入审计链（带 ctx 版本，trace_id/path/path_mode 证据字段，D-5/T3a）。
+// tracing 未启用时 trace_id 为空；请求入口未注入路径元数据时 path 为空，omitempty 不序列化。
 func (s *teeServer) denyAndAuditCtx(ctx context.Context, tenant, requestID, reason, payloadSHA string) {
 	s.recordUsage(tenant, 0, 0, true)
-	s.audit.append(AuditEvent{
+	// T3a：补齐 path/path_mode/hit_policies/http_status（§3.4 命中判定式可核）。
+	ev := buildDenyEvent(ctx, AuditEvent{
 		TenantID: tenant, RequestID: requestID, Action: "deny",
 		Result: reason, PayloadSHA: payloadSHA, HashAlg: hashAlgTag(),
 		TraceID: traceIDFromContext(ctx), // P1-2：trace_id 证据字段
-	})
+	}, reason)
+	s.audit.append(ev)
 	s.metrics.incDeny(tenant, reason)
 }
 
@@ -3646,6 +3708,27 @@ func (s *teeServer) handleAuditAnchor(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(rec)
 }
 
+// runPeriodicAnchor 周期触发审计锚定（T10，MOD8）：默认 1h，复用 anchorNow()。
+// 仅当锚定文件已配置时由 main 启动（见 -audit-anchor / -audit-anchor-interval）。
+// 锚定作为 WORM 链尾哈希的时间戳快照，截断检测（D-9）由 audit-verify -anchor 复核。
+// 锚定未启用（audit.anchorNow 返回 nil）时静默跳过，不报错。
+func (s *teeServer) runPeriodicAnchor(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		rec := s.audit.anchorNow()
+		if rec == nil {
+			log.Printf("[audit] 周期锚定跳过（锚定未启用）")
+			continue
+		}
+		log.Printf("[audit] 周期锚定完成：chain_hash=%s tst=%v",
+			orDefault(chainHashOf(rec), "-"), rec.TST != nil)
+	}
+}
+
 // orDefault 空串回退。
 func orDefault(v, def string) string {
 	if v == "" {
@@ -3757,6 +3840,9 @@ func main() {
 	cmaasModel := flag.String("cmaas-model", "", "C-MaaS 缺省模型 code（cmaas-glm-5.2 等；请求未指定模型时使用）")
 	auditFile := flag.String("audit-file", "", "审计事件 WORM 文件路径（JSON Lines 只追加；为空 = 内存模式）")
 	auditAnchor := flag.String("audit-anchor", "", "审计锚定文件路径（链尾哈希追加；仅 audit-file 开启时生效）")
+	auditAnchorInterval := flag.Duration("audit-anchor-interval", time.Hour, "审计周期锚定间隔（T10，MOD8；默认 1h；仅 -audit-anchor 配置时生效）。锚定链尾哈希供 audit-verify 复核截断（D-9）")
+	auditReportToken := flag.String("audit-report-token", "", "数据面上报只读令牌（A3-11：缺省即拒绝注册 /audit/report，fail-closed，不回落 -admin-token）")
+	auditReportTenants := flag.String("audit-report-tenants", "", "上报令牌可声明的 tenant_id 集合（逗号分隔；插件侧 A3-10 租户归属校验；缺省=网关级，服务端解析租户 D-18）")
 	auditRetention := flag.Int("audit-retention-days", defaultAuditRetentionDays, "审计/日志留存期声明（天；0=不声明；>0 须 ≥180 法定硬底）。仅声明：服务不删除审计数据（保 WORM 链完整），删除由存储层生命周期策略按本值执行")
 	tsaMode := flag.String("tsa", "mock", "RFC 3161 可信时间戳服务：mock（本地自签）| rfc3161（外部 TSA）| off（不绑定 TST）")
 	tsaRFC3161URL := flag.String("tsa-rfc3161-url", "", "外部 RFC 3161 TSA 服务 URL（-tsa rfc3161 时必填）")
@@ -4005,46 +4091,58 @@ func main() {
 	// P0-2 语义缓存 + §6.10：启动期装配运行时快照（默认 mode=off，与现网逐字节一致）。
 	cacheSt := buildCacheState()
 
+	m := newMetrics()
 	srv := &teeServer{
 		km: km, kSig: kSig, attest: *attestToken,
-		enclave:           encl,
-		requireAttest:     *requireAttest,
-		adminToken:        *adminToken,
-		meterToken:        *meterToken,                                    // GA-计费 P1-2：独立只读计量令牌（/usage 最小权限）
-		billing:           newBillingWebhook(*billingURL, *billingSecret), // GA-计费 P1-1：nil = 推送关闭（拉取为主）
-		model:             eng,
-		cmaasEngine:       cmaasEng,
-		protoVersion:      *protoVersion,
-		piiMode:           *piiMode,
-		guardrailCfgPath:  *guardrailCfg,
-		systemPrompt:      *systemPrompt,
-		seen:              make(map[string]bool),
-		seenAt:            make(map[string]int64),
-		sessions:          make(map[string]*teeSession),
-		recomputeStates:   newRecomputeStates(),
-		weightProvider:    NewMockWeightProvider(32),
-		route:             routeCfg,
-		tokenizer:         nil,                                          // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
-		cache:             cacheengine.NewLegacyAdapter(cacheSt.engine), // P0-2：legacy 兜底（仅原生引擎未生效时使用）
-		usage:             make(map[string]*usageRecord),
-		quota:             make(map[string]quotaSpec),
-		quotaDefault:      *tokenQuota,
-		quotaWindowUsage:  make(map[string]int64),
-		quotaWindowKey:    make(map[string]string),
-		shadowReports:     newShadowReportState(shadowReportTTL, shadowReportMax), // A 项：上报幂等状态
-		shadowWindowUsage: make(map[string]int64),
-		shadowWindowKey:   make(map[string]string),
-		audit:             audit,
-		guard:             newGuardrail(),
-		metrics:           newMetrics(),
-		disposition:       nilDisposition{}, // S4-4：默认永远放行；SaaS 构建由 initTenantDisposition 替换
+		enclave:            encl,
+		requireAttest:      *requireAttest,
+		adminToken:         *adminToken,
+		auditReportToken:   *auditReportToken,                                      // P1-7 T2a：数据面上报独立令牌（A3-11）
+		auditReportTenants: parseTenantSet(*auditReportTenants),                    // 非空=插件侧租户绑定模式；空=网关级
+		auditReports:       newShadowReportState(shadowReportTTL, shadowReportMax), // T2a：上报幂等状态（独立命名空间）
+		meterToken:         *meterToken,                                            // GA-计费 P1-2：独立只读计量令牌（/usage 最小权限）
+		billing:            newBillingWebhook(*billingURL, *billingSecret),         // GA-计费 P1-1：nil = 推送关闭（拉取为主）
+		model:              eng,
+		cmaasEngine:        cmaasEng,
+		protoVersion:       *protoVersion,
+		piiMode:            *piiMode,
+		guardrailCfgPath:   *guardrailCfg,
+		systemPrompt:       *systemPrompt,
+		seen:               make(map[string]bool),
+		seenAt:             make(map[string]int64),
+		sessions:           make(map[string]*teeSession),
+		recomputeStates:    newRecomputeStates(),
+		weightProvider:     NewMockWeightProvider(32),
+		route:              routeCfg,
+		tokenizer:          nil,                                          // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
+		cache:              cacheengine.NewLegacyAdapter(cacheSt.engine), // P0-2：legacy 兜底（仅原生引擎未生效时使用）
+		usage:              make(map[string]*usageRecord),
+		quota:              make(map[string]quotaSpec),
+		quotaDefault:       *tokenQuota,
+		quotaWindowUsage:   make(map[string]int64),
+		quotaWindowKey:     make(map[string]string),
+		shadowReports:      newShadowReportState(shadowReportTTL, shadowReportMax), // A 项：上报幂等状态
+		shadowWindowUsage:  make(map[string]int64),
+		shadowWindowKey:    make(map[string]string),
+		audit:              audit,
+		guard:              newGuardrail(),
+		metrics:            m,
+		retention:          defaultRetentionPolicy, // P1-7 T5 分层声明（可被 -audit-retention 覆盖）
+		disposition:        nilDisposition{},       // S4-4：默认永远放行；SaaS 构建由 initTenantDisposition 替换
 	}
+	auditMetrics = m // P1-7 T4/T7：脱敏与容量指标计数入口（包级）
 	// T-5：MCP 工具级治理接线（验签缓存 + TEE 内裁决引擎）。
 	// 约束：管理令牌或 MCP 密钥缺失 → 不构造 → /config/mcp 端点不注册（fail-closed）。
 	// P1-8 T5：审计 fail-closed 指标回调接入（M-7/M-8，source=tee）。
 	// 唯一生产点 = auditChain.appendOrFail（audit.go:319）。
 	srv.audit.SetWormWriteFailHook(func(policy string) { srv.metrics.incWormWriteFail(policy) })
 	srv.audit.SetFailClosedRejectHook(func() { srv.metrics.incAuditFailClosedReject() })
+	// T10（MOD8）：周期锚定循环（默认 1h）。仅当锚定文件已配置（-audit-anchor）时启用；
+	// 复用既有 anchorNow()，将链尾哈希追加为时间戳快照，供 audit-verify 复核截断（D-9）。
+	if *auditAnchor != "" && *auditAnchorInterval > 0 {
+		go srv.runPeriodicAnchor(*auditAnchorInterval)
+		log.Printf("[audit] 周期锚定已启用：间隔 %s（文件=%s）", *auditAnchorInterval, *auditAnchor)
+	}
 	if *adminToken != "" && *mcpKeyHex != "" {
 		key, kerr := hex.DecodeString(*mcpKeyHex)
 		if kerr != nil || len(key) < 32 {
@@ -4331,14 +4429,24 @@ func main() {
 	mux.HandleFunc("/attest/complete", srv.handleAttestComplete)
 	mux.HandleFunc("/key/issue", srv.handleKeyIssue)
 	mux.HandleFunc("/v1/infer", srv.handleInfer)
-	mux.HandleFunc("/v1/recompute", srv.handleRecompute)                               // 路线 2 非线性补算
-	mux.HandleFunc("/infer", srv.handleInfer)                                          // 网关路由别名
-	mux.HandleFunc("/usage", srv.handleUsage)                                          // M9-2 用量
-	mux.HandleFunc("/usage/quota", srv.handleQuota)                                    // P1 配额设置
-	mux.HandleFunc("/audit", srv.handleAudit)                                          // M9-3 审计
-	mux.HandleFunc("/audit/shadow", srv.handleShadowReport)                            // A 项：数据面明文影子窗口级汇总上报（幂等落链）
+	mux.HandleFunc("/v1/recompute", srv.handleRecompute)    // 路线 2 非线性补算
+	mux.HandleFunc("/infer", srv.handleInfer)               // 网关路由别名
+	mux.HandleFunc("/usage", srv.handleUsage)               // M9-2 用量
+	mux.HandleFunc("/usage/quota", srv.handleQuota)         // P1 配额设置
+	mux.HandleFunc("/audit", srv.handleAudit)               // M9-3 审计
+	mux.HandleFunc("/audit/shadow", srv.handleShadowReport) // A 项：数据面明文影子窗口级汇总上报（幂等落链）
+	// P1-7 T2a（§6.5 A3-11）：数据面未达 TEE 流量上报端点。fail-closed：仅当 -audit-report-token
+	// 配置时注册，缺省不注册本端点（不回落 -admin-token）。
+	if *auditReportToken != "" {
+		mux.HandleFunc("/audit/report", srv.handleAuditReport)
+		log.Printf("[audit] 数据面上报端点已注册：POST /audit/report（独立令牌，fail-closed；模式=%s）",
+			auditReportModeLabel(*auditReportTenants))
+	} else {
+		log.Printf("[audit] -audit-report-token 缺省 → /audit/report 未注册（fail-closed，A3-11）")
+	}
 	mux.HandleFunc("/audit/verify", srv.handleAuditVerify)                             // M9-3 哈希链校验
 	mux.HandleFunc("/audit/anchor", srv.handleAuditAnchor)                             // C-5 审计锚定
+	mux.HandleFunc("/audit/retention", srv.handleAuditRetention)                       // P1-7 T9：留存/分层声明读写（§6.4）
 	mux.HandleFunc("/metrics", srv.handleMetrics)                                      // M10 可观测性
 	mux.HandleFunc("/config", srv.handleConfig)                                        // M3-B 安全中心：配置只读快照
 	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig)                     // M3-B 高敏复核：Guardrail 降级生效点

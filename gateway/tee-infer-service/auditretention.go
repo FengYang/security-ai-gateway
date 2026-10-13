@@ -30,3 +30,41 @@ func validateAuditRetentionDays(days int) error {
 	}
 	return nil
 }
+
+// ---- P1-7 T5（MOD4 分层声明，§7.5）----
+
+// RetentionPolicy 热/温/冷分层与未命中采样声明（声明式，服务不删除数据，C-4）。
+type RetentionPolicy struct {
+	HotDays        int // 热层留存天数（本地 WORM，检索快）
+	WarmDays       int // 温层留存天数（对象存储，全量归档）
+	ColdDays       int // 冷层留存天数（对象存储，仅命中事件）
+	SampleMissRate int // 读取/导出侧未命中降采样率（0–100，0=不采样；合规档默认 0）
+}
+
+// defaultRetentionPolicy 缺省分层（热 7d / 温 30d / 冷 180d；合计 ≥180 硬底，C-8）。
+var defaultRetentionPolicy = RetentionPolicy{HotDays: 7, WarmDays: 30, ColdDays: 180, SampleMissRate: 0}
+
+// validateRetentionPolicy 校验分层声明（fail-closed，§7.5 T5）：
+//   - HotDays ≥ 1
+//   - WarmDays > HotDays
+//   - ColdDays ≥ WarmDays
+//   - HotDays+WarmDays+ColdDays ≥ 180（C-8 法定硬底）
+//   - 0 ≤ SampleMissRate ≤ 100
+func validateRetentionPolicy(p RetentionPolicy) error {
+	if p.HotDays < 1 {
+		return fmt.Errorf("retention: HotDays=%d 必须 ≥ 1", p.HotDays)
+	}
+	if p.WarmDays <= p.HotDays {
+		return fmt.Errorf("retention: WarmDays=%d 必须 > HotDays=%d", p.WarmDays, p.HotDays)
+	}
+	if p.ColdDays < p.WarmDays {
+		return fmt.Errorf("retention: ColdDays=%d 必须 ≥ WarmDays=%d", p.ColdDays, p.WarmDays)
+	}
+	if p.HotDays+p.WarmDays+p.ColdDays < minAuditRetentionDays {
+		return fmt.Errorf("retention: 合计 %d 天低于法定硬底 %d 天（C-8）", p.HotDays+p.WarmDays+p.ColdDays, minAuditRetentionDays)
+	}
+	if p.SampleMissRate < 0 || p.SampleMissRate > 100 {
+		return fmt.Errorf("retention: SampleMissRate=%d 必须 ∈ [0,100]", p.SampleMissRate)
+	}
+	return nil
+}

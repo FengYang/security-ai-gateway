@@ -65,7 +65,18 @@ var knownExposedMetrics = map[string]bool{
 	"otpmask_content_label_frames_total":                  true,
 	"otpmask_billing_blocked":                             true,
 	"otpmask_audit_events":                                true,
+	"otpmask_worm_write_failed_total":                     true, // P1-8 M-7 审计 WORM 写入失败（source=tee，真实暴露）
 	"otpmask_reconcile_last_run_timestamp_seconds":        true,
+	// ---- P1-7 全流量审计改造（T7，MOD5 容量管控）新增附加指标族 ----
+	"otpmask_audit_bytes":                     true,
+	"otpmask_audit_records_tier":              true,
+	"otpmask_audit_sampled_total":             true,
+	"otpmask_audit_write_failures_total":      true,
+	"otpmask_audit_archive_failures_total":    true,
+	"otpmask_audit_duplicate_requests_total":  true,
+	"otpmask_audit_redact_truncated_total":    true,
+	"otpmask_audit_report_dropped_total":      true,
+	"otpmask_audit_unregistered_result_total": true,
 }
 
 // externalMetricsAllowed 非本服务暴露、但允许在告警规则中引用的外部指标。
@@ -203,4 +214,48 @@ func unique(in []string) []string {
 		}
 	}
 	return out
+}
+
+// TestAuditCapacityRuleReferencedMetricsExist P1-7 T7 容量告警规则引用的指标必须真实存在
+// （防 P0-1 根因：yaml 引用代码里根本不存在的指标）。本文件为交付物（入库），缺失即视为缺陷。
+func TestAuditCapacityRuleReferencedMetricsExist(t *testing.T) {
+	path := filepath.Join("..", "..", "deploy", "monitoring", "audit-capacity-rules.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取 P1-7 审计容量告警规则失败（该文件须随交付入库）: %v", err)
+	}
+	for _, name := range unique(otpmaskMetricRE.FindAllString(string(raw), -1)) {
+		if !knownExposedMetrics[name] {
+			t.Errorf("审计容量告警规则引用了 tee-infer 未定义的指标 %q", name)
+		}
+	}
+	for _, name := range unique(kubeMetricRE.FindAllString(string(raw), -1)) {
+		if !externalMetricsAllowed[name] {
+			t.Errorf("审计容量告警规则引用了未登记的外部指标 %q", name)
+		}
+	}
+}
+
+// TestAuditCapacityRuleAlertsComplete P1-7 T7 七类告警线齐备（§8 集成清单 / 文档 v1.12）。
+func TestAuditCapacityRuleAlertsComplete(t *testing.T) {
+	path := filepath.Join("..", "..", "deploy", "monitoring", "audit-capacity-rules.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取 P1-7 审计容量告警规则失败: %v", err)
+	}
+	for _, alert := range []string{
+		"AuditCapacityWarning",        // ① 容量水位 70%
+		"AuditCapacityCritical",       // ① 容量水位 85%
+		"AuditCapacityPage",           // ① 容量水位 95%
+		"AuditWriteFailure",           // ② WORM 写失败
+		"AuditChainBroken",            // ③ 链断裂
+		"AuditArchiveFailure",         // ④ 归档失败
+		"AuditDuplicateRateAnomaly",   // ⑤ 重复率异常
+		"AuditReportDropped",          // ⑥ 上报丢弃率 >0（A3-14）
+		"AuditUnregisteredResult",     // ⑦ 非登记 result（A3-20）
+	} {
+		if !strings.Contains(string(raw), "- alert: "+alert) {
+			t.Errorf("缺失审计容量告警 %s", alert)
+		}
+	}
 }

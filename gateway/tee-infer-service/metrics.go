@@ -80,6 +80,25 @@ type otpmaskMetrics struct {
 	// P1-8 安全加固（M-7/M-8，source=tee）：审计 WORM 写入失败与 fail-closed 拒绝
 	wormWriteFail          map[string]int64 // policy（fail_closed|fail_open）：M-7 otpmask_worm_write_failed_total
 	auditFailClosedReject  int64            // M-8 otpmask_audit_failclosed_rejected_total
+	// ---- P1-7 全流量审计改造（T7，MOD5 容量管控；附加指标族，既有族不变，C-9）----
+	// 字节量（gauge，单调递增；每次 WORM 写入累加事件字节数）。
+	auditBytes int64
+	// 各层记录数（gauge，按 tier=hot|warm|cold）。
+	auditRecordsTier map[string]int64
+	// 读取/导出侧降采样计数（counter，仅未命中事件）。
+	auditSampled int64
+	// WORM 写失败计数（counter；挂既有 SetWriteFailureHook，onWriteFail 路径）。
+	auditWriteFailures int64
+	// 归档失败计数（counter）。
+	auditArchiveFailures int64
+	// 归档去重（三元组）计数（counter）。
+	auditDuplicateRequests int64
+	// 脱敏截断计数（counter；T4 超长字段截断）。
+	auditRedactTruncated int64
+	// 数据面上报队列丢弃计数（counter，reason=queue_full|send_failed|invalid|replay_failed，A3-14）。
+	auditReportDropped map[string]int64
+	// TEE 侧非登记 result 取值计数（counter，A3-20/R-17；不改链、不拒落链，仅登记告警）。
+	auditUnregisteredResult int64
 	ogCanaryProbe      int64            // P0-3 策略 C：canary 探测句走完整 L2 的次数
 	ogCanaryReattach   int64            // P0-3 策略 C：canary 命中底线触发回挂的次数
 	ogPolicyRollback   map[string]int64 // reason（策略热加载回退事件）
@@ -160,6 +179,9 @@ func newMetrics() *otpmaskMetrics {
 		contentLabelFrames: make(map[string]int64),
 		cryptopCompatMode:  make(map[string]int64),
 		mcpMethod:          make(map[string]int64),
+		// P1-7 容量管控指标
+		auditRecordsTier:   make(map[string]int64),
+		auditReportDropped: make(map[string]int64),
 	}
 }
 
@@ -222,6 +244,80 @@ func (m *otpmaskMetrics) incWormWriteFail(policy string) {
 func (m *otpmaskMetrics) incAuditFailClosedReject() {
 	m.mu.Lock()
 	m.auditFailClosedReject++
+	m.mu.Unlock()
+}
+
+// ---- P1-7 全流量审计改造（T7，MOD5 容量管控；附加指标族）----
+
+// incAuditBytes 累加已写入 WORM 的审计字节数（gauge，单调递增）。
+func (m *otpmaskMetrics) incAuditBytes(n int64) {
+	if n <= 0 {
+		return
+	}
+	m.mu.Lock()
+	m.auditBytes += n
+	m.mu.Unlock()
+}
+
+// incAuditRecordsTier 记录某层记录数（gauge，tier=hot|warm|cold）。
+func (m *otpmaskMetrics) incAuditRecordsTier(tier string, n int64) {
+	if tier == "" {
+		tier = "hot"
+	}
+	m.mu.Lock()
+	m.auditRecordsTier[tier] += n
+	m.mu.Unlock()
+}
+
+// incAuditSampled 记录一次读取/导出侧降采样（仅未命中事件）。
+func (m *otpmaskMetrics) incAuditSampled() {
+	m.mu.Lock()
+	m.auditSampled++
+	m.mu.Unlock()
+}
+
+// incAuditWriteFailure 记录一次 WORM 写失败（挂 SetWriteFailureHook）。
+func (m *otpmaskMetrics) incAuditWriteFailure() {
+	m.mu.Lock()
+	m.auditWriteFailures++
+	m.mu.Unlock()
+}
+
+// incAuditArchiveFailure 记录一次归档失败。
+func (m *otpmaskMetrics) incAuditArchiveFailure() {
+	m.mu.Lock()
+	m.auditArchiveFailures++
+	m.mu.Unlock()
+}
+
+// incAuditDuplicateRequest 记录一次归档去重（三元组 (instance_id,request_id,action)）。
+func (m *otpmaskMetrics) incAuditDuplicateRequest() {
+	m.mu.Lock()
+	m.auditDuplicateRequests++
+	m.mu.Unlock()
+}
+
+// incAuditRedactTruncated 记录一次脱敏截断（T4，超长字段）。
+func (m *otpmaskMetrics) incAuditRedactTruncated() {
+	m.mu.Lock()
+	m.auditRedactTruncated++
+	m.mu.Unlock()
+}
+
+// incAuditReportDropped 记录一次数据面上报队列丢弃（reason=queue_full|send_failed|invalid|replay_failed）。
+func (m *otpmaskMetrics) incAuditReportDropped(reason string) {
+	if reason == "" {
+		reason = "invalid"
+	}
+	m.mu.Lock()
+	m.auditReportDropped[reason]++
+	m.mu.Unlock()
+}
+
+// incAuditUnregisteredResult 记录一次 TEE 侧非登记 result 取值（A3-20/R-17）。
+func (m *otpmaskMetrics) incAuditUnregisteredResult() {
+	m.mu.Lock()
+	m.auditUnregisteredResult++
 	m.mu.Unlock()
 }
 
@@ -481,6 +577,42 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	if m.auditFailClosedReject > 0 {
 		fmt.Fprintf(w, "# HELP otpmask_audit_failclosed_rejected_total 审计 fail-closed 模式下因 WORM 写入失败拒绝的请求数\n# TYPE otpmask_audit_failclosed_rejected_total counter\n")
 		fmt.Fprintf(w, "otpmask_audit_failclosed_rejected_total %d\n", m.auditFailClosedReject)
+	}
+	// ---- P1-7 全流量审计改造（T7，MOD5 容量管控；附加指标族，既有族不变，C-9）----
+	fmt.Fprintf(w, "# HELP otpmask_audit_bytes 审计 WORM 累计写入字节数（gauge，单调递增）\n# TYPE otpmask_audit_bytes gauge\n")
+	fmt.Fprintf(w, "otpmask_audit_bytes %d\n", m.auditBytes)
+	if len(m.auditRecordsTier) > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_audit_records_tier 各层审计记录数（gauge，tier=hot|warm|cold）\n# TYPE otpmask_audit_records_tier gauge\n")
+		for _, tier := range []string{"hot", "warm", "cold"} {
+			if v, ok := m.auditRecordsTier[tier]; ok {
+				fmt.Fprintf(w, "otpmask_audit_records_tier{tier=%q} %d\n", tier, v)
+			}
+		}
+	}
+	if m.auditSampled > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_audit_sampled_total 读取/导出侧降采样事件数（仅未命中事件；配置/策略变更类恒保留）\n# TYPE otpmask_audit_sampled_total counter\n")
+		fmt.Fprintf(w, "otpmask_audit_sampled_total %d\n", m.auditSampled)
+	}
+	if m.auditWriteFailures > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_audit_write_failures_total WORM 写入失败次数（审计完整性受损；挂 SetWriteFailureHook）\n# TYPE otpmask_audit_write_failures_total counter\n")
+		fmt.Fprintf(w, "otpmask_audit_write_failures_total %d\n", m.auditWriteFailures)
+	}
+	if m.auditArchiveFailures > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_audit_archive_failures_total 归档/迁移失败次数\n# TYPE otpmask_audit_archive_failures_total counter\n")
+		fmt.Fprintf(w, "otpmask_audit_archive_failures_total %d\n", m.auditArchiveFailures)
+	}
+	if m.auditDuplicateRequests > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_audit_duplicate_requests_total 归档去重（三元组 instance_id,request_id,action）丢弃的重复事件数\n# TYPE otpmask_audit_duplicate_requests_total counter\n")
+		fmt.Fprintf(w, "otpmask_audit_duplicate_requests_total %d\n", m.auditDuplicateRequests)
+	}
+	if m.auditRedactTruncated > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_audit_redact_truncated_total 脱敏阶段超长字段截断次数（T4；默认上限 1024 字节）\n# TYPE otpmask_audit_redact_truncated_total counter\n")
+		fmt.Fprintf(w, "otpmask_audit_redact_truncated_total %d\n", m.auditRedactTruncated)
+	}
+	writeCounter(w, "otpmask_audit_report_dropped_total", "数据面上报队列丢弃计数（reason=queue_full|send_failed|invalid|replay_failed；A3-14 丢弃率>0 即告警）", m.auditReportDropped, []string{"reason"})
+	if m.auditUnregisteredResult > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_audit_unregistered_result_total TEE 侧非登记 result 取值次数（A3-20/R-17；不改链、不拒落链，仅登记告警）\n# TYPE otpmask_audit_unregistered_result_total counter\n")
+		fmt.Fprintf(w, "otpmask_audit_unregistered_result_total %d\n", m.auditUnregisteredResult)
 	}
 	writeCounter(w, "otpmask_key_issue_total", "密钥签发计数（按租户）", m.keyIssues, []string{"tenant"})
 	writeCounter(w, "otpmask_reconcile_mismatch_total", "审计-计量对账不一致次数（按差异分类）", m.reconcile, []string{"reason"})

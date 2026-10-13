@@ -15,6 +15,8 @@ import (
 //
 // fail-closed：无段① 证明会话 / 信封不可解 一律拒绝，绝不降级明文（C-4）。
 func (s *teeServer) handleMCPRequest(w http.ResponseWriter, r *http.Request) {
+	// T3a：注入请求路径证据元数据（MCP 敏感轨 path_mode=encrypted）。
+	r = r.WithContext(withAuditReqMeta(r.Context(), r.URL.Path, auditPathMode(r.URL.Path)))
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -27,19 +29,19 @@ func (s *teeServer) handleMCPRequest(w http.ResponseWriter, r *http.Request) {
 	tenant := tenantOf(r)
 	// V-7 就绪门控：治理未启用 / 策略未就绪 → **503**（fail-closed，不降级放行）。
 	if s.mcpCache == nil || !s.mcpCache.Ready() {
-		s.denyAndAudit(tenant, "", "mcp_guard_not_ready", payloadHashHex(body))
+		s.denyAndAudit(r, tenant, "", "mcp_guard_not_ready", payloadHashHex(body))
 		http.Error(w, "MCP 策略未就绪（fail-closed 503）", http.StatusServiceUnavailable)
 		return
 	}
 	sess := s.sessionByID(r)
 	if sess == nil {
-		s.denyAndAudit(tenant, "", "mcp_no_session", payloadHashHex(body))
+		s.denyAndAudit(r, tenant, "", "mcp_no_session", payloadHashHex(body))
 		http.Error(w, "MCP 敏感轨须段① 证明会话（fail-closed）", http.StatusBadRequest)
 		return
 	}
 	pt, oerr := sess.openPayload(protocol.EndpointMCP, body)
 	if oerr != nil {
-		s.denyAndAudit(tenant, "", "mcp_envelope_error", payloadHashHex(body))
+		s.denyAndAudit(r, tenant, "", "mcp_envelope_error", payloadHashHex(body))
 		http.Error(w, "MCP 请求须为加密信封（fail-closed）", http.StatusBadRequest)
 		return
 	}

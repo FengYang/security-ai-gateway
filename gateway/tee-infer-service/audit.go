@@ -21,6 +21,10 @@ import (
 	"time"
 )
 
+// auditMetrics 包级指标指针（启动时由 main.go 构造处赋值），供脱敏/容量等模块计数。
+// 仅用于指标递增，nil 时安全跳过（单测可不设）。
+var auditMetrics *otpmaskMetrics
+
 // AuditEvent 审计事件。
 type AuditEvent struct {
 	EventID    string `json:"event_id"`
@@ -93,6 +97,40 @@ type AuditEvent struct {
 	MCPTool          string `json:"mcp_tool,omitempty"`
 	MCPReason        string `json:"mcp_reason,omitempty"`
 	MCPPolicyVersion int    `json:"mcp_policy_version,omitempty"`
+	// ---- P1-7 全流量审计改造（T1，§6.1(B) 证据字段）----
+	// 以下字段全部为证据字段、omitempty、**不进 hash()**（保持 WORM 旧链逐字节不变，C-3/D-1）。
+	// Path 请求路径（规范化、去 query 值，由 T4 redact 处理）；PathMode = plain|encrypted。
+	Path string `json:"path,omitempty"`
+	// PathMode 请求路径密态标记；Path 为规范化路径（不含 query 值）。
+	PathMode string `json:"path_mode,omitempty"` // plain | encrypted
+	// TTFTMs 首 token 时延（ms），与 P0-2 TTFT 口径一致。
+	TTFTMs int `json:"ttft_ms,omitempty"`
+	// DurMS 请求总耗时（ms）。
+	DurMS int `json:"dur_ms,omitempty"`
+	// HTTPStatus 对外返回状态码。
+	HTTPStatus int `json:"http_status,omitempty"`
+	// HitPolicies 命中的安全策略（逗号分隔枚举，全集见 §6.1(B)）；空 = 未命中（分层判定依据）。
+	// 枚举值全集（小写 + 下划线命名；实施时做白名单校验，非法值丢弃并告警）：
+	//   guardrail_* / rpm_limit / tpm_limit / daily_budget / quota_deny / bad_signature /
+	//   replay_attack / cache_negative / output_blocked / output_masked / shadow_reject
+	// 仅用于策略维度检索与统计，不作为链哈希的一部分（C-3）。
+	HitPolicies string `json:"hit_policies,omitempty"`
+	// Origin 事件来源：tee（空）| data-plane（数据面经 /audit/report 上报，D-2）。
+	Origin string `json:"origin,omitempty"`
+	// Sampled 【v1.11 废弃，不启用；保留定义仅为旧文件反序列化兼容】（D-16，归档不再降采样）。
+	// 旧注释"因 sampled 不进 hash，哈希链 prev_hash 仍然一致"已被证伪（归档降采样会断链）；
+	// 本字段恒为 false（omitempty 不落 JSON），归档副本与源 WORM 行逐字节一致。
+	Sampled bool `json:"sampled,omitempty"`
+	// MCPSessionID MCP 敏感轨的回退关联键（A3-07）：request_id 不可得时的兜底（由 sess.ID 派生）。
+	MCPSessionID string `json:"mcp_session_id,omitempty"`
+	// ReporterID 数据面上报端实例标识（A3-10）：由上报令牌绑定的 reporter 身份在服务端写入，
+	// 不信任请求体自报值，用于上报对账与审计投毒溯源。
+	ReporterID string `json:"reporter_id,omitempty"`
+	// TenantIDResolution 租户解析方式（v1.12 新增，D-18）：仅回灌事件（origin=data-plane 且
+	// 由 T2c 采集器上报）写入，取值 consumer_map（X-Mse-Consumer→映射表解析为真实租户）/
+	// unauthenticated（无服务端认证身份，落哨兵租户 _unauthenticated）；不进 hash。
+	// 插件侧上报事件不写本字段（其租户由令牌绑定，见 §6.5 分型①）。
+	TenantIDResolution string `json:"tenant_id_resolution,omitempty"`
 }
 
 // hash 计算事件哈希（不含 prev_hash 字段本身）。
@@ -107,6 +145,12 @@ func (e *AuditEvent) hash() string {
 }
 
 // hashWithErr 同 hash()，但把未知 `hash_alg` 作为错误返回（R-12，供 load/写入路径 fail-closed）。
+//
+// ⚠️ 哈希字段清单锁定（P1-7 T1，C-3/D-1）：以下 10 个字段及其顺序**永久冻结**，
+// 任何新增字段（含 §6.1(B) 全部证据字段）一律 omitempty 且**不得**加入本清单，
+// 否则历史 WORM 链哈希将改变、audit-verify 全链断裂。变更本清单须走评审并双写兼容迁移。
+//   1 EventID   2 Timestamp   3 TenantID   4 UserID   5 RequestID
+//   6 Action    7 TokensIn    8 TokensOut  9 Result   10 PayloadSHA
 func (e *AuditEvent) hashWithErr() (string, error) {
 	var buf bytes.Buffer
 	writeLP := func(s string) {
@@ -273,7 +317,12 @@ func (c *auditChain) append(e AuditEvent) AuditEvent {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e.PrevHash = c.lastHex
-	e.Timestamp = time.Now().UnixNano()
+	// P1-7 T2a（§6.5）：调用方显式设置 Timestamp（数据面上报携带 timestamp_ns）时
+	// 予以保留（取证用原始上报时刻）；否则取落链时刻。零值判定保证既有 30 处
+	// 调用点（均未预置 Timestamp）行为不变，哈希链逐字节兼容（C-3/D-1）。
+	if e.Timestamp == 0 {
+		e.Timestamp = time.Now().UnixNano()
+	}
 	if e.EventID == "" {
 		e.EventID = fmt.Sprintf("evt-%d", e.Timestamp)
 	}

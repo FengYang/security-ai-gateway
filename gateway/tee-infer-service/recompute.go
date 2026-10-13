@@ -118,6 +118,8 @@ func (p *mockWeightProvider) LayerWeight(layer int) (*maskedinfer.QuantizedMatri
 
 // handleRecompute /v1/recompute
 func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
+	// T3a：注入请求路径证据元数据（path/path_mode）。
+	r = r.WithContext(withAuditReqMeta(r.Context(), r.URL.Path, auditPathMode(r.URL.Path)))
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -148,7 +150,7 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 	// 层序校验
 	st := s.recomputeStates.state(sess.ID)
 	if err := st.checkLayerOrder(req.Layer); err != nil {
-		s.denyAndAudit(tenantOf(r), req.RequestID, "recompute_layer_mismatch", "")
+		s.denyAndAudit(r, tenantOf(r), req.RequestID, "recompute_layer_mismatch", "")
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
