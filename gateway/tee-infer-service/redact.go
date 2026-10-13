@@ -117,10 +117,14 @@ func redactEvent(e *AuditEvent) *AuditEvent {
 	return &out
 }
 
-// ---- TEE 侧 result 取值登记（interim；权威矩阵由 T3b 产出，V-14）----
+// ---- TEE 侧 result 取值登记（权威矩阵由 T3b 产出，V-14）----
+//
+// T3b 已产出「action × result 组合矩阵」（docs/详细设计/P1/审计落链覆盖矩阵.md）；
+// 本集合即该矩阵的代码侧登记基准。非登记值仅打点计数 + 告警，**不改写事件、不拒绝落链**
+// （A3-20/R-17，避免与 C-3/C-7 冲突）。
 
 // knownResultExact 已知合法 result 取值（精确匹配）。覆盖：TEE 实测冻结集（§6.1(D)）+ 数据面
-// 上报 6 项白名单（§6.5）+ 既有 deny/would_reject 等。
+// 上报 6 项白名单（§6.5）+ 既有 deny/would_reject + T3b 新增出口的精确取值。
 var knownResultExact = map[string]bool{
 	"ok": true, "deny": true, "would_reject": true,
 	"route_rejected": true, "unknown_nonce": true, "quota_exceeded": true,
@@ -132,10 +136,21 @@ var knownResultExact = map[string]bool{
 	"rate_limited": true, "auth_failed": true, "ip_blocked": true,
 	"non_infer": true, "quota_deny": true, "rpm_limit": true,
 	"tpm_limit": true, "daily_budget": true,
+	// T3b：请求体超限（limitBody 413）。
+	"body_too_large": true,
+	// T3b：管理面/数据面接口失败出口的统一 rejection 结果（精确项，非族）。
+	"rejected_public_facing_lock": true,
 }
 
-// knownResultPrefix 已知合法 result 前缀族（* 通配，§6.1(B) 枚举全集）。
-var knownResultPrefix = []string{"guardrail_", "mcp_", "recompute_"}
+// knownResultPrefix 已知合法 result 前缀族（* 通配）。
+//
+// §6.1(B) 枚举族：guardrail_ / mcp_ / recompute_；
+// T3b 出口族：attest_（挑战-响应）/ attest_complete_ / keyissue_ / tenant_auth_ / report_
+// （数据面上报 D-13 防护）/ infer_（推理面读取失败）/ rejected_（B 类管理面/数据面接口失败）。
+var knownResultPrefix = []string{
+	"guardrail_", "mcp_", "recompute_",
+	"attest_", "keyissue_", "tenant_auth_", "report_", "infer_", "rejected_",
+}
 
 // isRegisteredResult 判断 result 是否为登记合法值（精确或前缀族匹配）。
 func isRegisteredResult(r string) bool {

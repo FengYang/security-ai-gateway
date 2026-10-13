@@ -12,10 +12,12 @@ import (
 // handleMCPConfig GET /config/mcp：MCP 工具治理只读快照（管理令牌）。
 func (s *teeServer) handleMCPConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
+		recordExemptExit("handleMCPConfig", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "mcp_config_change", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -44,19 +46,23 @@ type mcpPolicyRequest struct {
 // UpdatePolicy 天然拒绝非法签名与版本回退）并告警。
 func (s *teeServer) handleMCPPolicy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleMCPPolicy", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "mcp_policy_change", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	var req mcpPolicyRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req); err != nil {
+		s.auditAdminExit(r, "mcp_policy_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if req.Catalog == nil && req.Policy == nil {
+		s.auditAdminExit(r, "mcp_policy_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "bad request: catalog/policy 至少一项", http.StatusBadRequest)
 		return
 	}

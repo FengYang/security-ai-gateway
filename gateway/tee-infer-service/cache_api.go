@@ -67,12 +67,14 @@ func cacheReqID(r *http.Request) string { return r.Header.Get("X-Request-Id") }
 
 func writeCacheOK(w http.ResponseWriter, r *http.Request, data any) {
 	w.Header().Set("Content-Type", "application/json")
+	recordExemptExit("writeCacheOK", "ok_write")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(cacheAPIResponse{OK: true, Data: data, RequestID: cacheReqID(r)})
 }
 
 func writeCacheErr(w http.ResponseWriter, r *http.Request, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
+	recordExemptExit("writeCacheErr", "common_writer")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(cacheAPIResponse{
 		OK: false, Error: &cacheAPIError{Code: code, Message: msg}, RequestID: cacheReqID(r),
@@ -490,6 +492,7 @@ func (a *cacheAdminAPI) handleConfigCacheReload(w http.ResponseWriter, r *http.R
 		if errors.Is(err, cacheengine.ErrReloadRestartRequired) {
 			// 结构性维度变更：需滚动重启；回传 restart_required 与差异详情。
 			w.Header().Set("Content-Type", "application/json")
+			a.srv.auditAdminExit(r, "cache_reload", "rejected_conflict", http.StatusConflict)
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(cacheAPIResponse{
 				OK: false,

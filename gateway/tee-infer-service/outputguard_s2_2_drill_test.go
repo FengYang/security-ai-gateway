@@ -87,11 +87,15 @@ func TestS22EnforcingDrillAndRollback(t *testing.T) {
 		t.Fatalf("拒绝升级后 mode 应仍为 shadow，实际 %q", v)
 	}
 
-	// ⑥ 审计留痕：拦截仅发生在回滚前（1 条 output_blocked）；成功的 mode 变更 1 条。
+	// ⑥ 审计留痕：拦截仅发生在回滚前（1 条 output_blocked）；成功的 mode 变更 1 条；
+	//    T3b：被拒的运行时升级亦落 1 条（同 action，result=rejected_bad_request）。
 	if n := srv.audit.countByAction("output_blocked"); n != 1 {
 		t.Fatalf("回滚前应仅 1 条 output_blocked，实际 %d", n)
 	}
-	if n := srv.audit.countByAction("output_guard_mode_change"); n != 1 {
-		t.Fatalf("应留 1 条 output_guard_mode_change，实际 %d", n)
+	if n := countByActionResult(srv.audit, "output_guard_mode_change", "applied"); n != 1 {
+		t.Fatalf("应留 1 条 output_guard_mode_change/applied，实际 %d", n)
+	}
+	if n := countByActionResult(srv.audit, "output_guard_mode_change", "rejected_bad_request"); n != 1 {
+		t.Fatalf("被拒升级应留 1 条 output_guard_mode_change/rejected_bad_request，实际 %d", n)
 	}
 }

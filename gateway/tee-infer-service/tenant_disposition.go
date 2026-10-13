@@ -137,11 +137,13 @@ func (s *tenantDispositionStore) Snapshot() map[string]*tenantDispositionRecord 
 //	POST /config/tenant-disposition          设置单租户处置状态（body: {tenant,state,reason}）
 func (s *teeServer) handleTenantDisposition(w http.ResponseWriter, r *http.Request) {
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "tenant_disposition_change", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
 	store, ok := s.disposition.(*tenantDispositionStore)
 	if !ok || store == nil {
+		s.auditAdminExit(r, "tenant_disposition_change", "rejected_not_found", http.StatusNotFound)
 		http.Error(w, "tenant disposition not enabled (SaaS mode)", http.StatusNotFound)
 		return
 	}
@@ -177,12 +179,14 @@ func (s *teeServer) handleTenantDisposition(w http.ResponseWriter, r *http.Reque
 			Reason string `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			s.auditAdminExit(r, "tenant_disposition_change", "rejected_bad_request", http.StatusBadRequest)
 			http.Error(w, "请求体解析失败: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		actor := r.Header.Get("X-Admin-Actor")
 		reqID := r.Header.Get("X-Request-ID")
 		if err := store.Set(body.Tenant, body.State, actor, body.Reason, reqID); err != nil {
+			s.auditAdminExit(r, "tenant_disposition_change", "rejected_bad_request", http.StatusBadRequest)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -194,6 +198,7 @@ func (s *teeServer) handleTenantDisposition(w http.ResponseWriter, r *http.Reque
 		})
 
 	default:
+		recordExemptExit("handleTenantDisposition", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }

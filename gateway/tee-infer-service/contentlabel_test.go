@@ -284,8 +284,10 @@ func TestContentLabelConfigAPI(t *testing.T) {
 	if !srv.currentContentLabelConfig().Enabled || srv.currentContentLabelConfig().Repeat != 3 {
 		t.Fatalf("切换未生效：%+v", srv.currentContentLabelConfig())
 	}
-	if n := srv.audit.countByAction("content_label_change"); n != 1 {
-		t.Fatalf("应落 1 条 content_label_change 审计，实际 %d", n)
+	// T3b：400 拒绝出口亦落 content_label_change 事件（result=rejected_bad_request）；
+	// 成功路径断言收敛为 **result=applied 恰 1 条**（等价原"应落 1 条"意图）。
+	if n := countByActionResult(srv.audit, "content_label_change", "applied"); n != 1 {
+		t.Fatalf("应落 1 条 content_label_change/applied 审计，实际 %d", n)
 	}
 	raw, err := os.ReadFile(srv.contentLabelCfgPath)
 	if err != nil {

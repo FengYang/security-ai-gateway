@@ -735,6 +735,7 @@ type attestCompleteRequest struct {
 // 向后兼容：旧协议（无 body / token 模式）仍返回 MVP 握手确认。
 func (s *teeServer) handleAttest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleAttest", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -743,6 +744,8 @@ func (s *teeServer) handleAttest(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	if len(bytesTrimSpace(body)) > 0 {
 		if err := json.Unmarshal(body, &chal); err != nil {
+			// T3b（A 类）：协议面拒绝出口落链（action=deny）。
+			s.auditDenyExitReq(r, "-", "", "attest_bad_json", "", http.StatusBadRequest)
 			http.Error(w, fmt.Sprintf("bad json: %v", err), http.StatusBadRequest)
 			return
 		}
@@ -751,6 +754,7 @@ func (s *teeServer) handleAttest(w http.ResponseWriter, r *http.Request) {
 	if chal.Nonce != "" {
 		n, err := hex.DecodeString(chal.Nonce)
 		if err != nil || len(n) != 32 {
+			s.auditDenyExitReq(r, "-", "", "attest_bad_nonce", "", http.StatusBadRequest)
 			http.Error(w, "nonce 须为 32 字节 hex", http.StatusBadRequest)
 			return
 		}
@@ -758,6 +762,7 @@ func (s *teeServer) handleAttest(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// 旧版握手：服务端生成挑战（等价 nonce，客户可忽略）
 		if _, err := rand.Read(nonce); err != nil {
+			s.auditDenyExitReq(r, "-", "", "attest_nonce_gen_failed", "", http.StatusInternalServerError)
 			http.Error(w, "生成 nonce 失败", http.StatusInternalServerError)
 			return
 		}
@@ -768,12 +773,14 @@ func (s *teeServer) handleAttest(w http.ResponseWriter, r *http.Request) {
 	// 防中间人替换握手公钥劫持加密通道）
 	sess, err := newSession(nonce)
 	if err != nil {
+		s.auditDenyExitReq(r, "-", "", "attest_session_create_failed", "", http.StatusInternalServerError)
 		http.Error(w, fmt.Sprintf("创建会话失败: %v", err), http.StatusInternalServerError)
 		return
 	}
 	reportData := reportDataBinding(nonce, sess.ServerPub())
 	proof, err := s.enclave.Attest(nonce, reportData)
 	if err != nil {
+		s.auditDenyExitReq(r, "-", "", "attest_proof_failed", "", http.StatusInternalServerError)
 		http.Error(w, fmt.Sprintf("生成证明失败: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -785,6 +792,7 @@ func (s *teeServer) handleAttest(w http.ResponseWriter, r *http.Request) {
 	// 与插件侧解码约定一致（直接序列化结构体会被 Go 默认编码为 base64）
 	proofJSON, err := proof.proofJSON()
 	if err != nil {
+		s.auditDenyExitReq(r, "-", "", "attest_proof_json_failed", "", http.StatusInternalServerError)
 		http.Error(w, fmt.Sprintf("生成证明JSON失败: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -806,21 +814,25 @@ func (s *teeServer) handleAttest(w http.ResponseWriter, r *http.Request) {
 // 客户端 ECDH 公钥到达 → ECDH + HKDF 派生会话密钥（K_sig/K_enc）。
 func (s *teeServer) handleAttestComplete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleAttestComplete", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var req attestCompleteRequest
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		s.auditDenyExitReq(r, "-", "", "attest_complete_read_failed", "", http.StatusBadRequest)
 		http.Error(w, fmt.Sprintf("读取请求失败: %v", err), http.StatusBadRequest)
 		return
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
+		s.auditDenyExitReq(r, "-", "", "attest_complete_bad_json", "", http.StatusBadRequest)
 		http.Error(w, fmt.Sprintf("bad json: %v", err), http.StatusBadRequest)
 		return
 	}
 	clientPub, err := hex.DecodeString(req.ClientPub)
 	if err != nil {
+		s.auditDenyExitReq(r, "-", req.SessionID, "attest_complete_bad_client_pub", "", http.StatusBadRequest)
 		http.Error(w, "client_pub 须为 hex", http.StatusBadRequest)
 		return
 	}
@@ -828,10 +840,12 @@ func (s *teeServer) handleAttestComplete(w http.ResponseWriter, r *http.Request)
 	sess, ok := s.sessions[req.SessionID]
 	s.mu.Unlock()
 	if !ok {
+		s.auditDenyExitReq(r, "-", req.SessionID, "attest_complete_no_session", "", http.StatusUnauthorized)
 		http.Error(w, "会话不存在或已过期", http.StatusUnauthorized)
 		return
 	}
 	if err := sess.Complete(clientPub); err != nil {
+		s.auditDenyExitReq(r, "-", req.SessionID, "attest_complete_kdf_failed", "", http.StatusBadRequest)
 		http.Error(w, fmt.Sprintf("会话密钥派生失败: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -915,11 +929,14 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 	// 会话模式（X-Session-ID 有效会话）或 MVP token 模式，二选一通过
 	sess := s.sessionByID(r)
 	if sess == nil && !s.checkAttest(r) {
+		// T3b（A 类）：鉴权失败出口落链（action=deny）。
+		s.auditDenyExitReq(r, tenantOf(r), "", "keyissue_attest_failed", "", http.StatusUnauthorized)
 		http.Error(w, "远程证明失败：无效的 attestation 令牌", http.StatusUnauthorized)
 		return
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		s.auditDenyExitReq(r, tenantOf(r), "", "keyissue_read_failed", "", http.StatusBadRequest)
 		http.Error(w, fmt.Sprintf("读取请求失败: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -939,10 +956,12 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	var req keyIssueRequest
 	if err := json.Unmarshal(body, &req); err != nil {
+		s.auditDenyExitReq(r, tenantOf(r), "", "keyissue_bad_json", payloadSHA, http.StatusBadRequest)
 		http.Error(w, fmt.Sprintf("bad json: %v", err), http.StatusBadRequest)
 		return
 	}
 	if req.RequestID == "" || req.Model == "" {
+		s.auditDenyExitReq(r, tenantOf(r), "", "keyissue_bad_request", payloadSHA, http.StatusBadRequest)
 		http.Error(w, "request_id/model 必填", http.StatusBadRequest)
 		return
 	}
@@ -950,6 +969,7 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 	tenant := tenantOf(r)
 	seed, nonceHex, masterID, err := s.tkm.Issue(tenant, req.RequestID, req.Model)
 	if err != nil {
+		s.auditDenyExitReq(r, tenant, req.RequestID, "keyissue_issue_failed", payloadSHA, http.StatusInternalServerError)
 		http.Error(w, fmt.Sprintf("签发密钥失败: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -970,6 +990,7 @@ func (s *teeServer) handleKeyIssue(w http.ResponseWriter, r *http.Request) {
 		ProtocolVersion: s.protoVersion,
 	})
 	if err != nil {
+		s.auditDenyExitReq(r, tenant, req.RequestID, "keyissue_encode_failed", payloadSHA, http.StatusInternalServerError)
 		http.Error(w, fmt.Sprintf("编码响应失败: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -1015,6 +1036,8 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(withAuditReqMeta(r.Context(), r.URL.Path, auditPathMode(r.URL.Path)))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		// T3b（A 类）：读取失败出口落链（action=deny）。
+		s.auditDenyExitReq(r, tenantOf(r), "", "infer_read_failed", "", http.StatusBadRequest)
 		http.Error(w, fmt.Sprintf("读取请求失败: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -1783,11 +1806,15 @@ var errMCPNotReady = errors.New("mcp: 治理未就绪（fail-closed 503）")
 
 // mcpCallAudit 敏感轨 tools/call 审计（T-9 / V-6）：唯一生产者＝tee-infer；
 // 仅记决策元数据与参数 hash（无明文参数）。
-func (s *teeServer) mcpCallAudit(tenant, tool, decision, paramsHash, reason string, policyVersion int) {
+//
+// T3b（A3-07 / A4-05）：新增 RequestID / MCPSessionID 关联键——
+// requestID 优先客户端 `params._meta.request_id`，否则取会话 ID；sessionID 恒填作回退键。
+func (s *teeServer) mcpCallAudit(tenant, requestID, sessionID, tool, decision, paramsHash, reason string, policyVersion int) {
 	s.audit.append(AuditEvent{
-		TenantID: tenant, Action: "mcp_tool_call", Result: decision,
+		TenantID: tenant, RequestID: requestID, Action: "mcp_tool_call", Result: decision,
 		PayloadSHA: paramsHash, HashAlg: hashAlgTag(),
 		MCPTool: tool, MCPReason: reason, MCPPolicyVersion: policyVersion,
+		MCPSessionID: sessionID,
 	})
 }
 
@@ -1841,6 +1868,7 @@ func (s *teeServer) streamTextInfer(w http.ResponseWriter, sess *teeSession,
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
+	recordExemptExit("streamTextInfer", "ok_write")
 	w.WriteHeader(http.StatusOK)
 	var seq uint64
 	writeChunk := func(delta, finish string, guard *chunkGuardMeta, label *chunkLabelMeta) error {
@@ -2181,22 +2209,26 @@ func (s *teeServer) denyAndAuditCtx(ctx context.Context, tenant, requestID, reas
 func (s *teeServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	// liveness：进程存活
 	if r.URL.Path == "/healthz/live" {
+		recordExemptExit("handleHealthz", "health")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 		return
 	}
 	// readiness：证明状态联动
 	if s.requireAttest && !s.hasValidSession() {
+		recordExemptExit("handleHealthz", "health")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("attestation required: no valid session"))
 		return
 	}
 	// readiness：输入侧语义分类器侧车健康联动
 	if s.guardProbe != nil && !s.guardProbe.Healthy() {
+		recordExemptExit("handleHealthz", "health")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("guard classifier sidecar unhealthy: fail-closed, draining"))
 		return
 	}
+	recordExemptExit("handleHealthz", "health")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }
@@ -2405,10 +2437,12 @@ func (s *teeServer) l1Classifier() OutputClassifier {
 // POST /config/guardrail（方案 §3.2/§5.3）。
 func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
+		recordExemptExit("handleConfig", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "config_change", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
@@ -2506,10 +2540,12 @@ type policyReloadResponse struct {
 //   - 未配置策略目录 → 400（端点不适用）；GET 等非 POST → 405。
 func (s *teeServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handlePolicyReload", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "output_guard_policy_reload", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
@@ -2519,6 +2555,7 @@ func (s *teeServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 
 	if s.outputGuardPolicyDir == "" {
 		w.Header().Set("Content-Type", "application/json")
+		s.auditAdminExit(r, "output_guard_policy_reload", "rejected_bad_request", http.StatusBadRequest)
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(policyReloadResponse{
 			Status: "not_configured", OldVersion: oldVersion, Reason: "policy_dir_not_configured",
@@ -2587,19 +2624,23 @@ func (s *teeServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 // 读权限与 /usage 一致：管理令牌或独立只读计量令牌（控制面看板/计费侧只读消费）。
 func (s *teeServer) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
+		recordExemptExit("handleReconcile", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkMetering(r) {
+		s.auditAdminExit(r, "metering_reconcile", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "计量认证失败", http.StatusUnauthorized)
 		return
 	}
 	if s.reconciler == nil {
+		s.auditAdminExit(r, "metering_reconcile", "rejected_unavailable", http.StatusServiceUnavailable)
 		http.Error(w, "对账器未启动", http.StatusServiceUnavailable)
 		return
 	}
 	st := s.reconciler.status()
 	if st == nil {
+		s.auditAdminExit(r, "metering_reconcile", "rejected_unavailable", http.StatusServiceUnavailable)
 		http.Error(w, "对账尚未执行", http.StatusServiceUnavailable)
 		return
 	}
@@ -2611,14 +2652,17 @@ func (s *teeServer) handleReconcile(w http.ResponseWriter, r *http.Request) {
 // 返回 {"ok": 是否一致, "status": 对账快照}。
 func (s *teeServer) handleReconcileRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleReconcileRun", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "metering_reconcile_run", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
 	if s.reconciler == nil {
+		s.auditAdminExit(r, "metering_reconcile_run", "rejected_unavailable", http.StatusServiceUnavailable)
 		http.Error(w, "对账器未启动", http.StatusServiceUnavailable)
 		return
 	}
@@ -2652,19 +2696,23 @@ type guardrailConfigRecord struct {
 //     治理级 fail-closed 由门户侧 G1 链承担（见 gateway-admin-service change.go）。
 func (s *teeServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleGuardrailConfig", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "guardrail_config", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
 	var req guardrailConfigRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		s.auditAdminExit(r, "guardrail_config", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "请求体须为 JSON", http.StatusBadRequest)
 		return
 	}
 	if req.PIIMode != "block" && req.PIIMode != "mask" {
+		s.auditAdminExit(r, "guardrail_config", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "pii_mode 仅允许 block|mask（不提供 Guardrail 关闭开关）", http.StatusBadRequest)
 		return
 	}
@@ -2678,10 +2726,12 @@ func (s *teeServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		}
 		raw, err := json.Marshal(rec)
 		if err != nil {
+			s.auditAdminExit(r, "guardrail_config", "rejected_internal", http.StatusInternalServerError)
 			http.Error(w, "配置序列化失败", http.StatusInternalServerError)
 			return
 		}
 		if err := os.WriteFile(s.guardrailCfgPath, append(raw, '\n'), 0o600); err != nil {
+			s.auditAdminExit(r, "guardrail_config", "rejected_internal", http.StatusInternalServerError)
 			http.Error(w, "配置持久化失败", http.StatusInternalServerError)
 			return
 		}
@@ -2715,15 +2765,18 @@ func (s *teeServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 //   - 切换同步更新 mode gauge（与 policy_version gauge 配对，指标门禁 #9 required 常驻）。
 func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleOutputGuardConfig", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "output_guard_mode_change", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
 	var req outputGuardConfigRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		s.auditAdminExit(r, "output_guard_mode_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "请求体须为 JSON", http.StatusBadRequest)
 		return
 	}
@@ -2732,11 +2785,13 @@ func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Reque
 	//   2. 运行时不允许升为 enforcing（拦截路径仅启动参数可开，待治理闸门就绪后放开）；
 	//   3. 允许从 enforcing 降级到 shadow/off（OG-20 回滚演练必备，fail-safe 原则）。
 	if req.Mode != outputGuardOff && req.Mode != outputGuardShadow && req.Mode != outputGuardEnforcing {
+		s.auditAdminExit(r, "output_guard_mode_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "mode 非法（仅支持 off|shadow|enforcing）", http.StatusBadRequest)
 		return
 	}
 	oldMode := s.currentOutputGuardMode()
 	if req.Mode == outputGuardEnforcing && oldMode != outputGuardEnforcing {
+		s.auditAdminExit(r, "output_guard_mode_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "mode 不允许运行时升为 enforcing（拦截仅能经启动参数开启；运行时可从 enforcing 降级到 shadow/off）", http.StatusBadRequest)
 		return
 	}
@@ -2764,6 +2819,7 @@ func (s *teeServer) handleOutputGuardConfig(w http.ResponseWriter, r *http.Reque
 		if err := writeOutputGuardConfigRecord(s.outputGuardCfgPath, outputGuardConfigRecord{
 			Mode: req.Mode, Actor: actor, RequestID: reqID,
 		}, false, false); err != nil {
+			s.auditAdminExit(r, "output_guard_mode_change", "rejected_internal", http.StatusInternalServerError)
 			http.Error(w, "配置持久化失败", http.StatusInternalServerError)
 			return
 		}
@@ -2811,25 +2867,30 @@ type outputGuardStrategyRequest struct {
 //   - 持久化读改写合并（不抹 mode/版本引用）；审计 output_guard_strategy_change（证据走 TransformedHash）。
 func (s *teeServer) handleOutputGuardStrategy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleOutputGuardStrategy", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "output_guard_strategy_change", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
 	var req outputGuardStrategyRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		s.auditAdminExit(r, "output_guard_strategy_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "请求体须为 JSON", http.StatusBadRequest)
 		return
 	}
 	if err := validateOutputStrategy(req.Strategy); err != nil {
+		s.auditAdminExit(r, "output_guard_strategy_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	oldStrategy := s.currentOutputGuardStrategy()
 	if !strategyRunnable(req.Strategy) {
 		w.Header().Set("Content-Type", "application/json")
+		s.auditAdminExit(r, "output_guard_strategy_change", "rejected_bad_request", http.StatusBadRequest)
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"status": "rejected", "reason": "strategy_c_unavailable", "old_strategy": oldStrategy,
@@ -2842,6 +2903,7 @@ func (s *teeServer) handleOutputGuardStrategy(w http.ResponseWriter, r *http.Req
 		if err := writeOutputGuardConfigRecord(s.outputGuardCfgPath, outputGuardConfigRecord{
 			Strategy: req.Strategy, Actor: actor, RequestID: reqID,
 		}, false, false); err != nil {
+			s.auditAdminExit(r, "output_guard_strategy_change", "rejected_internal", http.StatusInternalServerError)
 			http.Error(w, "配置持久化失败", http.StatusInternalServerError)
 			return
 		}
@@ -2880,15 +2942,18 @@ type outputGuardCategoriesRequest struct {
 //   - 持久化整体接管停用集合（含清空为全启用）；审计 output_guard_category_toggle。
 func (s *teeServer) handleOutputGuardCategories(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleOutputGuardCategories", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "output_guard_category_toggle", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
 	var req outputGuardCategoriesRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req); err != nil {
+		s.auditAdminExit(r, "output_guard_category_toggle", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "请求体须为 JSON", http.StatusBadRequest)
 		return
 	}
@@ -2899,6 +2964,7 @@ func (s *teeServer) handleOutputGuardCategories(w http.ResponseWriter, r *http.R
 	}
 	for _, cat := range req.Enable {
 		if !isValidCategory(cat) {
+			s.auditAdminExit(r, "output_guard_category_toggle", "rejected_bad_request", http.StatusBadRequest)
 			http.Error(w, fmt.Sprintf("enable 类目 %q 不存在（须为 31 类内部 ID）", cat), http.StatusBadRequest)
 			return
 		}
@@ -2906,10 +2972,12 @@ func (s *teeServer) handleOutputGuardCategories(w http.ResponseWriter, r *http.R
 	}
 	for _, cat := range req.Disable {
 		if !isValidCategory(cat) {
+			s.auditAdminExit(r, "output_guard_category_toggle", "rejected_bad_request", http.StatusBadRequest)
 			http.Error(w, fmt.Sprintf("disable 类目 %q 不存在（须为 31 类内部 ID）", cat), http.StatusBadRequest)
 			return
 		}
 		if !categoryDisableAllowed(cat) {
+			s.auditAdminExit(r, "output_guard_category_toggle", "rejected_bad_request", http.StatusBadRequest)
 			http.Error(w, fmt.Sprintf("类目 %s 不允许停用（拦截/脱敏安全底线，最高边界不放开关）", cat), http.StatusBadRequest)
 			return
 		}
@@ -2922,6 +2990,7 @@ func (s *teeServer) handleOutputGuardCategories(w http.ResponseWriter, r *http.R
 		if err := writeOutputGuardConfigRecord(s.outputGuardCfgPath, outputGuardConfigRecord{
 			DisabledCategories: list, Actor: actor, RequestID: reqID,
 		}, false, true); err != nil {
+			s.auditAdminExit(r, "output_guard_category_toggle", "rejected_internal", http.StatusInternalServerError)
 			http.Error(w, "配置持久化失败", http.StatusInternalServerError)
 			return
 		}
@@ -3025,15 +3094,18 @@ func (s *teeServer) loadOutputGuardOverride() {
 //   - 切换同步更新 enabled gauge（指标门禁 #9 required 常驻）。
 func (s *teeServer) handleContentLabelConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleContentLabelConfig", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "content_label_change", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
 	var req contentLabelConfigRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		s.auditAdminExit(r, "content_label_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "请求体须为 JSON", http.StatusBadRequest)
 		return
 	}
@@ -3050,6 +3122,7 @@ func (s *teeServer) handleContentLabelConfig(w http.ResponseWriter, r *http.Requ
 	}
 	next = resolveContentLabelConfig(next)
 	if err := validateContentLabelConfig(next); err != nil {
+		s.auditAdminExit(r, "content_label_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -3065,10 +3138,12 @@ func (s *teeServer) handleContentLabelConfig(w http.ResponseWriter, r *http.Requ
 		}
 		raw, err := json.Marshal(rec)
 		if err != nil {
+			s.auditAdminExit(r, "content_label_change", "rejected_internal", http.StatusInternalServerError)
 			http.Error(w, "配置序列化失败", http.StatusInternalServerError)
 			return
 		}
 		if err := os.WriteFile(s.contentLabelCfgPath, append(raw, '\n'), 0o600); err != nil {
+			s.auditAdminExit(r, "content_label_change", "rejected_internal", http.StatusInternalServerError)
 			http.Error(w, "配置持久化失败", http.StatusInternalServerError)
 			return
 		}
@@ -3158,6 +3233,7 @@ func (s *teeServer) loadGuardrailOverride() {
 
 func (s *teeServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "metrics_read", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
@@ -3205,6 +3281,7 @@ type shadowView struct {
 // GA-计费 P1-2：接受管理令牌或独立只读计量令牌（meter-token）。
 func (s *teeServer) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if !s.checkMetering(r) {
+		s.auditAdminExit(r, "usage_read", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "计量查询认证失败", http.StatusUnauthorized)
 		return
 	}
@@ -3277,15 +3354,18 @@ func (s *teeServer) handleUsageIncremental(w http.ResponseWriter, q url.Values) 
 	now := time.Now().UnixNano()
 	from, ok := parseBillingTime(q.Get("from"), 0)
 	if !ok {
+		s.auditAdminExit(nil, "usage_read", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "from 须为 RFC 3339（推荐 UTC）或 Unix 秒", http.StatusBadRequest)
 		return
 	}
 	to, ok := parseBillingTime(q.Get("to"), now)
 	if !ok {
+		s.auditAdminExit(nil, "usage_read", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "to 须为 RFC 3339（推荐 UTC）或 Unix 秒", http.StatusBadRequest)
 		return
 	}
 	if from >= to {
+		s.auditAdminExit(nil, "usage_read", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "from 须早于 to（区间左闭右开）", http.StatusBadRequest)
 		return
 	}
@@ -3340,11 +3420,13 @@ func (s *teeServer) quotaLimitsView(tenant string) []quotaLimitView {
 // 鉴权：计量查询凭证（管理令牌或只读计量令牌；checkMetering 内含 checkAdmin）。
 func (s *teeServer) handleQuotaReadback(w http.ResponseWriter, r *http.Request) {
 	if !s.checkMetering(r) {
+		s.auditAdminExit(r, "quota_read", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "计量查询认证失败", http.StatusUnauthorized)
 		return
 	}
 	tenant := r.URL.Query().Get("tenant")
 	if tenant == "" {
+		s.auditAdminExit(r, "quota_read", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "bad request（须含 tenant）", http.StatusBadRequest)
 		return
 	}
@@ -3381,39 +3463,47 @@ func (s *teeServer) handleQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleQuota", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "quota_change", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
 	var req quotaRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Tenant == "" {
+		s.auditAdminExit(r, "quota_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "bad json（须含 tenant）", http.StatusBadRequest)
 		return
 	}
 	if !validQuotaWindow(req.Window) {
+		s.auditAdminExit(r, "quota_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "bad window（须为 minute|day 或省略）", http.StatusBadRequest)
 		return
 	}
 	if req.Limits != nil && (req.MaxTokens != 0 || req.Window != "") {
+		s.auditAdminExit(r, "quota_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "bad request（limits 与 max_tokens/window 互斥，勿同时下发）", http.StatusBadRequest)
 		return
 	}
 	seenWindow := make(map[string]bool, len(req.Limits))
 	for _, l := range req.Limits {
 		if !validQuotaWindow(l.Window) {
+			s.auditAdminExit(r, "quota_change", "rejected_bad_request", http.StatusBadRequest)
 			http.Error(w, "bad limits（window 须为 minute|day 或省略）", http.StatusBadRequest)
 			return
 		}
 		if seenWindow[l.Window] {
+			s.auditAdminExit(r, "quota_change", "rejected_bad_request", http.StatusBadRequest)
 			http.Error(w, fmt.Sprintf("bad limits（window=%q 重复）", l.Window), http.StatusBadRequest)
 			return
 		}
 		seenWindow[l.Window] = true
 	}
 	if req.Shadow != nil && (req.Shadow.RPM < 0 || req.Shadow.TPM < 0 || req.Shadow.DailyBudgetTokens < 0) {
+		s.auditAdminExit(r, "quota_change", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "bad shadow（rpm/tpm/daily_budget_tokens 须为非负）", http.StatusBadRequest)
 		return
 	}
@@ -3461,6 +3551,7 @@ func (s *teeServer) handleQuota(w http.ResponseWriter, r *http.Request) {
 // handleAudit 审计查询：GET /audit（全部）或 ?tenant=X（按租户过滤）。
 func (s *teeServer) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "audit_read", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
@@ -3615,27 +3706,32 @@ func (st *shadowReportState) evict(now time.Time) {
 //   - 响应：{"accepted","deduped","chain_events"}；指标 otpmask_shadow_reports_total{result}。
 func (s *teeServer) handleShadowReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleShadowReport", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "shadow", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
 	var req shadowReportRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		s.metrics.incShadowReport("rejected", 1)
+		s.auditAdminExit(r, "shadow", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
 	if len(req.Reports) == 0 {
 		s.metrics.incShadowReport("rejected", 1)
+		s.auditAdminExit(r, "shadow", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "reports 不得为空", http.StatusBadRequest)
 		return
 	}
 	for i := range req.Reports {
 		if err := req.Reports[i].validate(); err != nil {
 			s.metrics.incShadowReport("rejected", 1)
+			s.auditAdminExit(r, "shadow", "rejected_bad_request", http.StatusBadRequest)
 			http.Error(w, fmt.Sprintf("第 %d 条上报非法: %v", i, err), http.StatusBadRequest)
 			return
 		}
@@ -3696,11 +3792,13 @@ func (s *teeServer) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 // 返回锚定记录；未启用锚定文件时 400。
 func (s *teeServer) handleAuditAnchor(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleAuditAnchor", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	rec := s.audit.anchorNow()
 	if rec == nil {
+		s.auditAdminExit(r, "audit_anchor", "rejected_bad_request", http.StatusBadRequest)
 		http.Error(w, "锚定未启用（需 -audit-anchor 参数）", http.StatusBadRequest)
 		return
 	}
@@ -3816,6 +3914,8 @@ const maxRequestBodyBytes = 4 << 20
 func limitBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ContentLength > maxRequestBodyBytes {
+			// T3b（A 类）：通用入口体量拒绝落链（经包级 auditChainRef；未装配时 no-op）。
+			auditExitGlobal(tenantOf(r), r.Header.Get("X-Request-ID"), "deny", "body_too_large", "", http.StatusRequestEntityTooLarge)
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
@@ -4131,6 +4231,9 @@ func main() {
 		disposition:        nilDisposition{},       // S4-4：默认永远放行；SaaS 构建由 initTenantDisposition 替换
 	}
 	auditMetrics = m // P1-7 T4/T7：脱敏与容量指标计数入口（包级）
+	// P1-7 T3b：装配包级审计链引用，供无 *teeServer 句柄的通用中间件
+	// （requireTenant / limitBody）失败出口落链（§7.3 A 类）。
+	setAuditChainRef(audit)
 	// T-5：MCP 工具级治理接线（验签缓存 + TEE 内裁决引擎）。
 	// 约束：管理令牌或 MCP 密钥缺失 → 不构造 → /config/mcp 端点不注册（fail-closed）。
 	// P1-8 T5：审计 fail-closed 指标回调接入（M-7/M-8，source=tee）。

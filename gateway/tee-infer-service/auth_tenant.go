@@ -212,9 +212,12 @@ type tenantJWTKeySource interface {
 // 两者是分层的：attest 验证网关身份（通道可信），tenant JWT 验证终端租户身份。
 func requireTenant(next http.HandlerFunc, keySource tenantJWTKeySource, expectedTenant string, leeway time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// T3b（A 类）：鉴权失败出口落链（经包级 auditChainRef；未装配时 no-op）。
+		reqID := r.Header.Get("X-Request-ID")
 		if keySource == nil || !keySource.Required() {
 			// 未配置租户 JWT → 启动期应已 fail-closed；
 			// 运行时防御：直接 503（绝不静默放行）。
+			auditExitGlobal("", reqID, "deny", "tenant_auth_not_configured", "", http.StatusServiceUnavailable)
 			http.Error(w, "tenant auth not configured", http.StatusServiceUnavailable)
 			return
 		}
@@ -222,11 +225,13 @@ func requireTenant(next http.HandlerFunc, keySource tenantJWTKeySource, expected
 		// 取 Bearer token
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
+			auditExitGlobal("", reqID, "deny", "tenant_auth_missing", "", http.StatusUnauthorized)
 			http.Error(w, "missing authorization", http.StatusUnauthorized)
 			return
 		}
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+			auditExitGlobal("", reqID, "deny", "tenant_auth_bad_format", "", http.StatusUnauthorized)
 			http.Error(w, "invalid authorization format", http.StatusUnauthorized)
 			return
 		}
@@ -242,6 +247,7 @@ func requireTenant(next http.HandlerFunc, keySource tenantJWTKeySource, expected
 		// 这是 HMAC 模式的必然选择（非对称 RS256 才可以先解析再选密钥）。
 		// 网关侧 jwt-auth 同样是"按路由/租户配置 JWKS"的模式，此处对齐。
 		if wantTenant == "" {
+			auditExitGlobal("", reqID, "deny", "tenant_auth_missing_tenant", "", http.StatusUnauthorized)
 			http.Error(w, "missing tenant identifier", http.StatusUnauthorized)
 			return
 		}
@@ -249,6 +255,7 @@ func requireTenant(next http.HandlerFunc, keySource tenantJWTKeySource, expected
 		key, ok := keySource.GetKey(wantTenant)
 		if !ok || len(key) == 0 {
 			// 租户未配置密钥 → fail-closed（不回退到任何其它密钥）
+			auditExitGlobal(wantTenant, reqID, "deny", "tenant_auth_key_not_found", "", http.StatusUnauthorized)
 			http.Error(w, "tenant key not found", http.StatusUnauthorized)
 			return
 		}
@@ -256,12 +263,14 @@ func requireTenant(next http.HandlerFunc, keySource tenantJWTKeySource, expected
 		now := time.Now()
 		claims, err := verifyTenantJWT(token, key, now, leeway)
 		if err != nil {
+			auditExitGlobal(wantTenant, reqID, "deny", "tenant_auth_invalid_token", "", http.StatusUnauthorized)
 			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
 
 		// 双重校验：JWT 声明的租户必须与预期租户一致
 		if claims.tenantID() != wantTenant {
+			auditExitGlobal(wantTenant, reqID, "deny", "tenant_auth_mismatch", "", http.StatusForbidden)
 			http.Error(w, "tenant mismatch", http.StatusForbidden)
 			return
 		}

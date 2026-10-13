@@ -34,7 +34,11 @@ const (
 
 // CallAudit tools/call 审计回调（T-9 / V-6）。**仅**携带 hash 与决策元数据，不含明文参数；
 // 唯一生产者＝tee-infer（本包只回调，不落链）。
-type CallAudit func(tenant, tool, decision, paramsHash, reason string, policyVersion int)
+//
+// T3b（A3-07 / A4-05）：新增 requestID / sessionID 两个关联键。
+//   - requestID：优先客户端提供的 `params._meta.request_id`（格式校验通过），否则取会话 ID（见 callTool）；
+//   - sessionID：tee-infer 解密信封后经 `WithSessionID` 注入（回退关联键 mcp_session_id）。
+type CallAudit func(tenant, requestID, sessionID, tool, decision, paramsHash, reason string, policyVersion int)
 
 // Deps 依赖注入：mcpguard 引擎（裁决）与策略缓存（目录/策略/版本）。
 type Deps struct {
@@ -42,6 +46,27 @@ type Deps struct {
 	Cache *mcpguard.PolicyCache
 	// Audit 可选：tools/call 审计回调（nil = 不审计；生产由 tee-infer 注入，见 V-6）。
 	Audit CallAudit
+}
+
+// mcpSessionContextKey MCP 会话 ID 的 context 键类型（未导出空结构，避免键冲突）。
+type mcpSessionContextKey struct{}
+
+// WithSessionID 将 MCP 会话 ID 注入 context（tee-infer 解密信封后调用一次）。
+// 供审计回调在 request_id 不可得时填充回退关联键 mcp_session_id（A3-07）。
+func WithSessionID(ctx context.Context, id string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, mcpSessionContextKey{}, id)
+}
+
+// SessionIDFromContext 读取 MCP 会话 ID（缺失返回空串）。
+func SessionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(mcpSessionContextKey{}).(string)
+	return v
 }
 
 // NewHandler 返回可挂在 tee-infer mux 上的 MCP HTTP handler。
@@ -76,8 +101,8 @@ func buildServer(d Deps, tenant string) *mcp.Server {
 			Description: "otpmask secure tool: " + t.Name,
 			InputSchema: inputSchema(&t),
 		}
-		s.AddTool(tool, func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return callTool(d, tenant, req)
+		s.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return callTool(d, tenant, ctx, req)
 		})
 	}
 	return s
@@ -102,7 +127,7 @@ func selectTools(cat *mcpsec.ToolCatalog, pol *mcpsec.RBACPolicy, tenant string)
 }
 
 // callTool 经 mcpguard 裁决；拒绝细节不外泄。
-func callTool(d Deps, tenant string, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func callTool(d Deps, tenant string, ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if req == nil || req.Params == nil {
 		return denied(), nil
 	}
@@ -117,7 +142,14 @@ func callTool(d Deps, tenant string, req *mcp.CallToolRequest) (*mcp.CallToolRes
 		if !dec.Allow {
 			decision, reason = "deny", string(dec.Reason)
 		}
-		d.Audit(tenant, req.Params.Name, decision, dec.ParamsHash, reason, dec.PolicyVersion)
+		// T3b（A4-05）：request_id 优先取客户端 `params._meta.request_id`（格式校验通过），
+		// 信封无则取 MCP 会话 ID（tee-infer 经 ctx 注入）；sessionID 另作回退关联键。
+		reqID := requestIDOf(req)
+		sessID := SessionIDFromContext(ctx)
+		if reqID == "" {
+			reqID = sessID
+		}
+		d.Audit(tenant, reqID, sessID, req.Params.Name, decision, dec.ParamsHash, reason, dec.PolicyVersion)
 	}
 	if !dec.Allow {
 		return denied(), nil

@@ -576,10 +576,12 @@ const policyErrVersionRequired = "version_required"
 // 便于"没配版本库"与"配了但读坏了"区分呈现）；非 GET → 405；鉴权同其它管理端点。
 func (s *teeServer) handlePolicyVersions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
+		recordExemptExit("handlePolicyVersions", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "output_guard_policy_activate", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return
 	}
@@ -639,16 +641,19 @@ func (s *teeServer) handlePolicyRollback(w http.ResponseWriter, r *http.Request)
 func (s *teeServer) decodePolicyVersionRequest(w http.ResponseWriter, r *http.Request) (policyActivateRequest, bool) {
 	var req policyActivateRequest
 	if r.Method != http.MethodPost {
+		recordExemptExit("decodePolicyVersionRequest", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return req, false
 	}
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "output_guard_policy_activate", "rejected_admin_auth", http.StatusUnauthorized)
 		http.Error(w, "管理认证失败", http.StatusUnauthorized)
 		return req, false
 	}
 	if r.Body != nil {
 		// 空体合法（rollback 缺省回上一 active）；非 JSON 则 400。
 		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil && err != io.EOF {
+			s.auditAdminExit(r, "output_guard_policy_activate", "rejected_bad_request", http.StatusBadRequest)
 			http.Error(w, `请求体须为 JSON（{"version":"..."}，可为空）`, http.StatusBadRequest)
 			return req, false
 		}
@@ -659,6 +664,7 @@ func (s *teeServer) decodePolicyVersionRequest(w http.ResponseWriter, r *http.Re
 // writeJSON 统一 JSON 响应（含状态码）。
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	recordExemptExit("writeJSON", "common_writer")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }

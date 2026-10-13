@@ -121,26 +121,31 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 	// T3a：注入请求路径证据元数据（path/path_mode）。
 	r = r.WithContext(withAuditReqMeta(r.Context(), r.URL.Path, auditPathMode(r.URL.Path)))
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleRecompute", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	sess := s.sessionByID(r)
 	if sess == nil {
+		s.auditDenyExitReq(r, tenantOf(r), "", "recompute_no_session", "", http.StatusUnauthorized)
 		http.Error(w, "未证明会话（B4：recompute 需有效证明会话）", http.StatusUnauthorized)
 		return
 	}
 	var req recomputeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.auditDenyExitReq(r, tenantOf(r), "", "recompute_bad_json", "", http.StatusBadRequest)
 		http.Error(w, fmt.Sprintf("bad json: %v", err), http.StatusBadRequest)
 		return
 	}
 	// 签名校验
 	if !verifyRecomputeSig(sess.K_sig, &req) {
+		s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_bad_signature", "", http.StatusUnauthorized)
 		http.Error(w, "recompute 签名无效", http.StatusUnauthorized)
 		return
 	}
 	// batch 上限（连续批处理对齐）
 	if len(req.Batch) == 0 || len(req.Batch) > recomputeBatchLimit {
+		s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_batch_invalid", "", http.StatusBadRequest)
 		http.Error(w, fmt.Sprintf("batch 长度 %d 超限（1..%d）", len(req.Batch), recomputeBatchLimit), http.StatusBadRequest)
 		return
 	}
@@ -158,6 +163,7 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 	// 派生层掩码流
 	seed, serr := s.sessionSeed(r)
 	if serr != nil {
+		s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_no_session_key", "", http.StatusInternalServerError)
 		http.Error(w, "会话密钥缺失: "+serr.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -165,11 +171,13 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 	layerDomain := fmt.Sprintf("otpmask/layer/%d/v1", req.Layer)
 	stream, err := newLayerStream(seed, maskModulus, []byte(layerDomain))
 	if err != nil {
+		s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_layer_stream_failed", "", http.StatusInternalServerError)
 		http.Error(w, fmt.Sprintf("掩码流派生失败: %v", err), http.StatusInternalServerError)
 		return
 	}
 	nextStream, err := newLayerStream(seed, maskModulus, []byte(fmt.Sprintf("otpmask/layer/%d/v1", req.Layer+1)))
 	if err != nil {
+		s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_next_stream_failed", "", http.StatusInternalServerError)
 		http.Error(w, fmt.Sprintf("下一层掩码流派生失败: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -179,6 +187,7 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 	dim := len(req.Batch[0])
 	weights, err := s.weightProvider.LayerWeight(req.Layer)
 	if err != nil {
+		s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_weight_load_failed", "", http.StatusInternalServerError)
 		http.Error(w, fmt.Sprintf("权重加载失败: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -189,6 +198,7 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 	}
 	maskImage, err := weights.MaskImage(rMask)
 	if err != nil {
+		s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_mask_image_failed", "", http.StatusInternalServerError)
 		http.Error(w, fmt.Sprintf("掩码像计算失败: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -196,6 +206,7 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 		// 脱掩码
 		y, err := maskedinfer.Unmask(yCipher, maskImage)
 		if err != nil {
+			s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_unmask_failed", "", http.StatusInternalServerError)
 			http.Error(w, fmt.Sprintf("脱掩码失败: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -224,6 +235,7 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 			result[b] = []uint64{uint64(tokenIdx)}
 			continue
 		default:
+			s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_unknown_op", "", http.StatusBadRequest)
 			http.Error(w, fmt.Sprintf("未知算子 %q（gelu|softmax|layernorm|rmsnorm|argmax）", req.Op), http.StatusBadRequest)
 			return
 		}
@@ -235,6 +247,7 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 		}
 		remasked, err := maskedinfer.Remask(fY, rNext)
 		if err != nil {
+			s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_remask_failed", "", http.StatusInternalServerError)
 			http.Error(w, fmt.Sprintf("重掩码失败: %v", err), http.StatusInternalServerError)
 			return
 		}

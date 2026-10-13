@@ -143,8 +143,13 @@ func TestShadowReportEndpoint_validation(t *testing.T) {
 			t.Fatalf("%s 应 400，实际 %d", c.name, code)
 		}
 	}
-	if n := len(srv.audit.query("")); n != 0 {
-		t.Fatalf("非法上报不得落链，实际 %d 条", n)
+	// T3b：非法上报内容不入链（无 action=shadow/result=would_reject），
+	// 但 8 条拒绝出口各落 1 条 deny（action=shadow、result=rejected_bad_request）。
+	if n := countByActionResult(srv.audit, "shadow", "would_reject"); n != 0 {
+		t.Fatalf("非法上报不得入链（would_reject），实际 %d 条", n)
+	}
+	if n := countByActionResult(srv.audit, "shadow", "rejected_bad_request"); n != 8 {
+		t.Fatalf("8 条拒绝出口应各落 1 条 rejected_bad_request，实际 %d", n)
 	}
 	m := shadowReportsMetrics(srv)
 	if !strings.Contains(m, `otpmask_shadow_reports_total{result="rejected"} 8`) {

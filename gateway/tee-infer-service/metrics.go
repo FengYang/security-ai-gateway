@@ -99,6 +99,8 @@ type otpmaskMetrics struct {
 	auditReportDropped map[string]int64
 	// TEE 侧非登记 result 取值计数（counter，A3-20/R-17；不改链、不拒落链，仅登记告警）。
 	auditUnregisteredResult int64
+	// C 类豁免出口计数（counter，handler|reason；T3b §7.3③：豁免项以聚合指标计数而非逐条落链）。
+	auditExemptExit map[string]int64
 	ogCanaryProbe      int64            // P0-3 策略 C：canary 探测句走完整 L2 的次数
 	ogCanaryReattach   int64            // P0-3 策略 C：canary 命中底线触发回挂的次数
 	ogPolicyRollback   map[string]int64 // reason（策略热加载回退事件）
@@ -182,6 +184,8 @@ func newMetrics() *otpmaskMetrics {
 		// P1-7 容量管控指标
 		auditRecordsTier:   make(map[string]int64),
 		auditReportDropped: make(map[string]int64),
+		// P1-7 T3b：C 类豁免出口计数
+		auditExemptExit: make(map[string]int64),
 	}
 }
 
@@ -318,6 +322,20 @@ func (m *otpmaskMetrics) incAuditReportDropped(reason string) {
 func (m *otpmaskMetrics) incAuditUnregisteredResult() {
 	m.mu.Lock()
 	m.auditUnregisteredResult++
+	m.mu.Unlock()
+}
+
+// incAuditExemptExit 记录一次 C 类豁免出口（T3b §7.3③；handler|reason）。
+// 豁免项不逐条落链，只以聚合指标计数，保证"出口 100% 登记"可被观测。
+func (m *otpmaskMetrics) incAuditExemptExit(handler, reason string) {
+	if handler == "" {
+		return
+	}
+	if reason == "" {
+		reason = "exempt"
+	}
+	m.mu.Lock()
+	m.auditExemptExit[handler+"|"+reason]++
 	m.mu.Unlock()
 }
 
@@ -614,6 +632,8 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 		fmt.Fprintf(w, "# HELP otpmask_audit_unregistered_result_total TEE 侧非登记 result 取值次数（A3-20/R-17；不改链、不拒落链，仅登记告警）\n# TYPE otpmask_audit_unregistered_result_total counter\n")
 		fmt.Fprintf(w, "otpmask_audit_unregistered_result_total %d\n", m.auditUnregisteredResult)
 	}
+	// P1-7 T3b §7.3③：C 类豁免出口计数（豁免项不逐条落链，以聚合指标登记，V-14）。
+	writeCounter(w, "otpmask_audit_exempt_exit_total", "C 类豁免出口计数（handler × reason：method_not_allowed|health|common_writer|stream_ok|ok_write；不逐条落链，V-14 登记口径）", m.auditExemptExit, []string{"handler", "reason"})
 	writeCounter(w, "otpmask_key_issue_total", "密钥签发计数（按租户）", m.keyIssues, []string{"tenant"})
 	writeCounter(w, "otpmask_reconcile_mismatch_total", "审计-计量对账不一致次数（按差异分类）", m.reconcile, []string{"reason"})
 	writeCounter(w, "otpmask_shadow_would_reject_total", "影子命中计数（只计数不拒绝；按租户与维度）", m.shadowWouldReject, []string{"tenant", "rule"})

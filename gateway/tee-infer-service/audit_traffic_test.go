@@ -147,8 +147,12 @@ func TestT2aInvalidResult400(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("期望 400，实际 %d: %s", w.Code, w.Body.String())
 	}
-	if len(s.audit.events) != 0 {
-		t.Fatalf("非法批次不应落链，实际 %d 条", len(s.audit.events))
+	// T3b（A 类）：拒绝出口落 deny 事件；但被拒上报内容**不得**入链（无 action=request）。
+	if n := countAction(s, "request"); n != 0 {
+		t.Fatalf("非法批次不应入链（action=request），实际 %d 条", n)
+	}
+	if n := countAction(s, "deny"); n != 1 {
+		t.Fatalf("非法批次应落 1 条 deny，实际 %d 条", n)
 	}
 }
 
@@ -178,8 +182,11 @@ func TestT2aWrongSig401(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("期望 401，实际 %d", w.Code)
 	}
-	if len(s.audit.events) != 0 {
-		t.Fatalf("签名错误不应落链，实际 %d 条", len(s.audit.events))
+	if n := countAction(s, "request"); n != 0 {
+		t.Fatalf("签名错误不应入链（action=request），实际 %d 条", n)
+	}
+	if n := countAction(s, "deny"); n != 1 {
+		t.Fatalf("签名错误应落 1 条 deny，实际 %d 条", n)
 	}
 }
 
@@ -208,9 +215,23 @@ func TestT2aTenantNotInSet400(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("期望 400，实际 %d: %s", w.Code, w.Body.String())
 	}
-	if len(s.audit.events) != 0 {
-		t.Fatalf("越界租户不应落链，实际 %d 条", len(s.audit.events))
+	if n := countAction(s, "request"); n != 0 {
+		t.Fatalf("越界租户不应入链（action=request），实际 %d 条", n)
 	}
+	if n := countAction(s, "deny"); n != 1 {
+		t.Fatalf("越界租户应落 1 条 deny，实际 %d 条", n)
+	}
+}
+
+// countAction 统计链上指定 action 的事件数（T3b：区分"拒绝落 deny"与"内容入链 request"）。
+func countAction(s *teeServer, action string) int {
+	n := 0
+	for _, ev := range s.audit.events {
+		if ev.Action == action {
+			n++
+		}
+	}
+	return n
 }
 
 // TestT2aGatewayModeResolvesTenant 网关级（无 tenants 绑定）：忽略自报 tenant，

@@ -163,21 +163,25 @@ func (s *teeServer) checkReportAuth(r *http.Request) bool {
 // （action=request、origin=data-plane），完整实现 §6.5 语义。
 func (s *teeServer) handleAuditReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		recordExemptExit("handleAuditReport", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.checkReportAuth(r) {
+		s.auditDenyExitReq(r, "-", "", "report_auth_failed", "", http.StatusUnauthorized)
 		http.Error(w, "上报认证失败", http.StatusUnauthorized)
 		return
 	}
 	// 先读原始 body（用于 HMAC 校验），再解析 JSON。
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
+		s.auditDenyExitReq(r, "-", "", "report_read_failed", "", http.StatusBadRequest)
 		http.Error(w, "读取请求体失败", http.StatusBadRequest)
 		return
 	}
 	sig := r.Header.Get("X-Audit-Report-Sig")
 	if sig == "" {
+		s.auditDenyExitReq(r, "-", "", "report_missing_sig", "", http.StatusUnauthorized)
 		http.Error(w, "缺少 X-Audit-Report-Sig", http.StatusUnauthorized)
 		return
 	}
@@ -185,17 +189,20 @@ func (s *teeServer) handleAuditReport(w http.ResponseWriter, r *http.Request) {
 	mac.Write(raw)
 	expected := hex.EncodeToString(mac.Sum(nil))
 	if !hmac.Equal([]byte(expected), []byte(sig)) {
+		s.auditDenyExitReq(r, "-", "", "report_bad_sig", "", http.StatusUnauthorized)
 		http.Error(w, "上报签名校验失败", http.StatusUnauthorized)
 		return
 	}
 	var req auditReport
 	if err := json.Unmarshal(raw, &req); err != nil {
+		s.auditDenyExitReq(r, "-", "", "report_bad_json", "", http.StatusBadRequest)
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
 
 	pluginMode := len(s.auditReportTenants) > 0
 	if err := req.validate(time.Now().UnixNano(), pluginMode); err != nil {
+		s.auditDenyExitReq(r, "-", "", "report_validate_failed", "", http.StatusBadRequest)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -203,6 +210,7 @@ func (s *teeServer) handleAuditReport(w http.ResponseWriter, r *http.Request) {
 	if pluginMode {
 		for i := range req.Reports {
 			if !s.auditReportTenants[req.Reports[i].TenantID] {
+				s.auditDenyExitReq(r, "-", "", "report_tenant_unauthorized", "", http.StatusBadRequest)
 				http.Error(w, fmt.Sprintf("第 %d 条：tenant_id %q 不在本令牌授权集合", i, req.Reports[i].TenantID), http.StatusBadRequest)
 				return
 			}

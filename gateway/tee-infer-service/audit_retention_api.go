@@ -48,6 +48,7 @@ func (s *teeServer) retentionSnapshot() RetentionPolicy {
 // handleAuditRetention GET/PUT /audit/retention。
 func (s *teeServer) handleAuditRetention(w http.ResponseWriter, r *http.Request) {
 	if !s.checkAdmin(r) {
+		s.auditAdminExit(r, "audit_retention_change", "rejected_forbidden", http.StatusForbidden)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -68,6 +69,7 @@ func (s *teeServer) handleAuditRetention(w http.ResponseWriter, r *http.Request)
 	case http.MethodPut:
 		var req auditRetentionReq
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+			s.auditAdminExit(r, "audit_retention_change", "rejected_bad_request", http.StatusBadRequest)
 			http.Error(w, "非法请求体: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -78,10 +80,12 @@ func (s *teeServer) handleAuditRetention(w http.ResponseWriter, r *http.Request)
 			SampleMissRate: req.SampleMissRate,
 		}
 		if err := validateRetentionPolicy(policy); err != nil {
+			s.auditAdminExit(r, "audit_retention_change", "rejected_bad_request", http.StatusBadRequest)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if err := validateAuditRetentionDays(req.DeclaredDays); err != nil {
+			s.auditAdminExit(r, "audit_retention_change", "rejected_bad_request", http.StatusBadRequest)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -97,6 +101,7 @@ func (s *teeServer) handleAuditRetention(w http.ResponseWriter, r *http.Request)
 			ColdDays: policy.ColdDays, SampleMissRate: policy.SampleMissRate, Enabled: true,
 		})
 	default:
+		recordExemptExit("handleAuditRetention", "method_not_allowed")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }

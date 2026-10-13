@@ -156,7 +156,7 @@ func TestTransportConsistency(t *testing.T) {
 func TestCallToolAllowDeny(t *testing.T) {
 	d := readyDeps(t, "ta")
 	call := func(name string) *mcp.CallToolResult {
-		res, err := callTool(d, "ta", &mcp.CallToolRequest{
+		res, err := callTool(d, "ta", context.Background(), &mcp.CallToolRequest{
 			Params: &mcp.CallToolParamsRaw{Name: name, Arguments: json.RawMessage(`{"q":"x"}`)},
 		})
 		if err != nil {
@@ -175,7 +175,7 @@ func TestCallToolAllowDeny(t *testing.T) {
 	// 未就绪引擎 → 拒绝（fail-closed）
 	empty, _ := mcpguard.NewCache(bytes.Repeat([]byte{0x11}, 32))
 	d2 := Deps{Guard: mcpguard.NewEngine(empty), Cache: empty}
-	if res, _ := callTool(d2, "ta", &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "secure_ok"}}); !res.IsError {
+	if res, _ := callTool(d2, "ta", context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "secure_ok"}}); !res.IsError {
 		t.Fatalf("未就绪应 fail-closed 拒绝")
 	}
 }
