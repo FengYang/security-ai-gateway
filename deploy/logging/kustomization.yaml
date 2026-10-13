@@ -7,3 +7,7 @@ kind: Kustomization
 resources:
 - promtail.yaml
 - loki.yaml
+# P1-7 T2c（D-18）：consumer→tenant 映射表（回灌侧租户解析第二层）。
+- consumer-tenant-map.yaml
+# 注：`audit-report-pipeline.yaml`（Fluent Bit 回灌管道）**为草案，暂不纳入**——
+#     待 §7.3 前置实测（X-Mse-Consumer 注入行为，准入④）与「HMAC 签名缺口」定案后启用。

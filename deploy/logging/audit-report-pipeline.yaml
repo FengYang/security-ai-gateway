@@ -1,0 +1,208 @@
+# P1-7 T2c（D-15/D-18/D-19）：数据面拒绝的采集与回灌管道（Fluent Bit）。
+#
+# 目标：把**不可由 otpmask 插件采集**的三类数据面拒绝（401 鉴权失败 / 403 IP 封禁 / 429 限流）
+# 经网关原生访问日志采集，批量回灌 tee-infer `POST /audit/report`（不新建端点、不新建链）。
+#
+# 采集器选型（D-19(b)）：Fluent Bit（标准采集器，原生 HTTP output + at-least-once/背压）。
+#   ⚠️ 不复用 Promtail——`promtail.yaml` 的 clients 只送 Loki，无 HTTP output（实测）。
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ⚠️ 状态：**草案（未纳入 kustomization，未联调验证）**——存在两处未决项：
+#
+# 【阻塞① · 前置实测未做（§7.3 item 1）】需在 higress-standalone 实测：
+#   (a) key-auth 认证通过后是否确实注入 X-Mse-Consumer（仓库注释有 2026-09-13 取证，待复核）；
+#   (b) **403 路由授权拒绝（consumer 不在 allow）时该头是否注入**——决定其归真实租户还是哨兵租户。
+#   ⇒ 未实测即无法确定 grep/映射规则，本管道不得上线（准入④）。
+#
+# 【阻塞② · 签名缺口（D-13 与 Fluent Bit 能力不匹配）】/audit/report 要求
+#   `X-Audit-Report-Sig = hex(HMAC-SHA256(token, 原始 body))`，且 body 须为 `{"reports":[...]}`。
+#   而 Fluent Bit 的 HTTP output 在**输出阶段重新序列化**载荷，过滤器（Lua）无法对最终字节签名；
+#   其内置 `http` output 亦不能产出 `{"reports":[...]}` 包裹结构。两种候选解决路径（**待拍板**）：
+#     (i) 在 tee-infer 侧为**回灌通道**增加一个受同一令牌保护、以不同完整性机制（如 body 内嵌
+#         `replay_id`+时间窗+幂等，或以 mTLS 承担通道完整性）的端点变体；
+#     (ii) 采集器后接一个**极薄签名器**（读 Fluent Bit 批次→序列化→HMAC→POST），
+#         相当于把「采集」与「签名投递」分离（不违背 D-19「不自建采集引擎」的本意）。
+#   ⇒ 本文件先给出「采集 + 整形 + 租户解析」的确定性部分；OUTPUT 段按候选 (ii) 预留。
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-replay-scripts
+  namespace: otpmask
+  labels:
+    app: audit-report-pipeline
+data:
+  # 记录整形 + 租户三层解析（D-18）；见 deploy/logging/audit_replay.lua（同源）。
+  audit_replay.lua: |
+    -- 与本目录 audit_replay.lua 同源；kustomize 部署时以文件为准，此处为自包含副本。
+    local MAP_PATH = "/fluent-bit/scripts/consumer-tenant.json"
+    local SENTINEL = "_unauthenticated"
+    local consumer_map = nil
+    local function load_map()
+      consumer_map = {}
+      local f = io.open(MAP_PATH, "r")
+      if not f then return end
+      local raw = f:read("*a"); f:close()
+      for k, v in string.gmatch(raw, '"([^"]+)"%s*:%s*"([^"]*)"') do consumer_map[k] = v end
+    end
+    local function map_result(code)
+      code = tostring(code or "")
+      if code == "429" then return "rate_limited" end
+      if code == "401" then return "auth_failed" end
+      if code == "403" then return "ip_blocked" end
+      return nil
+    end
+    local function resolve_tenant(consumer)
+      if consumer ~= nil and consumer ~= "" then
+        if consumer_map == nil then load_map() end
+        local t = consumer_map[consumer]
+        if t ~= nil and t ~= "" then return t, "consumer_map" end
+      end
+      return SENTINEL, "unauthenticated"
+    end
+    function replay_filter(tag, timestamp, record)
+      local result = map_result(record["response_code"])
+      if result == nil then return 2 end
+      local tenant, resolution = resolve_tenant(record["x_mse_consumer"])
+      record["audit_report_item"] = {
+        request_id = record["request_id"] or "",
+        tenant_id = tenant,
+        path = record["path"] or "",
+        path_mode = "plain",
+        http_status = tonumber(record["response_code"]) or 0,
+        result = result,
+        timestamp_ns = (tonumber(record["date"]) or 0) * 1000000000,
+        dur_ms = tonumber(record["duration"]) or 0,
+        tenant_id_resolution = resolution,
+      }
+      return 1, timestamp, record
+    end
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-report-pipeline-config
+  namespace: otpmask
+  labels:
+    app: audit-report-pipeline
+data:
+  parsers.conf: |
+    [PARSER]
+        Name        cri
+        Format      regex
+        Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+    [PARSER]
+        Name        gateway_access_json
+        Format      json
+        Time_Key    start_time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush        5
+        Daemon       Off
+        Log_Level    info
+        Parsers_File /fluent-bit/etc/parsers.conf
+
+    # 采集：Higress 网关访问日志（随 Pod stdout 落 /var/log/pods）。
+    # ⚠️ Path 需按集群实际 Pod 命名/标签调整（此处为 higress-system 命名空间下 envoy-gateway）。
+    [INPUT]
+        Name              tail
+        Path              /var/log/pods/higress-system_envoy-gateway*/*/*.log
+        Tag               gateway.access
+        Parser            cri
+        Refresh_Interval  5
+        Rotate_Wait       30
+        DB                /var/lib/fluent-bit/audit-replay.db
+        Mem_Buf_Limit     32MB
+
+    # CRI 外层剥离后，内层为访问日志 JSON。
+    [FILTER]
+        Name    parser
+        Match   gateway.access
+        Key_Name log
+        Parser  gateway_access_json
+        Reserve_Data On
+
+    # 仅保留数据面拒绝（401/403/429）；其余丢弃（本管道只回灌拒绝事件）。
+    [FILTER]
+        Name    grep
+        Match   gateway.access
+        Regex   response_code ^(401|403|429)$
+
+    # 记录整形 + 租户三层解析（D-18）。见上方脚本说明。
+    [FILTER]
+        Name    lua
+        Match   gateway.access
+        script  /fluent-bit/scripts/audit_replay.lua
+        call    replay_filter
+
+    # ⚠️ OUTPUT 段待「阻塞② 签名缺口」定案后启用（候选 (ii)：极薄签名器）。
+    # 下列仅为形态示意，当前**不启用**（注释）：
+    # [OUTPUT]
+    #     Name        http
+    #     Match       gateway.access
+    #     Host        tee-infer-service.otpmask.svc
+    #     Port        19090
+    #     URI         /audit/report
+    #     Format      json_stream
+    #     Header      X-Admin-Token ${AUDIT_REPORT_TOKEN}
+    #     # Header    X-Audit-Report-Sig <待候选方案产生>
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: audit-report-pipeline
+  namespace: otpmask
+  labels:
+    app: audit-report-pipeline
+spec:
+  selector:
+    matchLabels:
+      app: audit-report-pipeline
+  template:
+    metadata:
+      labels:
+        app: audit-report-pipeline
+    spec:
+      serviceAccountName: promtail   # 复用既有日志采集 SA（仅需读取 /var/log/pods）
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: fluent-bit
+          image: cr.fluentbit.io/fluentbit/fluent-bit:3.1
+          # ⚠️ 资源占用纳入 T11 性能基线（A4-11）；不得与网关同机争抢（D-19 约束②）。
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 300m, memory: 256Mi }
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/fluent-bit.conf
+              subPath: fluent-bit.conf
+            - name: config
+              mountPath: /fluent-bit/etc/parsers.conf
+              subPath: parsers.conf
+            - name: scripts
+              mountPath: /fluent-bit/scripts/audit_replay.lua
+              subPath: audit_replay.lua
+            - name: tenant-map
+              mountPath: /fluent-bit/scripts/consumer-tenant.json
+              subPath: consumer-tenant.json
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: buffer
+              mountPath: /var/lib/fluent-bit
+      volumes:
+        - name: config
+          configMap: { name: audit-report-pipeline-config }
+        - name: scripts
+          configMap: { name: audit-replay-scripts }
+        - name: tenant-map
+          configMap: { name: consumer-tenant-map }
+        - name: varlog
+          hostPath: { path: /var/log }
+        - name: buffer
+          emptyDir: {}

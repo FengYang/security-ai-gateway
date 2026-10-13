@@ -1,0 +1,39 @@
+# P1-7 T2c（D-18）：consumer → tenant 映射表（回灌侧租户三层解析之第二层）。
+#
+# 背景：数据面拒绝（401/403/429）的请求在 otpmask 插件之前即被短路，链上无租户字段。
+# 唯一可信来源是 key-auth 2.0.0 认证通过后注入的 X-Mse-Consumer（consumer 名称），
+# 故需其到租户的映射。本表复用管理面既有「x-api-key → consumer → tenant」设计
+# （见《GA-Higress-MCP接入与打通-技术实现方案.md》），非新建概念。
+#
+# 三层解析（D-18，按拒绝类型分层）：
+#   ① 拒绝类为 429 限流 / 403 IP 封禁（发生在 key-auth 之后，认证已通过）
+#      ⇒ X-Mse-Consumer 可得 ⇒ 命中本表 → 真实 tenant_id；
+#   ② 403 路由授权拒绝（consumer 不在 allow 列表）——官方措辞为「认证鉴权通过后注入」，
+#      该子类**是否注入需实测**（T2c 第一步）；若未注入 ⇒ 降为哨兵租户；
+#   ③ 401 认证失败（无/无效凭证）——无任何服务端认证身份 ⇒ **哨兵租户 `_unauthenticated`**，
+#      并置证据字段 tenant_id_resolution=unauthenticated。
+#
+# ⚠️ 明令禁止：取客户端自报 X-Tenant-ID（被拒请求在 otpmask 前短路 ⇒ 该头不存在或为自报值，
+#    取用即「证据投毒」，与 A3-10「服务端不信任自报值」正面冲突）。
+#
+# 部署：kubectl apply -k deploy/logging
+# 维护：新增消费者时同步更新本表（或改由管理面下发；见 R-20 削弱登记）。
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: consumer-tenant-map
+  namespace: otpmask
+  labels:
+    app: audit-report-pipeline
+data:
+  # key-auth consumer 名称 → 租户 ID。JSON 便于 Fluent Bit Lua 过滤器直接加载。
+  # 未命中的 consumer（含 X-Mse-Consumer 为空）由过滤器回退为哨兵租户 `_unauthenticated`。
+  consumer-tenant.json: |
+    {
+      "consumer-alpha": "tenant-alpha",
+      "consumer-beta": "tenant-beta"
+    }
+  # 哨兵租户：无服务端可解析身份时使用（D-18）。该租户事件不参与租户级统计、
+  # 查询侧仅管理员可见（R-20）。
+  sentinel-tenant: "_unauthenticated"
