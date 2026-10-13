@@ -78,9 +78,16 @@ teeInfer:
   # 与管理令牌，否则 tee-infer 启动守卫会拒绝启动（fail-closed）。
   # 注：本 Chart 暂未模板化 -enclave/-admin-token，生产启用前需扩展（见部署指南）。
   devMode: true
+  # 【P1-7 T0 · A4-13】内存上调 512Mi → 1–2 Gi：
+  # 审计留痕启用 WORM 持久化（persistence.enabled）后，冷启动需扫描事件文件建立
+  # **偏移量索引**、归档与区间检索需**文件区间扫描排序缓冲**，原 512Mi 上限不足
+  # （依据本体 §10.2 A3-27 压测复核结论）。
+  # ⚠️ 当前取区间**下限** 1Gi（requests 由 128Mi 同步上调至 512Mi）——A4-13 要求
+  # 「以压测结论为准并登记实测值」，而 T11 性能基线尚未实测；待 T11 压测后回填实测值，
+  # 若实测不足则上调至 2Gi（上限）。
   resources:
-    requests: { cpu: 100m, memory: 128Mi }
-    limits: { cpu: 1000m, memory: 512Mi }
+    requests: { cpu: 100m, memory: 512Mi }
+    limits: { cpu: 1000m, memory: 1Gi }
 
 # P1-7 T0：审计 WORM 持久化（D-14 单写者形态 / D-17 落盘强度）。
 # ⚠️ 准入③：本段默认值（尤其 storageClass / size / 单写者）须与运维确认后方可上生产。
