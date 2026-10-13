@@ -103,6 +103,18 @@ var (
 	// /v1/adminext/audit-tee GET（audit:read）。
 	epAuditTee = endpointRule{domAudit, actRead, []string{roleAuditAdmin, roleAuditor}, 0}
 
+	// P1-7 T8（§6.2/§7.7）：温/冷层归档检索 GET（audit:read；同 audit-tee 口径）。
+	epAuditFullSearch = endpointRule{domAudit, actRead, []string{roleAuditAdmin, roleAuditor}, 0}
+
+	// P1-7 T8：归档导出 GET（audit:export；与 audit-chain/export 同口径，auditor 不含）。
+	epAuditFullExport = endpointRule{domAudit, actExport, []string{roleAuditAdmin, roleSystemAdmin}, 0}
+
+	// P1-7 T9（§6.4/§7.8）：留存声明读（audit:read；auditor 可读）。
+	epAuditRetentionRead = endpointRule{domAudit, actRead, []string{roleAuditAdmin, roleAuditor, roleSecAdmin}, 0}
+
+	// P1-7 T9：留存声明写（audit:write；admin，会话级 MFA）。
+	epAuditRetentionWrite = endpointRule{domAudit, actWrite, []string{roleSystemAdmin}, mfaSessionFreshness}
+
 	// /v1/adminext/changes GET（config:read；全部管理角色）。
 	epChangesRead = endpointRule{domConfig, actRead,
 		[]string{roleSystemAdmin, roleSecAdmin, roleAuditAdmin}, 0}

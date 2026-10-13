@@ -46,6 +46,7 @@ type secCenterHandler struct {
 	chain    *adminAuditChain // nil = G1 链未启用
 	settings *usageSettings   // 复用 tee-infer 地址/令牌配置
 	client   *http.Client
+	full     *auditFullHandler // P1-7 T8/T9：温/冷层检索·导出 + 留存声明（恒装配）
 }
 
 // newSecCenterHandler 装配安全中心 handler（恒注册；数据源缺失时按上述 503 语义返回）。
@@ -54,6 +55,7 @@ func newSecCenterHandler(chain *adminAuditChain, s *usageSettings) *secCenterHan
 		chain:    chain,
 		settings: s,
 		client:   &http.Client{Timeout: secCenterTimeout},
+		full:     newAuditFullHandler(s, chain),
 	}
 }
 
@@ -155,8 +157,18 @@ func (h *secCenterHandler) handleTeeAudit(w http.ResponseWriter, r *http.Request
 	q := r.URL.Query()
 	if q.Get("verify") == "1" {
 		target += "/verify"
-	} else if tenant := q.Get("tenant"); tenant != "" {
-		target += "?" + url.Values{"tenant": {tenant}}.Encode()
+	} else {
+		// P1-7 T8（§7.7）：热层查询透传 §6.2 多维参数（hit/path_mode/request_id/sort/...）。
+		pass := url.Values{}
+		for _, k := range []string{"tenant", "from", "to", "model", "status", "action",
+			"hit", "path_mode", "request_id", "limit", "offset", "sort"} {
+			if v := q.Get(k); v != "" {
+				pass.Set(k, v)
+			}
+		}
+		if enc := pass.Encode(); enc != "" {
+			target += "?" + enc
+		}
 	}
 	body, status, err := h.fetchTee(r, target, true)
 	if err != nil {

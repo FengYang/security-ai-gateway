@@ -67,6 +67,8 @@ const (
 	// P1-4 M7 套餐动作（附录 D）。
 	auditActionPlanUpgrade   = "plan_upgrade"
 	auditActionPlanDowngrade = "plan_downgrade"
+	// P1-7 T9（§6.4/§7.8）：审计留存/分层声明变更（落 G1 链，fail-closed；detail 存声明值）。
+	auditActionAuditRetentionChange = "audit_retention_change"
 )
 
 // auditAnchorInterval 每追加 N 条事件锚定一次链尾哈希。

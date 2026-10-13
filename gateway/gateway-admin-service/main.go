@@ -149,6 +149,12 @@ func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *
 		mux.HandleFunc(auditChainVerifyPath, authMiddleware(cfg, sch.handleAuditChainVerify))
 		mux.HandleFunc(auditChainExportPath, authMiddleware(cfg, sch.handleAuditChainExport))
 		mux.HandleFunc(teeAuditPath, authMiddleware(cfg, sch.handleTeeAudit))
+		// P1-7 T8/T9（§6.2/§6.4）：温/冷层检索·导出 + 留存声明读写。
+		if sch.full != nil {
+			mux.HandleFunc(auditFullSearchPath, authMiddleware(cfg, sch.full.handleAuditFullSearch))
+			mux.HandleFunc(auditFullExportPath, authMiddleware(cfg, sch.full.handleAuditFullExport))
+			mux.HandleFunc(auditRetentionPath, authMiddleware(cfg, sch.full.handleAuditRetention))
+		}
 	}
 	if cs != nil {
 		mux.HandleFunc(changeAPIBase, authMiddleware(cfg, cs.handleList))
