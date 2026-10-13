@@ -3973,6 +3973,13 @@ func main() {
 	auditAnchorInterval := flag.Duration("audit-anchor-interval", time.Hour, "审计周期锚定间隔（T10，MOD8；默认 1h；仅 -audit-anchor 配置时生效）。锚定链尾哈希供 audit-verify 复核截断（D-9）")
 	auditReportToken := flag.String("audit-report-token", "", "数据面上报只读令牌（A3-11：缺省即拒绝注册 /audit/report，fail-closed，不回落 -admin-token）")
 	auditReportTenants := flag.String("audit-report-tenants", "", "上报令牌可声明的 tenant_id 集合（逗号分隔；插件侧 A3-10 租户归属校验；缺省=网关级，服务端解析租户 D-18）")
+	// P1-7 T0（§7.1 第 6 项）：启动期自检入参。
+	// -audit-fail-closed 使 fail-closed 首次可从部署层配置——此前 SetFailClosed 无产品调用点，
+	// failClosed 恒为 false ⇒ A3-03 自检永不触发；本开关亦为 T15 租户级灰度/回退预留。
+	auditFailClosed := flag.Bool("audit-fail-closed", false, "审计写失败是否拒绝业务请求（A3-03 fail-closed）；true 时启动期自检要求 WORM 后端已装配（-audit-file），否则拒绝启动")
+	// -audit-replicas 由部署层注入（helm 按 persistence.enabled 计算实际副本数），
+	// 用于 D-14 单写者自检：进程自身无法感知 K8s 副本数。
+	auditReplicas := flag.Int("audit-replicas", 1, "本服务副本数（部署注入，须与 Deployment spec.replicas 一致；D-14 单写者自检：>1 且启用共享 PVC 时拒绝启动）")
 	auditRetention := flag.Int("audit-retention-days", defaultAuditRetentionDays, "审计/日志留存期声明（天；0=不声明；>0 须 ≥180 法定硬底）。仅声明：服务不删除审计数据（保 WORM 链完整），删除由存储层生命周期策略按本值执行")
 	tsaMode := flag.String("tsa", "mock", "RFC 3161 可信时间戳服务：mock（本地自签）| rfc3161（外部 TSA）| off（不绑定 TST）")
 	tsaRFC3161URL := flag.String("tsa-rfc3161-url", "", "外部 RFC 3161 TSA 服务 URL（-tsa rfc3161 时必填）")
@@ -4223,6 +4230,17 @@ func main() {
 			on, oe, oi)
 	} else {
 		audit = newAuditChainWithTSA(tsa)
+	}
+
+	// P1-7 T0（§7.1 第 6 项）：启动期 fail-closed 自检（D-14 单写者 / A3-03 / A3-11）。
+	// 三条判据见 audit_bootstrap.go；任一不满足即 log.Fatalf 拒绝启动。
+	audit.SetFailClosed(*auditFailClosed)
+	if err := auditStartupGuard(audit, auditStartupConfig{
+		AuditFile:   *auditFile,
+		Replicas:    *auditReplicas,
+		ReportToken: *auditReportToken,
+	}); err != nil {
+		log.Fatalf("审计启动期自检未通过（fail-closed，拒绝启动）: %v", err)
 	}
 
 	// P0-2 语义缓存 + §6.10：启动期装配运行时快照（默认 mode=off，与现网逐字节一致）。

@@ -88,6 +88,11 @@ teeInfer:
   resources:
     requests: { cpu: 100m, memory: 512Mi }
     limits: { cpu: 1000m, memory: 1Gi }
+  # 【P1-7 T0 · §7.1 第 6 项 A3-03】审计 fail-closed 开关：
+  # true = 审计写失败时拒绝业务请求；此时启动期自检要求 WORM 后端已装配
+  # （由 persistence.enabled 提供 -audit-file），否则 tee-infer **拒绝启动**。
+  # 默认 false 保持既有 fail-open 兼容行为；亦为 T15 租户级灰度/回退的总开关。
+  auditFailClosed: false
 
 # P1-7 T0：审计 WORM 持久化（D-14 单写者形态 / D-17 落盘强度）。
 # ⚠️ 准入③：本段默认值（尤其 storageClass / size / 单写者）须与运维确认后方可上生产。
