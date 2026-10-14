@@ -19,6 +19,7 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -32,6 +33,11 @@ type config struct {
 	MaxRetry   int           // 5xx/网络失败重试次数（4xx 不重试）
 	Backoff    time.Duration // 重试退避基数
 	Timeout    time.Duration // 单次上游请求超时
+	// Transform 是否把「Higress 访问日志」整形为契约记录（D-18/D-20 联调下沉，见 relay.go）。
+	// 默认 off（输入已是契约结构）；接 Fluent Bit 原始日志时置 on。
+	Transform bool
+	// MapPath consumer → tenant_id 映射表路径（TRANSFORM 模式必填，D-18 A 层解析依据）。
+	MapPath string
 }
 
 func loadConfig() (config, error) {
@@ -42,9 +48,14 @@ func loadConfig() (config, error) {
 		MaxRetry:   envIntOr("MAX_RETRY", 3),
 		Backoff:    time.Duration(envIntOr("BACKOFF_MS", 200)) * time.Millisecond,
 		Timeout:    time.Duration(envIntOr("UPSTREAM_TIMEOUT_MS", 5000)) * time.Millisecond,
+		Transform:  envBoolOr("TRANSFORM", false),
+		MapPath:    envOr("MAP_PATH", "/etc/audit-report/consumer-tenant.json"),
 	}
 	if c.Token == "" {
 		return c, errMissingToken
+	}
+	if c.Transform && c.MapPath == "" {
+		return c, errors.New("TRANSFORM=on 时 MAP_PATH 必填（D-18 租户解析依据）")
 	}
 	return c, nil
 }
