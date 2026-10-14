@@ -40,10 +40,16 @@ metadata:
 data:
   # key-auth consumer 名称 → 租户 ID。JSON 便于 Fluent Bit Lua 过滤器直接加载。
   # 未命中的 consumer（含 X-Mse-Consumer 为空）由过滤器回退为哨兵租户 `_unauthenticated`。
+  # ⚠️ 2026-10-14 复测修正：原示例值 `consumer-alpha/beta` 在实测集群中**一条都不命中**
+  #    （真实 consumer 名由 key-auth 配置为 `otpmask-customer-a/b`），会导致本应归真实租户的
+  #    403 授权拒绝全部回落哨兵 ⇒ V-13「403 归真实租户」断言失败。
+  #    已改为实测环境中真实存在的 consumer 名。**部署到其它环境时仍须按实际 consumer 名替换**
+  #    （本表是环境相关的，不可用占位值上线）。
   consumer-tenant.json: |
     {
-      "consumer-alpha": "tenant-alpha",
-      "consumer-beta": "tenant-beta"
+      "otpmask-customer-a": "tenant-a",
+      "otpmask-customer-b": "tenant-b",
+      "otpmask-customer-c": "tenant-a"
     }
   # 哨兵租户：无服务端可解析身份时使用（D-18）。该租户事件不参与租户级统计、
   # 查询侧仅管理员可见（R-20）。

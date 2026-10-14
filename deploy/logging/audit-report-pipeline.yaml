@@ -7,8 +7,8 @@
 #   ⚠️ 不复用 Promtail——`promtail.yaml` 的 clients 只送 Loki，无 HTTP output（实测）。
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# ⚠️ 状态：**联调已通过（V-13 闭合）；形态已收敛为 sidecar；仍未纳入 kustomization、未上线**
-#   （上线前置见文末：签名器镜像需由具备构建能力的环境产出）。两处未决项均已解除：
+# ⚠️ 状态：**V-13 已闭合，且已在容器 sidecar 形态下复测通过（2026-10-14）；仍未纳入 kustomization、未上线**
+#   （剩余上线前置见文末：镜像推 registry + 纳入 kustomization）。两处未决项均已解除：
 #
 # 【阻塞① · 前置实测】✅ **已完成（2026-10-14 K3s 实测，准入④ 闭合）**
 #   留证：《docs/详细设计/P1/P1-7-T2c-X-Mse-Consumer注入行为实测报告.md》。实测结论：
@@ -34,13 +34,26 @@
 # 【2026-10-14 联调结论】链路已打通、**V-13 已闭合**（auth_failed 120 / consumer_unauthorized
 #   121 / rate_limited 127，各 ≥100；403 授权拒绝子类归真实租户；签名器 dropped=0、failed=0）。
 #   形态已按 D-20 收敛为 **sidecar**（本 DaemonSet 内两个容器，127.0.0.1 本地通道，无 Service）。
+# 【2026-10-14 复测（同日稍后）】镜像到位后**以真实容器形态重跑 V-13 通过**（上一段为节点二进制
+#   替代形态）：签名器与 Fluent Bit 均为 DaemonSet 内容器，2/2 Ready，统计见文末上线前置②。
+#   复测期间为复用宿主上的 tee-infer 联调实例，测试副本临时启用了 `hostNetwork`；
+#   **本交付清单不设 hostNetwork**——生产由 Pod 经 Service 访问 tee-infer（见 AUDIT_REPORT_URL）。
 #
-# ⚠️ **上线前置（尚未完成，阻塞上线）**：
-#   ① **镜像**：`audit-sign-relay:latest` 须由具备构建能力的环境产出
-#      （`docker build -t audit-sign-relay:latest -f cmd/audit-sign-relay/Dockerfile .`）
-#      并推至集群可拉取的 registry——测试机无 docker/buildah、外网不可达，无法就地构建。
-#   ② **联调复测**：在具备镜像的环境重跑 V-13（当前联调以节点二进制替代容器）。
-#   ③ 确认后本清单方可纳入 kustomization。
+# ⚠️ **上线前置（2026-10-14 复测后更新）**：
+#   ① **镜像** ✅ **已在测试机产出并导入**：测试机已装 Docker 29.9.0（**与 K3s 隔离**——
+#      `daemon.json` 关闭 iptables/bridge/ip-forward 以免打断 K3s 网络；构建须 `--network=host`）。
+#      `audit-sign-relay:latest` 已构建（28.7 MB），经 `docker save` +
+#      `ctr -n k8s.io --address /run/k3s/containerd/containerd.sock images import` 进入 K3s，
+#      Pod 可调度（Events: "already present on machine"）。
+#      ⚠️ **仍待**：推至集群可拉取的 registry 并改用可拉取 tag——当前为**本地导入**，
+#      换节点/重建节点即失效，仅适用于单节点验证。
+#   ② **联调复测** ✅ **已完成（容器 sidecar 形态，非节点二进制替代）**：V-13 全判据闭合
+#      ——auth_failed 126 / consumer_unauthorized 126 / rate_limited 175（各 ≥100）；
+#      403 授权拒绝归真实租户 tenant-a（`consumer_map`=126），401/429 落哨兵（`unauthenticated`=301）；
+#      **反向用例**：自报 `X-Tenant-ID: tenant-FAKE` 在链上 **0 条**；
+#      签名器 batches=17 / items=427 / forwarded=17 / **dropped=0 / failed=0** / 上游 200。
+#      复测另暴露并修正本清单 **4 处缺陷**（fluent-bit 镜像、日志 Path、SA、映射表），见各处 ⚠️ 注释。
+#   ③ **仍待**：推 registry + 纳入 kustomization 后方可上线。
 # ─────────────────────────────────────────────────────────────────────────────
 
 ---
@@ -114,10 +127,13 @@ data:
         Parsers_File /fluent-bit/etc/parsers.conf
 
     # 采集：Higress 网关访问日志（随 Pod stdout 落 /var/log/pods）。
-    # ⚠️ Path 需按集群实际 Pod 命名/标签调整（此处为 higress-system 命名空间下 envoy-gateway）。
+    # ⚠️ 2026-10-14 复测修正：原 Path 为 `higress-system_envoy-gateway*`，而实际网关 Pod 名为
+    #    `higress-gateway-<rs>-<pod>`、容器名为 `higress-gateway` ⇒ **原路径一个文件都匹配不到**
+    #    （Fluent Bit 日志可见 inotify 无任何文件加入），管道静默无输出。已按实测路径修正。
+    #    仍提醒：Path 需按集群实际 Pod 命名/容器名调整（多副本网关由 glob 覆盖）。
     [INPUT]
         Name              tail
-        Path              /var/log/pods/higress-system_envoy-gateway*/*/*.log
+        Path              /var/log/pods/higress-system_higress-gateway-*/higress-gateway/*.log
         Tag               gateway.access
         Parser            cri
         Refresh_Interval  5
@@ -182,12 +198,20 @@ spec:
       labels:
         app: audit-report-pipeline
     spec:
-      serviceAccountName: promtail   # 复用既有日志采集 SA（仅需读取 /var/log/pods）
+      # ⚠️ 2026-10-14 复测修正：原值 `promtail` 在 otpmask 命名空间下**不存在**（既有 promtail
+      #    SA 位于 higress-system），按原值部署 Pod 会因 SA 缺失而创建失败。改用 default。
+      #    待办：若需最小权限，另行创建专用 SA 并绑定仅读 /var/log/pods 的 RBAC（纳入 T14）。
+      serviceAccountName: default
       tolerations:
         - operator: Exists
       containers:
         - name: fluent-bit
-          image: cr.fluentbit.io/fluentbit/fluent-bit:3.1
+          # ⚠️ 2026-10-14 复测修正：`cr.fluentbit.io/fluentbit/fluent-bit:{3.1,3.2.2}` 实测均
+          #    **解析失败**（manifest not found），按原值部署必然 ImagePullBackOff。
+          #    改用 docker.io 官方镜像 `fluent/fluent-bit:3.2.2`（已验证可拉取并跑通 V-13）。
+          #    离线/内网环境：须预置镜像，或 `docker save` + `ctr -n k8s.io images import` 导入。
+          image: fluent/fluent-bit:3.2.2
+          imagePullPolicy: IfNotPresent
           # ⚠️ 资源占用纳入 T11 性能基线（A4-11）；不得与网关同机争抢（D-19 约束②）。
           resources:
             requests: { cpu: 50m, memory: 64Mi }
