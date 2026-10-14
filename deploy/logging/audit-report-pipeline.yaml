@@ -7,7 +7,8 @@
 #   ⚠️ 不复用 Promtail——`promtail.yaml` 的 clients 只送 Loki，无 HTTP output（实测）。
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# ⚠️ 状态：**草案（未纳入 kustomization，未联调验证）**——两处未决项中 ① 已解除、② 已裁决：
+# ⚠️ 状态：**联调已通过（V-13 闭合）；形态已收敛为 sidecar；仍未纳入 kustomization、未上线**
+#   （上线前置见文末：签名器镜像需由具备构建能力的环境产出）。两处未决项均已解除：
 #
 # 【阻塞① · 前置实测】✅ **已完成（2026-10-14 K3s 实测，准入④ 闭合）**
 #   留证：《docs/详细设计/P1/P1-7-T2c-X-Mse-Consumer注入行为实测报告.md》。实测结论：
@@ -28,12 +29,34 @@
 #   量级 < 100 行，属投递适配器而非采集引擎（不违反 D-19 精神），复用同一上报令牌
 #   ⇒ **不新增信任边界、不改动 tee-infer 既有上报契约（避免重跑 T12 四域安全测试）**。
 #   后备：若 mTLS 落地（依赖 P1-5 国密 TLS）或运维拒绝新增组件，回退评估候选 (i) 端点变体。
-#   ⇒ 本文件给出「采集 + 整形 + 租户解析」的确定性部分；OUTPUT 段按候选 (ii) 预留。
+#   ⇒ 本文件给出「采集 + 筛选」的确定性部分；整形与租户解析由 sidecar 签名器承担。
 #
-# ⚠️ **剩余未决（阻塞 T2c 上线，V-13 未闭合）**：极薄签名器尚未实现、管道尚未联调、
-#   401/403/429 各 ≥100 次的 V-13 实测未执行 ⇒ **仍不得纳入 kustomization、不得上线**。
+# 【2026-10-14 联调结论】链路已打通、**V-13 已闭合**（auth_failed 120 / consumer_unauthorized
+#   121 / rate_limited 127，各 ≥100；403 授权拒绝子类归真实租户；签名器 dropped=0、failed=0）。
+#   形态已按 D-20 收敛为 **sidecar**（本 DaemonSet 内两个容器，127.0.0.1 本地通道，无 Service）。
+#
+# ⚠️ **上线前置（尚未完成，阻塞上线）**：
+#   ① **镜像**：`audit-sign-relay:latest` 须由具备构建能力的环境产出
+#      （`docker build -t audit-sign-relay:latest -f cmd/audit-sign-relay/Dockerfile .`）
+#      并推至集群可拉取的 registry——测试机无 docker/buildah、外网不可达，无法就地构建。
+#   ② **联调复测**：在具备镜像的环境重跑 V-13（当前联调以节点二进制替代容器）。
+#   ③ 确认后本清单方可纳入 kustomization。
 # ─────────────────────────────────────────────────────────────────────────────
 
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: audit-report-token
+  namespace: otpmask
+  labels:
+    app: audit-report-pipeline
+type: Opaque
+stringData:
+  # ⚠️ 占位值，部署前必须替换；生产应改用 SealedSecret / 外部密钥管理，**禁止明文入库**。
+  # 令牌须与 tee-infer 的 -audit-report-token 一致；**不得回落管理令牌**（A3-11）。
+  AUDIT_REPORT_TOKEN: "CHANGE_ME_AUDIT_REPORT_TOKEN"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -42,52 +65,25 @@ metadata:
   labels:
     app: audit-report-pipeline
 data:
-  # 记录整形 + 租户两层解析（D-18 v1.13）；见 deploy/logging/audit_replay.lua（同源，**以文件为准**）。
-  # ⚠️ 2026-10-14 实测修订见该文件：403 须按 response_code_details 区分「授权拒绝 / IP 封禁」子类，
-  #    且 429/403-IP/401 实测拿不到 consumer（详见同目录实测报告）。本内嵌副本仅为自包含兜底。
+  # ⚠️ 本内嵌副本须与 deploy/logging/audit_replay.lua **保持一致**（以文件为准）。
+  #    2026-10-14 联调后该函数已由「整形器」收敛为「筛选器」，整形/租户解析下沉到签名器。
   audit_replay.lua: |
-    -- 与本目录 audit_replay.lua 同源；kustomize 部署时以文件为准，此处为自包含副本。
-    local MAP_PATH = "/fluent-bit/scripts/consumer-tenant.json"
-    local SENTINEL = "_unauthenticated"
-    local consumer_map = nil
-    local function load_map()
-      consumer_map = {}
-      local f = io.open(MAP_PATH, "r")
-      if not f then return end
-      local raw = f:read("*a"); f:close()
-      for k, v in string.gmatch(raw, '"([^"]+)"%s*:%s*"([^"]*)"') do consumer_map[k] = v end
-    end
-    local function map_result(code)
-      code = tostring(code or "")
-      if code == "429" then return "rate_limited" end
-      if code == "401" then return "auth_failed" end
-      if code == "403" then return "ip_blocked" end
-      return nil
-    end
-    local function resolve_tenant(consumer)
-      if consumer ~= nil and consumer ~= "" then
-        if consumer_map == nil then load_map() end
-        local t = consumer_map[consumer]
-        if t ~= nil and t ~= "" then return t, "consumer_map" end
-      end
-      return SENTINEL, "unauthenticated"
-    end
+    -- 与 deploy/logging/audit_replay.lua 同源；kustomize 部署时以文件为准，此处为自包含副本。
+    -- P1-7 T2c（D-18/D-20）：Fluent Bit Lua **筛选器**——只放行数据面拒绝（401/403/429）。
+    --
+    -- ⚠️ 2026-10-14 联调修正（勿回退）：
+    --   1) 该过滤器**不允许替换 record**（返回新表 ⇒ invalid table returned）；
+    --   2) 丢弃必须用 **return -1**（单值），用 return 2 同样触发上述错误；
+    --   ⇒ 故整形与租户解析下沉到极薄签名器（cmd/audit-sign-relay，TRANSFORM=on）。
+    local REPLAY_CODES = { ["401"] = true, ["403"] = true, ["429"] = true }
+
     function replay_filter(tag, timestamp, record)
-      local result = map_result(record["response_code"])
-      if result == nil then return 2 end
-      local tenant, resolution = resolve_tenant(record["x_mse_consumer"])
-      record["audit_report_item"] = {
-        request_id = record["request_id"] or "",
-        tenant_id = tenant,
-        path = record["path"] or "",
-        path_mode = "plain",
-        http_status = tonumber(record["response_code"]) or 0,
-        result = result,
-        timestamp_ns = (tonumber(record["date"]) or 0) * 1000000000,
-        dur_ms = tonumber(record["duration"]) or 0,
-        tenant_id_resolution = resolution,
-      }
-      return 1, timestamp, record
+      local code = tostring(record["response_code"] or "")
+      if not REPLAY_CODES[code] then
+        return -1
+      end
+      record["audit_replay"] = "1"
+      return 2, timestamp, record
     end
 ---
 apiVersion: v1
@@ -150,23 +146,25 @@ data:
         script  /fluent-bit/scripts/audit_replay.lua
         call    replay_filter
 
-    # 【OUTPUT 段 · 按 D-20 候选 (ii) 定稿形态，仍注释未启用（联调后开启）】
-    # 关键差异：OUTPUT **不再直连 tee-infer**，而是投递到**同 Pod 的极薄签名器**
+    # 【OUTPUT 段 · 按 D-20 候选 (ii)；签名器为**同 Pod 的 sidecar**，走 127.0.0.1 本地通道】
+    # 关键差异：OUTPUT **不直连 tee-infer**，而是投递到同 Pod 内的极薄签名器
     # （`audit-sign-relay`，实现见 `cmd/audit-sign-relay/`），由它整形 + HMAC 签名后转发。
     # 理由：Fluent Bit 在输出阶段重新序列化，Lua 过滤器无法对最终字节签名；
     #      其内置 http output 亦不能产出 `{"reports":[...]}` 包裹结构。
     #
-    # ⚠️ 生产形态：签名器为**本 DaemonSet Pod 的 sidecar**，Host 取 127.0.0.1（本地通道，D-20）。
-    #    联调阶段可先指向独立 Deployment 的 Service（见 audit-sign-relay.yaml 的形态说明），
-    #    联调通过后改回 sidecar 并删除该独立 Deployment/Service。
-    # [OUTPUT]
-    #     Name        http
-    #     Match       gateway.access
-    #     Host        127.0.0.1
-    #     Port        9090
-    #     URI         /audit/batch
-    #     Format      json_stream
-    #     # 不上报令牌、不签名——这两项由签名器负责（令牌不经过 Fluent Bit 配置，缩小暴露面）
+    # ⚠️ 形态已按 D-20 收敛：**不再存在独立 Deployment / Service**（原 audit-sign-relay.yaml 已删除）。
+    #    理由（2026-10-14 复盘）：独立 Deployment + ClusterIP Service 会让集群内任意 Pod
+    #    都能向签名器投递——而签名器自身不鉴权、会用自己令牌签任何收到的内容 ⇒
+    #    等同于开放一个「任意事件注入审计链」的入口（A3-10 要防的证据投毒）。
+    [OUTPUT]
+        Name        http
+        Match       gateway.access
+        Host        127.0.0.1
+        Port        9090
+        URI         /audit/batch
+        Format      json_lines
+        Retry_Limit 3
+        # 不上报令牌、不签名——这两项由同 Pod 的签名器负责（令牌不经过 Fluent Bit 配置）
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -212,6 +210,54 @@ spec:
               readOnly: true
             - name: buffer
               mountPath: /var/lib/fluent-bit
+        # ── 极薄签名器（D-20 候选 ii）：与 Fluent Bit 同 Pod，仅经 127.0.0.1 通信 ──
+        - name: audit-sign-relay
+          image: audit-sign-relay:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # 只监听 Pod 内回环地址 ⇒ 不对外暴露任何入口（无 Service）
+            - name: LISTEN_ADDR
+              value: "127.0.0.1:9090"
+            - name: AUDIT_REPORT_URL
+              value: "http://tee-infer-service.otpmask.svc.cluster.local:19090/audit/report"
+            - name: AUDIT_REPORT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: audit-report-token
+                  key: AUDIT_REPORT_TOKEN
+            # TRANSFORM=on：由签名器完成整形 + 租户解析（Lua 侧受 Fluent Bit 约束无法替换 record）
+            - name: TRANSFORM
+              value: "on"
+            - name: MAP_PATH
+              value: "/etc/audit-report/consumer-tenant.json"
+            - name: MAX_RETRY
+              value: "3"
+            - name: BACKOFF_MS
+              value: "200"
+            - name: UPSTREAM_TIMEOUT_MS
+              value: "5000"
+          ports:
+            - name: relay
+              containerPort: 9090
+          readinessProbe:
+            httpGet: { path: /healthz, port: 9090 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 9090 }
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: tenant-map
+              mountPath: /etc/audit-report/consumer-tenant.json
+              subPath: consumer-tenant.json
+              readOnly: true
       volumes:
         - name: config
           configMap: { name: audit-report-pipeline-config }
