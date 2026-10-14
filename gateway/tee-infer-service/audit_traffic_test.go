@@ -135,6 +135,51 @@ func TestT2aIdempotent(t *testing.T) {
 	}
 }
 
+// TestT2aConsumerUnauthorizedAccepted 【T-4 · v1.13】403 路由授权拒绝子类
+// `result=consumer_unauthorized` 须被白名单接受并落链。
+//
+// 依据《P1-7-T2c-X-Mse-Consumer注入行为实测报告》（2026-10-14 K3s 实测）：403 存在两个
+// 语义与归属均不同的子类（Unauthorized_consumer 可归真实租户 / ip_not_allowed 落哨兵），
+// 若该值不在白名单 ⇒ 整批校验判 400 ⇒ V-13 不可达。
+func TestT2aConsumerUnauthorizedAccepted(t *testing.T) {
+	s := pluginServer(t)
+	now := time.Now().UnixNano()
+	items := []auditReportItem{{
+		RequestID: "req-authz-deny", TenantID: "t-001", Path: "/infer", PathMode: "plain",
+		HTTPStatus: 403, Result: "consumer_unauthorized", TimestampNS: now,
+	}}
+	raw, _ := buildReportBody(t, items)
+	w := doReport(t, s, raw, map[string]string{
+		adminHeader:          testReportToken,
+		"X-Audit-Report-Sig": signReport(t, testReportToken, raw),
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200（consumer_unauthorized 为白名单值），实际 %d: %s", w.Code, w.Body.String())
+	}
+	if len(s.audit.events) != 1 {
+		t.Fatalf("期望落链 1 条，实际 %d", len(s.audit.events))
+	}
+	if got := s.audit.events[0].Result; got != "consumer_unauthorized" {
+		t.Fatalf("落链 result 不符：期望 consumer_unauthorized，实际 %q", got)
+	}
+}
+
+// TestT2aWhitelistComplete 白名单全集防回归：7 项齐备且无多余项（§6.5 v1.13）。
+func TestT2aWhitelistComplete(t *testing.T) {
+	want := []string{
+		"rate_limited", "auth_failed", "ip_blocked", "consumer_unauthorized",
+		"cache_hit_dataplane", "non_infer", "ok",
+	}
+	if len(auditReportResultWhitelist) != len(want) {
+		t.Fatalf("白名单项数不符：期望 %d，实际 %d", len(want), len(auditReportResultWhitelist))
+	}
+	for _, r := range want {
+		if !auditReportResultWhitelist[r] {
+			t.Fatalf("白名单缺项：%q", r)
+		}
+	}
+}
+
 // TestT2aInvalidResult400 白名单外 result → 整批 400。
 func TestT2aInvalidResult400(t *testing.T) {
 	s := pluginServer(t)

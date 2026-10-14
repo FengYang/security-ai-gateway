@@ -36,7 +36,7 @@ type auditReportItem struct {
 	Path        string `json:"path,omitempty"`
 	PathMode    string `json:"path_mode,omitempty"` // plain | encrypted
 	HTTPStatus  int    `json:"http_status,omitempty"`
-	Result      string `json:"result"` // 6 项白名单（见 auditReportResultWhitelist）
+	Result      string `json:"result"` // 7 项白名单（见 auditReportResultWhitelist；v1.13 增补 consumer_unauthorized）
 	HitPolicies string `json:"hit_policies,omitempty"`
 	TimestampNS int64  `json:"timestamp_ns,omitempty"` // 上报时刻（数据面时钟，Unix 纳秒）；用于 5 分钟重放窗校验
 	DurMS       int    `json:"dur_ms,omitempty"`
@@ -48,14 +48,24 @@ type auditReport struct {
 	Reports []auditReportItem `json:"reports"`
 }
 
-// auditReportResultWhitelist 上报侧 result 严格白名单（§6.5，冻结全集，实施时不得新增）。
+// auditReportResultWhitelist 上报侧 result 严格白名单（§6.5）。
+//
+// ⚠️ v1.13 由 6 项增为 7 项（T-4）：新增 consumer_unauthorized，用于承载 403 的
+// **路由授权拒绝**子类（consumer 不在 allow 列表）。
+// 依据《P1-7-T2c-X-Mse-Consumer注入行为实测报告》（2026-10-14 K3s 实测）：
+//   - 403 存在两个语义与归属均不同的子类，须按 response_code_details 区分：
+//     Unauthorized_consumer（授权拒绝，**唯一可归真实租户**的拒绝子类）
+//     vs ip_not_allowed（IP 封禁，实测拿不到 consumer ⇒ 哨兵租户）；
+//   - 若沿用 ip_blocked 承载授权拒绝，将造成语义污染（可归属事件被记为不可归属），
+//     且白名单外取值会被整批校验判 400 ⇒ V-13 不可达。
 var auditReportResultWhitelist = map[string]bool{
-	"rate_limited":        true, // 限流拒绝（D-15，→ hit）
-	"auth_failed":         true, // 鉴权失败 401（D-15，→ hit）
-	"ip_blocked":          true, // IP 封禁 403（D-15，→ hit）
-	"cache_hit_dataplane": true, // 数据面缓存命中（→ miss）
-	"non_infer":           true, // 非推理请求（→ miss）
-	"ok":                  true, // 正常到达 TEE 前的补充上报（→ miss）
+	"rate_limited":          true, // 限流拒绝 429（D-15，→ hit）
+	"auth_failed":           true, // 鉴权失败 401（D-15，→ hit）
+	"ip_blocked":            true, // IP 封禁 403（D-15，→ hit）
+	"consumer_unauthorized": true, // 【v1.13 新增·T-4】路由授权拒绝 403（consumer 不在 allow，→ hit）
+	"cache_hit_dataplane":   true, // 数据面缓存命中（→ miss）
+	"non_infer":             true, // 非推理请求（→ miss）
+	"ok":                    true, // 正常到达 TEE 前的补充上报（→ miss）
 }
 
 // auditReportMaxBatch 单批条数上限（§6.5 validate）。

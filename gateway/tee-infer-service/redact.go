@@ -124,7 +124,8 @@ func redactEvent(e *AuditEvent) *AuditEvent {
 // （A3-20/R-17，避免与 C-3/C-7 冲突）。
 
 // knownResultExact 已知合法 result 取值（精确匹配）。覆盖：TEE 实测冻结集（§6.1(D)）+ 数据面
-// 上报 6 项白名单（§6.5）+ 既有 deny/would_reject + T3b 新增出口的精确取值。
+// 上报 7 项白名单（§6.5；v1.13 由 6 项增补 consumer_unauthorized，T-4）
+// + 既有 deny/would_reject + T3b 新增出口的精确取值。
 var knownResultExact = map[string]bool{
 	"ok": true, "deny": true, "would_reject": true,
 	"route_rejected": true, "unknown_nonce": true, "quota_exceeded": true,
@@ -134,6 +135,8 @@ var knownResultExact = map[string]bool{
 	"cache_negative": true, "cache_hit": true, "cache_hit_dataplane": true,
 	"output_blocked": true, "output_masked": true, "shadow_reject": true,
 	"rate_limited": true, "auth_failed": true, "ip_blocked": true,
+	// 【v1.13 新增·T-4】403 路由授权拒绝子类（实测可归真实租户），与 ip_blocked 语义相反。
+	"consumer_unauthorized": true,
 	"non_infer": true, "quota_deny": true, "rpm_limit": true,
 	"tpm_limit": true, "daily_budget": true,
 	// T3b：请求体超限（limitBody 413）。
