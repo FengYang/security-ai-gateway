@@ -56,6 +56,14 @@ spec:
         {{- if .Values.teeInfer.auditFailClosed }}
         - "-audit-fail-closed"
         {{- end }}
+        # P1-7 T15（§7.10）：租户级灰度开关（启动档位；运行时切换走 PUT /audit/canary）。
+        # all=全量（缺省）；canary=仅名单内租户留痕；off=一键回退（控制类事件仍落链）。
+        - "-audit-canary"
+        - "{{ .Values.teeInfer.auditCanary | default "all" }}"
+        {{- if .Values.teeInfer.auditCanaryTenants }}
+        - "-audit-canary-tenants"
+        - "{{ .Values.teeInfer.auditCanaryTenants }}"
+        {{- end }}
         {{- if .Values.teeInfer.engineUrl }}
         - "-engine-url"
         - "{{ .Values.teeInfer.engineUrl }}"

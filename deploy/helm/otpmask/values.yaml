@@ -93,6 +93,13 @@ teeInfer:
   # （由 persistence.enabled 提供 -audit-file），否则 tee-infer **拒绝启动**。
   # 默认 false 保持既有 fail-open 兼容行为；亦为 T15 租户级灰度/回退的总开关。
   auditFailClosed: false
+  # 【P1-7 T15 · §7.10】租户级审计灰度开关（启动档位；运行时切换走 PUT /audit/canary）：
+  #   all    = 全量留痕（缺省，生产终态；与未装配本开关行为一致）
+  #   canary = 仅 auditCanaryTenants 名单内租户留痕（上线灰度；空名单拒绝启动）
+  #   off    = 一键回退：租户归属事件不落链（控制类事件仍落链；已归档数据不回删）
+  # 回退 SOP 见《P1-7-T15-审计灰度与回退SOP.md》。
+  auditCanary: all
+  auditCanaryTenants: "" # canary 档名单（逗号分隔），如 "tenant-a,tenant-b"
 
 # P1-7 T0：审计 WORM 持久化（D-14 单写者形态 / D-17 落盘强度）。
 # ⚠️ 准入③：本段默认值（尤其 storageClass / size / 单写者）须与运维确认后方可上生产。

@@ -99,6 +99,8 @@ type otpmaskMetrics struct {
 	auditReportDropped map[string]int64
 	// TEE 侧非登记 result 取值计数（counter，A3-20/R-17；不改链、不拒落链，仅登记告警）。
 	auditUnregisteredResult int64
+	// T15：租户级灰度跳过的事件数（counter，无标签；canary/off 档累计，见 audit_canary.go）。
+	auditCanarySkipped int64
 	// C 类豁免出口计数（counter，handler|reason；T3b §7.3③：豁免项以聚合指标计数而非逐条落链）。
 	auditExemptExit map[string]int64
 	ogCanaryProbe      int64            // P0-3 策略 C：canary 探测句走完整 L2 的次数
@@ -248,6 +250,13 @@ func (m *otpmaskMetrics) incWormWriteFail(policy string) {
 func (m *otpmaskMetrics) incAuditFailClosedReject() {
 	m.mu.Lock()
 	m.auditFailClosedReject++
+	m.mu.Unlock()
+}
+
+// incAuditCanarySkipped 记录一次被租户级灰度跳过的事件（T15；counter 无标签）。
+func (m *otpmaskMetrics) incAuditCanarySkipped() {
+	m.mu.Lock()
+	m.auditCanarySkipped++
 	m.mu.Unlock()
 }
 
@@ -595,6 +604,11 @@ func (m *otpmaskMetrics) render(w io.Writer, auditEvents int) {
 	if m.auditFailClosedReject > 0 {
 		fmt.Fprintf(w, "# HELP otpmask_audit_failclosed_rejected_total 审计 fail-closed 模式下因 WORM 写入失败拒绝的请求数\n# TYPE otpmask_audit_failclosed_rejected_total counter\n")
 		fmt.Fprintf(w, "otpmask_audit_failclosed_rejected_total %d\n", m.auditFailClosedReject)
+	}
+	// P1-7 T15：租户级灰度跳过（counter 无标签；>0 表示处于 canary/off 档且有事件被过滤）
+	if m.auditCanarySkipped > 0 {
+		fmt.Fprintf(w, "# HELP otpmask_audit_canary_skipped_total 租户级灰度跳过的事件数（T15；canary 名单外 / off 档累计，无标签防基数爆炸）\n# TYPE otpmask_audit_canary_skipped_total counter\n")
+		fmt.Fprintf(w, "otpmask_audit_canary_skipped_total %d\n", m.auditCanarySkipped)
 	}
 	// ---- P1-7 全流量审计改造（T7，MOD5 容量管控；附加指标族，既有族不变，C-9）----
 	fmt.Fprintf(w, "# HELP otpmask_audit_bytes 审计 WORM 累计写入字节数（gauge，单调递增）\n# TYPE otpmask_audit_bytes gauge\n")

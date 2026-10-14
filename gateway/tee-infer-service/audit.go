@@ -210,6 +210,16 @@ type auditChain struct {
 	// onFailClosedReject：fail-closed 模式下因写失败拒绝请求的计数（M-8 指标）。
 	// 唯一生产点：appendOrFail。
 	onFailClosedReject func()
+	// onCanarySkip：租户级灰度跳过事件的计数回调（T15 指标；append 过滤路径调用）。
+	onCanarySkip func()
+	// ---- P1-7 T15（§7.10）：租户级灰度开关（audit_canary.go）----
+	// canaryMode：灰度档位（all 缺省 | canary 名单灰度 | off 一键回退）。
+	// canaryTenants：canary 档生效的名单（nil = 空名单；canary 档拒绝空名单）。
+	// canarySkipped：累计被灰度跳过的事件数（counter，无标签）。
+	// 三者均由 c.mu 保护（与 append 同锁，见 audit_canary.go 头注锁口径）。
+	canaryMode     canaryMode
+	canaryTenants  map[string]bool
+	canarySkipped  uint64
 }
 
 // SetWriteFailureHook 设置审计链写入失败回调（启动期调用；P0-2 §9.1 #16）。
@@ -248,6 +258,9 @@ func (c *auditChain) SetWormWriteFailHook(fn func(policy string)) { c.onWormWrit
 // 启动期一次性设置。
 func (c *auditChain) SetFailClosedRejectHook(fn func()) { c.onFailClosedReject = fn }
 
+// SetCanarySkipHook 设置灰度跳过计数回调（P1-7 T15 指标；启动期一次性设置）。
+func (c *auditChain) SetCanarySkipHook(fn func()) { c.onCanarySkip = fn }
+
 // WormFsyncInfo 返回 WORM 落盘强度档位与累计 fsync 次数（只读；P1-7 T0 / D-17，供 /config 暴露）。
 // ok=false 表示当前非 fileWorm 后端（纯内存或其它后端），调用方按「未启用」如实呈现。
 func (c *auditChain) WormFsyncInfo() (mode string, every int, interval string, count uint64, ok bool) {
@@ -265,11 +278,13 @@ func (c *auditChain) WormFsyncInfo() (mode string, every int, interval string, c
 func newInstanceID() string { return "inst-" + randHex(8) }
 
 // newAuditChain 构造内存审计链。
-func newAuditChain() *auditChain { return &auditChain{instanceID: newInstanceID()} }
+func newAuditChain() *auditChain {
+	return &auditChain{instanceID: newInstanceID(), canaryMode: canaryAll}
+}
 
 // newAuditChainWithTSA 构造内存审计链（绑定 RFC 3161 TSA）。
 func newAuditChainWithTSA(tsa TSASigner) *auditChain {
-	return &auditChain{tsa: tsa, instanceID: newInstanceID()}
+	return &auditChain{tsa: tsa, instanceID: newInstanceID(), canaryMode: canaryAll}
 }
 
 // newAuditChainWORM 构造 WORM 持久化审计链（默认落盘强度 = D-17 档：每 1000 条或 1 秒）。
@@ -289,7 +304,7 @@ func newAuditChainWORMWithConfig(path, anchorPath string, cfg WormFsyncConfig) (
 	if err != nil {
 		return nil, err
 	}
-	c := &auditChain{worm: wb, instanceID: newInstanceID()}
+	c := &auditChain{worm: wb, instanceID: newInstanceID(), canaryMode: canaryAll}
 	if err := c.load(path); err != nil {
 		_ = wb.Close()
 		return nil, err
@@ -341,6 +356,11 @@ func (c *auditChain) load(path string) error {
 func (c *auditChain) append(e AuditEvent) AuditEvent {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// P1-7 T15：租户级灰度过滤（控制类事件 tenant 空/"-" 恒放过；其余按档位）。
+	// 跳过的事件不构造哈希、不写 WORM、不进链，但**不报错**——回退不得破坏业务。
+	if !c.canaryAllowsLocked(e.TenantID) {
+		return e
+	}
 	e.PrevHash = c.lastHex
 	// P1-7 T2a（§6.5）：调用方显式设置 Timestamp（数据面上报携带 timestamp_ns）时
 	// 予以保留（取证用原始上报时刻）；否则取落链时刻。零值判定保证既有 30 处
