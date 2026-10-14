@@ -150,17 +150,23 @@ data:
         script  /fluent-bit/scripts/audit_replay.lua
         call    replay_filter
 
-    # ⚠️ OUTPUT 段待「阻塞② 签名缺口」定案后启用（候选 (ii)：极薄签名器）。
-    # 下列仅为形态示意，当前**不启用**（注释）：
+    # 【OUTPUT 段 · 按 D-20 候选 (ii) 定稿形态，仍注释未启用（联调后开启）】
+    # 关键差异：OUTPUT **不再直连 tee-infer**，而是投递到**同 Pod 的极薄签名器**
+    # （`audit-sign-relay`，实现见 `cmd/audit-sign-relay/`），由它整形 + HMAC 签名后转发。
+    # 理由：Fluent Bit 在输出阶段重新序列化，Lua 过滤器无法对最终字节签名；
+    #      其内置 http output 亦不能产出 `{"reports":[...]}` 包裹结构。
+    #
+    # ⚠️ 生产形态：签名器为**本 DaemonSet Pod 的 sidecar**，Host 取 127.0.0.1（本地通道，D-20）。
+    #    联调阶段可先指向独立 Deployment 的 Service（见 audit-sign-relay.yaml 的形态说明），
+    #    联调通过后改回 sidecar 并删除该独立 Deployment/Service。
     # [OUTPUT]
     #     Name        http
     #     Match       gateway.access
-    #     Host        tee-infer-service.otpmask.svc
-    #     Port        19090
-    #     URI         /audit/report
+    #     Host        127.0.0.1
+    #     Port        9090
+    #     URI         /audit/batch
     #     Format      json_stream
-    #     Header      X-Admin-Token ${AUDIT_REPORT_TOKEN}
-    #     # Header    X-Audit-Report-Sig <待候选方案产生>
+    #     # 不上报令牌、不签名——这两项由签名器负责（令牌不经过 Fluent Bit 配置，缩小暴露面）
 ---
 apiVersion: apps/v1
 kind: DaemonSet
