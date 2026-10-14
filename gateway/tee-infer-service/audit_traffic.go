@@ -41,6 +41,11 @@ type auditReportItem struct {
 	TimestampNS int64  `json:"timestamp_ns,omitempty"` // 上报时刻（数据面时钟，Unix 纳秒）；用于 5 分钟重放窗校验
 	DurMS       int    `json:"dur_ms,omitempty"`
 	Model       string `json:"model,omitempty"`
+	// TenantIDResolution 回灌侧的租户解析方式证据字段（D-18 v1.13 / T-4）。
+	// 取值：consumer_map（签名器按 consumer→tenant 映射表解析为真实租户）
+	//     ｜ unauthenticated（无服务端可解析身份，落哨兵租户）。
+	// ⚠️ 仅回灌侧（gateway 模式）有效；不进 hash（证据字段）。
+	TenantIDResolution string `json:"tenant_id_resolution,omitempty"`
 }
 
 // auditReport 上报请求体（批量）。
@@ -227,10 +232,19 @@ func (s *teeServer) handleAuditReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 回灌侧（D-18）：读取数据面经 key-auth 注入的 consumer 标识，作为租户解析线索
-	// （真实 consumer→tenant 映射表由 T2c deliverable deploy/logging/consumer-tenant-map.yaml 落地；
-	// 本任务未装配映射表，故暂落哨兵租户 + TenantIDResolution 标记，待 T2c 接入后改为真实解析）。
-	consumer := r.Header.Get("X-Mse-Consumer")
+	// 【回灌侧租户解析（D-18 v1.13 / T-4 补齐）】
+	// 原实现从**本请求的 X-Mse-Consumer 头**读 consumer 线索——该头是网关转发给上游时注入的，
+	// 回灌上报由签名器发起，**请求里根本没有该头** ⇒ consumer 恒为空；且随后无条件把
+	// TenantID 覆盖为哨兵（2026-10-14 联调实测：122 条 403 授权拒绝全部落哨兵，与实测结论矛盾）。
+	//
+	// 修正：consumer→tenant 映射由**极薄签名器**（cmd/audit-sign-relay，持有映射表、有单测覆盖）
+	// 完成，随事件以 tenant_id + tenant_id_resolution 上报；服务端只做**一致性裁决**
+	// （不重算映射，避免映射表两处维护）：
+	//   · consumer_map      → 采用上报 tenant_id（须非空且非哨兵，否则降级为哨兵）
+	//   · unauthenticated   → 落哨兵租户
+	//   · 其它/缺失         → 视为未解析，落哨兵并置 unauthenticated
+	// 信任依据：签名器与 tee-infer 之间为本地通道 + HMAC 令牌（D-20 论证不新增信任边界），
+	// 属服务端侧组件，不等同于客户端/插件自报（A3-10 的"不信任自报"仍然成立）。
 
 	now := time.Now()
 	reporterID := "tok-" + reporterHash8(s.auditReportToken)
@@ -266,14 +280,24 @@ func (s *teeServer) handleAuditReport(w http.ResponseWriter, r *http.Request) {
 		if it.TimestampNS != 0 {
 			ev.Timestamp = it.TimestampNS
 		}
-		// 网关/回灌侧：服务端解析租户，不信任自报（D-18 分型②）。
+		// 网关/回灌侧：按签名器给出的解析证据裁决（D-18 v1.13 / T-4）。
 		if !pluginMode {
-			if consumer != "" {
-				ev.TenantIDResolution = "consumer_map" // T2c 映射表将据此解析真实租户
-			} else {
+			switch it.TenantIDResolution {
+			case "consumer_map":
+				// 签名器已按 consumer→tenant 映射表解析成功 → 采用真实租户；
+				// 若上报值异常（空或哨兵）则降级为哨兵，杜绝伪报。
+				if it.TenantID != "" && it.TenantID != auditReportSentinelTenant {
+					ev.TenantID = it.TenantID
+					ev.TenantIDResolution = "consumer_map"
+				} else {
+					ev.TenantID = auditReportSentinelTenant
+					ev.TenantIDResolution = "unauthenticated"
+				}
+			default:
+				// unauthenticated / 缺失 / 非法值 → 一律落哨兵（不伪报租户）
+				ev.TenantID = auditReportSentinelTenant
 				ev.TenantIDResolution = "unauthenticated"
 			}
-			ev.TenantID = auditReportSentinelTenant
 		}
 		s.audit.append(ev)
 		newly++

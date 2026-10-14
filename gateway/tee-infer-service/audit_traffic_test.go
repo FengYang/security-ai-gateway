@@ -23,10 +23,10 @@ func signReport(t *testing.T, token string, body []byte) string {
 // newReportServer 构造带内存审计链的上报端点测试 server（plugin 模式，绑定 t-001/t-002）。
 func newReportServer(token string, tenants map[string]bool) *teeServer {
 	s := &teeServer{
-		auditReportToken:  token,
+		auditReportToken:   token,
 		auditReportTenants: tenants,
-		auditReports:      newShadowReportState(shadowReportTTL, shadowReportMax),
-		audit:             newAuditChain(),
+		auditReports:       newShadowReportState(shadowReportTTL, shadowReportMax),
+		audit:              newAuditChain(),
 	}
 	return s
 }
@@ -68,7 +68,7 @@ func TestT2aValidBatchAccepted(t *testing.T) {
 	}
 	raw, _ := buildReportBody(t, items)
 	w := doReport(t, s, raw, map[string]string{
-		adminHeader:         testReportToken,
+		adminHeader:          testReportToken,
 		"X-Audit-Report-Sig": signReport(t, testReportToken, raw),
 	})
 	if w.Code != http.StatusOK {
@@ -186,7 +186,7 @@ func TestT2aInvalidResult400(t *testing.T) {
 	items := []auditReportItem{{RequestID: "req-x", TenantID: "t-001", Result: "evil_result", TimestampNS: time.Now().UnixNano()}}
 	raw, _ := buildReportBody(t, items)
 	w := doReport(t, s, raw, map[string]string{
-		adminHeader:         testReportToken,
+		adminHeader:          testReportToken,
 		"X-Audit-Report-Sig": signReport(t, testReportToken, raw),
 	})
 	if w.Code != http.StatusBadRequest {
@@ -207,7 +207,7 @@ func TestT2aMissingRequestID400(t *testing.T) {
 	items := []auditReportItem{{TenantID: "t-001", Result: "non_infer", TimestampNS: time.Now().UnixNano()}}
 	raw, _ := buildReportBody(t, items)
 	w := doReport(t, s, raw, map[string]string{
-		adminHeader:         testReportToken,
+		adminHeader:          testReportToken,
 		"X-Audit-Report-Sig": signReport(t, testReportToken, raw),
 	})
 	if w.Code != http.StatusBadRequest {
@@ -221,7 +221,7 @@ func TestT2aWrongSig401(t *testing.T) {
 	items := []auditReportItem{{RequestID: "req-y", TenantID: "t-001", Result: "cache_hit_dataplane", TimestampNS: time.Now().UnixNano()}}
 	raw, _ := buildReportBody(t, items)
 	w := doReport(t, s, raw, map[string]string{
-		adminHeader:         testReportToken,
+		adminHeader:          testReportToken,
 		"X-Audit-Report-Sig": signReport(t, "wrong-token", raw),
 	})
 	if w.Code != http.StatusUnauthorized {
@@ -254,7 +254,7 @@ func TestT2aTenantNotInSet400(t *testing.T) {
 	items := []auditReportItem{{RequestID: "req-t", TenantID: "t-999", Result: "cache_hit_dataplane", TimestampNS: time.Now().UnixNano()}}
 	raw, _ := buildReportBody(t, items)
 	w := doReport(t, s, raw, map[string]string{
-		adminHeader:         testReportToken,
+		adminHeader:          testReportToken,
 		"X-Audit-Report-Sig": signReport(t, testReportToken, raw),
 	})
 	if w.Code != http.StatusBadRequest {
@@ -279,18 +279,19 @@ func countAction(s *teeServer, action string) int {
 	return n
 }
 
-// TestT2aGatewayModeResolvesTenant 网关级（无 tenants 绑定）：忽略自报 tenant，
-// 落哨兵租户 + TenantIDResolution 标记（D-18 分型②）。
-func TestT2aGatewayModeResolvesTenant(t *testing.T) {
+// TestT2aGatewayModeIgnoresSelfReportedTenant 网关级（无 tenants 绑定）且**无解析证据**：
+// 忽略自报 tenant_id，落哨兵租户 + unauthenticated（D-18 分型②，防证据投毒）。
+//
+// ⚠️ v1.13 行为变更（T-4）：解析依据由「请求头 X-Mse-Consumer」改为「事件字段
+// tenant_id_resolution」——回灌上报由签名器发起，请求里并不存在该头（2026-10-14 联调实测）。
+func TestT2aGatewayModeIgnoresSelfReportedTenant(t *testing.T) {
 	s := newReportServer(testReportToken, nil) // 网关级模式
 	now := time.Now().UnixNano()
 	items := []auditReportItem{{RequestID: "req-g", TenantID: "t-attacker-self-report", Result: "rate_limited", TimestampNS: now}}
 	raw, _ := buildReportBody(t, items)
-	// 带 X-Mse-Consumer 头（D-18 解析线索）
 	w := doReport(t, s, raw, map[string]string{
 		adminHeader:          testReportToken,
-		"X-Audit-Report-Sig":  signReport(t, testReportToken, raw),
-		"X-Mse-Consumer":      "consumer-abc",
+		"X-Audit-Report-Sig": signReport(t, testReportToken, raw),
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("期望 200，实际 %d: %s", w.Code, w.Body.String())
@@ -300,10 +301,75 @@ func TestT2aGatewayModeResolvesTenant(t *testing.T) {
 		t.Fatalf("期望落链 1 条，实际 %d", len(evs))
 	}
 	if evs[0].TenantID != auditReportSentinelTenant {
-		t.Fatalf("网关模式应落哨兵租户，实际 %q", evs[0].TenantID)
+		t.Fatalf("无解析证据时应落哨兵租户，实际 %q", evs[0].TenantID)
 	}
-	if evs[0].TenantIDResolution != "consumer_map" {
-		t.Fatalf("带 X-Mse-Consumer 应标记 consumer_map，实际 %q", evs[0].TenantIDResolution)
+	if evs[0].TenantIDResolution != "unauthenticated" {
+		t.Fatalf("无解析证据时应标记 unauthenticated，实际 %q", evs[0].TenantIDResolution)
+	}
+}
+
+// TestT2aGatewayConsumerMapAdopted 【T-4】签名器按 consumer→tenant 映射解析成功
+// （tenant_id_resolution=consumer_map）→ 服务端采用真实租户。
+//
+// 依据 2026-10-14 实测：403 路由授权拒绝子类携带 X-Mse-Consumer，是唯一可归真实租户的
+// 拒绝子类；若服务端一律落哨兵，则该子类的归属能力等于失效（联调实测 122 条全落哨兵）。
+func TestT2aGatewayConsumerMapAdopted(t *testing.T) {
+	s := newReportServer(testReportToken, nil)
+	items := []auditReportItem{{
+		RequestID: "req-authz", TenantID: "tenant-a", Result: "consumer_unauthorized",
+		TimestampNS: time.Now().UnixNano(), TenantIDResolution: "consumer_map",
+	}}
+	raw, _ := buildReportBody(t, items)
+	w := doReport(t, s, raw, map[string]string{
+		adminHeader:          testReportToken,
+		"X-Audit-Report-Sig": signReport(t, testReportToken, raw),
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d: %s", w.Code, w.Body.String())
+	}
+	evs := s.audit.events
+	if len(evs) != 1 {
+		t.Fatalf("期望落链 1 条，实际 %d", len(evs))
+	}
+	if evs[0].TenantID != "tenant-a" || evs[0].TenantIDResolution != "consumer_map" {
+		t.Fatalf("consumer_map 应采用真实租户：tenant=%q resolution=%q", evs[0].TenantID, evs[0].TenantIDResolution)
+	}
+}
+
+// TestT2aGatewayResolutionRejectsFake 防伪报：resolution=consumer_map 但 tenant_id 为空或哨兵
+// → 降级为哨兵；resolution 非法/缺失 → 一律哨兵。
+func TestT2aGatewayResolutionRejectsFake(t *testing.T) {
+	cases := []struct {
+		name, tenant, resolution string
+	}{
+		{"空租户", "", "consumer_map"},
+		{"哨兵租户", auditReportSentinelTenant, "consumer_map"},
+		{"非法 resolution", "tenant-a", "evil_resolution"},
+		{"缺失 resolution", "tenant-a", ""},
+		{"显式 unauthenticated", "tenant-a", "unauthenticated"},
+	}
+	for _, c := range cases {
+		s := newReportServer(testReportToken, nil)
+		items := []auditReportItem{{
+			RequestID: "req-" + c.name, TenantID: c.tenant, Result: "rate_limited",
+			TimestampNS: time.Now().UnixNano(), TenantIDResolution: c.resolution,
+		}}
+		raw, _ := buildReportBody(t, items)
+		w := doReport(t, s, raw, map[string]string{
+			adminHeader:          testReportToken,
+			"X-Audit-Report-Sig": signReport(t, testReportToken, raw),
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s：期望 200，实际 %d", c.name, w.Code)
+		}
+		evs := s.audit.events
+		if len(evs) != 1 {
+			t.Fatalf("%s：期望落链 1 条，实际 %d", c.name, len(evs))
+		}
+		if evs[0].TenantID != auditReportSentinelTenant || evs[0].TenantIDResolution != "unauthenticated" {
+			t.Fatalf("%s：应落哨兵+unauthenticated，实际 tenant=%q resolution=%q",
+				c.name, evs[0].TenantID, evs[0].TenantIDResolution)
+		}
 	}
 }
 
@@ -314,7 +380,7 @@ func TestT2aReplayWindowExceeded400(t *testing.T) {
 	items := []auditReportItem{{RequestID: "req-old", TenantID: "t-001", Result: "non_infer", TimestampNS: old}}
 	raw, _ := buildReportBody(t, items)
 	w := doReport(t, s, raw, map[string]string{
-		adminHeader:         testReportToken,
+		adminHeader:          testReportToken,
 		"X-Audit-Report-Sig": signReport(t, testReportToken, raw),
 	})
 	if w.Code != http.StatusBadRequest {
@@ -329,7 +395,7 @@ func TestT2aAdminTokenRejected(t *testing.T) {
 	items := []auditReportItem{{RequestID: "req-adm", TenantID: "t-001", Result: "cache_hit_dataplane", TimestampNS: time.Now().UnixNano()}}
 	raw, _ := buildReportBody(t, items)
 	w := doReport(t, s, raw, map[string]string{
-		adminHeader:         "admin-tok", // 用管理令牌访问上报端点
+		adminHeader:          "admin-tok", // 用管理令牌访问上报端点
 		"X-Audit-Report-Sig": signReport(t, "admin-tok", raw),
 	})
 	if w.Code != http.StatusUnauthorized {
