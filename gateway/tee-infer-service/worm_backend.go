@@ -99,8 +99,9 @@ type fileWorm struct {
 	syncs    uint64        // 累计 fsync 次数（单一计数点；含关闭前最终 flush）
 
 	// 周期 flush goroutine（仅 batch 档启用）
-	stop chan struct{}
-	wg   sync.WaitGroup
+	stop     chan struct{}
+	stopOnce sync.Once // 保证 stop 只关闭一次（Close 可被重复调用）
+	wg       sync.WaitGroup
 }
 
 // newFileWorm 构造本地文件 WORM 后端（默认落盘强度 D-17 档：每 1000 条或 1 秒）。
@@ -138,11 +139,15 @@ func newFileWormWithConfig(path string, cfg WormFsyncConfig) (*fileWorm, error) 
 // loop 周期触发 flush（batch 档）。
 func (w *fileWorm) loop() {
 	defer w.wg.Done()
+	// stop 取构造期快照、循环体内不再读 w.stop 字段：
+	// Close() 会 close(stop)（旧实现还曾置空字段），若循环体在 select 中重读该字段，
+	// 可能读到 nil 通道 → <-nil 永久阻塞 → Close 的 wg.Wait() 死锁（2026-10-14 整包回归实勘）。
+	stop := w.stop
 	t := time.NewTicker(w.interval)
 	defer t.Stop()
 	for {
 		select {
-		case <-w.stop:
+		case <-stop:
 			return
 		case <-t.C:
 			w.flush()
@@ -215,10 +220,11 @@ func (w *fileWorm) FsyncConfig() (mode string, every int, interval time.Duration
 // Close 停止周期 flush、执行最终落盘并关闭文件。
 func (w *fileWorm) Close() error {
 	// 1) 停 goroutine（先释放锁，避免与正在执行的 flush 互等）。
+	//    用 stopOnce 保证只 close 一次；不再置空 w.stop 字段（loop 已取快照，无需置空；
+	//    置空反而会诱发「select 重读 nil 通道」死锁，见 loop() 注释）。
 	w.mu.Lock()
 	if w.stop != nil {
-		close(w.stop)
-		w.stop = nil
+		w.stopOnce.Do(func() { close(w.stop) })
 	}
 	w.mu.Unlock()
 	w.wg.Wait()
