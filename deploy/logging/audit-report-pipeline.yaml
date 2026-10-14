@@ -7,22 +7,31 @@
 #   ⚠️ 不复用 Promtail——`promtail.yaml` 的 clients 只送 Loki，无 HTTP output（实测）。
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# ⚠️ 状态：**草案（未纳入 kustomization，未联调验证）**——存在两处未决项：
+# ⚠️ 状态：**草案（未纳入 kustomization，未联调验证）**——两处未决项中 ① 已解除、② 已裁决：
 #
-# 【阻塞① · 前置实测未做（§7.3 item 1）】需在 higress-standalone 实测：
-#   (a) key-auth 认证通过后是否确实注入 X-Mse-Consumer（仓库注释有 2026-09-13 取证，待复核）；
-#   (b) **403 路由授权拒绝（consumer 不在 allow）时该头是否注入**——决定其归真实租户还是哨兵租户。
-#   ⇒ 未实测即无法确定 grep/映射规则，本管道不得上线（准入④）。
+# 【阻塞① · 前置实测】✅ **已完成（2026-10-14 K3s 实测，准入④ 闭合）**
+#   留证：《docs/详细设计/P1/P1-7-T2c-X-Mse-Consumer注入行为实测报告.md》。实测结论：
+#     (a) 认证通过后**确实注入** X-Mse-Consumer（基线场景可见 `otpmask-customer-a`）；
+#     (b) **403 路由授权拒绝（consumer 不在 allow）亦注入** ⇒ **归真实租户**；
+#     (c) **429 限流与 403 IP 封禁实测为 `-`（未注入）⇒ 归哨兵租户**——
+#         **推翻** v1.12「发生在 key-auth 之后 ⇒ 可得」的假设；
+#     (d) 401 未注入（与假设一致）⇒ 哨兵租户。
+#   ⇒ **grep/映射规则已可确定**：403 须按 `response_code_details` 区分「授权拒绝」与
+#     「IP 封禁」两个子类（结论相反），**不可只按状态码 403 判定**；
+#     D-18 据此由三层收为两层（A 层＝仅 403 授权拒绝；B 层＝401/429/403-IP）。
 #
-# 【阻塞② · 签名缺口（D-13 与 Fluent Bit 能力不匹配）】/audit/report 要求
-#   `X-Audit-Report-Sig = hex(HMAC-SHA256(token, 原始 body))`，且 body 须为 `{"reports":[...]}`。
-#   而 Fluent Bit 的 HTTP output 在**输出阶段重新序列化**载荷，过滤器（Lua）无法对最终字节签名；
-#   其内置 `http` output 亦不能产出 `{"reports":[...]}` 包裹结构。两种候选解决路径（**待拍板**）：
-#     (i) 在 tee-infer 侧为**回灌通道**增加一个受同一令牌保护、以不同完整性机制（如 body 内嵌
-#         `replay_id`+时间窗+幂等，或以 mTLS 承担通道完整性）的端点变体；
-#     (ii) 采集器后接一个**极薄签名器**（读 Fluent Bit 批次→序列化→HMAC→POST），
-#         相当于把「采集」与「签名投递」分离（不违背 D-19「不自建采集引擎」的本意）。
-#   ⇒ 本文件先给出「采集 + 整形 + 租户解析」的确定性部分；OUTPUT 段按候选 (ii) 预留。
+# 【阻塞② · 签名缺口（D-13 与 Fluent Bit 能力不匹配）】**已按 D-20 裁决：取候选 (ii)**
+#   /audit/report 要求 `X-Audit-Report-Sig = hex(HMAC-SHA256(token, 原始 body))`，
+#   且 body 须为 `{"reports":[...]}`；而 Fluent Bit 的 HTTP output 在**输出阶段重新序列化**载荷，
+#   过滤器（Lua）无法对最终字节签名，其内置 `http` output 亦不能产出该包裹结构。
+#   裁决（D-20）：采集器后接**极薄签名器**（读 Fluent Bit 批次 → 序列化 → HMAC → POST），
+#   量级 < 100 行，属投递适配器而非采集引擎（不违反 D-19 精神），复用同一上报令牌
+#   ⇒ **不新增信任边界、不改动 tee-infer 既有上报契约（避免重跑 T12 四域安全测试）**。
+#   后备：若 mTLS 落地（依赖 P1-5 国密 TLS）或运维拒绝新增组件，回退评估候选 (i) 端点变体。
+#   ⇒ 本文件给出「采集 + 整形 + 租户解析」的确定性部分；OUTPUT 段按候选 (ii) 预留。
+#
+# ⚠️ **剩余未决（阻塞 T2c 上线，V-13 未闭合）**：极薄签名器尚未实现、管道尚未联调、
+#   401/403/429 各 ≥100 次的 V-13 实测未执行 ⇒ **仍不得纳入 kustomization、不得上线**。
 # ─────────────────────────────────────────────────────────────────────────────
 
 apiVersion: v1
@@ -33,7 +42,9 @@ metadata:
   labels:
     app: audit-report-pipeline
 data:
-  # 记录整形 + 租户三层解析（D-18）；见 deploy/logging/audit_replay.lua（同源）。
+  # 记录整形 + 租户两层解析（D-18 v1.13）；见 deploy/logging/audit_replay.lua（同源，**以文件为准**）。
+  # ⚠️ 2026-10-14 实测修订见该文件：403 须按 response_code_details 区分「授权拒绝 / IP 封禁」子类，
+  #    且 429/403-IP/401 实测拿不到 consumer（详见同目录实测报告）。本内嵌副本仅为自包含兜底。
   audit_replay.lua: |
     -- 与本目录 audit_replay.lua 同源；kustomize 部署时以文件为准，此处为自包含副本。
     local MAP_PATH = "/fluent-bit/scripts/consumer-tenant.json"

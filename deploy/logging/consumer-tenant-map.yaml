@@ -1,23 +1,34 @@
-# P1-7 T2c（D-18）：consumer → tenant 映射表（回灌侧租户三层解析之第二层）。
+# P1-7 T2c（D-18）：consumer → tenant 映射表（回灌侧租户解析依据）。
 #
 # 背景：数据面拒绝（401/403/429）的请求在 otpmask 插件之前即被短路，链上无租户字段。
 # 唯一可信来源是 key-auth 2.0.0 认证通过后注入的 X-Mse-Consumer（consumer 名称），
 # 故需其到租户的映射。本表复用管理面既有「x-api-key → consumer → tenant」设计
 # （见《GA-Higress-MCP接入与打通-技术实现方案.md》），非新建概念。
 #
-# 三层解析（D-18，按拒绝类型分层）：
-#   ① 拒绝类为 429 限流 / 403 IP 封禁（发生在 key-auth 之后，认证已通过）
-#      ⇒ X-Mse-Consumer 可得 ⇒ 命中本表 → 真实 tenant_id；
-#   ② 403 路由授权拒绝（consumer 不在 allow 列表）——官方措辞为「认证鉴权通过后注入」，
-#      该子类**是否注入需实测**（T2c 第一步）；若未注入 ⇒ 降为哨兵租户；
-#   ③ 401 认证失败（无/无效凭证）——无任何服务端认证身份 ⇒ **哨兵租户 `_unauthenticated`**，
-#      并置证据字段 tenant_id_resolution=unauthenticated。
+# ⚠️ 2026-10-14 实测修订（见《P1-7-T2c-X-Mse-Consumer注入行为实测报告》）：
+#    原「三层解析」中第①层的假设已被推翻，本表按**两层解析**使用。
+#
+# 两层解析（D-18 v1.13，按实测结论分层）：
+#   A 层（可归真实租户）——**仅** 403 **路由授权拒绝**子类，即 response_code_details 命中
+#      `key-auth::…Request_denied_by_Key_Auth_check._Unauthorized_consumer`；
+#      ⇒ X-Mse-Consumer **实测注入** ⇒ 命中本表 → 真实 tenant_id，
+#        并置证据字段 tenant_id_resolution=consumer_map。
+#   B 层（哨兵租户 `_unauthenticated`）——**401 认证失败 / 429 限流 / 403 IP 封禁**三类；
+#      实测 x_mse_consumer 均为 `-`（Envoy 字面量「头不存在」）：
+#        · 401（无/无效凭证）——无任何服务端认证身份；
+#        · 429（cluster-key-rate-limit）——**v1.12 曾判为「key-auth 之后 ⇒ 可得」，实测推翻**；
+#        · 403（ip-restriction::…ip_not_allowed）——**同上推翻**；
+#      ⇒ 落哨兵租户并置 tenant_id_resolution=unauthenticated。
+#
+# ⚠️ 实现要求：**403 须按 response_code_details 区分「授权拒绝」与「IP 封禁」两个子类**，
+#    两者归属结论相反，**不可只按状态码 403 判定**。
 #
 # ⚠️ 明令禁止：取客户端自报 X-Tenant-ID（被拒请求在 otpmask 前短路 ⇒ 该头不存在或为自报值，
 #    取用即「证据投毒」，与 A3-10「服务端不信任自报值」正面冲突）。
 #
 # 部署：kubectl apply -k deploy/logging
-# 维护：新增消费者时同步更新本表（或改由管理面下发；见 R-20 削弱登记）。
+# 维护：新增消费者时同步更新本表（或改由管理面下发；见 R-20 削弱登记——
+#      实测后 4 类拒绝中仅 1 类可归属，其中 429 为生产最高频拒绝原因）。
 ---
 apiVersion: v1
 kind: ConfigMap
