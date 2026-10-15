@@ -57,10 +57,10 @@ const (
 // 配置热更新通过整 map 替换实现原子切换。
 type EndpointState struct {
 	// —— 配置层（从路由表加载）——
-	Name     string  // 端点名称（唯一标识）
-	URL      string  // 端点地址
-	Priority int     // 优先级（数字越小越高）
-	Enabled  bool    // 是否启用
+	Name       string  // 端点名称（唯一标识）
+	URL        string  // 端点地址
+	Priority   int     // 优先级（数字越小越高）
+	Enabled    bool    // 是否启用
 	BaseWeight float64 // 配置的基础权重（0-1，同优先级组内和为1）
 
 	// —— 失败率统计层（EWMA，方案 §6.2）——
@@ -93,9 +93,14 @@ func (e *EndpointState) IsUsable() bool {
 type Strategy string
 
 const (
-	StrategyPriority      Strategy = "priority"       // 主备模式（按优先级）
-	StrategyWeighted      Strategy = "weighted"       // 权重模式（同优先级按比例）
-	StrategyFailureAware  Strategy = "failure-aware"  // 失败率感知（动态权重调整）
+	StrategyPriority     Strategy = "priority"      // 主备模式（按优先级）
+	StrategyWeighted     Strategy = "weighted"      // 权重模式（同优先级按比例）
+	StrategyFailureAware Strategy = "failure-aware" // 失败率感知（动态权重调整）
+
+	// —— P1-6 延迟择优（M1.3；本体 §6.1 strategy 枚举扩展）——
+	StrategyLatencyAware   Strategy = "latency-aware"   // TTFT 倒数加权随机（D-3/D-4）
+	StrategyLatencyFastest Strategy = "latency-fastest" // 最快优先（确定性；γ→∞ 极限形式）
+	StrategyHybrid         Strategy = "hybrid"          // 失败率 × TTFT 三步合并（M1.5）
 )
 
 // CanaryConfig 灰度切流配置（方案 §7.5）。
@@ -134,6 +139,9 @@ type Config struct {
 
 	// 灰度切流配置（方案 §7.5，可选）
 	Canary CanaryConfig
+
+	// P1-6 延迟择优配置（strategy 为 latency-*/hybrid 时生效；§6.1）
+	Latency LatencyConfig
 }
 
 // EndpointConfig 端点配置（来自 TableRoute.Endpoints）。
@@ -180,6 +188,14 @@ func (e *Engine) SetBillingHook(hook BillingNotifier) {
 	e.billingHook = hook
 }
 
+// SetTTFTStatsUnreachable 标记 TTFT 统计通道不可达（R2-19 序 1）。
+// 由数据面拉取 tick（M2.6）在控制面不可达 / 聚合器 503 时调用；请求路径只读该标志。
+func (e *Engine) SetTTFTStatsUnreachable(v bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.ttftUnreachable = v
+}
+
 // Engine 路由引擎实例。
 //
 // 用法：
@@ -195,6 +211,9 @@ type Engine struct {
 	state       map[string]*EndpointState // name -> state
 	canary      *CanaryManager            // 灰度管理器（nil = 未启用灰度）
 	billingHook BillingNotifier           // 计费通知器（nil = 不通知）
+
+	// P1-6：R2-19 序 1 的控制面不可达标志（数据面拉取 tick 维护；请求路径只读）
+	ttftUnreachable bool
 }
 
 // NewEngine 创建路由引擎。

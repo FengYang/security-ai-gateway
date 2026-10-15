@@ -228,3 +228,196 @@ func latencyGroupTotalWeight(state map[string]*EndpointState, minPrio int, tMinM
 	}
 	return total
 }
+
+// ============================================================
+// latency-aware 抽样与确定性回退（M1.3；§3.5 / R2-16 / R2-19）
+// ============================================================
+
+// 回退原因（与 otpmask_route_ttft_fallback_total 拆名一一对应，§6.5；M5.2 接线）。
+const (
+	fallbackUnreachable = "unreachable" // R2-19 序 1：控制面不可达 / 聚合器 503
+	fallbackStale       = "stale"       // R2-19 序 2：组内统计全部陈旧
+	fallbackLowSamples  = "low_samples" // R2-19 序 3/4：样本不足（含 E==1 等价单端点）
+	fallbackNoSamples   = "no_samples"  // R2-19 序 3：全无样本（非流式流量常态）
+	fallbackNoRand      = "no_rand"     // R2-19 序 5：随机源不可用 → 确定性回退
+)
+
+// latencyFallbackObserver 包级回退观测接缝（M5.2 由插件注入 → fallback_total 拆名
+// Counter）。未注入时 no-op；请求路径不写日志/不发网络（C-4），仅回调计数。
+var latencyFallbackObserver func(reason string)
+
+// SetLatencyFallbackObserver 注入回退观测回调（仅装配期调用一次）。
+func SetLatencyFallbackObserver(fn func(reason string)) { latencyFallbackObserver = fn }
+
+// reportLatencyFallback 记录一次延迟策略回退（无回调时静默）。
+func reportLatencyFallback(reason string) {
+	if latencyFallbackObserver != nil {
+		latencyFallbackObserver(reason)
+	}
+}
+
+// latencyFastestOf 组内**有效**端点 argmin t_i（确定性：并列按 name 字典序；
+// 禁止依赖 map 遍历序，TT2-02）。§3.5 no_rand 确定性回退与 latency-fastest 共用。
+func latencyFastestOf(state map[string]*EndpointState, minPrio int, cfg LatencyConfig) (*EndpointState, bool) {
+	var best *EndpointState
+	var bestT int64
+	for _, ep := range state {
+		if ep.Priority != minPrio || !latencyEligible(ep) {
+			continue
+		}
+		t := latencyRefMs(ep.TTFT, cfg)
+		if best == nil || t < bestT || (t == bestT && ep.Name < best.Name) {
+			best, bestT = ep, t
+		}
+	}
+	return best, best != nil
+}
+
+// pickByLatency latency-aware：探索 + 倒数幂加权随机（§3.5；R2-19 回退索引）。
+// 调用方持锁（pickByStrategy 内部）。Decision.Strategy 恒为本次生效的
+// config.Strategy（R2-10：回退不改写策略标签，回退以 fallback_total{reason} 表达）。
+func (e *Engine) pickByLatency() Decision {
+	cfg := e.config.Latency.normalized()
+	minPrio, usable, single, hasUsable := latencyGroupScan(e.state)
+	if !hasUsable {
+		return Decision{Reason: "no_usable_endpoints"}
+	}
+	if usable == 1 {
+		// §3.5 单端点优化（TT2-07）：跳过权计算与探索，等价 latency-fastest。
+		return e.latencyDecisionOf(single, "latency_single")
+	}
+
+	tMin, eligible := latencyGroupTMin(e.state, minPrio, cfg)
+	switch {
+	case eligible == 0:
+		// R2-19 序 1-3：全局回退 failure-aware（行为 = pickByWeight）。
+		return e.latencyGlobalFallback(e.classifyNoStats(minPrio, cfg))
+	case eligible == 1:
+		// R2-19 序 4：等价退单端点（确定性），计 _low_samples。
+		if sole, ok := latencyFastestOf(e.state, minPrio, cfg); ok {
+			reportLatencyFallback(fallbackLowSamples)
+			return e.latencyDecisionOf(sole, "latency_single_eligible")
+		}
+		return e.latencyGlobalFallback(fallbackLowSamples) // 理论不可达
+	}
+
+	maxBase := latencyGroupMaxBase(e.state, minPrio, tMin, cfg)
+	floor := cfg.MinWeight * maxBase
+	totalW := latencyGroupTotalWeight(e.state, minPrio, tMin, floor, cfg)
+	if totalW <= 0 {
+		// 数值退化（理论不可达：≥2 个有效端点 ⇒ 每端点 w > 0）→ 确定性回退。
+		return e.latencyFallbackFastest(minPrio, cfg, "")
+	}
+
+	// 抽样 1：探索判定（R2-16：两次抽样分别取随机，任一步 ok=false 即确定性回退）。
+	rv1, ok1 := randFloat64()
+	if !ok1 {
+		return e.latencyFallbackFastest(minPrio, cfg, fallbackNoRand)
+	}
+	if rv1 < cfg.ExploreRatio {
+		// 探索：在**可用**集合 U 内均匀随机（§3.5；含 TTFT 无效端点——探索为其提供
+		// 刷新统计样本的机会，避免「无效→永无流量→永远无效」的饿死闭环）。
+		rv2, ok2 := randFloat64()
+		if !ok2 {
+			return e.latencyFallbackFastest(minPrio, cfg, fallbackNoRand)
+		}
+		idx := int(rv2 * float64(usable))
+		if idx >= usable {
+			idx = usable - 1
+		}
+		i := 0
+		for _, ep := range e.state {
+			if ep.Priority != minPrio || !ep.IsUsable() {
+				continue
+			}
+			if i == idx {
+				return e.latencyDecisionOf(ep, "latency_explore")
+			}
+			i++
+		}
+		return e.latencyFallbackFastest(minPrio, cfg, "") // 理论不可达
+	}
+
+	// 利用：按 w_i 加权随机（抽样 2），失败 → 确定性回退（R2-16）。
+	rv2, ok2 := randFloat64()
+	if !ok2 {
+		return e.latencyFallbackFastest(minPrio, cfg, fallbackNoRand)
+	}
+	r := rv2 * totalW
+	var cum float64
+	for _, ep := range e.state {
+		if ep.Priority != minPrio || !latencyEligible(ep) {
+			continue
+		}
+		cum += latencyGroupWeightOf(ep, tMin, floor, cfg)
+		if r < cum {
+			return e.latencyDecisionOf(ep, "latency_weighted")
+		}
+	}
+	// 浮点误差兜底（r 逼近 totalW 尾部）：确定性回退，不依赖 map 遍历序。
+	return e.latencyFallbackFastest(minPrio, cfg, "")
+}
+
+// latencyDecisionOf 构造选中结果：Strategy 恒回填本次生效的 config.Strategy（R2-10）。
+func (e *Engine) latencyDecisionOf(ep *EndpointState, reason string) Decision {
+	return Decision{
+		EndpointName: ep.Name,
+		EndpointURL:  ep.URL,
+		Strategy:     e.config.Strategy,
+		Reason:       reason,
+	}
+}
+
+// latencyFallbackFastest 确定性回退：取组内最快有效端点（§3.5；reason 非空时计数）。
+func (e *Engine) latencyFallbackFastest(minPrio int, cfg LatencyConfig, reason string) Decision {
+	if reason != "" {
+		reportLatencyFallback(reason)
+	}
+	if best, ok := latencyFastestOf(e.state, minPrio, cfg); ok {
+		return e.latencyDecisionOf(best, "latency_fallback_fastest")
+	}
+	// 不应发生（调用点保证 ≥2 个有效端点）；保底走全局回退。
+	return e.latencyGlobalFallback(fallbackLowSamples)
+}
+
+// latencyGlobalFallback R2-19 序 1-3：全局回退既有 failure-aware 加权
+// （行为 = pickByWeight），计数后仍回填 config.Strategy（R2-10：回退不改写策略标签）。
+func (e *Engine) latencyGlobalFallback(reason string) Decision {
+	reportLatencyFallback(reason)
+	d := e.pickByWeight()
+	d.Strategy = e.config.Strategy
+	d.Reason = "latency_fallback_" + reason
+	return d
+}
+
+// classifyNoStats R2-19 序 1-3 归因（组内有效端点 E==0 时）：
+// 序 1 unreachable（拉取侧置位）→ 序 3 no_samples / low_samples → 序 2 stale。
+//
+// 口径说明：陈旧（stale）的**时间**判定由数据面拉取侧完成（M2.6 按时钟判 updated_at
+// 过期并置 valid=false），保持本包无 wall-clock 依赖（纯逻辑、可离线单测）；本层以
+// 「样本充足但仍无效」归因 stale（此时唯一剩余成因即过期淘汰，见 §6.3）。
+func (e *Engine) classifyNoStats(minPrio int, cfg LatencyConfig) string {
+	if e.ttftUnreachable {
+		return fallbackUnreachable
+	}
+	anySamples := false
+	allBelowMin := true
+	for _, ep := range e.state {
+		if ep.Priority != minPrio || !ep.IsUsable() {
+			continue
+		}
+		if ep.TTFT.Samples > 0 {
+			anySamples = true
+		}
+		if ep.TTFT.Samples >= int64(cfg.MinSamples) {
+			allBelowMin = false
+		}
+	}
+	if !anySamples {
+		return fallbackNoSamples
+	}
+	if allBelowMin {
+		return fallbackLowSamples
+	}
+	return fallbackStale
+}

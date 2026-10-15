@@ -2,6 +2,7 @@ package routeengine
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -397,5 +398,249 @@ func TestLatencyWeights_NoStateMutation(t *testing.T) {
 
 	if *a != snapA || *b != snapB {
 		t.Fatal("权函数改写了 EndpointState（违反 C-3：请求内临时量、不就地改写）")
+	}
+}
+
+// ============================================================
+// M1.3 验收（本体 v1.5 §3.5 / §4.1 M1.3 / R2-16 / R2-10）：
+// 确定性回退（两次抽样分别注入 ok=false）、探索均匀性、加权分布与
+// P_min(n)（R2-01）、Strategy 回填、单端点/等价单端点、R2-19 序 1-3 归因。
+// ============================================================
+
+// ttftRandStep 脚本化随机序列元素。
+type ttftRandStep struct {
+	v  float64
+	ok bool
+}
+
+// ttftScriptedRand 脚本化随机源：按序消费；耗尽后返回 ok=false。
+type ttftScriptedRand struct {
+	steps []ttftRandStep
+	i     int
+}
+
+func ttftScripted(steps ...ttftRandStep) *ttftScriptedRand {
+	return &ttftScriptedRand{steps: steps}
+}
+
+func (s *ttftScriptedRand) Float64() (float64, bool) {
+	if s.i >= len(s.steps) {
+		return 0, false
+	}
+	st := s.steps[s.i]
+	s.i++
+	return st.v, st.ok
+}
+
+// ttftLCGRand 确定性伪随机源（测试统计用；非密码学）。
+type ttftLCGRand struct{ s uint64 }
+
+func (l *ttftLCGRand) Float64() (float64, bool) {
+	l.s = l.s*6364136223846793005 + 1442695040888963407
+	return float64(l.s>>11) / float64(uint64(1)<<53), true
+}
+
+func ttftWithRand(t *testing.T, rs RandSource) {
+	t.Helper()
+	old := randSource
+	SetRandSource(rs)
+	t.Cleanup(func() { SetRandSource(old) })
+}
+
+func ttftWithObserver(t *testing.T) *[]string {
+	t.Helper()
+	recs := &[]string{}
+	old := latencyFallbackObserver
+	SetLatencyFallbackObserver(func(reason string) { *recs = append(*recs, reason) })
+	t.Cleanup(func() { SetLatencyFallbackObserver(old) })
+	return recs
+}
+
+func ttftEngine(strategy Strategy, eps ...*EndpointState) *Engine {
+	e := NewEngine(Config{Strategy: strategy, Latency: latencyTestCfg()})
+	e.state = mkState(eps...)
+	return e
+}
+
+// TestPickByLatency_NoRandDeterministicFallback（R2-16）：两次抽样**分别**注入
+// ok=false（第一抽失败 / 利用分支第二抽失败 / 探索分支第二抽失败）均触发确定性
+// 回退（latency-fastest），计 _no_rand，且 Strategy 仍回填 latency-aware（R2-10）。
+func TestPickByLatency_NoRandDeterministicFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		rand *ttftScriptedRand
+	}{
+		{"first-draw-fails", ttftScripted(ttftRandStep{0, false})},
+		{"util-second-draw-fails", ttftScripted(ttftRandStep{0.9, true}, ttftRandStep{0, false})},
+		{"explore-second-draw-fails", ttftScripted(ttftRandStep{0.01, true}, ttftRandStep{0, false})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recs := ttftWithObserver(t)
+			ttftWithRand(t, tc.rand)
+			e := ttftEngine(StrategyLatencyAware, mkEp("a", 1, 200, true), mkEp("b", 1, 400, true))
+			d := e.pickByLatency()
+			if d.EndpointName != "a" { // 最快有效端点（t=200）
+				t.Errorf("确定性回退应选最快有效端点 a，got %q", d.EndpointName)
+			}
+			if d.Strategy != StrategyLatencyAware {
+				t.Errorf("Strategy 应回填 latency-aware（R2-10），got %q", d.Strategy)
+			}
+			if d.Reason != "latency_fallback_fastest" {
+				t.Errorf("Reason=%q，want latency_fallback_fastest", d.Reason)
+			}
+			if len(*recs) != 1 || (*recs)[0] != fallbackNoRand {
+				t.Errorf("回退计数=%v，want [no_rand]", *recs)
+			}
+		})
+	}
+}
+
+// TestPickByLatency_StrategyBackfill_R2_10：正常加权路径不得被标成 weighted。
+func TestPickByLatency_StrategyBackfillR2_10(t *testing.T) {
+	ttftWithRand(t, ttftScripted(ttftRandStep{0.9, true}, ttftRandStep{0.5, true}))
+	e := ttftEngine(StrategyLatencyAware, mkEp("a", 1, 200, true), mkEp("b", 1, 400, true))
+	// r = 0.5 × 1.7 = 0.85；a 权重 1.0 → 必中 a（与 map 序无关）
+	d := e.pickByLatency()
+	if d.EndpointName != "a" {
+		t.Fatalf("加权抽样应命中 a，got %q", d.EndpointName)
+	}
+	if d.Strategy != StrategyLatencyAware {
+		t.Errorf("Strategy=%q，不得被标成 weighted（R2-10）", d.Strategy)
+	}
+	if d.Reason != "latency_weighted" {
+		t.Errorf("Reason=%q，want latency_weighted", d.Reason)
+	}
+}
+
+// TestPickByLatency_ExploreUniform：explore_ratio=1 时组内均匀。
+func TestPickByLatency_ExploreUniform(t *testing.T) {
+	cfg := latencyTestCfg()
+	cfg.ExploreRatio = 1
+	e := NewEngine(Config{Strategy: StrategyLatencyAware, Latency: cfg})
+	e.state = mkState(mkEp("a", 1, 200, true), mkEp("b", 1, 300, true), mkEp("c", 1, 400, true))
+	ttftWithRand(t, &ttftLCGRand{s: 42})
+
+	const n = 15000
+	counts := map[string]int{}
+	for i := 0; i < n; i++ {
+		counts[e.pickByLatency().EndpointName]++
+	}
+	for _, name := range []string{"a", "b", "c"} {
+		f := float64(counts[name]) / n
+		if f < 1.0/3-0.02 || f > 1.0/3+0.02 {
+			t.Errorf("探索分布不均匀：%s 频率=%.4f（期望≈1/3）", name, f)
+		}
+	}
+}
+
+// TestPickByLatency_WeightedDistributionPMin（R2-01）：1 快 + (n-1) 极慢（触底 floor）。
+// 断言慢端点频率 ≥ P_min(n) 且 > 0（防饿死）、快端点占比 > 慢端点（快慢比>1）。
+func TestPickByLatency_WeightedDistributionPMin(t *testing.T) {
+	ttftWithRand(t, &ttftLCGRand{s: 7})
+	const floor = 0.05
+	const explore = 0.05
+	for _, n := range []int{2, 6, 50} {
+		eps := make([]*EndpointState, 0, n)
+		eps = append(eps, mkEp("fast", 1, 100, true))
+		for i := 1; i < n; i++ {
+			eps = append(eps, mkEp(fmt.Sprintf("slow%02d", i), 1, 30000, true))
+		}
+		e := ttftEngine(StrategyLatencyAware, eps...)
+		const total = 30000
+		counts := map[string]int{}
+		for i := 0; i < total; i++ {
+			counts[e.pickByLatency().EndpointName]++
+		}
+		pMin := explore/float64(n) + (1-explore)*floor/(1+float64(n-1)*floor)
+		fSlow := float64(counts["slow01"]) / total
+		if fSlow < pMin-0.01 {
+			t.Errorf("n=%d 慢端点频率=%.4f < P_min(%d)=%.4f（R2-01）", n, fSlow, n, pMin)
+		}
+		if fSlow <= 0 {
+			t.Errorf("n=%d 防饿死被违反（慢端点频率=0）", n)
+		}
+		if counts["fast"] <= counts["slow01"] {
+			t.Errorf("n=%d 快端点占比应 > 慢端点：fast=%d slow01=%d", n, counts["fast"], counts["slow01"])
+		}
+	}
+}
+
+// TestPickByLatency_EligibleOne：R2-19 序 4——有效端点=1 → 等价退单端点 + _low_samples。
+func TestPickByLatency_EligibleOne(t *testing.T) {
+	recs := ttftWithObserver(t)
+	e := ttftEngine(StrategyLatencyAware,
+		mkEp("valid", 1, 300, true),
+		mkEp("invalid", 1, 100, false), // 更快但统计无效 → 不参与 TTFT 权
+	)
+	d := e.pickByLatency()
+	if d.EndpointName != "valid" || d.Reason != "latency_single_eligible" {
+		t.Fatalf("等价单端点：got %q/%q", d.EndpointName, d.Reason)
+	}
+	if d.Strategy != StrategyLatencyAware {
+		t.Errorf("Strategy=%q，want latency-aware", d.Strategy)
+	}
+	if len(*recs) != 1 || (*recs)[0] != fallbackLowSamples {
+		t.Errorf("回退计数=%v，want [low_samples]", *recs)
+	}
+}
+
+// TestPickByLatency_NoStatsClassification_R2_19：E==0 时序 1-3 归因与全局回退。
+func TestPickByLatency_NoStatsClassification(t *testing.T) {
+	cases := []struct {
+		name        string
+		unreachable bool
+		samplesA    int64
+		samplesB    int64
+		want        string
+	}{
+		{"unreachable-first", true, 100, 100, fallbackUnreachable},
+		{"no_samples", false, 0, 0, fallbackNoSamples},
+		{"low_samples", false, 5, 10, fallbackLowSamples},
+		{"stale", false, 100, 60, fallbackStale},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recs := ttftWithObserver(t)
+			a := mkEp("a", 1, 200, true)
+			a.TTFT = TTFTStat{P95Ms: 200, Samples: tc.samplesA, Valid: false, UpdatedAt: 1}
+			b := mkEp("b", 1, 400, true)
+			b.TTFT = TTFTStat{P95Ms: 400, Samples: tc.samplesB, Valid: false, UpdatedAt: 1}
+			e := ttftEngine(StrategyLatencyAware, a, b)
+			e.SetTTFTStatsUnreachable(tc.unreachable)
+
+			d := e.pickByLatency()
+			if d.EndpointName == "" {
+				t.Fatal("全局回退应经 failure-aware 选出端点")
+			}
+			if d.Strategy != StrategyLatencyAware {
+				t.Errorf("Strategy=%q，回退不得改写策略标签（R2-10）", d.Strategy)
+			}
+			if len(*recs) != 1 || (*recs)[0] != tc.want {
+				t.Errorf("回退计数=%v，want [%s]", *recs, tc.want)
+			}
+		})
+	}
+}
+
+// TestPickByLatency_SingleAndEmpty：单端点优化（TT2-07）与空组。
+func TestPickByLatency_SingleAndEmpty(t *testing.T) {
+	recs := ttftWithObserver(t)
+	e := ttftEngine(StrategyLatencyAware, mkEp("solo", 1, 500, false)) // 唯一可用（统计无效也直返）
+	d := e.pickByLatency()
+	if d.EndpointName != "solo" || d.Reason != "latency_single" {
+		t.Fatalf("单端点优化：got %q/%q", d.EndpointName, d.Reason)
+	}
+	if d.Strategy != StrategyLatencyAware {
+		t.Errorf("Strategy=%q，want latency-aware", d.Strategy)
+	}
+	if len(*recs) != 0 {
+		t.Errorf("单端点优化不应计回退，got %v", *recs)
+	}
+
+	e2 := ttftEngine(StrategyLatencyAware)
+	d2 := e2.pickByLatency()
+	if d2.EndpointName != "" || d2.Reason != "no_usable_endpoints" {
+		t.Fatalf("空组应返回空 Decision，got %q/%q", d2.EndpointName, d2.Reason)
 	}
 }
