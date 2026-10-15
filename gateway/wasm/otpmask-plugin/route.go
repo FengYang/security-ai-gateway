@@ -416,7 +416,51 @@ func buildEngineConfig(tr *routecache.TableRoute) routeengine.Config {
 		Strategy:  routeStrategy(tr.Strategy),
 		Endpoints: eps,
 		Canary:    canaryCfg,
+		// P1-6 M4.5：latency 段解析（缺省填充按字段存在性；仅延迟策略参与选路）。
+		Latency: buildLatencyConfig(tr.Latency),
 	}
+}
+
+// buildLatencyConfig 由路由表 latency 段构造引擎延迟配置（P1-6 M4.5，§6.1）。
+//
+// 缺省填充按**字段存在性**完成：gamma / min_weight / explore_ratio / cache_partition
+// 为指针字段（非 nil = 显式值，含合法零值 gamma=0 / min_weight=0 / explore_ratio=0 /
+// cache_partition=false）；其余字段零值 ≡ 未配置（零值非法，Validate 已把关），
+// 与 LatencyConfig.normalized() 的兜底钳制口径一致。
+// nil 段（未携带 latency 的表）→ 全缺省（防御性：延迟策略本应在 Validate 层要求携带）。
+func buildLatencyConfig(l *routecache.RouteLatency) routeengine.LatencyConfig {
+	cfg := routeengine.DefaultLatencyConfig()
+	if l == nil {
+		return cfg
+	}
+	if l.WindowSec != 0 {
+		cfg.WindowSec = l.WindowSec
+	}
+	if l.Quantile != "" {
+		cfg.Quantile = l.Quantile
+	}
+	if l.Gamma != nil {
+		cfg.Gamma = *l.Gamma
+	}
+	if l.MinWeight != nil {
+		cfg.MinWeight = *l.MinWeight
+	}
+	if l.ExploreRatio != nil {
+		cfg.ExploreRatio = *l.ExploreRatio
+	}
+	if l.MinSamples != 0 {
+		cfg.MinSamples = l.MinSamples
+	}
+	if l.StaleSec != 0 {
+		cfg.StaleSec = l.StaleSec
+	}
+	if l.CachePartition != nil {
+		cfg.CachePartition = *l.CachePartition
+	}
+	if l.MaxTTFTMs != 0 {
+		cfg.MaxTTFTMs = l.MaxTTFTMs
+	}
+	return cfg
 }
 
 // routeStrategy 解析路由策略字符串（大小写与连接符不敏感）。

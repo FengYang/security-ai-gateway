@@ -111,6 +111,24 @@ func (c LatencyConfig) normalized() LatencyConfig {
 	return c
 }
 
+// DefaultLatencyConfig 返回 §6.1 缺省值填充后的延迟配置（P1-6 M4.5）。
+// 作为「schema 解析层按字段存在性填充缺省」的基础值（唯一缺省值来源，
+// 避免调用方重复硬编码；plugin route.go 的 buildLatencyConfig 在此基础上按
+// 字段存在性覆盖）。
+func DefaultLatencyConfig() LatencyConfig {
+	return LatencyConfig{
+		WindowSec:      defaultLatencyWindowSec,
+		Quantile:       defaultLatencyQuantile,
+		Gamma:          defaultLatencyGamma,
+		MinWeight:      defaultLatencyMinWeight,
+		ExploreRatio:   defaultLatencyExploreRatio,
+		MinSamples:     defaultLatencyMinSamples,
+		StaleSec:       defaultLatencyStaleSec,
+		CachePartition: true, // 缺省 true（§6.1；false 为合法显式值，由存在性解析保留）
+		MaxTTFTMs:      defaultLatencyMaxTTFTMs,
+	}
+}
+
 // ============================================================
 // 权函数（M1.2）：无量纲倒数幂 + 相对下界（§3.5；D-3/D-4）
 //

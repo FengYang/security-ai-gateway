@@ -135,3 +135,88 @@ func TestBuildEngineConfigSkipsUnnamed(t *testing.T) {
 		t.Fatal("W3 语义：Name 非空即启用")
 	}
 }
+
+// ============================================================
+// P1-6 M4.5：buildLatencyConfig 字段映射 / 缺省值（按存在性填充；§6.1）
+// ============================================================
+
+// TestBuildLatencyConfig_DefaultsAndPresence：nil/空段 → 全缺省；指针字段显式零值保留；
+// 值字段非零覆盖；未提供字段保持缺省。
+func TestBuildLatencyConfig_DefaultsAndPresence(t *testing.T) {
+	def := routeengine.DefaultLatencyConfig()
+	if def.WindowSec != 300 || def.Quantile != "p95" || def.Gamma != 1.0 ||
+		def.MinWeight != 0.05 || def.ExploreRatio != 0.05 || def.MinSamples != 20 ||
+		def.StaleSec != 75 || !def.CachePartition || def.MaxTTFTMs != 30000 {
+		t.Fatalf("DefaultLatencyConfig 与 §6.1 缺省值不符：%+v", def)
+	}
+	// nil 段 / 空段 → 全缺省
+	if got := buildLatencyConfig(nil); got != def {
+		t.Fatalf("nil 段应全缺省：%+v", got)
+	}
+	if got := buildLatencyConfig(&routecache.RouteLatency{}); got != def {
+		t.Fatalf("空段应全缺省：%+v", got)
+	}
+	// 指针字段显式零值保留（γ=0 / min_weight=0 / explore_ratio=0 / cache_partition=false）
+	zero, no := 0.0, false
+	got := buildLatencyConfig(&routecache.RouteLatency{
+		Gamma: &zero, MinWeight: &zero, ExploreRatio: &zero, CachePartition: &no,
+	})
+	if got.Gamma != 0 || got.MinWeight != 0 || got.ExploreRatio != 0 || got.CachePartition {
+		t.Fatalf("指针字段显式零值应保留：%+v", got)
+	}
+	if got.WindowSec != 300 || got.Quantile != "p95" || got.MinSamples != 20 ||
+		got.StaleSec != 75 || got.MaxTTFTMs != 30000 {
+		t.Fatalf("未提供字段应保持缺省：%+v", got)
+	}
+	// 值字段部分覆盖
+	got2 := buildLatencyConfig(&routecache.RouteLatency{
+		WindowSec: 600, Quantile: "p50", MinSamples: 50, StaleSec: 30, MaxTTFTMs: 5000,
+	})
+	want := def
+	want.WindowSec, want.Quantile, want.MinSamples, want.StaleSec, want.MaxTTFTMs = 600, "p50", 50, 30, 5000
+	if got2 != want {
+		t.Fatalf("部分覆盖错误：got %+v want %+v", got2, want)
+	}
+	// 全字段显式（合法范围内）
+	g2, mw03, er05 := 2.0, 0.3, 0.5
+	yes := true
+	got3 := buildLatencyConfig(&routecache.RouteLatency{
+		WindowSec: 120, Quantile: "p50", Gamma: &g2, MinWeight: &mw03,
+		ExploreRatio: &er05, MinSamples: 5, StaleSec: 25, CachePartition: &yes, MaxTTFTMs: 1000,
+	})
+	full := routeengine.LatencyConfig{
+		WindowSec: 120, Quantile: "p50", Gamma: 2, MinWeight: 0.3, ExploreRatio: 0.5,
+		MinSamples: 5, StaleSec: 25, CachePartition: true, MaxTTFTMs: 1000,
+	}
+	if got3 != full {
+		t.Fatalf("全字段显式映射错误：got %+v want %+v", got3, full)
+	}
+}
+
+// TestBuildEngineConfig_LatencyWiring：buildEngineConfig 接线（策略映射 + latency 段解析）；
+// 旧表（无 latency 段）策略透传且 latency 全缺省（零回归）。
+func TestBuildEngineConfig_LatencyWiring(t *testing.T) {
+	g0 := 0.0
+	cfg := buildEngineConfig(&routecache.TableRoute{
+		Strategy:  "latency-aware",
+		Endpoints: []routecache.TableEndpoint{{Name: "ep-a", Weight: 1, Priority: 1}},
+		Latency:   &routecache.RouteLatency{WindowSec: 600, Gamma: &g0},
+	})
+	if cfg.Strategy != routeengine.StrategyLatencyAware {
+		t.Fatalf("策略应映射 latency-aware，got %q", cfg.Strategy)
+	}
+	if cfg.Latency.WindowSec != 600 || cfg.Latency.Gamma != 0 {
+		t.Fatalf("latency 段解析错误（显式值/显式零值）：%+v", cfg.Latency)
+	}
+	if cfg.Latency.Quantile != "p95" || !cfg.Latency.CachePartition || cfg.Latency.MinWeight != 0.05 {
+		t.Fatalf("未提供字段应缺省：%+v", cfg.Latency)
+	}
+	// 旧表（无 latency 段 / 非延迟策略）不受影响
+	cfg2 := buildEngineConfig(&routecache.TableRoute{
+		Strategy:  "failure-rate-aware",
+		Endpoints: []routecache.TableEndpoint{{Name: "ep-b", Weight: 1, Priority: 1}},
+	})
+	if cfg2.Strategy != routeengine.StrategyFailureAware || cfg2.Latency != routeengine.DefaultLatencyConfig() {
+		t.Fatalf("旧表应策略透传且 latency 全缺省：%+v", cfg2)
+	}
+}
