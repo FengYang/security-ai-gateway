@@ -198,10 +198,17 @@ func (h *tenantHandler) handleTenantPolicyPut(w http.ResponseWriter, r *http.Req
 		tenantWriteError(w, http.StatusServiceUnavailable, "策略保存失败")
 		return
 	}
+	// N5：同事务 config_version+1，保证「配置已存、待下发」原子性（C-20）。
+	if err := h.dispatchBumpInTx(tx, tenantID); err != nil {
+		log.Printf("[tenant-policy] N5 下发入队失败 tenant=%s: %v", tenantID, err)
+		tenantWriteError(w, http.StatusServiceUnavailable, "策略保存失败")
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		tenantWriteError(w, http.StatusServiceUnavailable, "策略保存失败")
 		return
 	}
+	h.dispatchEnqueue(tenantID)
 
 	// 审计：仅条目数/类目数摘要（不存具体词，附录 D）
 	h.auditAppendDetail(tenantActor(r), auditActionPolicyUpdate, tenantID,
@@ -429,10 +436,17 @@ func (h *tenantHandler) handleTenantModelsConfigPut(w http.ResponseWriter, r *ht
 		tenantWriteError(w, http.StatusServiceUnavailable, "模型配置保存失败")
 		return
 	}
+	// N5：同事务 config_version+1（C-20）。
+	if err := h.dispatchBumpInTx(tx, tenantID); err != nil {
+		log.Printf("[tenant-models] N5 下发入队失败 tenant=%s: %v", tenantID, err)
+		tenantWriteError(w, http.StatusServiceUnavailable, "模型配置保存失败")
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		tenantWriteError(w, http.StatusServiceUnavailable, "模型配置保存失败")
 		return
 	}
+	h.dispatchEnqueue(tenantID)
 
 	// 审计：记模型 ID 列表与默认模型（非敏感，附录 D）
 	h.auditAppendDetail(tenantActor(r), auditActionModelConfigUpdate, tenantID,

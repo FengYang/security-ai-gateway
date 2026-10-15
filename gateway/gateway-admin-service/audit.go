@@ -71,6 +71,8 @@ const (
 	auditActionAuditRetentionChange = "audit_retention_change"
 	// P1-4 N 系列动作（附录 D；N1 开通/变更场景，v1.7 新增）。
 	auditActionProvisioningUpdate = "provisioning_update"
+	// P1-4 N5 下发重放（附录 D；admin + target_tenant，记录原因与 config_version）。
+	auditActionDispatchReplay = "dispatch_replay"
 )
 
 // auditAnchorInterval 每追加 N 条事件锚定一次链尾哈希。

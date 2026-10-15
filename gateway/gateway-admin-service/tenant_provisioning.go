@@ -56,10 +56,27 @@ type provisioningView struct {
 //
 // 由后续子任务注入真实实现（D=N5、F=N4）；未注入 = 空操作，保证各阶段可独立编译/测试。
 // 最终形态：bumpDispatchVersion 在同事务内把表 ⑩ config_version+1、status=pending；
+// enqueueDispatch 在事务提交后投递进程内下发任务（每租户单飞）；
 // reissueStatement 在提交后按 supersedes 链重签承诺边界声明。
 type provisioningEffects struct {
 	bumpDispatchVersion func(tx TenantTx, tenantID string) error
+	enqueueDispatch     func(tenantID string)
 	reissueStatement    func(tenantID string) error
+}
+
+// dispatchBumpInTx 同事务推进下发版本（未接线 = 空操作）。
+func (h *tenantHandler) dispatchBumpInTx(tx TenantTx, tenantID string) error {
+	if h.effects.bumpDispatchVersion == nil {
+		return nil
+	}
+	return h.effects.bumpDispatchVersion(tx, tenantID)
+}
+
+// dispatchEnqueue 提交后投递下发任务（未接线 = 空操作）。
+func (h *tenantHandler) dispatchEnqueue(tenantID string) {
+	if h.effects.enqueueDispatch != nil {
+		h.effects.enqueueDispatch(tenantID)
+	}
 }
 
 // registerTenantProvisioningMux 注册开通配置端点（租户令牌 + CSRF（写））。
@@ -213,6 +230,9 @@ func (h *tenantHandler) handleTenantProvisioningPut(w http.ResponseWriter, r *ht
 		tenantWriteError(w, http.StatusServiceUnavailable, "开通配置保存失败")
 		return
 	}
+
+	// 提交后投递 N5 下发任务（每租户单飞）。
+	h.dispatchEnqueue(tenantID)
 
 	// 联动 N4 重签承诺边界声明（supersedes 链）。声明重签失败不回滚配置（配置已存），仅告警。
 	if h.effects.reissueStatement != nil {

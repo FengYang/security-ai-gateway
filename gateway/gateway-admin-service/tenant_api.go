@@ -50,6 +50,8 @@ type tenantHandler struct {
 
 	// effects 开通变更联动（N4 重签 / N5 下发），由后续子任务注入；零值 = 空操作。
 	effects provisioningEffects
+	// dispatch N5 下发调度器（nil = 未接线；管理员手动重放依赖它）。
+	dispatch *dispatcher
 }
 
 // newTenantHandler 构造租户 handler（captcha 仅在启用时创建）。
@@ -113,6 +115,9 @@ func (h *tenantHandler) registerMux(mux *http.ServeMux) {
 
 	// 密钥资产视图（N2）
 	h.registerTenantSecretsMux(mux)
+
+	// 数据面下发状态/重放（N5）
+	h.registerTenantDispatchMux(mux)
 }
 
 // registerCaptcha 在管理面 mux 注册验证码签发端点（Console 内部，authMiddleware）。
@@ -574,11 +579,18 @@ func (h *tenantHandler) handleVerify(w http.ResponseWriter, r *http.Request) {
 		tenantWriteError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// N5：免费版绑定 = 配额变更，须下发数据面（ai-quota，C-20）。
+	if err := h.dispatchBumpInTx(tx, tenant.ID); err != nil {
+		log.Printf("[tenant-verify] N5 下发入队失败 tenant=%s: %v", tenant.ID, err)
+		tenantWriteError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("[tenant-verify] 提交事务失败: %v", err)
 		tenantWriteError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	h.dispatchEnqueue(tenant.ID)
 
 	h.auditAppendTenantRegister(tenant.ID, user.Email)
 	log.Printf("[tenant-verify] 验证完成 tenant=%s status=%s", tenant.ID, res.Status)

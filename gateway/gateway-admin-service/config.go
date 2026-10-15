@@ -62,6 +62,12 @@ type config struct {
 
 	// 策略（M5，§6.5）：各套餐条目上限（TENANT_POLICY_LIMITS）
 	policyLimits map[string]int
+
+	// 下发通道（N5，§4.3.5）：gateway-core 处方 API（mTLS + 内部服务令牌）。
+	// gatewayCoreURL 为空 = 通道未配置 → worker fail-closed（保留旧版并告警）。
+	gatewayCoreURL     string // GATEWAY_CORE_URL（处方 API 基址）
+	gatewayCoreToken   string // GATEWAY_CORE_DISPATCH_TOKEN（内部服务令牌）
+	dispatchTimeoutSec int    // GATEWAY_CORE_DISPATCH_TIMEOUT_SEC
 }
 
 // defaultIssuer / defaultAudience 内部令牌的签发方与本服务受众默认值。
@@ -234,6 +240,18 @@ func loadTenantConfig(cfg *config) error {
 
 	// F. 策略（§6.5）：各套餐白/黑名单条目上限
 	cfg.policyLimits = parsePolicyLimits(os.Getenv("TENANT_POLICY_LIMITS"))
+
+	// G. 下发通道（N5，§4.3.5）：gateway-core 处方 API（mTLS + 内部服务令牌）。
+	// 未配置 URL = 通道未就绪（worker fail-closed 保留旧版），不阻断门户启动。
+	cfg.gatewayCoreURL = strings.TrimRight(strings.TrimSpace(os.Getenv("GATEWAY_CORE_URL")), "/")
+	cfg.gatewayCoreToken = os.Getenv("GATEWAY_CORE_DISPATCH_TOKEN")
+	cfg.dispatchTimeoutSec = envInt("GATEWAY_CORE_DISPATCH_TIMEOUT_SEC", defaultDispatchTimeoutSec)
+	if cfg.dispatchTimeoutSec <= 0 {
+		cfg.dispatchTimeoutSec = defaultDispatchTimeoutSec
+	}
+	if cfg.gatewayCoreURL != "" && cfg.gatewayCoreToken == "" {
+		return fmt.Errorf("配置缺失：GATEWAY_CORE_URL 已配置但 GATEWAY_CORE_DISPATCH_TOKEN 未设置（下发须内部服务令牌，fail-closed）")
+	}
 	return nil
 }
 

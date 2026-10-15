@@ -309,8 +309,40 @@ func main() {
 		defer func() { _ = ts.Close() }()
 		tenantH.startQuotaCompensator(context.Background(),
 			time.Duration(cfg.tenantCompensateIntervalMin)*time.Minute)
-		log.Printf("租户自助门户已启用：store=%s smtp=%v captcha=%v billing=%v",
-			cfg.tenantStorePath, tenantH.mailer != nil, cfg.captchaEnabled, binder != nil)
+
+		// N5 数据面下发通道（§4.3.5，D-12）：经 gateway-core 处方 API；未配置 = 通道未就绪，
+		// worker fail-closed（保留旧版并告警），不阻断门户启动。
+		var applier dispatchApplier
+		if a := newHTTPDispatchApplier(cfg.gatewayCoreURL, cfg.gatewayCoreToken,
+			time.Duration(cfg.dispatchTimeoutSec)*time.Second); a != nil {
+			applier = a
+		} else {
+			log.Printf("提示：GATEWAY_CORE_URL 未配置——N5 下发通道未就绪（fail-closed 保留旧版并告警）")
+		}
+		disp := newDispatcher(ts, applier)
+		if bih != nil {
+			disp.quotaFn = func(tenantID string) *dispatchQuota {
+				plan, err := bih.store.Plans().Resolve(tenantID, time.Now().UnixNano())
+				if err != nil || plan == nil {
+					return nil
+				}
+				return &dispatchQuota{
+					PlanID: plan.ID, MonthlyTokens: plan.MonthlyTokens,
+					Concurrency: plan.Concurrency, CacheTier: plan.CacheTier,
+				}
+			}
+		}
+		tenantH.dispatch = disp
+		tenantH.effects.bumpDispatchVersion = disp.BumpInTx
+		tenantH.effects.enqueueDispatch = disp.Enqueue
+		if n, err := disp.ReplayPending(); err != nil {
+			log.Printf("重启重放下发任务失败：%v", err)
+		} else if n > 0 {
+			log.Printf("重启重放下发任务：%d 个租户（pending/applying）", n)
+		}
+
+		log.Printf("租户自助门户已启用：store=%s smtp=%v captcha=%v billing=%v dispatch=%v",
+			cfg.tenantStorePath, tenantH.mailer != nil, cfg.captchaEnabled, binder != nil, applier != nil)
 	} else {
 		log.Printf("租户自助门户未启用（TENANT_STORE_PATH 未配置），/v1/tenant/* 端点不注册")
 	}

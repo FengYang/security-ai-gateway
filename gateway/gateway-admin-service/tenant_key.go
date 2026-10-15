@@ -294,11 +294,18 @@ func (h *tenantHandler) handleKeyCreate(w http.ResponseWriter, r *http.Request) 
 		tenantWriteError(w, http.StatusServiceUnavailable, "Key 落库失败")
 		return
 	}
+	// N5：Key 变更须下发到数据面（key-auth Consumer，§4.3.5 映射表；C-20）。
+	if err := h.dispatchBumpInTx(tx, tenantID); err != nil {
+		log.Printf("[tenant-key] N5 下发入队失败 tenant=%s: %v", tenantID, err)
+		tenantWriteError(w, http.StatusServiceUnavailable, "Key 落库失败")
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("[tenant-key] 提交失败: %v", err)
 		tenantWriteError(w, http.StatusServiceUnavailable, "Key 落库失败")
 		return
 	}
+	h.dispatchEnqueue(tenantID)
 
 	h.auditAppendKey(actor, auditActionAPIKeyCreate, keyID, fingerprint)
 	log.Printf("[tenant-key] 创建成功 tenant=%s key=%s fp=%s", tenantID, keyID, fpPrefix(fingerprint))
@@ -377,11 +384,18 @@ func (h *tenantHandler) handleKeyRotate(w http.ResponseWriter, r *http.Request) 
 		tenantWriteError(w, http.StatusConflict, "Key 轮换失败")
 		return
 	}
+	// N5：轮换改动数据面 Consumer 凭证（C-20）。
+	if err := h.dispatchBumpInTx(tx, tenantID); err != nil {
+		log.Printf("[tenant-key] 轮换 N5 下发入队失败 tenant=%s: %v", tenantID, err)
+		tenantWriteError(w, http.StatusServiceUnavailable, "Key 轮换失败")
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("[tenant-key] 轮换提交失败: %v", err)
 		tenantWriteError(w, http.StatusServiceUnavailable, "Key 轮换失败")
 		return
 	}
+	h.dispatchEnqueue(tenantID)
 
 	h.auditAppendKey(actor, auditActionAPIKeyRotate, keyID, fingerprint)
 	log.Printf("[tenant-key] 轮换成功 tenant=%s old=%s new=%s", tenantID, old.KeyID, keyID)
@@ -425,10 +439,17 @@ func (h *tenantHandler) handleKeyRevoke(w http.ResponseWriter, r *http.Request) 
 		tenantWriteError(w, http.StatusServiceUnavailable, "Key 吊销失败")
 		return
 	}
+	// N5：吊销须下发数据面（C-20）。
+	if err := h.dispatchBumpInTx(tx, tenantID); err != nil {
+		log.Printf("[tenant-key] 吊销 N5 下发入队失败 tenant=%s: %v", tenantID, err)
+		tenantWriteError(w, http.StatusServiceUnavailable, "Key 吊销失败")
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		tenantWriteError(w, http.StatusServiceUnavailable, "Key 吊销失败")
 		return
 	}
+	h.dispatchEnqueue(tenantID)
 	h.auditAppendKey(tenantActor(r), auditActionAPIKeyRevoke, key.KeyID, key.Fingerprint)
 	log.Printf("[tenant-key] 吊销成功 tenant=%s key=%s", tenantID, key.KeyID)
 	tenantWriteJSON(w, http.StatusOK, map[string]any{"id": key.KeyID, "status": apiKeyStatusRevoked})

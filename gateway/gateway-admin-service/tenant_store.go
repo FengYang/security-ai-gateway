@@ -169,6 +169,14 @@ type TenantStore interface {
 	GetProvisioning(tenantID string) (*TenantProvisioning, error)
 	UpsertProvisioning(tx TenantTx, p *TenantProvisioning) error
 
+	// 下发状态机（N5，§3.5 表 ⑩）
+	GetDispatchState(tenantID string) (*TenantDispatchState, error)
+	BumpDispatchVersion(tx TenantTx, tenantID string, now int64) (int64, error)
+	MarkDispatchApplying(tx TenantTx, tenantID string, now int64) error
+	MarkDispatchApplied(tx TenantTx, tenantID string, appliedVersion, now int64) error
+	MarkDispatchFailed(tx TenantTx, tenantID string, lastError string, retryCount, now int64) error
+	ListDispatchStatesByStatus(statuses ...string) ([]*TenantDispatchState, error)
+
 	// 套餐升级/降级待确认单（M7）
 	CreateSubscriptionRequest(tx TenantTx, r *SubscriptionRequest) error
 	ListSubscriptionRequests(tenantID string, limit int) ([]*SubscriptionRequest, error)
@@ -269,6 +277,11 @@ func OpenTenantStore(dsn string, wal bool, pepper []byte) (TenantStore, error) {
 	}
 	// 开通配置表（N1，§3.5 表 ⑧）
 	if err := ensureProvisioningSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// 下发状态机表（N5，§3.5 表 ⑩）
+	if err := ensureDispatchSchema(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -1033,4 +1046,172 @@ func (s *sqliteTenantStore) UpsertProvisioning(tx TenantTx, p *TenantProvisionin
 		return fmt.Errorf("tenant: upsert provisioning: %w", err)
 	}
 	return nil
+}
+
+// ---------- 下发状态机（N5，§3.5 表 ⑩）----------
+
+// dispatchStatus* 下发状态机取值（§4.3.5）。
+const (
+	dispatchStatusIdle     = "idle"
+	dispatchStatusPending  = "pending"
+	dispatchStatusApplying = "applying"
+	dispatchStatusApplied  = "applied"
+	dispatchStatusFailed   = "failed"
+)
+
+// dispatchDDL 下发状态机表结构（对齐 §3.5 表 ⑩；每租户一行，config_version 单调递增）。
+//
+// 说明：§3.5 表 ⑩ 写作 `REFERENCES tenants(tenant_id)`，但租户表主键实为 `id`
+// （见 §3.5 tenants 表），故此处按真实列名写 `REFERENCES tenants(id)`（与表 ⑧ FK 同法），
+// 否则 SQLite 开启 foreign_keys 后写入报 "foreign key mismatch"。
+const dispatchDDL = `
+CREATE TABLE IF NOT EXISTS tenant_dispatch_state (
+  tenant_id       TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+  config_version  INTEGER NOT NULL DEFAULT 0,
+  status          TEXT    NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','pending','applying','applied','failed')),
+  applied_version INTEGER NOT NULL DEFAULT 0,
+  last_error      TEXT,
+  retry_count     INTEGER NOT NULL DEFAULT 0,
+  updated_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_status ON tenant_dispatch_state(status);
+`
+
+// TenantDispatchState 下发状态机行（每租户一行）。
+type TenantDispatchState struct {
+	TenantID       string
+	ConfigVersion  int64
+	Status         string
+	AppliedVersion int64
+	LastError      string
+	RetryCount     int64
+	UpdatedAt      int64
+}
+
+// ensureDispatchSchema 建表（N5 新表）。
+func ensureDispatchSchema(db *sql.DB) error {
+	if _, err := db.Exec(dispatchDDL); err != nil {
+		return fmt.Errorf("tenant: init dispatch schema: %w", err)
+	}
+	return nil
+}
+
+const dispatchColumns = `tenant_id, config_version, status, applied_version, COALESCE(last_error,''), retry_count, updated_at`
+
+// scanDispatchState 行扫描（*sql.Row / *sql.Rows 共用）。
+func scanDispatchState(sc rowScanner) (*TenantDispatchState, error) {
+	var d TenantDispatchState
+	if err := sc.Scan(&d.TenantID, &d.ConfigVersion, &d.Status, &d.AppliedVersion,
+		&d.LastError, &d.RetryCount, &d.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+func (s *sqliteTenantStore) GetDispatchState(tenantID string) (*TenantDispatchState, error) {
+	d, err := scanDispatchState(s.db.QueryRow(`SELECT `+dispatchColumns+
+		` FROM tenant_dispatch_state WHERE tenant_id = ?`, tenantID))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant: get dispatch state: %w", err)
+	}
+	return d, nil
+}
+
+// BumpDispatchVersion 同事务把 config_version+1、status='pending'（不存在则建行，config_version=1）。
+// 返回自增后的 config_version。用于「配置已存、待下发」的原子性保证（§4.3.5）。
+func (s *sqliteTenantStore) BumpDispatchVersion(tx TenantTx, tenantID string, now int64) (int64, error) {
+	_, err := tx.tx().Exec(`INSERT INTO tenant_dispatch_state
+		(tenant_id, config_version, status, applied_version, last_error, retry_count, updated_at)
+		VALUES (?, 1, 'pending', 0, NULL, 0, ?)
+		ON CONFLICT(tenant_id) DO UPDATE SET
+			config_version = config_version + 1,
+			status = 'pending',
+			last_error = NULL,
+			retry_count = 0,
+			updated_at = excluded.updated_at`,
+		tenantID, now)
+	if err != nil {
+		return 0, fmt.Errorf("tenant: bump dispatch version: %w", err)
+	}
+	var v int64
+	if err := tx.tx().QueryRow(`SELECT config_version FROM tenant_dispatch_state WHERE tenant_id = ?`, tenantID).
+		Scan(&v); err != nil {
+		return 0, fmt.Errorf("tenant: read bumped dispatch version: %w", err)
+	}
+	return v, nil
+}
+
+// MarkDispatchApplying 置 status='applying'（不改版本）。
+func (s *sqliteTenantStore) MarkDispatchApplying(tx TenantTx, tenantID string, now int64) error {
+	res, err := tx.tx().Exec(`UPDATE tenant_dispatch_state SET status = 'applying', updated_at = ?
+		WHERE tenant_id = ?`, now, tenantID)
+	if err != nil {
+		return fmt.Errorf("tenant: mark dispatch applying: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("tenant: dispatch state %s not found", tenantID)
+	}
+	return nil
+}
+
+// MarkDispatchApplied 置 status='applied'，applied_version 单调前进（MAX 语义，防乱序回退）。
+func (s *sqliteTenantStore) MarkDispatchApplied(tx TenantTx, tenantID string, appliedVersion, now int64) error {
+	res, err := tx.tx().Exec(`UPDATE tenant_dispatch_state
+		SET status = 'applied',
+		    applied_version = MAX(applied_version, ?),
+		    last_error = NULL,
+		    retry_count = 0,
+		    updated_at = ?
+		WHERE tenant_id = ?`, appliedVersion, now, tenantID)
+	if err != nil {
+		return fmt.Errorf("tenant: mark dispatch applied: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("tenant: dispatch state %s not found", tenantID)
+	}
+	return nil
+}
+
+// MarkDispatchFailed 置 status='failed' + 脱敏 last_error + 重试计数。
+func (s *sqliteTenantStore) MarkDispatchFailed(tx TenantTx, tenantID, lastError string, retryCount, now int64) error {
+	res, err := tx.tx().Exec(`UPDATE tenant_dispatch_state
+		SET status = 'failed', last_error = ?, retry_count = ?, updated_at = ?
+		WHERE tenant_id = ?`, lastError, retryCount, now, tenantID)
+	if err != nil {
+		return fmt.Errorf("tenant: mark dispatch failed: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("tenant: dispatch state %s not found", tenantID)
+	}
+	return nil
+}
+
+// ListDispatchStatesByStatus 按状态枚举下发状态行（重启重放扫描 pending/applying，§4.3.5 item 4）。
+func (s *sqliteTenantStore) ListDispatchStatesByStatus(statuses ...string) ([]*TenantDispatchState, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
+	args := make([]any, 0, len(statuses))
+	for _, st := range statuses {
+		args = append(args, st)
+	}
+	rows, err := s.db.Query(`SELECT `+dispatchColumns+` FROM tenant_dispatch_state WHERE status IN (`+
+		placeholders+`) ORDER BY updated_at ASC`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("tenant: list dispatch states: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*TenantDispatchState
+	for rows.Next() {
+		d, err := scanDispatchState(rows)
+		if err != nil {
+			return nil, fmt.Errorf("tenant: scan dispatch state: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
