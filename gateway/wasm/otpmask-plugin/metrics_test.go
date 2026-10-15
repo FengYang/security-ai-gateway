@@ -7,6 +7,8 @@ package main
 import (
 	"os"
 	"testing"
+
+	"security-ai-gateway/gateway/wasm/otpmask-plugin/routeengine"
 )
 
 func TestMain(m *testing.M) {
@@ -73,4 +75,66 @@ func TestObserveTTFTGuardedNoop(t *testing.T) {
 	for _, ms := range []int64{0, 1, 9, 10, 11, 25, 25000, 30000, 999999} {
 		observeTTFT(ms)
 	}
+}
+
+// TestLatencyPickCounterNaming：M5.2 选路拆名与 §6.5 契约名一致（三形态，别无维度）。
+func TestLatencyPickCounterNaming(t *testing.T) {
+	want := map[routeengine.Strategy]string{
+		routeengine.StrategyLatencyAware:   "otpmask_route_latency_pick_weighted_total",
+		routeengine.StrategyLatencyFastest: "otpmask_route_latency_pick_fastest_total",
+		routeengine.StrategyHybrid:         "otpmask_route_latency_pick_hybrid_total",
+	}
+	if len(latencyPickCounters) != len(want) {
+		t.Fatalf("选路计数维度数不符：got=%d want=%d", len(latencyPickCounters), len(want))
+	}
+	for strategy, name := range want {
+		c, ok := latencyPickCounters[strategy]
+		if !ok {
+			t.Fatalf("缺策略映射：%q", strategy)
+		}
+		if c.name != name {
+			t.Fatalf("策略 %q 指标名不符：got=%q want=%q", strategy, c.name, name)
+		}
+	}
+}
+
+// TestTTFTFallbackCounterNaming：M5.2 五原因拆名与 §6.5/R2-19 契约名一致
+// （取值来源 = routeengine.Fallback* 常量，防字面量漂移）。
+func TestTTFTFallbackCounterNaming(t *testing.T) {
+	want := map[string]string{
+		routeengine.FallbackUnreachable: "otpmask_route_ttft_fallback_unreachable_total",
+		routeengine.FallbackStale:       "otpmask_route_ttft_fallback_stale_total",
+		routeengine.FallbackLowSamples:  "otpmask_route_ttft_fallback_low_samples_total",
+		routeengine.FallbackNoSamples:   "otpmask_route_ttft_fallback_no_samples_total",
+		routeengine.FallbackNoRand:      "otpmask_route_ttft_fallback_no_rand_total",
+	}
+	if len(ttftFallbackCounters) != len(want) {
+		t.Fatalf("回退计数维度数不符：got=%d want=%d", len(ttftFallbackCounters), len(want))
+	}
+	for reason, name := range want {
+		c, ok := ttftFallbackCounters[reason]
+		if !ok {
+			t.Fatalf("缺原因映射：%q", reason)
+		}
+		if c.name != name {
+			t.Fatalf("原因 %q 指标名不符：got=%q want=%q", reason, c.name, name)
+		}
+	}
+}
+
+// TestRecordLatencyPickGuardedNoop：守卫下记录调用安全 no-op——
+// latency 三形态与未知/非延迟策略均不 panic；未知原因不误计。
+func TestRecordLatencyPickGuardedNoop(t *testing.T) {
+	recordLatencyPick(routeengine.StrategyLatencyAware)
+	recordLatencyPick(routeengine.StrategyLatencyFastest)
+	recordLatencyPick(routeengine.StrategyHybrid)
+	recordLatencyPick(routeengine.StrategyPriority)
+	recordLatencyPick(routeengine.StrategyWeighted)
+	recordLatencyPick(routeengine.StrategyFailureAware)
+	recordLatencyPick(routeengine.Strategy("unknown"))
+}
+
+// TestInitLatencyMetricsInjectsObserver：装配期注入不 panic（映射正确性由命名用例覆盖）。
+func TestInitLatencyMetricsInjectsObserver(t *testing.T) {
+	initLatencyMetrics()
 }

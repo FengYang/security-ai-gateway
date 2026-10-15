@@ -260,6 +260,16 @@ const (
 	fallbackNoRand      = "no_rand"     // R2-19 序 5：随机源不可用 → 确定性回退
 )
 
+// 回退原因对外别名（M5.2：插件装配期据此映射 otpmask_route_ttft_fallback_*_total 拆名
+// Counter——唯一取值来源，避免双份字面量漂移；内部实现恒用未导出常量，值域不变）。
+const (
+	FallbackUnreachable = fallbackUnreachable
+	FallbackStale       = fallbackStale
+	FallbackLowSamples  = fallbackLowSamples
+	FallbackNoSamples   = fallbackNoSamples
+	FallbackNoRand      = fallbackNoRand
+)
+
 // latencyFallbackObserver 包级回退观测接缝（M5.2 由插件注入 → fallback_total 拆名
 // Counter）。未注入时 no-op；请求路径不写日志/不发网络（C-4），仅回调计数。
 var latencyFallbackObserver func(reason string)

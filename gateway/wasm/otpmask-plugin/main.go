@@ -49,6 +49,8 @@ func init() {
 		// （MemKeyStore 无 TTL，不做此清理会致 seed 永久残留）。
 		wrapper.ProcessStreamDoneBy(onStreamDone),
 	)
+	// P1-6 M5.2（§6.5）：装配期注入延迟策略回退观测（五原因拆名 Counter）。
+	initLatencyMetrics()
 }
 
 // PluginConfig 插件配置（控制台 YAML 自动转 JSON 下发）。

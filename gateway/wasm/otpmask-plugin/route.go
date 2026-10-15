@@ -300,6 +300,8 @@ func finishRouteDecision(ctx wrapper.HttpContext, log logs.Log, tenant, model, r
 			case "control":
 				metricRouteCanaryControl.incr()
 			}
+			// P1-6 M5.2（§6.5）：延迟策略选路计数（按策略拆名；回退保留策略标签亦计入，R2-10）
+			recordLatencyPick(epd.Strategy)
 		}
 	}
 
