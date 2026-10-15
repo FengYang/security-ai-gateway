@@ -49,6 +49,9 @@ const (
 	dispatchTargetConsumerQuota       = "consumer_quota"
 	dispatchTargetPrescription        = "gateway_core_prescription"
 
+	// dispatchCacheKeyPrefix 语义缓存键前缀（N7，§4.3.7 item 1：`tenant_id+model`）。
+	dispatchCacheKeyPrefix = "tenant_id+model"
+
 	// dispatchApplyTimeout 单次 Apply 超时（超时 = 保留旧版，C-20）。
 	dispatchApplyTimeout = 20 * time.Second
 	// defaultDispatchTimeoutSec 单次 Apply 超时秒数（env 缺省，供 config 侧引用）。
@@ -130,6 +133,10 @@ func BuildDispatch(in DispatchInput) (*DispatchPlan, error) {
 				"segment2_mode":    in.Provisioning.Segment2Mode,
 				"template_version": in.Provisioning.TemplateVersion,
 				"chain":            chain,
+				// N7：跨租户隔离（语义缓存命名空间 + tenant 解析一致性处方）。
+				"cache_namespace":   cacheNamespaceForTenant(in.TenantID),
+				"cache_key_prefix":  dispatchCacheKeyPrefix,
+				"tenant_resolution": tenantResolutionSpec(in.TenantID),
 			},
 		})
 	}
@@ -163,17 +170,26 @@ func BuildDispatch(in DispatchInput) (*DispatchPlan, error) {
 				"monthly_tokens": in.Quota.MonthlyTokens,
 				"concurrency":    in.Quota.Concurrency,
 				"cache_tier":     in.Quota.CacheTier,
+				// N7：配额隔离（consumer 维度天然隔离 + 防伪造 X-Tenant-ID）。
+				"isolation": consumerIsolationSpec(in.TenantID),
 			},
 		})
 	}
 
 	// 4) gateway-core 处方（策略 overlay → request-validation；模型 ACL → ai-proxy allowlist）
-	presc := map[string]any{"route": otpRouteForTenant(in.TenantID)}
+	presc := map[string]any{
+		"route":             otpRouteForTenant(in.TenantID),
+		"tenant_resolution": tenantResolutionSpec(in.TenantID),
+	}
 	if in.Policy != nil {
 		presc["policy"] = policyPrescription(in.Policy)
 	}
 	if in.Models != nil {
 		presc["models"] = modelsPrescription(in.Models)
+	}
+	// N7 密态轨（S2/S3/S4）：段① 解密后的 JWT 声明租户须与声明租户一致（§4.3.7 S1–S5 差异）。
+	if requiresDecryptTenantBinding(in.Provisioning) {
+		presc["decrypt_tenant_binding"] = decryptTenantBindingSpec(in.TenantID)
 	}
 	plan.Targets = append(plan.Targets, DispatchTarget{
 		Kind: dispatchTargetPrescription,
@@ -186,6 +202,53 @@ func BuildDispatch(in DispatchInput) (*DispatchPlan, error) {
 
 // otpRouteForTenant 处方路由（X-Otp-Route，§4.3.5 映射表）。
 func otpRouteForTenant(tenantID string) string { return "tenant/" + tenantID }
+
+// ---------- N7 · 多租户隔离增强（§4.3.7，V-S7）----------
+
+// cacheNamespaceForTenant 语义缓存命名空间（§4.3.7 item 1：跨租户不误命中）。
+// 键 = `tenant_id+model`（键前缀见 dispatchCacheKeyPrefix），命名空间按租户前缀隔离。
+func cacheNamespaceForTenant(tenantID string) string { return "tenant:" + tenantID }
+
+// consumerIsolationSpec ai-quota/ai-token-ratelimit 的 consumer 维度隔离参数（§4.3.7 item 2）。
+// reject_self_declared_tenant_header：数据面以 JWT 真值覆盖自声明 X-Tenant-ID，防伪造越权。
+func consumerIsolationSpec(tenantID string) map[string]any {
+	return map[string]any{
+		"scope":                              "consumer",
+		"consumer":                           consumerForTenant(tenantID),
+		"isolate":                            true,
+		"reject_self_declared_tenant_header": true,
+	}
+}
+
+// tenantResolutionSpec tenant 解析一致性处方（§4.3.7 item 3/4）：
+// 租户由 auth-service JWT 派生、插件校验后**覆盖自声明头**；缺消费者落哨兵租户
+// （审计侧以 `tenant_id_resolution` 做一致性裁决）。
+func tenantResolutionSpec(tenantID string) map[string]any {
+	return map[string]any{
+		"mode":            "jwt_override",
+		"header":          "X-Tenant-ID",
+		"authority":       "auth-service",
+		"audit_field":     "tenant_id_resolution",
+		"consumer":        consumerForTenant(tenantID),
+		"sentinel_tenant": sentinelTenant,
+	}
+}
+
+// decryptTenantBindingSpec 密态轨（S2/S3/S4）段① 解密租户绑定校验（§4.3.7 S1–S5 差异）：
+// 段① 解密出的 JWT 声明租户须与声明租户一致，防"解密方≠声明租户"跨租户串味。
+func decryptTenantBindingSpec(tenantID string) map[string]any {
+	return map[string]any{
+		"require":       true,
+		"segment":       1,
+		"invariant":     "decrypted_jwt.tenant == declared.tenant",
+		"target_tenant": tenantID,
+	}
+}
+
+// requiresDecryptTenantBinding 是否需要段① 解密租户绑定校验（A 型分段密态 + 段① 启用）。
+func requiresDecryptTenantBinding(p *TenantProvisioning) bool {
+	return p != nil && p.Segment1Enabled && p.AccessMode == accessModeASegmented
+}
 
 // policyPrescription 策略 overlay 处方体（含条目清单，供 request-validation schema 渲染）。
 func policyPrescription(p *PolicyOverlay) map[string]any {
