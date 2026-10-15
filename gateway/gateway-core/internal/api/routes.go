@@ -601,6 +601,109 @@ func (s *Server) handleTTFTReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"result": "ok"})
 }
 
+// ============================================================
+// P1-6 M3.5：TTFT 统计下发端点（控制面 → 数据面，§6.3）
+// ============================================================
+
+// ttftStat 单条下发统计（§6.3 字段序）。
+type ttftStat struct {
+	Tenant    string `json:"tenant"`
+	Model     string `json:"model"`
+	Endpoint  string `json:"endpoint"`
+	Cache     string `json:"cache"`
+	P50Ms     int64  `json:"p50_ms"`
+	P95Ms     int64  `json:"p95_ms"`
+	Samples   uint64 `json:"samples"`
+	Valid     bool   `json:"valid"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+// ttftStatsMaxEntries 单次下发条目上限（§6.3：如 ≤1000 条，与上报侧对称）。
+const ttftStatsMaxEntries = 1000
+
+// nextTTFTGeneratedAt 返回严格递增的 generated_at（毫秒；§6.3 单调性由控制面保证）。
+func (s *Server) nextTTFTGeneratedAt() int64 {
+	s.ttftGenMu.Lock()
+	defer s.ttftGenMu.Unlock()
+	now := time.Now().UnixMilli()
+	if now <= s.ttftGenAt {
+		now = s.ttftGenAt + 1
+	}
+	s.ttftGenAt = now
+	return now
+}
+
+// handleTTFTStats GET /routes/ttft/stats?tenant=&model=&updated_since=（§6.3）。
+//
+// 语义：
+//   - tenant 必填；model / updated_since（秒，增量过滤 updated_at > updated_since）可选；
+//   - 无匹配统计（如实 404 not_found，不返回空 200）；updated_since 过滤后为空 → 200 空 stats；
+//   - valid = samples ≥ min_samples 且 now - updated_at ≤ stale_sec（缺省 20/75s，取路由 latency 配置覆盖）；
+//   - 单次 ≤1000 条（超出截断；数据面按 round-robin 分片，TT2-12）；
+//   - generated_at 严格递增（毫秒）；本接口不参与路由表签名（D-6）。
+func (s *Server) handleTTFTStats(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	tenant := q.Get("tenant")
+	if tenant == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "tenant 必填（§6.3）")
+		return
+	}
+	model := q.Get("model")
+	updatedSince := int64(-1)
+	if v := q.Get("updated_since"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_request", "updated_since 须为非负整数（秒）")
+			return
+		}
+		updatedSince = n
+	}
+
+	keys := s.ttftRing.Keys(tenant, model)
+	if len(keys) == 0 {
+		writeError(w, http.StatusNotFound, "not_found", "该 (tenant,model) 无统计（§6.3 如实 404）")
+		return
+	}
+
+	tbl := s.store.GetRouteTable()
+	nowSec := time.Now().Unix()
+	stats := make([]ttftStat, 0, len(keys))
+	for _, k := range keys {
+		wnd, ok := s.ttftRing.Merge(k)
+		if !ok {
+			continue
+		}
+		if updatedSince >= 0 && wnd.UpdatedAt <= updatedSince {
+			continue
+		}
+		minSamples, staleSec := route.TTFTDefaultMinSamples, route.TTFTDefaultStaleSec
+		if rt := tbl.Lookup(k.Tenant, k.Model); rt != nil && rt.Latency != nil {
+			if rt.Latency.MinSamples > 0 {
+				minSamples = rt.Latency.MinSamples
+			}
+			if rt.Latency.StaleSec > 0 {
+				staleSec = rt.Latency.StaleSec
+			}
+		}
+		p50, _ := wnd.Quantile(0.5)
+		p95, _ := wnd.Quantile(0.95)
+		valid := wnd.Samples >= uint64(minSamples) &&
+			wnd.UpdatedAt > 0 && nowSec-wnd.UpdatedAt <= int64(staleSec)
+		stats = append(stats, ttftStat{
+			Tenant: k.Tenant, Model: k.Model, Endpoint: k.Endpoint, Cache: k.Cache,
+			P50Ms: p50, P95Ms: p95,
+			Samples: wnd.Samples, Valid: valid, UpdatedAt: wnd.UpdatedAt,
+		})
+		if len(stats) >= ttftStatsMaxEntries {
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"generated_at": s.nextTTFTGeneratedAt(),
+		"stats":        stats,
+	})
+}
+
 // routeHistory 路由表历史版本（与 ratelimit 的 history 分开存储，避免互串）。
 // 为保持简洁，复用同一 histMu 互斥锁（两者都是配置面操作，并发度低）。
 //

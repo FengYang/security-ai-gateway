@@ -35,6 +35,9 @@ type Server struct {
 	// P1-6 M3.1/M3.3：TTFT 聚合（分片环形 + batch_id 去重；控制面非热路径）。
 	ttftRing  *route.TTFTRing
 	ttftDedup *route.TTFTDedup
+	// P1-6 M3.5：stats 下发 generated_at 单调性（毫秒，严格递增）。
+	ttftGenMu sync.Mutex
+	ttftGenAt int64
 }
 
 // New 构造 API Server。routerTable 为启动时注入的已签名默认路由表（可为空表）；
@@ -145,6 +148,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /routes/endpoints/status", s.withAuth(s.handleEndpointStatus))
 	// P1-6 M3.4：TTFT 上报（数据面 → 控制面；§6.2）
 	s.mux.HandleFunc("POST /routes/ttft/report", s.withAuth(s.handleTTFTReport))
+	// P1-6 M3.5：TTFT 统计下发（控制面 → 数据面；§6.3）
+	s.mux.HandleFunc("GET /routes/ttft/stats", s.withAuth(s.handleTTFTStats))
 	s.mux.HandleFunc("POST /routes/rollback", s.withAuth(s.withRouteChangeSpan("rollback", s.handleRouteRollback)))
 	s.mux.HandleFunc("GET /routes/history", s.withAuth(s.handleRouteHistory))
 	s.mux.HandleFunc("POST /routes/push", s.withAuth(s.handleRoutePush))

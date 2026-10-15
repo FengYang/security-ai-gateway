@@ -14,6 +14,7 @@ package route
 
 import (
 	"math"
+	"sort"
 	"sync"
 	"time"
 )
@@ -32,6 +33,13 @@ const TTFTShardWindowSec = 25
 
 // TTFTDefaultWindowSec 缺省总窗口（300s = 12×25s）。
 const TTFTDefaultWindowSec = 300
+
+// TTFTDefaultMinSamples / TTFTDefaultStaleSec 下发有效性判定缺省（§6.1 镜像：
+// 与数据面 routeengine.DefaultLatencyConfig 同口径；两侧为独立二进制，缺省口径源为 §6.1）。
+const (
+	TTFTDefaultMinSamples = 20
+	TTFTDefaultStaleSec   = 75
+)
 
 // TTFTMaxShards N 上限（144，对应 window_sec ≤ 3600；越界配置由 Validate 拦截，
 // 本层另做防御性归一化）。
@@ -212,6 +220,33 @@ func (r *TTFTRing) HasRoomFor(keys []TTFTKey) bool {
 		}
 	}
 	return len(r.entries)+missing <= r.maxEntries
+}
+
+// Keys 返回匹配 tenant（tenant 为空=不限）与 model（为空=不限）的条目键，
+// 按 (model, endpoint, cache) 排序（输出稳定，供 M3.5 下发与 M3.8 指标渲染）。
+func (r *TTFTRing) Keys(tenant, model string) []TTFTKey {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []TTFTKey
+	for k := range r.entries {
+		if tenant != "" && k.Tenant != tenant {
+			continue
+		}
+		if model != "" && k.Model != model {
+			continue
+		}
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Model != out[j].Model {
+			return out[i].Model < out[j].Model
+		}
+		if out[i].Endpoint != out[j].Endpoint {
+			return out[i].Endpoint < out[j].Endpoint
+		}
+		return out[i].Cache < out[j].Cache
+	})
+	return out
 }
 
 // Reset 清空键的全部分片（M3.6 reset 端点复用；返回重置前是否存在条目）。
