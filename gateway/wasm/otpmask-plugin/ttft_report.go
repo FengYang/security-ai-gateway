@@ -7,7 +7,8 @@ package main
 //   - M2.3：标识解析（node/VM ID，R2-03/G-3）+ 上报体构造 + batch_id + 超限拆分（TT2-08）；
 //   - M2.1：首 token 采样钩子（解密回调 + delta.content 判定，R2-04/R2-05/C-3）；
 //   - M2.4：待确认队列（冻结/确认移除/上限丢弃，R2-06/R2-18）；
-//   - M2.5：周期上报 tick（ttft_poll_interval_seconds 缺省 10s ≤ T=25s；cb/ok/reject/drop 指标）。
+//   - M2.5：周期上报 tick（ttft_poll_interval_seconds 缺省 10s ≤ T=25s；cb/ok/reject/drop 指标）；
+//   - M2.7：cache 维度输入接缝（TEE 响应头命中标识；契约未落地恒 miss，D-10/P0-2）。
 //
 // 本文件不含路由决策/权函数（TT2-19 解耦）；指标注册见 metrics.go（M5）。
 
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -190,9 +192,42 @@ func ttftBuildReports(id ttftIdentity, cycleStartSec int64, samples []ttftSample
 // M2.1：首 token 采样钩子（解密回调接线，§3.4 / R2-04 / R2-05 / C-3）
 // ============================================================
 
-// ttftCacheMiss cache 维度缺省值（D-10/§3.2 第 9 步）：TEE 侧命中标识回传契约（M2.7）
-// 未落地前恒记 miss（cache_partition=true 时等价不分层，不影响 miss 画像正确性）。
+// ttftCacheMiss cache 维度缺省值（D-10/§3.2 第 9 步）。
 const ttftCacheMiss = "miss"
+
+// ttftCacheHit cache 维度命中标识（D-10：hit 样本仅观测/控制面聚合，不参与路由权；R-11）。
+const ttftCacheHit = "hit"
+
+// ttftCacheHeaderName TEE 侧缓存命中标识响应头名（M2.7 输入接缝；P0-2 契约）。
+//
+// ⚠️ 跨文档依赖（§8「P0-2 语义缓存」）：命中判定在 tee-infer 进程内、数据面不可见，
+// 须由 TEE 响应头回传；契约未落地 → **空串 = 不读取响应头、cache 恒记 miss**
+// （cache_partition=true 时等价不分层，不影响 miss 画像正确性）。
+// 契约定稿后仅需填写实际头名（如 "X-Otpmask-Cache"）——上报/待确认队列/下发写回
+// 全链路已按任意 cache 值工作，数据面即自动 hit/miss 归维（M2.7 验收后半句）。
+var ttftCacheHeaderName = ""
+
+// ttftCacheDimFromValue 解析命中标识取值 → 维度名：仅显式 "hit"（忽略大小写/首尾空白）归 hit；
+// 其余（"miss"/空/未知值）一律 miss——路由权只用 miss（D-10/R-11：本期不启用 hit 样本路由）。
+func ttftCacheDimFromValue(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), ttftCacheHit) {
+		return ttftCacheHit
+	}
+	return ttftCacheMiss
+}
+
+// ttftCacheDimFromHeaders 从 TEE 响应头读取缓存维度（M2.7 输入接缝）：
+// 契约未落地（ttftCacheHeaderName 为空）→ 不发起读取、恒 miss（零行为变化）。
+func ttftCacheDimFromHeaders(getHeader func(string) (string, error)) string {
+	if ttftCacheHeaderName == "" {
+		return ttftCacheMiss
+	}
+	v, err := getHeader(ttftCacheHeaderName)
+	if err != nil {
+		v = ""
+	}
+	return ttftCacheDimFromValue(v)
+}
 
 // ttftKey TTFT 聚合键（§3.4/§6.2：(tenant, model, endpoint, cache)）。
 type ttftKey struct {
@@ -271,15 +306,19 @@ var ttftStore = newTTFTCounters()
 
 // ttftCapture 计算候选样本（纯函数；无路由上下文/起点缺失 → 不采样）。
 // endpoint 取请求级路由决策上下文（P0-1）；无端点归属（未走多端点路由）时如实跳过。
-func ttftCapture(ep, tenant, model string, startNs, nowNs int64) (ttftKey, int64, bool) {
+// cache 为 M2.7 输入接缝解析出的维度（空 → 缺省 miss）。
+func ttftCapture(ep, tenant, model, cache string, startNs, nowNs int64) (ttftKey, int64, bool) {
 	if ep == "" || startNs <= 0 || nowNs <= 0 {
 		return ttftKey{}, 0, false
+	}
+	if cache == "" {
+		cache = ttftCacheMiss
 	}
 	ms := (nowNs - startNs) / int64(time.Millisecond)
 	if ms < 0 {
 		ms = 0 // 时钟异常防御（如发生，如实归 0 桶）
 	}
-	return ttftKey{tenant: tenant, model: model, endpoint: ep, cache: ttftCacheMiss}, ms, true
+	return ttftKey{tenant: tenant, model: model, endpoint: ep, cache: cache}, ms, true
 }
 
 // ttftOnDecryptedOut 解密回调接线（M2.1）：把解密后重建的明文 SSE 喂入内容判定解析器
@@ -287,6 +326,7 @@ func ttftCapture(ep, tenant, model string, startNs, nowNs int64) (ttftKey, int64
 // delta.content 非空 token 到达 → now - RouteStart 记候选。
 // 非流式/整包路径不接线（§3.4：非流式/失败请求不计入）；候选提交唯一发生在
 // 流完整结束处（ttftCommitOnComplete），解密失败/截断流的候选自然丢弃。
+// cache 维度（M2.7）：取响应头阶段缓存的命中标识（契约未落地 → 恒 miss）。
 func ttftOnDecryptedOut(ctx wrapper.HttpContext, config PluginConfig, st *respStreamState, out []byte) {
 	if st == nil || len(out) == 0 {
 		return
@@ -297,12 +337,16 @@ func ttftOnDecryptedOut(ctx wrapper.HttpContext, config PluginConfig, st *respSt
 	ep, _ := ctx.GetContext(ctxKeyRouteEndpoint).(string)
 	tenant, _ := ctx.GetContext(ctxKeyTenantID).(string)
 	startNs, _ := ctx.GetContext(ctxKeyRouteStart).(int64)
-	st.ttft.onOut(out, ep, tenant, config.Model, startNs, time.Now().UnixNano())
+	cache, _ := ctx.GetContext(ctxKeyTTFTCache).(string)
+	if cache == "" {
+		cache = ttftCacheMiss
+	}
+	st.ttft.onOut(out, ep, tenant, config.Model, cache, startNs, time.Now().UnixNano())
 }
 
 // onOut 判定 + 捕获核心（无 ctx，可单测）：首内容 token 到达时按已解析的路由上下文记候选。
 // 首 token 后（fired）不再喂入；无路由上下文（endpoint 空/起点缺失）→ 如实不记候选。
-func (s *ttftRespSample) onOut(out []byte, ep, tenant, model string, startNs, nowNs int64) {
+func (s *ttftRespSample) onOut(out []byte, ep, tenant, model, cache string, startNs, nowNs int64) {
 	if len(out) == 0 || s.fired {
 		return
 	}
@@ -314,7 +358,7 @@ func (s *ttftRespSample) onOut(out []byte, ep, tenant, model string, startNs, no
 		return
 	}
 	s.fired = true
-	key, ms, ok := ttftCapture(ep, tenant, model, startNs, nowNs)
+	key, ms, ok := ttftCapture(ep, tenant, model, cache, startNs, nowNs)
 	if !ok {
 		return
 	}

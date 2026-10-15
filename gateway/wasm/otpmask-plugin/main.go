@@ -449,6 +449,10 @@ const ctxKeyTenantID = "otpmask-tenant-id"
 // ctxKeyRespStatus 响应状态码缓存键（同因：body 阶段读不到响应伪头 :status）。
 const ctxKeyRespStatus = "otpmask-resp-status"
 
+// ctxKeyTTFTCache TEE 响应头的缓存命中标识缓存键（P1-6 M2.7；body 阶段读不到响应头，
+// 与 :status 同因——响应头阶段读取并保存；契约未落地时头名为空、不读取，恒 miss）。
+const ctxKeyTTFTCache = "otpmask-ttft-cache"
+
 // ctxKeyRouteEndpoint / ctxKeyRouteEntry / ctxKeyRouteStart 请求级路由上下文（P0-1 多端点路由）。
 // 请求头阶段写入，响应头阶段读取以回写 EWMA/熔断/延迟结果。
 const (
@@ -590,6 +594,11 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig, log log
 	// body 阶段读不到响应伪头 :status → 此处缓存（SSE 增量 vs 整包路径判定依赖）。
 	st := responseStatus()
 	ctx.SetContext(ctxKeyRespStatus, st)
+	// P1-6 M2.7（D-10）：TEE 侧缓存命中标识——契约未落地（头名为空）时不读取、恒 miss；
+	// 契约定稿后自动 hit/miss 归维（body 阶段读不到响应头，故此处缓存）。
+	if ttftCacheHeaderName != "" {
+		ctx.SetContext(ctxKeyTTFTCache, ttftCacheDimFromHeaders(proxywasm.GetHttpResponseHeader))
+	}
 	// P0-1 多端点路由结果回写（EWMA 失败率/熔断/动态权重）；未选择端点时为 no-op。
 	if code, err := strconv.Atoi(st); err == nil {
 		recordRouteResult(ctx, code)

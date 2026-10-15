@@ -233,21 +233,73 @@ func TestTTFTReportJSONShape(t *testing.T) {
 
 // ---- M2.1：首 token 采样钩子（R2-04/R2-05/C-3）----
 
-// TestTTFTCapture：纯函数捕获语义（毫秒换算/缺失上下文不采样/负值钳制）。
+// TestTTFTCapture：纯函数捕获语义（毫秒换算/缺失上下文不采样/负值钳制/cache 维度缺省与命中）。
 func TestTTFTCapture(t *testing.T) {
 	const start = int64(1_000_000_000) // 纳秒基准
-	key, ms, ok := ttftCapture("tee-gpu-a", "t-001", "qwen-max", start, start+120*int64(time.Millisecond))
+	key, ms, ok := ttftCapture("tee-gpu-a", "t-001", "qwen-max", "", start, start+120*int64(time.Millisecond))
 	if !ok || ms != 120 || key != (ttftKey{tenant: "t-001", model: "qwen-max", endpoint: "tee-gpu-a", cache: ttftCacheMiss}) {
 		t.Fatalf("正常捕获不符：key=%+v ms=%d ok=%v", key, ms, ok)
 	}
-	if _, _, ok := ttftCapture("", "t-001", "qwen-max", start, start+1); ok {
+	if key, _, ok := ttftCapture("tee-gpu-a", "t-001", "qwen-max", ttftCacheHit, start, start+1); !ok || key.cache != ttftCacheHit {
+		t.Fatalf("hit 维度应保留：key=%+v ok=%v", key, ok)
+	}
+	if _, _, ok := ttftCapture("", "t-001", "qwen-max", "", start, start+1); ok {
 		t.Fatal("无端点不应采样")
 	}
-	if _, _, ok := ttftCapture("ep", "t-001", "m", 0, start+1); ok {
+	if _, _, ok := ttftCapture("ep", "t-001", "m", "", 0, start+1); ok {
 		t.Fatal("无起点不应采样")
 	}
-	if _, ms, ok := ttftCapture("ep", "t", "m", start+10, start+1); !ok || ms != 0 {
+	if _, ms, ok := ttftCapture("ep", "t", "m", "", start+10, start+1); !ok || ms != 0 {
 		t.Fatalf("负值应钳制为 0：ms=%d ok=%v", ms, ok)
+	}
+}
+
+// TestTTFTCacheDimFromValue：命中标识取值解析（M2.7）——仅显式 hit（忽略大小写/空白）归 hit。
+func TestTTFTCacheDimFromValue(t *testing.T) {
+	for _, v := range []string{"hit", "HIT", "Hit", " hit "} {
+		if got := ttftCacheDimFromValue(v); got != ttftCacheHit {
+			t.Fatalf("%q 应归 hit：%q", v, got)
+		}
+	}
+	for _, v := range []string{"", "miss", "MISS", "unknown", "hitx"} {
+		if got := ttftCacheDimFromValue(v); got != ttftCacheMiss {
+			t.Fatalf("%q 应归 miss：%q", v, got)
+		}
+	}
+}
+
+// TestTTFTCacheDimFromHeaders：契约未落地（头名空）→ 不读取、恒 miss（零行为变化）；
+// 头名填写后 → 按响应头取值归维（hit/miss/错误兜底 miss）。
+func TestTTFTCacheDimFromHeaders(t *testing.T) {
+	oldName := ttftCacheHeaderName
+	defer func() { ttftCacheHeaderName = oldName }()
+
+	calls := 0
+	getter := func(name string) (string, error) {
+		calls++
+		switch name {
+		case "X-Test-Cache":
+			return " HIT ", nil
+		default:
+			return "", fmt.Errorf("no such header")
+		}
+	}
+	// 契约未落地：不读取、恒 miss
+	ttftCacheHeaderName = ""
+	if got := ttftCacheDimFromHeaders(getter); got != ttftCacheMiss {
+		t.Fatalf("契约未落地应恒 miss：%q", got)
+	}
+	if calls != 0 {
+		t.Fatalf("契约未落地不应发起头读取：calls=%d", calls)
+	}
+	// 头名填写后：按取值归维
+	ttftCacheHeaderName = "X-Test-Cache"
+	if got := ttftCacheDimFromHeaders(getter); got != ttftCacheHit {
+		t.Fatalf("hit 头应归 hit：%q", got)
+	}
+	ttftCacheHeaderName = "X-Absent"
+	if got := ttftCacheDimFromHeaders(getter); got != ttftCacheMiss {
+		t.Fatalf("头缺失/错误应兜底 miss：%q", got)
 	}
 }
 
@@ -257,13 +309,13 @@ func TestTTFTSamplerRoleFrameThenContent(t *testing.T) {
 	s := &ttftRespSample{}
 	// role 帧（无 delta.content）——不触发、无候选
 	s.onOut([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"),
-		"tee-gpu-a", "t-001", "qwen-max", start, start+50*int64(time.Millisecond))
+		"tee-gpu-a", "t-001", "qwen-max", ttftCacheMiss, start, start+50*int64(time.Millisecond))
 	if s.fired || s.ready {
 		t.Fatal("role 帧不应触发")
 	}
 	// 内容帧 → 触发并记候选（50ms）
 	s.onOut([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n"),
-		"tee-gpu-a", "t-001", "qwen-max", start, start+50*int64(time.Millisecond))
+		"tee-gpu-a", "t-001", "qwen-max", ttftCacheMiss, start, start+50*int64(time.Millisecond))
 	if !s.fired || !s.ready {
 		t.Fatal("内容帧应触发并记候选")
 	}
@@ -272,7 +324,7 @@ func TestTTFTSamplerRoleFrameThenContent(t *testing.T) {
 	}
 	// 首 token 后停止喂入：候选不被改写
 	s.onOut([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"more\"}}]}\n\n"),
-		"tee-gpu-a", "t-001", "qwen-max", start, start+999*int64(time.Millisecond))
+		"tee-gpu-a", "t-001", "qwen-max", ttftCacheMiss, start, start+999*int64(time.Millisecond))
 	if s.ms != 50 {
 		t.Fatalf("首 token 后不应改写候选：ms=%d", s.ms)
 	}
@@ -283,7 +335,7 @@ func TestTTFTSamplerNoRouteContext(t *testing.T) {
 	const start = int64(3_000_000_000)
 	s := &ttftRespSample{}
 	s.onOut([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"),
-		"", "t-001", "qwen-max", start, start+10*int64(time.Millisecond))
+		"", "t-001", "qwen-max", ttftCacheMiss, start, start+10*int64(time.Millisecond))
 	if !s.fired || s.ready {
 		t.Fatalf("无端点应触发但不记候选：fired=%v ready=%v", s.fired, s.ready)
 	}
