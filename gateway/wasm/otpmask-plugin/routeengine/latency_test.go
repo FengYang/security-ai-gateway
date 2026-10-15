@@ -839,3 +839,86 @@ func TestPickByHybrid_NoRandFallback(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================
+// M1.6 验收（本体 v1.5 §4.1 M1.6 / TT2-04 / R2-10）：
+// pickByStrategy 接线（3 case）/ Snapshot 导出 TTFT /
+// UpdateConfigSmooth TTFT 保留规则 / SetEndpointTTFT 写入接缝
+// ============================================================
+
+// TestPickByStrategy_Wiring：三新策略经 pickByStrategy 正确分发（含 P0-1 回归）。
+func TestPickByStrategy_Wiring(t *testing.T) {
+	// latency-fastest：确定性最快 + Strategy 回填
+	e := ttftEngine(StrategyLatencyFastest, mkEp("fast", 1, 100, true), mkEp("slow", 1, 900, true))
+	if d := e.pickByStrategy(); d.EndpointName != "fast" || d.Strategy != StrategyLatencyFastest {
+		t.Fatalf("latency-fastest 分发：got %q/%q", d.EndpointName, d.Strategy)
+	}
+	// latency-aware：单端点优化路径（避免随机）
+	e2 := ttftEngine(StrategyLatencyAware, mkEp("solo", 1, 100, true))
+	if d := e2.pickByStrategy(); d.EndpointName != "solo" || d.Reason != "latency_single" || d.Strategy != StrategyLatencyAware {
+		t.Fatalf("latency-aware 分发：got %q/%q/%q", d.EndpointName, d.Reason, d.Strategy)
+	}
+	// hybrid：同一门禁，Strategy=hybrid
+	e3 := ttftEngine(StrategyHybrid, mkEp("solo", 1, 100, true))
+	if d := e3.pickByStrategy(); d.EndpointName != "solo" || d.Strategy != StrategyHybrid {
+		t.Fatalf("hybrid 分发：got %q/%q", d.EndpointName, d.Strategy)
+	}
+	// P0-1 回归：priority 分发不变（最高优先级组）
+	e4 := ttftEngine(StrategyPriority, mkEp("a", 2, 100, true), mkEp("b", 1, 100, true))
+	if d := e4.pickByStrategy(); d.EndpointName != "b" || d.Strategy != StrategyPriority {
+		t.Fatalf("priority 回归：got %q/%q", d.EndpointName, d.Strategy)
+	}
+}
+
+// TestSnapshot_ExportsTTFT：Snapshot 导出 TTFT；SetEndpointTTFT 写入接缝（未知名 false）。
+func TestSnapshot_ExportsTTFT(t *testing.T) {
+	e := ttftEngine(StrategyLatencyAware, mkEp("a", 1, 100, true))
+	st := TTFTStat{P50Ms: 80, P95Ms: 150, Samples: 42, Valid: true, UpdatedAt: 1760000000, Cache: "miss"}
+	if !e.SetEndpointTTFT("a", st) {
+		t.Fatal("SetEndpointTTFT 已知端点应返回 true")
+	}
+	if e.SetEndpointTTFT("ghost", st) {
+		t.Fatal("SetEndpointTTFT 未知名应返回 false")
+	}
+	snap := e.Snapshot()
+	if len(snap.Endpoints) != 1 || snap.Endpoints[0].TTFT != st {
+		t.Fatalf("Snapshot 未导出 TTFT：%+v", snap.Endpoints)
+	}
+}
+
+// TestUpdateConfigSmooth_TTFTMigration（TT2-04）：URL 不变保留 / URL 变重置 /
+// 新增零值（valid=false）/ 删除随 EndpointState 清理。
+func TestUpdateConfigSmooth_TTFTMigration(t *testing.T) {
+	e := ttftEngine(StrategyLatencyAware,
+		mkEp("keep", 1, 100, true),
+		mkEp("moved", 1, 100, true),
+		mkEp("removed", 1, 100, true),
+	)
+	good := TTFTStat{P50Ms: 90, P95Ms: 120, Samples: 30, Valid: true, UpdatedAt: 1760000000, Cache: "miss"}
+	e.SetEndpointTTFT("keep", good)
+	e.SetEndpointTTFT("moved", good)
+	e.SetEndpointTTFT("removed", good)
+
+	next := Config{
+		Strategy: StrategyLatencyAware,
+		Endpoints: []EndpointConfig{
+			{Name: "keep", URL: "https://keep.internal/v1", Priority: 1, Enabled: true},       // 同名同 URL
+			{Name: "moved", URL: "https://moved-new.internal/v1", Priority: 1, Enabled: true}, // URL 变更
+			{Name: "fresh", URL: "https://fresh.internal/v1", Priority: 1, Enabled: true},     // 新增
+		},
+	}
+	e.UpdateConfigSmooth(next)
+
+	if got := e.state["keep"].TTFT; got != good {
+		t.Errorf("URL 未变应保留 TTFT，got %+v", got)
+	}
+	if got := e.state["moved"].TTFT; got != (TTFTStat{}) {
+		t.Errorf("URL 变更应重置 TTFT（valid=false），got %+v", got)
+	}
+	if got := e.state["fresh"].TTFT; got != (TTFTStat{}) {
+		t.Errorf("新增端点 TTFT 应为零值（valid=false），got %+v", got)
+	}
+	if _, ok := e.state["removed"]; ok {
+		t.Error("被删除端点应随 EndpointState 一并清理")
+	}
+}

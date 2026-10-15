@@ -14,25 +14,26 @@ package routeengine
 
 // EndpointSnapshot 单端点运行时快照。
 type EndpointSnapshot struct {
-	Name            string         // 端点名称
-	URL             string         // 端点地址
-	Priority        int            // 优先级
-	Enabled         bool           // 是否启用
-	BaseWeight      float64        // 基础权重
-	CurrentWeight   float64        // 当前权重（动态调整后）
-	FailureRate     float64        // EWMA 失败率（0-1）
-	SampleCount     int64          // 累计样本数
-	FailureValid    bool           // 失败率统计是否有效（样本充足）
-	CircuitState    CircuitState   // 熔断器状态
+	Name          string       // 端点名称
+	URL           string       // 端点地址
+	Priority      int          // 优先级
+	Enabled       bool         // 是否启用
+	BaseWeight    float64      // 基础权重
+	CurrentWeight float64      // 当前权重（动态调整后）
+	FailureRate   float64      // EWMA 失败率（0-1）
+	SampleCount   int64        // 累计样本数
+	FailureValid  bool         // 失败率统计是否有效（样本充足）
+	CircuitState  CircuitState // 熔断器状态
+	TTFT          TTFTStat     // TTFT 统计（P1-6；Valid=false 表示无有效画像）
 }
 
 // EngineSnapshot 引擎运行时快照（用于监控、日志、调试）。
 type EngineSnapshot struct {
-	Strategy         Strategy            // 当前策略
-	EndpointCount    int                 // 端点总数
-	UsableCount      int                 // 可用端点数
-	Endpoints        []EndpointSnapshot  // 各端点快照（按名称排序，输出稳定）
-	Canary           *CanaryStateSnapshot // 灰度状态快照（nil 表示无灰度）
+	Strategy      Strategy             // 当前策略
+	EndpointCount int                  // 端点总数
+	UsableCount   int                  // 可用端点数
+	Endpoints     []EndpointSnapshot   // 各端点快照（按名称排序，输出稳定）
+	Canary        *CanaryStateSnapshot // 灰度状态快照（nil 表示无灰度）
 }
 
 // Snapshot 生成引擎运行时快照（读路径，RLock）。
@@ -68,16 +69,17 @@ func (e *Engine) Snapshot() EngineSnapshot {
 	for _, name := range names {
 		ep := e.state[name]
 		es := EndpointSnapshot{
-			Name:         ep.Name,
-			URL:          ep.URL,
-			Priority:     ep.Priority,
-			Enabled:      ep.Enabled,
-			BaseWeight:   ep.BaseWeight,
+			Name:          ep.Name,
+			URL:           ep.URL,
+			Priority:      ep.Priority,
+			Enabled:       ep.Enabled,
+			BaseWeight:    ep.BaseWeight,
 			CurrentWeight: ep.Weight,
-			FailureRate:  ep.Failure.GetRate(),
-			SampleCount:  ep.Failure.GetSampleCount(),
-			FailureValid: ep.Failure.Valid(),
-			CircuitState: ep.CircuitBreaker.State,
+			FailureRate:   ep.Failure.GetRate(),
+			SampleCount:   ep.Failure.GetSampleCount(),
+			FailureValid:  ep.Failure.Valid(),
+			CircuitState:  ep.CircuitBreaker.State,
+			TTFT:          ep.TTFT,
 		}
 		snap.Endpoints = append(snap.Endpoints, es)
 		if ep.IsUsable() {

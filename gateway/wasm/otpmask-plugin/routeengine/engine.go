@@ -196,6 +196,22 @@ func (e *Engine) SetTTFTStatsUnreachable(v bool) {
 	e.ttftUnreachable = v
 }
 
+// SetEndpointTTFT 写入端点 TTFT 统计（M1.6 写入接缝；M2.6 周期拉取 tick 调用）。
+//
+// 数据面把控制面 stats 下发结果（§6.3；含 valid / updated_at 过期判定后的最终值）
+// 写入运行态；未知名返回 false（调用方决定是否计数）。统计值不参与路由表签名
+// （D-6）；请求路径只读该字段，写路径显式加锁（engine 锁保护）。
+func (e *Engine) SetEndpointTTFT(name string, stat TTFTStat) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ep, ok := e.state[name]
+	if !ok {
+		return false
+	}
+	ep.TTFT = stat
+	return true
+}
+
 // Engine 路由引擎实例。
 //
 // 用法：
@@ -355,9 +371,10 @@ func (e *Engine) UpdateConfig(config Config) {
 //   - UpdateConfigSmooth：同名端点保留 EWMA 失败率和熔断器状态（平滑迁移）
 //
 // 迁移规则：
-//   - 新配置中有、旧状态中也有的端点 → 保留失败率和熔断器状态，更新配置层（权重/优先级/启用）
-//   - 新配置中有、旧状态中没有的端点 → 全新初始化
-//   - 旧状态中有、新配置中没有的端点 → 丢弃
+//   - 新配置中有、旧状态中也有的端点 → 保留失败率和熔断器状态，更新配置层（权重/优先级/启用）；
+//     其中 TTFT 统计（P1-6，TT2-04）：URL 未变保留，URL 变更重置 valid=false
+//   - 新配置中有、旧状态中没有的端点 → 全新初始化（TTFT 零值 = valid=false）
+//   - 旧状态中有、新配置中没有的端点 → 丢弃（TTFT 随 EndpointState 一并清理）
 //   - 配置层变更（如基础权重、优先级）立即生效，失败率统计保留
 //
 // 设计依据：方案 §4.1 配置热更新（平滑迁移，避免配置变更导致统计丢失、瞬时雪崩）
@@ -378,6 +395,10 @@ func (e *Engine) UpdateConfigSmooth(config Config) {
 
 		if oldEp, ok := oldState[epCfg.Name]; ok {
 			// 同名端点：保留失败率和熔断器状态，更新配置层
+			// TT2-04：URL 变更 → TTFT 重置无效（避免旧地址画像污染新端点）
+			if oldEp.URL != epCfg.URL {
+				oldEp.TTFT = TTFTStat{}
+			}
 			oldEp.Name = epCfg.Name
 			oldEp.URL = epCfg.URL
 			oldEp.Priority = epCfg.Priority
@@ -397,7 +418,7 @@ func (e *Engine) UpdateConfigSmooth(config Config) {
 
 			e.state[epCfg.Name] = oldEp
 		} else {
-			// 新端点：全新初始化
+			// 新端点：全新初始化（TTFT 零值 = valid=false，TT2-04）
 			e.state[epCfg.Name] = &EndpointState{
 				Name:       epCfg.Name,
 				URL:        epCfg.URL,
@@ -480,12 +501,20 @@ func (e *Engine) PickEndpointForTenant(tenant string) Decision {
 
 // pickByStrategy 按配置的策略选择端点（内部辅助，调用方持锁）。
 // 直接遍历 e.state，零堆分配。
+// P1-6（M1.6）：latency-aware / latency-fastest / hybrid 分发至 latency.go 实现；
+// default 显式信号（未知策略可观测）由 M4.4 接线。
 func (e *Engine) pickByStrategy() Decision {
 	switch e.config.Strategy {
 	case StrategyPriority:
 		return e.pickByPriority()
 	case StrategyWeighted, StrategyFailureAware:
 		return e.pickByWeight()
+	case StrategyLatencyAware:
+		return e.pickByLatency()
+	case StrategyLatencyFastest:
+		return e.pickByLatencyFastest()
+	case StrategyHybrid:
+		return e.pickByHybrid()
 	default:
 		return e.pickByPriority()
 	}
