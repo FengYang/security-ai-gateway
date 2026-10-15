@@ -212,6 +212,20 @@ func (e *Engine) SetEndpointTTFT(name string, stat TTFTStat) bool {
 	return true
 }
 
+// LatencyConfigOf 返回延迟配置副本（P1-6 M2.6：统计写入侧读取 stale_sec 做过期判定；读路径加锁）。
+func (e *Engine) LatencyConfigOf() LatencyConfig {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.config.Latency
+}
+
+// TTFTStatsUnreachable 返回统计通道不可达标志（R2-19 序 1；诊断与测试读取）。
+func (e *Engine) TTFTStatsUnreachable() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.ttftUnreachable
+}
+
 // Engine 路由引擎实例。
 //
 // 用法：

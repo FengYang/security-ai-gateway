@@ -515,6 +515,11 @@ type ttftRuntimeState struct {
 	identityReady bool
 	lastFreezeSec int64 // 上一周期起始秒（batch_id 周期起始；0 = 尚未冻结）
 	inflight      bool  // 单飞：同 VM 同一时刻至多一个在飞上报
+
+	// —— M2.6 统计拉取态（§6.3：round-robin 分片 + 单飞）——
+	fetchCursor   int   // round-robin 游标（对字典序租户列表取模）
+	fetchInflight int   // 在飞拉取请求数（回调被丢弃时由 tick 陈旧自愈复位）
+	fetchStartSec int64 // 本批拉取发起秒（陈旧自愈判定：>2×周期视为回调丢失）
 }
 
 // ttftRuntime 上报运行态单例（VM 级）；ttftQueue 待确认队列单例（§6.2：每 VM 独立上报）。
@@ -532,6 +537,9 @@ func initTTFTRuntime(config PluginConfig, log logs.Log) {
 	rt.identityReady = false
 	rt.lastFreezeSec = 0
 	rt.inflight = false
+	rt.fetchCursor = 0
+	rt.fetchInflight = 0
+	rt.fetchStartSec = 0
 	rt.nodeName = config.NodeName
 
 	intervalMs := config.TTFTPollIntervalSeconds * 1000
@@ -558,6 +566,10 @@ func initTTFTRuntime(config PluginConfig, log logs.Log) {
 	rt.enabled = true
 	wrapper.RegisterTickFunc(rt.intervalMs, ttftReportTick)
 	log.Infof("otpmask-plugin: TTFT 上报 tick 已注册 period_ms=%d（每次插件启动/热更新重新注册）", rt.intervalMs)
+	// M2.6：统计拉取 tick（同周期；无已建引擎租户集时零网络）。
+	wrapper.RegisterTickFunc(rt.intervalMs, ttftFetchTick)
+	log.Infof("otpmask-plugin: TTFT 统计拉取 tick 已注册 period_ms=%d（round-robin 分片 ≤%d 租户/tick）",
+		rt.intervalMs, TTFTStatsMaxTenantsPerTick)
 }
 
 // ensureIdentity 解析并缓存上报标识（每 VM 一次；属性通道不可得时如实兜底）。

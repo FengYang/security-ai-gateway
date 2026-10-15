@@ -21,6 +21,9 @@ package main
 //	otpmask_route_ttft_report_ok_total     TTFT 上报确认成功次数（200 且 result=ok/dropped/duplicate）
 //	otpmask_route_ttft_report_reject_total TTFT 上报未确认次数（非 200 / 非契约载荷；保留待确认队列重发）
 //	otpmask_route_ttft_report_drop_total   待确认队列超限丢弃最旧批次数（R2-06/R2-18）
+//	otpmask_route_ttft_stats_fetch_cb_total     TTFT 统计拉取回调被执行次数（恒 0 ⇒ 回调被丢弃）
+//	otpmask_route_ttft_stats_fetch_ok_total     TTFT 统计拉取确认成功次数（200 契约载荷 / 404 无统计）
+//	otpmask_route_ttft_stats_fetch_reject_total TTFT 统计拉取被拒次数（网络错/5xx/非契约载荷）
 //	otpmask_cred_fetch_cb_total   段① 凭据拉取**回调被执行**次数（恒 0 ⇒ 回调被丢弃）
 //	otpmask_cred_fetch_ok_total   段① 凭据校验通过并写入运行态次数
 //	otpmask_cred_fetch_reject_total 段① 凭据被拒次数（非 200 / 解析失败 / 载荷非法；插件保留旧值）
@@ -83,6 +86,10 @@ var (
 	metricTTFTReportOK     = &pwCounter{name: "otpmask_route_ttft_report_ok_total"}
 	metricTTFTReportReject = &pwCounter{name: "otpmask_route_ttft_report_reject_total"}
 	metricTTFTReportDrop   = &pwCounter{name: "otpmask_route_ttft_report_drop_total"}
+	// P1-6 M2.6（§6.5）：TTFT 统计拉取三件套（cb/ok/reject）。
+	metricTTFTStatsFetchCb     = &pwCounter{name: "otpmask_route_ttft_stats_fetch_cb_total"}
+	metricTTFTStatsFetchOK     = &pwCounter{name: "otpmask_route_ttft_stats_fetch_ok_total"}
+	metricTTFTStatsFetchReject = &pwCounter{name: "otpmask_route_ttft_stats_fetch_reject_total"}
 	// 段① 凭据运行态拉取（门禁 #8）：cb 恒为 0 ⇒ 回调从未执行（异步回调被丢弃）；
 	// reject 持续增长 ⇒ 端点不可用/令牌错误/载荷非法（插件保留旧值继续服务）。
 	metricCredFetchCb     = &pwCounter{name: "otpmask_cred_fetch_cb_total"}
