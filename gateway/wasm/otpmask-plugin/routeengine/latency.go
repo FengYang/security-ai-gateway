@@ -342,27 +342,12 @@ func (e *Engine) pickByLatency() Decision {
 		return e.latencyFallbackFastest(prep.minPrio, cfg, fallbackNoRand)
 	}
 	if rv1 < cfg.ExploreRatio {
-		// 探索：在**可用**集合 U 内均匀随机（§3.5；含 TTFT 无效端点——探索为其提供
-		// 刷新统计样本的机会，避免「无效→永无流量→永远无效」的饿死闭环）。
-		rv2, ok2 := randFloat64()
-		if !ok2 {
-			return e.latencyFallbackFastest(prep.minPrio, cfg, fallbackNoRand)
+		// 探索：在**可用**集合 U 内均匀随机（§3.5；探索为 TTFT 无效端点提供刷新统计
+		// 样本的机会，避免「无效→永无流量→永远无效」的饿死闭环）。
+		if d, ok := e.latencyExplorePick(prep, "latency_explore"); ok {
+			return d
 		}
-		idx := int(rv2 * float64(prep.usable))
-		if idx >= prep.usable {
-			idx = prep.usable - 1
-		}
-		i := 0
-		for _, ep := range e.state {
-			if ep.Priority != prep.minPrio || !ep.IsUsable() {
-				continue
-			}
-			if i == idx {
-				return e.latencyDecisionOf(ep, "latency_explore")
-			}
-			i++
-		}
-		return e.latencyFallbackFastest(prep.minPrio, cfg, "") // 理论不可达
+		return e.latencyFallbackFastest(prep.minPrio, cfg, fallbackNoRand)
 	}
 
 	// 利用：按 w_i 加权随机（抽样 2），失败 → 确定性回退（R2-16）。
@@ -402,6 +387,109 @@ func (e *Engine) pickByLatencyFastest() Decision {
 		return e.latencyGlobalFallback(fallbackLowSamples)
 	}
 	return e.latencyDecisionOf(best, "latency_fastest")
+}
+
+// latencyExplorePick 探索分支共用（latency-aware / hybrid，§3.5）：在组内**可用**
+// 集合 U 内均匀随机（R2-16 第二次抽样）。ok=false 表示随机源不可用（含理论不可达
+// 防御）——调用方按 no_rand 走确定性回退。reason 区分调用方
+// （latency_explore / hybrid_explore）。
+func (e *Engine) latencyExplorePick(prep latencyGroupPrep, reason string) (Decision, bool) {
+	rv, ok := randFloat64()
+	if !ok {
+		return Decision{}, false
+	}
+	idx := int(rv * float64(prep.usable))
+	if idx >= prep.usable {
+		idx = prep.usable - 1
+	}
+	i := 0
+	for _, ep := range e.state {
+		if ep.Priority != prep.minPrio || !ep.IsUsable() {
+			continue
+		}
+		if i == idx {
+			return e.latencyDecisionOf(ep, reason), true
+		}
+		i++
+	}
+	// 理论不可达（usable 计数与实际遍历一致）
+	return Decision{}, false
+}
+
+// ============================================================
+// hybrid：失败率 × TTFT 三步合并（M1.5；§3.5 / TT2-01）
+// ============================================================
+
+// hybridRawOf hybrid 第①+②步合并：w_raw_i = w_fail_i × max(base_i, floor)。
+// w_fail_i 即 EndpointState.Weight（失败率维度同组归一化权重，由 AdjustWeight 产出，
+// 本身含 P0-1 WeightMin 下限）；第③步组内归一化在抽样遍历中按 Σw_raw 隐式完成。
+// 全部为请求内临时量，不改写 EndpointState（C-3）。双下限说明见 §3.5。
+func hybridRawOf(ep *EndpointState, tMinMs int64, floor float64, cfg LatencyConfig) float64 {
+	return ep.Weight * latencyGroupWeightOf(ep, tMinMs, floor, cfg)
+}
+
+// hybridTotalRaw 第③步归一化分母：组内有效端点 Σ w_raw_i。
+func (e *Engine) hybridTotalRaw(minPrio int, tMinMs int64, floor float64, cfg LatencyConfig) float64 {
+	total := 0.0
+	for _, ep := range e.state {
+		if ep.Priority != minPrio || !latencyEligible(ep) {
+			continue
+		}
+		total += hybridRawOf(ep, tMinMs, floor, cfg)
+	}
+	return total
+}
+
+// pickByHybrid hybrid：失败率 × TTFT 三步合并（§3.5 / TT2-01；R2-19 回退索引）。
+// ① w_latency_i = max(base_i, floor)；② w_raw_i = w_fail_i × w_latency_i；③ 组内归一化。
+// 探索比例与 latency-aware 一致（explore_ratio 均匀探索 + 利用分支按 w_i(final) 加权）；
+// 回退口径同 M1.3（两次抽样任一 ok=false → latency-fastest 确定性回退，R2-16）。
+// Decision.Strategy 恒为 hybrid（R2-10）。
+func (e *Engine) pickByHybrid() Decision {
+	cfg := e.config.Latency.normalized()
+	prep, gate, done := e.latencyGroupGate(cfg)
+	if done {
+		return gate
+	}
+
+	maxBase := latencyGroupMaxBase(e.state, prep.minPrio, prep.tMinMs, cfg)
+	floor := cfg.MinWeight * maxBase
+	totalRaw := e.hybridTotalRaw(prep.minPrio, prep.tMinMs, floor, cfg)
+	if totalRaw <= 0 {
+		// 数值退化（理论不可达：可用端点 Weight>0 且 base>0 ⇒ Σw_raw>0）→ 确定性回退。
+		return e.latencyFallbackFastest(prep.minPrio, cfg, "")
+	}
+
+	// 抽样 1：探索判定（R2-16 双抽样回退，同 latency-aware）。
+	rv1, ok1 := randFloat64()
+	if !ok1 {
+		return e.latencyFallbackFastest(prep.minPrio, cfg, fallbackNoRand)
+	}
+	if rv1 < cfg.ExploreRatio {
+		if d, ok := e.latencyExplorePick(prep, "hybrid_explore"); ok {
+			return d
+		}
+		return e.latencyFallbackFastest(prep.minPrio, cfg, fallbackNoRand)
+	}
+
+	// 利用：按 w_raw 加权随机（抽样 2），失败 → 确定性回退（R2-16）。
+	rv2, ok2 := randFloat64()
+	if !ok2 {
+		return e.latencyFallbackFastest(prep.minPrio, cfg, fallbackNoRand)
+	}
+	r := rv2 * totalRaw
+	var cum float64
+	for _, ep := range e.state {
+		if ep.Priority != prep.minPrio || !latencyEligible(ep) {
+			continue
+		}
+		cum += hybridRawOf(ep, prep.tMinMs, floor, cfg)
+		if r < cum {
+			return e.latencyDecisionOf(ep, "hybrid_weighted")
+		}
+	}
+	// 浮点误差兜底（r 逼近 Σw_raw 尾部）：确定性回退，不依赖 map 遍历序。
+	return e.latencyFallbackFastest(prep.minPrio, cfg, "")
 }
 
 // latencyDecisionOf 构造选中结果：Strategy 恒回填本次生效的 config.Strategy（R2-10）。

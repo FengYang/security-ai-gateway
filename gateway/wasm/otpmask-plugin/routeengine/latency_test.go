@@ -737,3 +737,105 @@ func TestPickByLatencyFastest_SingleUsableAndEligibleOne(t *testing.T) {
 		t.Fatalf("回退计数=%v，want [low_samples]", *recs)
 	}
 }
+
+// ============================================================
+// M1.5 验收（本体 v1.5 §3.5 / §4.1 M1.5 / TT2-01 / R2-10）：
+// hybrid 三步合并（floor→相乘→归一化）+ 三变量（BaseWeight/失败率/TTFT）+
+// 探索/回退同 M1.3 + Decision.Strategy=hybrid
+// ============================================================
+
+// TestPickByHybrid_ThreeVariableFormula：三变量解析解对照（explore_ratio=0 纯利用）。
+// w_latency = 1 / 0.5 / 0.05(floor)；w_raw = 1×1 / 0.5×0.5 / 1×0.05；Σ=1.3。
+func TestPickByHybrid_ThreeVariableFormula(t *testing.T) {
+	cfg := latencyTestCfg()
+	cfg.ExploreRatio = 0 // 纯利用分支 → 与解析解逐项可比
+	e := NewEngine(Config{Strategy: StrategyHybrid, Latency: cfg})
+	a := mkEp("a", 1, 100, true) // BaseWeight=1, Weight=1, t=100ms
+	b := mkEp("b", 1, 200, true)
+	b.Weight = 0.5                 // 失败率维度权重差异
+	c := mkEp("c", 1, 10000, true) // TTFT 极慢 → base 触底 floor
+	e.state = mkState(a, b, c)
+	ttftWithRand(t, &ttftLCGRand{s: 99})
+
+	const n = 30000
+	counts := map[string]int{}
+	reasons := map[string]int{}
+	for i := 0; i < n; i++ {
+		d := e.pickByHybrid()
+		if d.Strategy != StrategyHybrid {
+			t.Fatalf("Strategy 应回填 hybrid（R2-10），got %q", d.Strategy)
+		}
+		counts[d.EndpointName]++
+		reasons[d.Reason]++
+	}
+	want := map[string]float64{"a": 1.0 / 1.3, "b": 0.25 / 1.3, "c": 0.05 / 1.3}
+	for name, p := range want {
+		f := float64(counts[name]) / n
+		if f < p-0.015 || f > p+0.015 {
+			t.Errorf("%s 频率=%.4f，期望≈%.4f（三步合并解析解）", name, f, p)
+		}
+	}
+	if reasons["hybrid_weighted"] != n {
+		t.Errorf("利用分支 reason 分布异常：%v", reasons)
+	}
+	// 双下限叠加：TTFT 最慢端点仍获非零概率（≈3.85%），不被饿死
+	if counts["c"] == 0 {
+		t.Error("TTFT 最慢端点被饿死（双下限失效）")
+	}
+}
+
+// TestPickByHybrid_ExploreUniformAndReason：explore_ratio=1 → U 内均匀 + hybrid_explore。
+func TestPickByHybrid_ExploreUniformAndReason(t *testing.T) {
+	cfg := latencyTestCfg()
+	cfg.ExploreRatio = 1
+	e := NewEngine(Config{Strategy: StrategyHybrid, Latency: cfg})
+	e.state = mkState(mkEp("a", 1, 100, true), mkEp("b", 1, 200, true), mkEp("c", 1, 300, true))
+	ttftWithRand(t, &ttftLCGRand{s: 5})
+
+	const n = 12000
+	counts := map[string]int{}
+	for i := 0; i < n; i++ {
+		d := e.pickByHybrid()
+		if d.Reason != "hybrid_explore" {
+			t.Fatalf("探索分支 reason=%q，want hybrid_explore", d.Reason)
+		}
+		if d.Strategy != StrategyHybrid {
+			t.Fatalf("Strategy=%q，want hybrid", d.Strategy)
+		}
+		counts[d.EndpointName]++
+	}
+	for _, name := range []string{"a", "b", "c"} {
+		f := float64(counts[name]) / n
+		if f < 1.0/3-0.02 || f > 1.0/3+0.02 {
+			t.Errorf("探索分布不均匀：%s 频率=%.4f（期望≈1/3）", name, f)
+		}
+	}
+}
+
+// TestPickByHybrid_NoRandFallback：两次抽样任一 ok=false → 确定性回退 + _no_rand，同 M1.3。
+func TestPickByHybrid_NoRandFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		rnd  *ttftScriptedRand
+	}{
+		{"first-draw-fails", ttftScripted(ttftRandStep{0, false})},
+		{"second-draw-fails", ttftScripted(ttftRandStep{0.9, true}, ttftRandStep{0, false})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recs := ttftWithObserver(t)
+			ttftWithRand(t, tc.rnd)
+			e := ttftEngine(StrategyHybrid, mkEp("a", 1, 200, true), mkEp("b", 1, 400, true))
+			d := e.pickByHybrid()
+			if d.EndpointName != "a" || d.Reason != "latency_fallback_fastest" {
+				t.Fatalf("确定性回退应选最快 a，got %q/%q", d.EndpointName, d.Reason)
+			}
+			if d.Strategy != StrategyHybrid {
+				t.Fatalf("Strategy=%q，回退不得改写策略标签（R2-10）", d.Strategy)
+			}
+			if len(*recs) != 1 || (*recs)[0] != fallbackNoRand {
+				t.Fatalf("回退计数=%v，want [no_rand]", *recs)
+			}
+		})
+	}
+}
