@@ -278,3 +278,70 @@ func TestDiffRoutesLatency(t *testing.T) {
 		t.Fatalf("显式 gamma=0 应记录一条变更，got %+v", ch)
 	}
 }
+
+// ============================================================
+// P1-6 M4.3：Validate 策略枚举 × latency 段范围 × 一致性（400 invalid_route 的校验源）
+// ============================================================
+
+// TestValidateStrategyLatencyCombos：合法组合通过；非法枚举/缺段/越界拒绝。
+func TestValidateStrategyLatencyCombos(t *testing.T) {
+	eps := []TableEndpoint{{Name: "a", URL: "https://a/v1", Weight: 1, Priority: 1, Enabled: true}}
+	routeWith := func(mut func(*TableRoute)) TableRoute {
+		r := TableRoute{Tenant: "t", Model: "m", DefaultEngine: "cmaas", Endpoints: eps}
+		mut(&r)
+		return r
+	}
+	ok := []struct {
+		name string
+		r    TableRoute
+	}{
+		{"latency-aware+空段", routeWith(func(r *TableRoute) { r.Strategy = "latency-aware"; r.Latency = &RouteLatency{} })},
+		{"latency-fastest+段", routeWith(func(r *TableRoute) { r.Strategy = "latency-fastest"; r.Latency = &RouteLatency{WindowSec: 300} })},
+		{"hybrid+显式零值", routeWith(func(r *TableRoute) {
+			r.Strategy = "hybrid"
+			r.Latency = &RouteLatency{Gamma: new(float64), CachePartition: new(bool)}
+		})},
+		{"旧策略无段", routeWith(func(r *TableRoute) { r.Strategy = "failure-rate-aware" })},
+		{"边缘合法值", routeWith(func(r *TableRoute) {
+			r.Strategy = "latency-aware"
+			r.Latency = &RouteLatency{WindowSec: 60, Quantile: "p50", MinSamples: 1, StaleSec: 25, MaxTTFTMs: 1000}
+		})},
+		{"上界合法值", routeWith(func(r *TableRoute) {
+			g5, mw05, er1 := 5.0, 0.5, 1.0
+			r.Strategy = "latency-aware"
+			r.Latency = &RouteLatency{WindowSec: 3600, Gamma: &g5, MinWeight: &mw05, ExploreRatio: &er1}
+		})},
+	}
+	for _, tc := range ok {
+		tbl := &RouteTable{Routes: []TableRoute{tc.r}}
+		if err := tbl.Validate(); err != nil {
+			t.Errorf("%s：应合法，got %v", tc.name, err)
+		}
+	}
+
+	g6, mw06, er15 := 6.0, 0.6, 1.5
+	bad := []struct {
+		name string
+		r    TableRoute
+	}{
+		{"未知策略", routeWith(func(r *TableRoute) { r.Strategy = "latency-smart" })},
+		{"latency 策略缺段", routeWith(func(r *TableRoute) { r.Strategy = "hybrid" })},
+		{"非 latency 策略带段", routeWith(func(r *TableRoute) { r.Strategy = "weighted"; r.Latency = &RouteLatency{} })},
+		{"缺省策略带段", routeWith(func(r *TableRoute) { r.Latency = &RouteLatency{} })},
+		{"window_sec 过小", routeWith(func(r *TableRoute) { r.Strategy = "latency-aware"; r.Latency = &RouteLatency{WindowSec: 59} })},
+		{"window_sec 过大", routeWith(func(r *TableRoute) { r.Strategy = "latency-aware"; r.Latency = &RouteLatency{WindowSec: 3601} })},
+		{"quantile 非法", routeWith(func(r *TableRoute) { r.Strategy = "latency-aware"; r.Latency = &RouteLatency{Quantile: "p99"} })},
+		{"gamma 越界", routeWith(func(r *TableRoute) { r.Strategy = "latency-aware"; r.Latency = &RouteLatency{Gamma: &g6} })},
+		{"min_weight 越界", routeWith(func(r *TableRoute) { r.Strategy = "latency-aware"; r.Latency = &RouteLatency{MinWeight: &mw06} })},
+		{"explore_ratio 越界", routeWith(func(r *TableRoute) { r.Strategy = "latency-aware"; r.Latency = &RouteLatency{ExploreRatio: &er15} })},
+		{"min_samples 为负", routeWith(func(r *TableRoute) { r.Strategy = "latency-aware"; r.Latency = &RouteLatency{MinSamples: -1} })},
+		{"stale_sec 过小", routeWith(func(r *TableRoute) { r.Strategy = "latency-aware"; r.Latency = &RouteLatency{StaleSec: 24} })},
+		{"max_ttft_ms 过小", routeWith(func(r *TableRoute) { r.Strategy = "latency-aware"; r.Latency = &RouteLatency{MaxTTFTMs: 999} })},
+	}
+	for _, tc := range bad {
+		tbl := &RouteTable{Routes: []TableRoute{tc.r}}
+		if err := tbl.Validate(); err == nil {
+			t.Errorf("%s：应校验失败（400 invalid_route 的校验源）", tc.name)
+		}
+	}
+}

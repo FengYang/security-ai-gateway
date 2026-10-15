@@ -211,12 +211,26 @@ func (r *TableRoute) Validate() error {
 				}
 			}
 		}
-		// 策略枚举校验
+		// 策略枚举校验（P1-6 M4.3：扩展延迟择优三策略，§6.1）
 		switch r.Strategy {
-		case "", "priority", "weighted", "failure-rate-aware":
+		case "", "priority", "weighted", "failure-rate-aware",
+			"latency-aware", "latency-fastest", "hybrid":
 			// 合法
 		default:
-			return fmt.Errorf("strategy 不合法: %q（支持 priority/weighted/failure-rate-aware）", r.Strategy)
+			return fmt.Errorf("strategy 不合法: %q（支持 priority/weighted/failure-rate-aware/latency-aware/latency-fastest/hybrid）", r.Strategy)
+		}
+		// strategy 与 latency 段一致性 + latency 段范围校验（P1-6 M4.3；§6.1）
+		latencyStrategy := r.Strategy == "latency-aware" || r.Strategy == "latency-fastest" || r.Strategy == "hybrid"
+		if latencyStrategy && r.Latency == nil {
+			return fmt.Errorf("strategy %q 必须携带 latency 段（§6.1）", r.Strategy)
+		}
+		if r.Latency != nil {
+			if !latencyStrategy {
+				return fmt.Errorf("latency 段仅适用于 latency-aware/latency-fastest/hybrid（当前 strategy=%q）", r.Strategy)
+			}
+			if err := r.Latency.validate(); err != nil {
+				return fmt.Errorf("latency 配置无效: %w", err)
+			}
 		}
 		// 灰度配置校验（启用才校验）
 		if r.Canary != nil && r.Canary.Enabled {
@@ -282,6 +296,40 @@ func (c *RouteCanary) validate(endpoints []TableEndpoint) error {
 	}
 	if c.RollbackMinSamples < 0 {
 		return fmt.Errorf("rollback_min_samples 须为非负整数，got %d", c.RollbackMinSamples)
+	}
+	return nil
+}
+
+// validate 校验 latency 段的取值范围（P1-6 M4.3；§6.1 字段表约束）。
+// 零值/指针 nil 表示「未配置」（缺省填充在 M4.5 buildEngineConfig），不参与范围校验；
+// 显式零值合法字段（gamma / min_weight / explore_ratio / cache_partition）如实校验。
+func (l *RouteLatency) validate() error {
+	if l.WindowSec != 0 && (l.WindowSec < 60 || l.WindowSec > 3600) {
+		return fmt.Errorf("window_sec 须在 [60,3600]，got %d", l.WindowSec)
+	}
+	switch l.Quantile {
+	case "", "p50", "p95":
+		// 合法（"" = 缺省 p95）
+	default:
+		return fmt.Errorf("quantile 须为 p50/p95，got %q", l.Quantile)
+	}
+	if l.Gamma != nil && (*l.Gamma < 0 || *l.Gamma > 5) {
+		return fmt.Errorf("gamma 须在 [0,5]，got %v", *l.Gamma)
+	}
+	if l.MinWeight != nil && (*l.MinWeight < 0 || *l.MinWeight > 0.5) {
+		return fmt.Errorf("min_weight 须在 [0,0.5]，got %v", *l.MinWeight)
+	}
+	if l.ExploreRatio != nil && (*l.ExploreRatio < 0 || *l.ExploreRatio > 1) {
+		return fmt.Errorf("explore_ratio 须在 [0,1]，got %v", *l.ExploreRatio)
+	}
+	if l.MinSamples < 0 {
+		return fmt.Errorf("min_samples 须为非负整数（0=缺省 20），got %d", l.MinSamples)
+	}
+	if l.StaleSec != 0 && l.StaleSec < 25 {
+		return fmt.Errorf("stale_sec 须 ≥25（且 ≥2×上报周期），got %d", l.StaleSec)
+	}
+	if l.MaxTTFTMs != 0 && l.MaxTTFTMs < 1000 {
+		return fmt.Errorf("max_ttft_ms 须 ≥1000，got %d", l.MaxTTFTMs)
 	}
 	return nil
 }
