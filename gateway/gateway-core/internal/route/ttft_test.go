@@ -359,3 +359,80 @@ func TestTTFTWindow_QuantileMixedWindow(t *testing.T) {
 		t.Fatalf("p95 应=875，got %d", p95)
 	}
 }
+
+// TestTTFTRing_HasRoomFor（M6.1 补强）：容量预检——新键去重计数、既有键不计、超限拒绝。
+func TestTTFTRing_HasRoomFor(t *testing.T) {
+	now, _ := fakeClock(1760000000)
+	r := NewTTFTRingWithLimit(now, 2)
+	k1 := TTFTKey{Tenant: "t", Model: "m", Endpoint: "e1", Cache: "miss"}
+	k2 := TTFTKey{Tenant: "t", Model: "m", Endpoint: "e2", Cache: "miss"}
+	k3 := TTFTKey{Tenant: "t", Model: "m", Endpoint: "e3", Cache: "miss"}
+
+	if !r.HasRoomFor([]TTFTKey{k1, k2}) {
+		t.Fatal("空表 2 新键应有余量")
+	}
+	if r.HasRoomFor([]TTFTKey{k1, k2, k3}) {
+		t.Fatal("3 新键超上限 2 应拒绝")
+	}
+	r.Record(k1, bk(1), 1760000000, 300)
+	if !r.HasRoomFor([]TTFTKey{k1, k2, k1}) {
+		t.Fatal("重复键应去重（净增 1 键）应有余量")
+	}
+	if !r.HasRoomFor(nil) {
+		t.Fatal("空键集应有余量")
+	}
+}
+
+// TestTTFTRing_KeysFilterAndSort（M6.1 补强）：Keys 过滤（tenant/model）与
+// (model, endpoint, cache) 稳定排序（M3.5 下发 / M3.8 指标渲染依赖输出稳定）。
+func TestTTFTRing_KeysFilterAndSort(t *testing.T) {
+	now, _ := fakeClock(1760000000)
+	r := NewTTFTRing(now)
+	mk := func(tenant, model, ep, cache string) TTFTKey {
+		return TTFTKey{Tenant: tenant, Model: model, Endpoint: ep, Cache: cache}
+	}
+	rec := func(k TTFTKey) { r.Record(k, bk(1), 1760000000, 300) }
+	rec(mk("t-a", "m2", "e1", "miss"))
+	rec(mk("t-a", "m1", "e2", "miss"))
+	rec(mk("t-a", "m1", "e1", "miss"))
+	rec(mk("t-b", "m1", "e1", "miss"))
+
+	if all := r.Keys("", ""); len(all) != 4 {
+		t.Fatalf("全量键数不符：%d", len(all))
+	}
+	ta := r.Keys("t-a", "")
+	if len(ta) != 3 {
+		t.Fatalf("t-a 键数不符：%d", len(ta))
+	}
+	want := []TTFTKey{
+		mk("t-a", "m1", "e1", "miss"),
+		mk("t-a", "m1", "e2", "miss"),
+		mk("t-a", "m2", "e1", "miss"),
+	}
+	for i := range want {
+		if ta[i] != want[i] {
+			t.Fatalf("排序不符：%v", ta)
+		}
+	}
+	if m1 := r.Keys("t-a", "m1"); len(m1) != 2 {
+		t.Fatalf("t-a/m1 键数不符：%d", len(m1))
+	}
+	if got := r.Keys("t-z", ""); len(got) != 0 {
+		t.Fatalf("无匹配应空：%v", got)
+	}
+}
+
+// TestNewTTFTRingWithLimit_Defaults（M6.1 补强）：nil 时钟 / 上限≤0 取缺省；显式上限生效。
+func TestNewTTFTRingWithLimit_Defaults(t *testing.T) {
+	r := NewTTFTRingWithLimit(nil, 0)
+	if r == nil || r.now == nil || r.maxEntries != TTFTMaxEntries {
+		t.Fatalf("缺省构造不符：%+v", r)
+	}
+	if r.now() == 0 {
+		t.Fatal("缺省时钟应返回当前秒（非零）")
+	}
+	r2 := NewTTFTRingWithLimit(func() int64 { return 1 }, 5)
+	if r2.maxEntries != 5 {
+		t.Fatalf("显式上限不符：%d", r2.maxEntries)
+	}
+}

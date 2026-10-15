@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"testing"
 
 	"security-ai-gateway/gateway/wasm/otpmask-plugin/routeengine"
@@ -232,5 +233,131 @@ func TestTTFTApplyStatsRejectMarksUnreachable(t *testing.T) {
 	}
 	if eng.TTFTStatsUnreachable() {
 		t.Fatal("400 属通道可达，不应标记不可达")
+	}
+}
+
+// TestTTFTFetchTenantViaSeam（M6.1 补强）：经 ttftFetchGet 接缝覆盖 fetchTenant 全支路——
+// 令牌优先级（运行态 > 静态 > 无头）、inflight 增减、成功回调应用、触发错误标不可达（R2-19 序 1）。
+func TestTTFTFetchTenantViaSeam(t *testing.T) {
+	eng := ttftNewTestEngine("tee-gpu-a")
+	ttftSwapRegistry(t, map[string]*routingEntry{"t-001\x00qwen-max": {engine: eng}})
+
+	oldGet := ttftFetchGet
+	defer func() { ttftFetchGet = oldGet }()
+
+	oldRuntimeToken := credRuntime.coreToken
+	defer func() { credRuntime.coreToken = oldRuntimeToken }()
+	credRuntime.coreToken = ""
+
+	rt := &ttftRuntimeState{enabled: true, service: "gateway-core.otpmask.svc.cluster.local",
+		port: 8085, token: "static-tok", intervalMs: 10000}
+
+	var gotPath string
+	var gotHeaders [][2]string
+	var lastCb func(int, http.Header, []byte)
+	ttftFetchGet = func(service string, port int64, path string, headers [][2]string,
+		cb func(int, http.Header, []byte)) error {
+		gotPath, gotHeaders, lastCb = path, headers, cb
+		return nil
+	}
+
+	// 静态令牌 → Authorization 注入；inflight +1
+	rt.fetchTenant("t-001", 1760000000)
+	if gotPath != "/routes/ttft/stats?tenant=t-001" {
+		t.Fatalf("路径不符：%q", gotPath)
+	}
+	if len(gotHeaders) != 1 || gotHeaders[0][0] != "Authorization" || gotHeaders[0][1] != "Bearer static-tok" {
+		t.Fatalf("静态令牌头不符：%v", gotHeaders)
+	}
+	if rt.fetchInflight != 1 {
+		t.Fatalf("在飞应 +1：%d", rt.fetchInflight)
+	}
+
+	// 成功回调：写入统计 + inflight 回落
+	body := []byte(`{"generated_at":1760000000000,"stats":[{"tenant":"t-001","model":"qwen-max","endpoint":"tee-gpu-a","cache":"miss","p50_ms":100,"p95_ms":480,"samples":100,"valid":true,"updated_at":1760000000}]}`)
+	lastCb(200, nil, body)
+	if rt.fetchInflight != 0 {
+		t.Fatalf("回调后应在飞归零：%d", rt.fetchInflight)
+	}
+	if st := ttftStatesByName(eng)["tee-gpu-a"].TTFT; !st.Valid || st.P95Ms != 480 {
+		t.Fatalf("回调应写入统计：%+v", st)
+	}
+
+	// 运行态令牌优先（并再走一次成功回调清 inflight）
+	credRuntime.coreToken = "runtime-tok"
+	rt.fetchTenant("t-001", 1760000000)
+	if len(gotHeaders) != 1 || gotHeaders[0][1] != "Bearer runtime-tok" {
+		t.Fatalf("运行态令牌应优先：%v", gotHeaders)
+	}
+	lastCb(200, nil, body)
+
+	// 触发错误（发起即失败）→ 标不可达 + inflight 回落
+	ttftFetchGet = func(service string, port int64, path string, headers [][2]string,
+		cb func(int, http.Header, []byte)) error {
+		return fmt.Errorf("connection refused")
+	}
+	rt.fetchTenant("t-001", 1760000000)
+	if rt.fetchInflight != 0 {
+		t.Fatalf("错误路径应在飞归零：%d", rt.fetchInflight)
+	}
+	if !eng.TTFTStatsUnreachable() {
+		t.Fatal("触发错误应标记不可达（R2-19 序 1）")
+	}
+
+	// 无令牌 → 不注入 Authorization 头
+	credRuntime.coreToken = ""
+	rt.token = ""
+	ttftFetchGet = func(service string, port int64, path string, headers [][2]string,
+		cb func(int, http.Header, []byte)) error {
+		gotHeaders = headers
+		return nil
+	}
+	rt.fetchTenant("t-001", 1760000000)
+	if len(gotHeaders) != 0 {
+		t.Fatalf("无令牌不应注入头：%v", gotHeaders)
+	}
+	rt.fetchDone() // 收回本步 inflight
+	if rt.fetchInflight != 0 {
+		t.Fatalf("结束应在飞归零：%d", rt.fetchInflight)
+	}
+}
+
+// TestTTFTFetchTickEntry（M6.1 补强）：tick 入口 ttftFetchTick——禁用态零网络；
+// 启用且有租户时经 ttftFetchDispatch 发起。
+func TestTTFTFetchTickEntry(t *testing.T) {
+	ttftSwapRegistry(t, map[string]*routingEntry{"t0\x00m": {engine: ttftNewTestEngine("e")}})
+
+	oldRT := ttftRuntime
+	defer func() { ttftRuntime = oldRT }()
+	oldDispatch := ttftFetchDispatch
+	defer func() { ttftFetchDispatch = oldDispatch }()
+
+	var calls int
+	ttftFetchDispatch = func(rt *ttftRuntimeState, tenant string, nowSec int64) { calls++ }
+
+	ttftRuntime = ttftRuntimeState{enabled: false}
+	ttftFetchTick()
+	if calls != 0 {
+		t.Fatalf("禁用态不应发起：%d", calls)
+	}
+	ttftRuntime = ttftRuntimeState{enabled: true, intervalMs: 10000}
+	ttftFetchTick()
+	if calls != 1 {
+		t.Fatalf("启用态应发起 1 次：%d", calls)
+	}
+}
+
+// TestTTFTFetchDoneFloor（M6.1 补强）：在飞计数递减下限 0（防陈旧自愈重置后旧回调复减为负）。
+func TestTTFTFetchDoneFloor(t *testing.T) {
+	rt := &ttftRuntimeState{}
+	rt.fetchDone()
+	rt.fetchDone()
+	if rt.fetchInflight != 0 {
+		t.Fatalf("下限应为 0：%d", rt.fetchInflight)
+	}
+	rt.fetchInflight = 2
+	rt.fetchDone()
+	if rt.fetchInflight != 1 {
+		t.Fatalf("正常递减不符：%d", rt.fetchInflight)
 	}
 }

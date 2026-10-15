@@ -138,3 +138,38 @@ func TestRecordLatencyPickGuardedNoop(t *testing.T) {
 func TestInitLatencyMetricsInjectsObserver(t *testing.T) {
 	initLatencyMetrics()
 }
+
+// TestInitLatencyMetricsFallbackObserverFires（M6.1 补强）：注入的回退观测回调可被
+// routeengine 回退路径触发（覆盖闭包；守卫下计数 no-op 不 panic）。以「统计通道不可达」
+// （R2-19 序 1）构造确定性回退，不依赖随机源。
+func TestInitLatencyMetricsFallbackObserverFires(t *testing.T) {
+	initLatencyMetrics()
+	eng := routeengine.NewEngine(routeengine.Config{
+		Strategy: routeengine.StrategyLatencyAware,
+		Endpoints: []routeengine.EndpointConfig{
+			{Name: "a", URL: "http://a", Enabled: true, Weight: 1},
+			{Name: "b", URL: "http://b", Enabled: true, Weight: 1},
+		},
+		Latency: routeengine.DefaultLatencyConfig(),
+	})
+	eng.SetTTFTStatsUnreachable(true) // → 全局回退（fallback_unreachable）
+	d := eng.PickEndpointForTenant("t-observer")
+	if d.EndpointName == "" {
+		t.Fatalf("不可达回退决策应有端点：%+v", d)
+	}
+}
+
+// TestMetricsObserveHelpers（M6.1 补强）：直方图/令牌观察函数在守卫下可安全执行（计数 no-op）。
+// 覆盖 observeLatency/observeTokens/recordTokensInput/Output 的调用面与边界值
+// （0 / 负值提前返回；超大批量走全桶循环）。
+func TestMetricsObserveHelpers(t *testing.T) {
+	observeLatency(0.25)
+	observeLatency(99.0) // 全部桶 le < value → 零次 incr（循环不命中边界）
+	observeTTFT(120)
+	observeTokens(0)
+	observeTokens(42)
+	recordTokensInput(0)  // ≤0 提前返回
+	recordTokensInput(10) // Counter + Histogram 双计路径
+	recordTokensOutput(-1)
+	recordTokensOutput(7)
+}

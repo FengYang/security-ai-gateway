@@ -38,6 +38,14 @@ var ttftFetchDispatch = func(rt *ttftRuntimeState, tenant string, nowSec int64) 
 	rt.fetchTenant(tenant, nowSec)
 }
 
+// ttftFetchGet 单租户统计 GET 发起接缝（wasm 运行态 = clusterClient.Get；单测替换以覆盖
+// fetchTenant 全支路——令牌优先级 / inflight 增减 / 成功与拒绝回调 / 触发错误标不可达）。
+var ttftFetchGet = func(service string, port int64, path string, headers [][2]string,
+	cb func(statusCode int, hdr http.Header, respBody []byte)) error {
+	cli := wrapper.NewClusterClient(wrapper.FQDNCluster{FQDN: service, Port: port})
+	return cli.Get(path, headers, cb)
+}
+
 // ttftFetchTick 统计拉取周期任务（wrapper.RegisterTickFunc 回调）。
 func ttftFetchTick() {
 	ttftFetchTickAt(time.Now().Unix())
@@ -106,7 +114,6 @@ func ttftFetchTenants() []string {
 
 // fetchTenant 发起单租户批量拉取（GET，异步回调应用）。
 func (rt *ttftRuntimeState) fetchTenant(tenant string, nowSec int64) {
-	cli := wrapper.NewClusterClient(wrapper.FQDNCluster{FQDN: rt.service, Port: rt.port})
 	headers := make([][2]string, 0, 1)
 	token := rt.token
 	if v := runtimeCoreChannelToken(); v != "" { // 运行态通道令牌优先（C 项；回退静态配置）
@@ -116,7 +123,7 @@ func (rt *ttftRuntimeState) fetchTenant(tenant string, nowSec int64) {
 		headers = append(headers, [2]string{"Authorization", "Bearer " + token})
 	}
 	rt.fetchInflight++
-	err := cli.Get("/routes/ttft/stats?tenant="+url.QueryEscape(tenant), headers,
+	err := ttftFetchGet(rt.service, rt.port, "/routes/ttft/stats?tenant="+url.QueryEscape(tenant), headers,
 		func(statusCode int, _ http.Header, respBody []byte) {
 			rt.fetchDone()
 			metricTTFTStatsFetchCb.incr()
