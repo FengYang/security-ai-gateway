@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // TestTTFTBucketBoundsAlignTeeInfer：桶边界与 tee-infer-service/metrics.go ttftBuckets 逐字段一致。
@@ -227,5 +228,115 @@ func TestTTFTReportJSONShape(t *testing.T) {
 	}
 	if buckets[0] != float64(12) || buckets[1] != float64(30) {
 		t.Fatalf("buckets 取值不符：%s", raw)
+	}
+}
+
+// ---- M2.1：首 token 采样钩子（R2-04/R2-05/C-3）----
+
+// TestTTFTCapture：纯函数捕获语义（毫秒换算/缺失上下文不采样/负值钳制）。
+func TestTTFTCapture(t *testing.T) {
+	const start = int64(1_000_000_000) // 纳秒基准
+	key, ms, ok := ttftCapture("tee-gpu-a", "t-001", "qwen-max", start, start+120*int64(time.Millisecond))
+	if !ok || ms != 120 || key != (ttftKey{tenant: "t-001", model: "qwen-max", endpoint: "tee-gpu-a", cache: ttftCacheMiss}) {
+		t.Fatalf("正常捕获不符：key=%+v ms=%d ok=%v", key, ms, ok)
+	}
+	if _, _, ok := ttftCapture("", "t-001", "qwen-max", start, start+1); ok {
+		t.Fatal("无端点不应采样")
+	}
+	if _, _, ok := ttftCapture("ep", "t-001", "m", 0, start+1); ok {
+		t.Fatal("无起点不应采样")
+	}
+	if _, ms, ok := ttftCapture("ep", "t", "m", start+10, start+1); !ok || ms != 0 {
+		t.Fatalf("负值应钳制为 0：ms=%d ok=%v", ms, ok)
+	}
+}
+
+// TestTTFTSamplerRoleFrameThenContent：role 帧不触发；内容帧触发并记候选（R2-04 验收）。
+func TestTTFTSamplerRoleFrameThenContent(t *testing.T) {
+	const start = int64(2_000_000_000)
+	s := &ttftRespSample{}
+	// role 帧（无 delta.content）——不触发、无候选
+	s.onOut([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"),
+		"tee-gpu-a", "t-001", "qwen-max", start, start+50*int64(time.Millisecond))
+	if s.fired || s.ready {
+		t.Fatal("role 帧不应触发")
+	}
+	// 内容帧 → 触发并记候选（50ms）
+	s.onOut([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n"),
+		"tee-gpu-a", "t-001", "qwen-max", start, start+50*int64(time.Millisecond))
+	if !s.fired || !s.ready {
+		t.Fatal("内容帧应触发并记候选")
+	}
+	if s.ms != 50 || s.key.endpoint != "tee-gpu-a" || s.key.cache != "miss" {
+		t.Fatalf("候选不符：ms=%d key=%+v", s.ms, s.key)
+	}
+	// 首 token 后停止喂入：候选不被改写
+	s.onOut([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"more\"}}]}\n\n"),
+		"tee-gpu-a", "t-001", "qwen-max", start, start+999*int64(time.Millisecond))
+	if s.ms != 50 {
+		t.Fatalf("首 token 后不应改写候选：ms=%d", s.ms)
+	}
+}
+
+// TestTTFTSamplerNoRouteContext：无路由上下文（endpoint 空）→ 触发但不记候选（如实不采样）。
+func TestTTFTSamplerNoRouteContext(t *testing.T) {
+	const start = int64(3_000_000_000)
+	s := &ttftRespSample{}
+	s.onOut([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"),
+		"", "t-001", "qwen-max", start, start+10*int64(time.Millisecond))
+	if !s.fired || s.ready {
+		t.Fatalf("无端点应触发但不记候选：fired=%v ready=%v", s.fired, s.ready)
+	}
+}
+
+// TestTTFTCommitOnlyOnComplete：唯一提交点 + 幂等；未就绪/无状态时 no-op（失败流候选丢弃）。
+func TestTTFTCommitOnlyOnComplete(t *testing.T) {
+	old := ttftStore
+	ttftStore = newTTFTCounters()
+	defer func() { ttftStore = old }()
+
+	key := ttftKey{tenant: "t-001", model: "qwen-max", endpoint: "tee-gpu-a", cache: "miss"}
+	st := &respStreamState{ttft: &ttftRespSample{ready: true, key: key, ms: 150}}
+	ttftCommitOnComplete(st)
+	b, ok := ttftStore.lookup(key)
+	if !ok || b.total() != 1 || b.counts[4] != 1 { // 150ms ∈ (100,250] → idx4
+		t.Fatalf("提交应落桶 idx4：%+v ok=%v", b, ok)
+	}
+	// 幂等：重复提交不双计
+	ttftCommitOnComplete(st)
+	if b2, _ := ttftStore.lookup(key); b2.total() != 1 {
+		t.Fatalf("重复提交应幂等：%+v", b2)
+	}
+	// 未就绪（fired 但无候选）与无状态 → no-op（不 panic）
+	ttftCommitOnComplete(&respStreamState{ttft: &ttftRespSample{fired: true}})
+	ttftCommitOnComplete(&respStreamState{})
+	ttftCommitOnComplete(nil)
+	if b3, _ := ttftStore.lookup(key); b3.total() != 1 {
+		t.Fatalf("no-op 路径不应改变计数：%+v", b3)
+	}
+}
+
+// TestTTFTCountersObserveIsolation：键隔离与 lookup 副本语义。
+func TestTTFTCountersObserveIsolation(t *testing.T) {
+	c := newTTFTCounters()
+	k1 := ttftKey{tenant: "t1", model: "m", endpoint: "e1", cache: "miss"}
+	k2 := ttftKey{tenant: "t1", model: "m", endpoint: "e2", cache: "miss"}
+	c.observe(k1, 5)  // 桶0
+	c.observe(k1, 15) // 桶1
+	c.observe(k2, 30) // 桶2
+	b1, ok := c.lookup(k1)
+	if !ok || b1.counts[0] != 1 || b1.counts[1] != 1 || b1.total() != 2 {
+		t.Fatalf("k1 计数不符：%+v", b1)
+	}
+	b2, ok := c.lookup(k2)
+	if !ok || b2.counts[2] != 1 || b2.total() != 1 {
+		t.Fatalf("k2 计数不符：%+v", b2)
+	}
+	b1.counts[0] = 99 // lookup 为副本：改写不影响内部
+	if again, _ := c.lookup(k1); again.counts[0] != 1 {
+		t.Fatalf("lookup 应为副本：%+v", again)
+	}
+	if _, ok := c.lookup(ttftKey{endpoint: "nope"}); ok {
+		t.Fatal("未观测键应 ok=false")
 	}
 }

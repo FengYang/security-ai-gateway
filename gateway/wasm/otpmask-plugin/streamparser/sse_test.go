@@ -1,6 +1,7 @@
 package streamparser
 
 import (
+	"bytes"
 	"testing"
 )
 
@@ -204,5 +205,82 @@ func TestNoParseAfterFirstToken(t *testing.T) {
 	p.Feed([]byte("more data here"))
 	if !p.FirstTokenSent() {
 		t.Fatal("首 token 状态不应被清除")
+	}
+}
+
+// ============================================================
+// P1-6 M2.1（R2-04/R2-05）：内容判定模式 + 行上限封顶
+// ============================================================
+
+// TestContentDeltaRoleFrameNotFirstToken：contentDelta 模式下 role 帧（无 delta.content）不触发（R2-04 验收）。
+func TestContentDeltaRoleFrameNotFirstToken(t *testing.T) {
+	p := NewContentDeltaSSEParser()
+	p.Feed([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n"))
+	if p.FirstTokenSent() {
+		t.Fatal("role 帧（无 delta.content）不应触发首 token")
+	}
+	p.Feed([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n\n"))
+	if p.FirstTokenSent() {
+		t.Fatal("空 content 不应触发首 token")
+	}
+	p.Feed([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+	if p.FirstTokenSent() {
+		t.Fatal("finish 帧不应触发首 token")
+	}
+	p.Feed([]byte("data: [DONE]\n\n"))
+	if p.FirstTokenSent() {
+		t.Fatal("[DONE] 不应触发首 token")
+	}
+	p.Feed([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n\n"))
+	if !p.FirstTokenSent() {
+		t.Fatal("首个非空 delta.content 应触发首 token")
+	}
+}
+
+// TestContentDeltaCrossChunk：内容帧跨 chunk 拆分仍正确判定。
+func TestContentDeltaCrossChunk(t *testing.T) {
+	p := NewContentDeltaSSEParser()
+	line := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+	mid := len(line) / 2
+	p.Feed(line[:mid])
+	if p.FirstTokenSent() {
+		t.Fatal("半行不应触发")
+	}
+	p.Feed(line[mid:])
+	if !p.FirstTokenSent() {
+		t.Fatal("跨帧拼合后应触发")
+	}
+}
+
+// TestOverlongLineCapSplitFrames：无换行的超长输入 → 缓冲定长封顶 + 丢弃至行边界后恢复（R2-05/C-3）。
+func TestOverlongLineCapSplitFrames(t *testing.T) {
+	p := NewContentDeltaSSEParser()
+	for i := 0; i < 200; i++ { // 200KB 无换行 → 触发封顶丢弃
+		p.Feed(bytes.Repeat([]byte("x"), 1024))
+		if len(p.buf) > maxSSELineBytes {
+			t.Fatalf("缓冲应封顶 ≤ %d，got %d", maxSSELineBytes, len(p.buf))
+		}
+	}
+	// 恢复：丢弃到行边界后，正常内容帧仍可判定
+	p.Feed([]byte("stale-tail\ndata: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+	if !p.FirstTokenSent() {
+		t.Fatal("超长行丢弃后应恢复解析并判定首 token")
+	}
+}
+
+// TestOverlongCompleteLineIgnored：单行超上限（含换行）同样丢弃（不处理、不保留）。
+func TestOverlongCompleteLineIgnored(t *testing.T) {
+	p := NewContentDeltaSSEParser()
+	big := append(bytes.Repeat([]byte("x"), maxSSELineBytes+8), '\n')
+	p.Feed(big)
+	if p.FirstTokenSent() {
+		t.Fatal("超长行不应触发")
+	}
+	if len(p.buf) != 0 {
+		t.Fatalf("缓冲不应保留：%d", len(p.buf))
+	}
+	p.Feed([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"v\"}}]}\n\n"))
+	if !p.FirstTokenSent() {
+		t.Fatal("超长行之后应可正常判定")
 	}
 }

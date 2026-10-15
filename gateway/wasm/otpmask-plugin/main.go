@@ -1136,6 +1136,8 @@ type respStreamState struct {
 	// B1：强标标识已注入（每流至多一次；上游 SawLabel 时不注入——单一注入点规则兜底）。
 	labelInjected bool
 	keys          []string // 本请求在 KeyStore 登记的密钥 key（onStreamDone 兜底删除）
+	// P1-6 M2.1：TTFT 首 token 采样状态（懒建；实现见 ttft_report.go）。
+	ttft *ttftRespSample
 }
 
 // ctxKeyRespStream 请求级响应流状态的上下文键。
@@ -1252,8 +1254,13 @@ func driveStream(ctx wrapper.HttpContext, config PluginConfig, st *respStreamSta
 				return
 			}
 			noteContentFilter(st) // OG-16：content_filter 审核终止边沿计数
+			// P1-6 M2.1：首内容 token 采样（label 注入之前——仅模型内容参与判定，R2-04）
+			ttftOnDecryptedOut(ctx, config, st, out)
 			out = maybeInjectContentLabel(st, config, out)
 			injectStream(ctx, st, out)
+			if st.dec != nil && st.dec.Completed() {
+				ttftCommitOnComplete(st) // P1-6 M2.1：流完整结束 → 提交候选（唯一提交点）
+			}
 			if !st.closed && len(st.rawPending) > 0 {
 				driveStream(ctx, config, st, log)
 			}

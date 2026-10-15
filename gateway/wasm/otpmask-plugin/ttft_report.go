@@ -5,7 +5,7 @@ package main
 // 范围（如实，随 M2 原子滚动补全）：
 //   - M2.2：固定 11 桶计数（§3.4；逐边界对齐 tee-infer-service/metrics.go ttftBuckets）；
 //   - M2.3：标识解析（node/VM ID，R2-03/G-3）+ 上报体构造 + batch_id + 超限拆分（TT2-08）；
-//   - M2.1（待）：首 token 采样钩子（解密回调 + delta.content 判定，R2-04/R2-05）；
+//   - M2.1：首 token 采样钩子（解密回调 + delta.content 判定，R2-04/R2-05/C-3）；
 //   - M2.4（待）：待确认队列（冻结/确认清零/上限丢弃，R2-06）；
 //   - M2.5（待）：周期上报 tick（复用 wrapper.RegisterTickFunc 范式）。
 //
@@ -15,6 +15,12 @@ import (
 	"fmt"
 	"hash/fnv"
 	"strconv"
+	"sync"
+	"time"
+
+	"github.com/higress-group/wasm-go/pkg/wrapper"
+
+	"security-ai-gateway/gateway/wasm/otpmask-plugin/streamparser"
 )
 
 // TTFTBucketCount TTFT 上报桶数（§3.4：11 桶；+Inf 为隐式兜底桶，不计入上报数组）。
@@ -172,4 +178,132 @@ func ttftBuildReports(id ttftIdentity, cycleStartSec int64, samples []ttftSample
 		})
 	}
 	return reports
+}
+
+// ============================================================
+// M2.1：首 token 采样钩子（解密回调接线，§3.4 / R2-04 / R2-05 / C-3）
+// ============================================================
+
+// ttftCacheMiss cache 维度缺省值（D-10/§3.2 第 9 步）：TEE 侧命中标识回传契约（M2.7）
+// 未落地前恒记 miss（cache_partition=true 时等价不分层，不影响 miss 画像正确性）。
+const ttftCacheMiss = "miss"
+
+// ttftKey TTFT 聚合键（§3.4/§6.2：(tenant, model, endpoint, cache)）。
+type ttftKey struct {
+	tenant   string
+	model    string
+	endpoint string
+	cache    string
+}
+
+// ttftRespSample 单响应采样状态（挂 respStreamState，随响应回收）。
+//
+// 并发与资源口径（R2-05/C-3，如实）：解析器实例随响应级状态创建（多响应流交错下不可
+// 全局共享）；缓冲定长封顶（maxSSELineBytes）、判定在解密后 chunk 上 O(1) 完成、
+// 首 token 后 fired 短路不再喂入——无随 chunk 数增长的累积。
+type ttftRespSample struct {
+	parser *streamparser.SSEParser // 内容判定（R2-04：delta.content 非空）
+	fired  bool                    // 已捕获候选（不再喂入）
+	ready  bool                    // 候选有效待提交（流完整结束才提交）
+	key    ttftKey
+	ms     int64
+}
+
+// ttftCounters 单 VM 端点桶计数存储（C-4：O(端点数×桶数)，不随请求增长）。
+// 冻结快照/清零由 M2.4/M2.5 周期管线消费；此处仅提供累计与查询原语。
+type ttftCounters struct {
+	mu sync.Mutex
+	m  map[ttftKey]*ttftBucketCounts
+}
+
+func newTTFTCounters() *ttftCounters {
+	return &ttftCounters{m: make(map[ttftKey]*ttftBucketCounts)}
+}
+
+// observe 将一次 TTFT 样本（毫秒）累计到键对应桶。
+func (c *ttftCounters) observe(k ttftKey, ms int64) {
+	c.mu.Lock()
+	b := c.m[k]
+	if b == nil {
+		b = &ttftBucketCounts{}
+		c.m[k] = b
+	}
+	b.observe(ms)
+	c.mu.Unlock()
+}
+
+// lookup 返回键当前桶计数副本（无该键 → ok=false）。
+func (c *ttftCounters) lookup(k ttftKey) (ttftBucketCounts, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b, ok := c.m[k]
+	if !ok {
+		return ttftBucketCounts{}, false
+	}
+	return *b, true
+}
+
+// ttftStore 插件 VM 级存储实例（§6.2：每个 Envoy worker 加载独立 Wasm VM、各自持桶独立上报）。
+var ttftStore = newTTFTCounters()
+
+// ttftCapture 计算候选样本（纯函数；无路由上下文/起点缺失 → 不采样）。
+// endpoint 取请求级路由决策上下文（P0-1）；无端点归属（未走多端点路由）时如实跳过。
+func ttftCapture(ep, tenant, model string, startNs, nowNs int64) (ttftKey, int64, bool) {
+	if ep == "" || startNs <= 0 || nowNs <= 0 {
+		return ttftKey{}, 0, false
+	}
+	ms := (nowNs - startNs) / int64(time.Millisecond)
+	if ms < 0 {
+		ms = 0 // 时钟异常防御（如发生，如实归 0 桶）
+	}
+	return ttftKey{tenant: tenant, model: model, endpoint: ep, cache: ttftCacheMiss}, ms, true
+}
+
+// ttftOnDecryptedOut 解密回调接线（M2.1）：把解密后重建的明文 SSE 喂入内容判定解析器
+// （须在 label 注入之前调用——仅模型内容参与判定，插件注入帧不触发）；首个
+// delta.content 非空 token 到达 → now - RouteStart 记候选。
+// 非流式/整包路径不接线（§3.4：非流式/失败请求不计入）；候选提交唯一发生在
+// 流完整结束处（ttftCommitOnComplete），解密失败/截断流的候选自然丢弃。
+func ttftOnDecryptedOut(ctx wrapper.HttpContext, config PluginConfig, st *respStreamState, out []byte) {
+	if st == nil || len(out) == 0 {
+		return
+	}
+	if st.ttft == nil {
+		st.ttft = &ttftRespSample{}
+	}
+	ep, _ := ctx.GetContext(ctxKeyRouteEndpoint).(string)
+	tenant, _ := ctx.GetContext(ctxKeyTenantID).(string)
+	startNs, _ := ctx.GetContext(ctxKeyRouteStart).(int64)
+	st.ttft.onOut(out, ep, tenant, config.Model, startNs, time.Now().UnixNano())
+}
+
+// onOut 判定 + 捕获核心（无 ctx，可单测）：首内容 token 到达时按已解析的路由上下文记候选。
+// 首 token 后（fired）不再喂入；无路由上下文（endpoint 空/起点缺失）→ 如实不记候选。
+func (s *ttftRespSample) onOut(out []byte, ep, tenant, model string, startNs, nowNs int64) {
+	if len(out) == 0 || s.fired {
+		return
+	}
+	if s.parser == nil {
+		s.parser = streamparser.NewContentDeltaSSEParser()
+	}
+	s.parser.Feed(out)
+	if !s.parser.FirstTokenSent() {
+		return
+	}
+	s.fired = true
+	key, ms, ok := ttftCapture(ep, tenant, model, startNs, nowNs)
+	if !ok {
+		return
+	}
+	s.key, s.ms, s.ready = key, ms, true
+}
+
+// ttftCommitOnComplete 流完整结束时提交候选（唯一提交点；幂等——ready 置空后不再提交）。
+func ttftCommitOnComplete(st *respStreamState) {
+	if st == nil || st.ttft == nil || !st.ttft.ready {
+		return
+	}
+	s := st.ttft
+	s.ready = false
+	ttftStore.observe(s.key, s.ms)
 }

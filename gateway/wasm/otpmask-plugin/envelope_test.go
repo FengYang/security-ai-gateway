@@ -276,6 +276,30 @@ func TestSSEDecoderIncrementalLatch(t *testing.T) {
 	}
 }
 
+// TestSSEDecoderCompletedFlag（P1-6 M2.1）：完整流 → Completed()=true；截断流 → false。
+func TestSSEDecoderCompletedFlag(t *testing.T) {
+	newSessionForTest(t)
+	body := buildSSEStream(t, []streamChunk{
+		{Seq: 1, Delta: "hi"},
+		{Seq: 2, Delta: "", Finish: "stop"},
+	}, []uint64{1, 2})
+	dec := NewSSEStreamDecoder("reqCmp", "modelCmp")
+	if _, err := feedAll(dec, body); err != nil {
+		t.Fatalf("完整流不应失败: %v", err)
+	}
+	if !dec.Completed() {
+		t.Fatal("完整流应 Completed()=true")
+	}
+	// 截断流（去掉末尾 [DONE] 尾部）→ 终态校验失败且 Completed()=false
+	trunc := NewSSEStreamDecoder("reqCmp2", "modelCmp")
+	if _, err := feedAll(trunc, body[:len(body)-5]); err == nil {
+		t.Fatal("截断流未被拒绝")
+	}
+	if trunc.Completed() {
+		t.Fatal("截断流不应 Completed()=true")
+	}
+}
+
 // TestIsSSEBody 判定：data: 行 → true；二进制协议响应 → false。
 func TestIsSSEBody(t *testing.T) {
 	if !isSSEBody([]byte("data: abc\n\n")) {

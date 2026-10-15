@@ -86,7 +86,7 @@ type sseChunk struct {
 	Created int64       `json:"created"`
 	Model   string      `json:"model"`
 	Choices []sseChoice `json:"choices"`
-	Guard   *chunkGuard `json:"guard,omitempty"` // OG-16：审核注解自定义扩展字段；标准客户端忽略未知键
+	Guard   *chunkGuard `json:"guard,omitempty"`         // OG-16：审核注解自定义扩展字段；标准客户端忽略未知键
 	Label   *chunkLabel `json:"content_label,omitempty"` // B1：强标标识自定义扩展字段；标准客户端忽略未知键
 }
 
@@ -178,15 +178,16 @@ func isSSEBody(body []byte) bool {
 // 整流拒绝（err 非 nil，外层不再外发），不输出半截明文；已外发的合法前缀由
 // 外层以 fail-closed 截断丢弃（HTTP 上表现为流中断）。
 type SSEStreamDecoder struct {
-	dec       *sseStreamDecryptor
-	reqID     string
-	model     string
-	done      bool   // 已收到正常终止（stop/content_filter）并输出 [DONE]
+	dec           *sseStreamDecryptor
+	reqID         string
+	model         string
+	done          bool   // 已收到正常终止（stop/content_filter）并输出 [DONE]
+	completed     bool   // 流完整结束（finish 终态校验通过；P1-6 M2.1：TTFT 候选唯一提交依据）
 	contentFilter bool   // 已观察到 finish="content_filter"（OG-16 网关层独立指标用）
-	labelSeen bool   // B1：上游已携带 label meta（SawLabel 去重注入的依据）
-	first     bool   // 是否已见到首个 data: 行（判空流）
-	pending   []byte // 跨 frame 未拼合完整行的残留字节
-	err       error  // 首个不可恢复错误（整流拒绝后不再处理新帧）
+	labelSeen     bool   // B1：上游已携带 label meta（SawLabel 去重注入的依据）
+	first         bool   // 是否已见到首个 data: 行（判空流）
+	pending       []byte // 跨 frame 未拼合完整行的残留字节
+	err           error  // 首个不可恢复错误（整流拒绝后不再处理新帧）
 
 	// ---- 批量模式 ----
 	batchSize int      // 批大小（<=1 = 逐帧，等价原行为）
@@ -194,9 +195,9 @@ type SSEStreamDecoder struct {
 	emitQueue []byte   // 已解密待输出的明文 SSE 字节（顺序排列）
 	inBatch   bool     // 是否正在等批量解密回调（防止重入）
 	// 批结束时需要延续的状态（供 flushBatch 回调恢复 drain 上下文）
-	batchOut     []byte // 批回调时累积的 out
-	batchLast    bool   // 批回调时的 isLastChunk
-	batchCb      func(out []byte, err error) // 批回调时的 cb
+	batchOut  []byte                      // 批回调时累积的 out
+	batchLast bool                        // 批回调时的 isLastChunk
+	batchCb   func(out []byte, err error) // 批回调时的 cb
 }
 
 // NewSSEStreamDecoder 创建增量解密状态机（默认逐帧，batchSize=1）。
@@ -218,6 +219,12 @@ func NewSSEStreamDecoderWithBatch(reqID, model string, batchSize int) *SSEStream
 // 外层在 Feed 正常收尾后读取一次，用于网关层 content_filter 独立计数。
 func (d *SSEStreamDecoder) ContentFiltered() bool {
 	return d.contentFilter
+}
+
+// Completed 报告流是否**完整结束**（isLastChunk 终态校验全部通过并已正常终止；P1-6 M2.1）。
+// 用于 TTFT 候选样本的唯一提交判定：失败/截断/乱序流均为 false，候选自然丢弃。
+func (d *SSEStreamDecoder) Completed() bool {
+	return d.completed
 }
 
 // SawLabel 报告上游流是否已携带强标标识 label meta（B1 去重语义）：
@@ -426,6 +433,7 @@ func (d *SSEStreamDecoder) finish(out []byte, isLastChunk bool, cb func(out []by
 			cb(nil, d.err)
 			return
 		}
+		d.completed = true // P1-6 M2.1：终态校验全部通过——流完整结束
 	}
 	cb(out, nil)
 }
