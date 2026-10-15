@@ -24,6 +24,7 @@ package main
 //	otpmask_route_ttft_stats_fetch_cb_total     TTFT 统计拉取回调被执行次数（恒 0 ⇒ 回调被丢弃）
 //	otpmask_route_ttft_stats_fetch_ok_total     TTFT 统计拉取确认成功次数（200 契约载荷 / 404 无统计）
 //	otpmask_route_ttft_stats_fetch_reject_total TTFT 统计拉取被拒次数（网络错/5xx/非契约载荷）
+//	otpmask_route_ttft_seconds_bucket_le_*  首 token 延迟累积直方图（11 桶，秒制上界；M5.1，§6.5）
 //	otpmask_cred_fetch_cb_total   段① 凭据拉取**回调被执行**次数（恒 0 ⇒ 回调被丢弃）
 //	otpmask_cred_fetch_ok_total   段① 凭据校验通过并写入运行态次数
 //	otpmask_cred_fetch_reject_total 段① 凭据被拒次数（非 200 / 解析失败 / 载荷非法；插件保留旧值）
@@ -158,12 +159,17 @@ var (
 // bucket 配置（与方案 §10.1.3 对齐）：
 //   延迟：[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, +Inf]（9 桶）
 //   token：[10, 100, 500, 1000, 2000, 5000, 10000, +Inf]（8 桶）
+//   TTFT：[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30]（11 桶；= M2.2 上报桶秒制换算）
 
 // latencyBuckets 延迟桶上界（秒），与方案 §10.1.3 对齐。
 var latencyBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0}
 
 // tokenBuckets token 数桶上界。
 var tokenBuckets = []float64{10, 100, 500, 1000, 2000, 5000, 10000}
+
+// ttftBuckets TTFT 桶上界（秒；M5.1）——与上报内存桶 `ttftBucketUpperBoundsMs`（M2.2，
+// 毫秒制 11 桶）逐边界一致：同一次采样事件由两套计数分别维护（§6.5 语义区分注记）。
+var ttftBuckets = []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0}
 
 // latencyBucketCounters 按延迟桶索引对应的 Counter（懒初始化）。
 // 命名格式：otpmask_route_latency_seconds_bucket{le="0.005"}
@@ -172,6 +178,10 @@ var latencyBucketCounters []*pwCounter
 
 // tokenBucketCounters 按 token 桶索引对应的 Counter（懒初始化）。
 var tokenBucketCounters []*pwCounter
+
+// ttftBucketCounters 按 TTFT 桶索引对应的 Counter（懒初始化；M5.1）。
+// 命名格式：otpmask_route_ttft_seconds_bucket_le_0_025（le 值编码进指标名）。
+var ttftBucketCounters []*pwCounter
 
 func init() {
 	// 预初始化 Histogram 桶 Counter（与 bucket 一一对应，按顺序）。
@@ -185,6 +195,12 @@ func init() {
 	for i, le := range tokenBuckets {
 		tokenBucketCounters[i] = &pwCounter{
 			name: "otpmask_route_tokens_bucket_le_" + formatFloatForMetric(le),
+		}
+	}
+	ttftBucketCounters = make([]*pwCounter, len(ttftBuckets))
+	for i, le := range ttftBuckets {
+		ttftBucketCounters[i] = &pwCounter{
+			name: "otpmask_route_ttft_seconds_bucket_le_" + formatFloatForMetric(le),
 		}
 	}
 }
@@ -214,6 +230,18 @@ func observeTokens(tokens int) {
 	for i, le := range tokenBuckets {
 		if v <= le {
 			tokenBucketCounters[i].incr()
+		}
+	}
+}
+
+// observeTTFT 记录一次首 token 延迟（毫秒；M5.1，累积直方图语义：所有 le ≥ value 的桶 +1）。
+// 调用点与上报内存桶一致（ttftCommitOnComplete → ttftStore.observe）——
+// 两个计数体系由同一次采样事件分别维护（§6.5 语义区分注记，勿混用两个口径）。
+func observeTTFT(ms int64) {
+	valueSec := float64(ms) / 1000 // 毫秒 → 秒（桶上界为秒制）
+	for i, le := range ttftBuckets {
+		if valueSec <= le {
+			ttftBucketCounters[i].incr()
 		}
 	}
 }

@@ -38,3 +38,39 @@ func TestMetricNames(t *testing.T) {
 		}
 	}
 }
+
+// TestTTFTMetricBucketsAlignReportBuckets：M5.1 指标桶与 M2.2 上报桶逐边界一致（秒制换算），
+// 桶 Counter 命名（le 值编码）正确。
+func TestTTFTMetricBucketsAlignReportBuckets(t *testing.T) {
+	if len(ttftBuckets) != TTFTBucketCount {
+		t.Fatalf("桶数不符：metric=%d report=%d", len(ttftBuckets), TTFTBucketCount)
+	}
+	for i, ms := range ttftBucketUpperBoundsMs {
+		if ttftBuckets[i] != float64(ms)/1000 {
+			t.Fatalf("第 %d 桶上界不符：metric=%v report=%dms", i, ttftBuckets[i], ms)
+		}
+	}
+	if len(ttftBucketCounters) != len(ttftBuckets) {
+		t.Fatalf("桶 Counter 数不符：%d", len(ttftBucketCounters))
+	}
+	for i, le := range ttftBuckets {
+		want := "otpmask_route_ttft_seconds_bucket_le_" + formatFloatForMetric(le)
+		if ttftBucketCounters[i].name != want {
+			t.Fatalf("第 %d 桶命名不符：got=%q want=%q", i, ttftBucketCounters[i].name, want)
+		}
+	}
+	// le 编码抽样（防 formatFloatForMetric 漂移）：0.025 → le_0_025；30 → le_30
+	if got := ttftBucketCounters[1].name; got != "otpmask_route_ttft_seconds_bucket_le_0_025" {
+		t.Fatalf("桶名编码不符：%q", got)
+	}
+	if got := ttftBucketCounters[10].name; got != "otpmask_route_ttft_seconds_bucket_le_30" {
+		t.Fatalf("桶名编码不符：%q", got)
+	}
+}
+
+// TestObserveTTFTGuardedNoop：守卫下 observeTTFT 边界值遍历安全 no-op（不 panic）。
+func TestObserveTTFTGuardedNoop(t *testing.T) {
+	for _, ms := range []int64{0, 1, 9, 10, 11, 25, 25000, 30000, 999999} {
+		observeTTFT(ms)
+	}
+}

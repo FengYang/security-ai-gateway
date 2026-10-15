@@ -373,6 +373,9 @@ func ttftCommitOnComplete(st *respStreamState) {
 	s := st.ttft
 	s.ready = false
 	ttftStore.observe(s.key, s.ms)
+	// M5.1（§6.5）：Envoy 累积直方图语义的桶指标——与上报内存桶同一次采样事件分别维护
+	// （内存桶为非累积、随周期冻结清空；指标桶为累积、仅经 Counter 单调递增）。
+	observeTTFT(s.ms)
 }
 
 // ============================================================
