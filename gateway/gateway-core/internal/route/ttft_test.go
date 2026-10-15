@@ -207,3 +207,134 @@ func TestTTFTRing_MergeUnknownKey(t *testing.T) {
 		t.Fatal("非法输入不应创建条目")
 	}
 }
+
+// ============================================================
+// M3.2 分位插值（桶内线性；排序一致性口径，§3.4）
+// ============================================================
+
+// bucketize 测试辅助：按 le 语义（上界含；>30000 归末桶）将样本值分桶。
+func bucketize(vals []int64) *[TTFTBucketCount]uint64 {
+	var b [TTFTBucketCount]uint64
+	for _, v := range vals {
+		idx := TTFTBucketCount - 1
+		for i := 0; i < TTFTBucketCount; i++ {
+			if v <= TTFTBucketUpperMs[i] {
+				idx = i
+				break
+			}
+		}
+		b[idx]++
+	}
+	return &b
+}
+
+// TestTTFTWindow_QuantileBasic：跨桶插值解析值 + 单调性（p95 ≥ p50）。
+func TestTTFTWindow_QuantileBasic(t *testing.T) {
+	var w TTFTWindow
+	w.Buckets[0], w.Buckets[1], w.Buckets[2] = 100, 100, 100
+	w.Samples = 300
+	// p50：target=150 → 桶(10,25]：10 + 15×(150-100)/100 = 17.5 → 18
+	p50, ok := w.Quantile(0.5)
+	if !ok || p50 != 18 {
+		t.Fatalf("p50 应=18，got (%d,%v)", p50, ok)
+	}
+	// p95：target=285 → 桶(25,50]：25 + 25×(285-200)/100 = 46.25 → 46
+	p95, ok := w.Quantile(0.95)
+	if !ok || p95 != 46 {
+		t.Fatalf("p95 应=46，got (%d,%v)", p95, ok)
+	}
+	if p95 < p50 {
+		t.Fatalf("单调性破坏：p95=%d < p50=%d", p95, p50)
+	}
+}
+
+// TestTTFTWindow_QuantileBoundaries：单桶内插值区间、q=1、空窗/越界及 le 边界分桶。
+func TestTTFTWindow_QuantileBoundaries(t *testing.T) {
+	// 全样本落单桶 (100,250]（idx4）：插值必须落在桶区间内
+	var w TTFTWindow
+	w.Buckets[4] = 10
+	w.Samples = 10
+	p50, ok := w.Quantile(0.5) // 100 + 150×0.5 = 175
+	if !ok || p50 != 175 {
+		t.Fatalf("单桶 p50 应=175，got (%d,%v)", p50, ok)
+	}
+	p95, ok := w.Quantile(0.95) // 100 + 150×0.95 = 242.5 → 243
+	if !ok || p95 != 243 {
+		t.Fatalf("单桶 p95 应=243，got (%d,%v)", p95, ok)
+	}
+	p100, ok := w.Quantile(1.0) // 桶上界 250
+	if !ok || p100 != 250 {
+		t.Fatalf("q=1 应=桶上界 250，got (%d,%v)", p100, ok)
+	}
+	// 空窗口 / q 越界
+	var e TTFTWindow
+	if _, ok := e.Quantile(0.5); ok {
+		t.Fatal("空窗口应 ok=false")
+	}
+	if _, ok := w.Quantile(0); ok {
+		t.Fatal("q=0 应 ok=false")
+	}
+	if _, ok := w.Quantile(1.5); ok {
+		t.Fatal("q>1 应 ok=false")
+	}
+	// le 边界分桶语义：10→首桶；11/25→(10,25]；25000/99999（>30000 归末桶）
+	b := bucketize([]int64{10, 11, 25, 25000, 30000, 99999})
+	if b[0] != 1 || b[1] != 2 || b[10] != 3 {
+		t.Fatalf("le 边界分桶不符：%v", b)
+	}
+}
+
+// TestTTFTWindow_QuantileSortConsistency：与全量排序的**排序一致性**（§3.4 精度口径；TT2-04，
+// 不做 100% 排序断言）：三端点 P95 分属不同桶时，插值序必须与真实序一致。
+func TestTTFTWindow_QuantileSortConsistency(t *testing.T) {
+	rep := func(v int64, n int) []int64 {
+		s := make([]int64, n)
+		for i := range s {
+			s[i] = v
+		}
+		return s
+	}
+	cases := []struct {
+		name string
+		vals []int64
+		want int64 // 桶内插值解析值（与真实值同序）
+	}{
+		{"ep-a(20ms→桶(10,25])", rep(20, 50), 24},      // 10+15×0.95=24.25→24
+		{"ep-c(200ms→桶(100,250])", rep(200, 50), 243}, // 100+150×0.95=242.5→243
+		{"ep-b(400ms→桶(250,500])", rep(400, 50), 488}, // 250+250×0.95=487.5→488
+	}
+	prev := int64(-1)
+	prevName := ""
+	for _, c := range cases {
+		b := bucketize(c.vals)
+		var w TTFTWindow
+		w.Buckets = *b
+		w.Samples = uint64(len(c.vals))
+		p95, ok := w.Quantile(0.95)
+		if !ok || p95 != c.want {
+			t.Fatalf("%s：p95 应=%d，got (%d,%v)", c.name, c.want, p95, ok)
+		}
+		if p95 <= prev {
+			t.Fatalf("排序一致性破坏：%s(%d) 应大于前序 %s(%d)", c.name, p95, prevName, prev)
+		}
+		prev, prevName = p95, c.name
+	}
+}
+
+// TestTTFTWindow_QuantileMixedWindow：多桶混合下 p50/p95 解析值（含累积路径）。
+func TestTTFTWindow_QuantileMixedWindow(t *testing.T) {
+	// 40 样本：idx0(≤10)×8、idx2(≤50)×24、idx6(≤1000)×8
+	var w TTFTWindow
+	w.Buckets[0], w.Buckets[2], w.Buckets[6] = 8, 24, 8
+	w.Samples = 40
+	// p50：target=20；桶2 累积 8+24=32≥20：(25,50] 内 25 + 25×(20-8)/24 = 25+12.5 = 37.5 → 38
+	p50, _ := w.Quantile(0.5)
+	if p50 != 38 {
+		t.Fatalf("p50 应=38，got %d", p50)
+	}
+	// p95：target=38；桶6 累积 40≥38：(500,1000] 内 500 + 500×(38-32)/8 = 500+375 = 875
+	p95, _ := w.Quantile(0.95)
+	if p95 != 875 {
+		t.Fatalf("p95 应=875，got %d", p95)
+	}
+}

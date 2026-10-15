@@ -13,6 +13,7 @@ package route
 // 本文件只负责环形机制；去重/值域钳制/白名单/条目上限属 M3.3，分位插值属 M3.2。
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -170,4 +171,49 @@ func (r *TTFTRing) Reset(k TTFTKey) bool {
 		delete(r.entries, k)
 	}
 	return ok
+}
+
+// ============================================================
+// M3.2 分位插值（桶内线性；精度=排序一致性口径，§3.4）
+// ============================================================
+
+// Quantile 计算窗口桶计数在分位 q（0<q≤1）处的桶内线性插值（毫秒，§3.4）：
+//
+//	p ≈ le_lo + (le_hi - le_lo) × (q - cum_before) / count_in_bucket
+//
+// 桶 i 覆盖上界 TTFTBucketUpperMs[i]（le 语义：首桶 le=10）；累积占比首次 ≥ q 的桶内插值。
+//
+// 精度口径（§3.4，如实）：用于**端点间相对排序**，不承诺绝对精度——同桶内取值不可分辨，
+// 相邻桶宽约 2～2.5×，最坏绝对相对误差可达数十 %；排序可分辨性以「两 P95 分属不同桶」为前提。
+// 返回 (p_ms, true)；samples==0 或 q 越界 → (0, false)。
+func (w TTFTWindow) Quantile(q float64) (int64, bool) {
+	if w.Samples == 0 || q <= 0 || q > 1 {
+		return 0, false
+	}
+	target := q * float64(w.Samples)
+	var cum float64
+	for i := 0; i < TTFTBucketCount; i++ {
+		c := float64(w.Buckets[i])
+		if c == 0 {
+			continue
+		}
+		if cum+c >= target || i == TTFTBucketCount-1 {
+			lo := int64(0)
+			if i > 0 {
+				lo = TTFTBucketUpperMs[i-1]
+			}
+			hi := TTFTBucketUpperMs[i]
+			inBucket := target - cum
+			if inBucket < 0 {
+				inBucket = 0 // 浮点防御
+			}
+			if inBucket > c {
+				inBucket = c
+			}
+			p := float64(lo) + float64(hi-lo)*(inBucket/c)
+			return int64(math.Round(p)), true
+		}
+		cum += c
+	}
+	return 0, false // 不可达（samples>0 时必命中）
 }
