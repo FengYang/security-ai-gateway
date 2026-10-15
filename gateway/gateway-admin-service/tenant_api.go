@@ -110,6 +110,9 @@ func (h *tenantHandler) registerMux(mux *http.ServeMux) {
 
 	// 场景化开通向导（N1）
 	h.registerTenantProvisioningMux(mux)
+
+	// 密钥资产视图（N2）
+	h.registerTenantSecretsMux(mux)
 }
 
 // registerCaptcha 在管理面 mux 注册验证码签发端点（Console 内部，authMiddleware）。

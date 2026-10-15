@@ -35,6 +35,9 @@ type provisioningRequest struct {
 	TrustTier string `json:"trust_tier"`
 	// Confirm 二次确认（active 租户高敏变更必填 true，§4.3.1）。
 	Confirm bool `json:"confirm"`
+	// ProviderCredRefs provider 凭据引用（N2；仅 vault 句柄 + 元数据，禁明文）。
+	// nil = 保持既有引用不变；非 nil = 全量替换。
+	ProviderCredRefs *[]providerCredRef `json:"provider_cred_refs,omitempty"`
 }
 
 // provisioningView 开通配置视图（GET/PUT 响应，§6.12）。
@@ -158,6 +161,19 @@ func (h *tenantHandler) handleTenantProvisioningPut(w http.ResponseWriter, r *ht
 		if cur.ProviderCredRefsJSON != "" {
 			credRefs = cur.ProviderCredRefsJSON
 		}
+	}
+	// N2：provider 凭据引用（仅句柄 + 元数据）；提供则全量替换，否则保持既有。
+	if req.ProviderCredRefs != nil {
+		if msg, ok := validateProviderCredRefs(*req.ProviderCredRefs); !ok {
+			tenantWriteError(w, http.StatusBadRequest, msg)
+			return
+		}
+		refsJSON, err := marshalProviderCredRefs(normalizeProviderCredRefs(*req.ProviderCredRefs, now))
+		if err != nil {
+			tenantWriteError(w, http.StatusInternalServerError, "provider 凭据引用序列化失败")
+			return
+		}
+		credRefs = refsJSON
 	}
 
 	p := &TenantProvisioning{
