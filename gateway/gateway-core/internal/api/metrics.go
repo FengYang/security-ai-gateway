@@ -23,21 +23,23 @@ import (
 
 // coreMetrics 控制面指标集合（线程安全）。
 type coreMetrics struct {
-	mu          sync.Mutex
-	tableVer    int64
-	rules       map[string]int64 // kind|scope|action
-	changes     map[string]int64 // result
-	teeApplied  map[string]int64 // result
-	pullReject  map[string]int64 // reason
-	auditEvents int64
+	mu           sync.Mutex
+	tableVer     int64
+	rules        map[string]int64 // kind|scope|action
+	changes      map[string]int64 // result
+	teeApplied   map[string]int64 // result
+	pullReject   map[string]int64 // reason
+	auditEvents  int64
+	reportResult map[string]int64 // P1-6 M3.4：TTFT 上报处理结果（ok/reject/duplicate；渲染见 M3.8）
 }
 
 func newCoreMetrics() *coreMetrics {
 	return &coreMetrics{
-		rules:      make(map[string]int64),
-		changes:    make(map[string]int64),
-		teeApplied: make(map[string]int64),
-		pullReject: make(map[string]int64),
+		rules:        make(map[string]int64),
+		changes:      make(map[string]int64),
+		teeApplied:   make(map[string]int64),
+		pullReject:   make(map[string]int64),
+		reportResult: make(map[string]int64),
 	}
 }
 
@@ -70,6 +72,13 @@ func (m *coreMetrics) incTeeApplied(result string) {
 func (m *coreMetrics) incPullReject(reason string) {
 	m.mu.Lock()
 	m.pullReject[reason]++
+	m.mu.Unlock()
+}
+
+// incReportResult 记录 TTFT 上报处理结果（ok / reject / duplicate，§6.5）。
+func (m *coreMetrics) incReportResult(result string) {
+	m.mu.Lock()
+	m.reportResult[result]++
 	m.mu.Unlock()
 }
 

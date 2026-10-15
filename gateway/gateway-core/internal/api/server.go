@@ -32,6 +32,9 @@ type Server struct {
 	metrics  *coreMetrics       // 控制面指标（门禁 #7/#9）
 	histMu   sync.Mutex
 	history  []*ratelimit.Table // 历史版本（含当前），用于按 version 回滚
+	// P1-6 M3.1/M3.3：TTFT 聚合（分片环形 + batch_id 去重；控制面非热路径）。
+	ttftRing  *route.TTFTRing
+	ttftDedup *route.TTFTDedup
 }
 
 // New 构造 API Server。routerTable 为启动时注入的已签名默认路由表（可为空表）；
@@ -49,6 +52,8 @@ func New(signer *route.Signer, msigner *mcpsec.Signer, rlsigner *ratelimit.Signe
 		signer: signer, msigner: msigner, rlsigner: rlsigner, teeQuota: teeQuota,
 		store: st, token: authToken, mux: http.NewServeMux(),
 		audit: &policyaudit.Chain{}, metrics: newCoreMetrics(),
+		ttftRing:  route.NewTTFTRing(nil),
+		ttftDedup: route.NewTTFTDedup(),
 	}
 	if rateLimitTable != nil {
 		s.recordHistory(rateLimitTable)
@@ -138,6 +143,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /routes/{tenant}/{model}", s.withAuth(s.withRouteChangeSpan("delete", s.handleDeleteRoute)))
 	s.mux.HandleFunc("POST /routes/dry-run", s.withAuth(s.handleDryRun))
 	s.mux.HandleFunc("GET /routes/endpoints/status", s.withAuth(s.handleEndpointStatus))
+	// P1-6 M3.4：TTFT 上报（数据面 → 控制面；§6.2）
+	s.mux.HandleFunc("POST /routes/ttft/report", s.withAuth(s.handleTTFTReport))
 	s.mux.HandleFunc("POST /routes/rollback", s.withAuth(s.withRouteChangeSpan("rollback", s.handleRouteRollback)))
 	s.mux.HandleFunc("GET /routes/history", s.withAuth(s.handleRouteHistory))
 	s.mux.HandleFunc("POST /routes/push", s.withAuth(s.handleRoutePush))

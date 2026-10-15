@@ -189,9 +189,9 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"valid":        true,
-		"route_count":  len(req.Routes),
-		"changes":      changes,
+		"valid":       true,
+		"route_count": len(req.Routes),
+		"changes":     changes,
 		"changes_summary": map[string]int{
 			"added":   added,
 			"updated": updated,
@@ -447,6 +447,158 @@ func (s *Server) appendRouteAudit(r *http.Request, action string, from, to int,
 		}
 	}
 	return nil
+}
+
+// ============================================================
+// P1-6 M3.4：TTFT 上报端点（数据面 → 控制面，§6.2）
+// ============================================================
+
+// ttftReportRequest 上报报文（§6.2，数据面 M2.3 构造）。
+type ttftReportRequest struct {
+	Node       string             `json:"node"`
+	Worker     int                `json:"worker"`
+	BatchID    string             `json:"batch_id"`
+	ReportedAt int64              `json:"reported_at"` // 毫秒时间戳
+	Samples    []ttftReportSample `json:"samples"`
+}
+
+type ttftReportSample struct {
+	Tenant   string   `json:"tenant"`
+	Model    string   `json:"model"`
+	Endpoint string   `json:"endpoint"`
+	Cache    string   `json:"cache"`
+	Buckets  []uint64 `json:"buckets"`
+}
+
+// ttftReportMaxSamples 单批 samples 条目数上限（§6.2 TT2-08，与下发侧对称；超限 400 too_many_samples）。
+const ttftReportMaxSamples = 1000
+
+// handleTTFTReport POST /routes/ttft/report（至少一次 + 按 batch_id 去重，§6.2）。
+//
+// 处理序（全或无；400 拒绝不消耗 batch_id）：
+//  1. 结构校验（JSON / batch_id / reported_at / samples 非空与条数上限）；
+//  2. 逐样本值域校验（tenant/model/endpoint/cache、buckets 长度 11 与单桶上限、
+//     reported_at 时间窗——窗口取该 (tenant,model) 路由 latency 配置）+ 白名单（TT2-08）；
+//  3. 单批总样本上限；
+//  4. batch_id 去重：重复 → 200 result=duplicate（ACK 丢弃，数据面据此清待确认队列）；
+//  5. 聚合条目容量预检（超限 503 source_unavailable）→ 落片 → 200 result=ok。
+func (s *Server) handleTTFTReport(w http.ResponseWriter, r *http.Request) {
+	reject := func(msg string) {
+		s.metrics.incReportResult("reject")
+		writeError(w, http.StatusBadRequest, "invalid_request", msg)
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		reject("请求体读取失败")
+		return
+	}
+	var req ttftReportRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		reject(fmt.Sprintf("请求体 JSON 解析失败: %v", err))
+		return
+	}
+	if req.BatchID == "" {
+		reject("batch_id 不能为空（去重键）")
+		return
+	}
+	if req.ReportedAt <= 0 {
+		reject("reported_at 必须为毫秒时间戳")
+		return
+	}
+	if len(req.Samples) == 0 {
+		reject("samples 不能为空")
+		return
+	}
+	if len(req.Samples) > ttftReportMaxSamples {
+		reject(fmt.Sprintf("samples 条目数 %d 超出上限 %d（too_many_samples）", len(req.Samples), ttftReportMaxSamples))
+		return
+	}
+
+	tbl := s.store.GetRouteTable()
+	nowSec := time.Now().Unix()
+	reportedAtSec := req.ReportedAt / 1000
+
+	type landing struct {
+		key       route.TTFTKey
+		buckets   [route.TTFTBucketCount]uint64
+		windowSec int
+	}
+	landings := make([]landing, 0, len(req.Samples))
+	var total uint64
+	for i := range req.Samples {
+		sm := &req.Samples[i]
+		if sm.Tenant == "" || sm.Model == "" || sm.Endpoint == "" {
+			reject(fmt.Sprintf("samples[%d] tenant/model/endpoint 不能为空", i))
+			return
+		}
+		if sm.Cache != "hit" && sm.Cache != "miss" {
+			reject(fmt.Sprintf("samples[%d] cache 须为 hit/miss，got %q", i, sm.Cache))
+			return
+		}
+		if len(sm.Buckets) != route.TTFTBucketCount {
+			reject(fmt.Sprintf("samples[%d] buckets 长度须为 %d，got %d", i, route.TTFTBucketCount, len(sm.Buckets)))
+			return
+		}
+		var b [route.TTFTBucketCount]uint64
+		copy(b[:], sm.Buckets)
+		if err := route.ValidateTTFTBucketCounts(&b); err != nil {
+			reject(fmt.Sprintf("samples[%d] %v", i, err))
+			return
+		}
+		// 该 (tenant,model) 生效窗口（路由 latency 配置；缺省 300s）
+		win := route.TTFTDefaultWindowSec
+		if rt := tbl.Lookup(sm.Tenant, sm.Model); rt != nil && rt.Latency != nil && rt.Latency.WindowSec > 0 {
+			win = rt.Latency.WindowSec
+		}
+		if !route.TTFTReportedAtInWindow(reportedAtSec, nowSec, win) {
+			reject(fmt.Sprintf("samples[%d] reported_at 越窗（now=%d window=%ds，TT2-03）", i, nowSec, win))
+			return
+		}
+		if !tbl.KnowsEndpoint(sm.Tenant, sm.Model, sm.Endpoint) {
+			reject(fmt.Sprintf("samples[%d] 未知端点 (%s,%s,%s) 不在当前路由表（TT2-08）", i, sm.Tenant, sm.Model, sm.Endpoint))
+			return
+		}
+		for _, c := range b {
+			total += c
+		}
+		landings = append(landings, landing{
+			key:       route.TTFTKey{Tenant: sm.Tenant, Model: sm.Model, Endpoint: sm.Endpoint, Cache: sm.Cache},
+			buckets:   b,
+			windowSec: win,
+		})
+	}
+	if err := route.ValidateTTFTBatchTotal(total); err != nil {
+		reject(err.Error())
+		return
+	}
+
+	// batch_id 去重：重复批次 ACK 丢弃（验证通过后才登记，400 拒绝不消耗 batch_id）
+	if s.ttftDedup.Seen(req.BatchID, nowSec) {
+		s.metrics.incReportResult("duplicate")
+		writeJSON(w, http.StatusOK, map[string]string{"result": "duplicate"})
+		return
+	}
+	// 容量预检（TT2-08：条目数上限；整体拒绝避免部分落片）
+	keys := make([]route.TTFTKey, 0, len(landings))
+	for _, ld := range landings {
+		keys = append(keys, ld.key)
+	}
+	if !s.ttftRing.HasRoomFor(keys) {
+		s.metrics.incReportResult("reject")
+		writeError(w, http.StatusServiceUnavailable, "source_unavailable",
+			"TTFT 聚合条目数已达上限（TT2-08；需运维 reset 或扩容）")
+		return
+	}
+	for _, ld := range landings {
+		if res := s.ttftRing.Record(ld.key, &ld.buckets, reportedAtSec, ld.windowSec); res != route.TTFTIngestOK {
+			// 防御路径（预检后仅并发竞态可触达）；batch_id 已登记，重试将按 duplicate ACK
+			s.metrics.incReportResult("reject")
+			writeError(w, http.StatusServiceUnavailable, "source_unavailable", "TTFT 聚合器拒绝落片")
+			return
+		}
+	}
+	s.metrics.incReportResult("ok")
+	writeJSON(w, http.StatusOK, map[string]string{"result": "ok"})
 }
 
 // routeHistory 路由表历史版本（与 ratelimit 的 history 分开存储，避免互串）。

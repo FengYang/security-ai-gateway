@@ -126,6 +126,10 @@ const (
 // Record 将一批桶计数按 reported_at（秒）落入对应分片（整批归入 reported_at 所在分片）。
 // 落片前执行时间驱动淘汰；窗口配置变化 → 重建条目（统计清零，避免新旧窗口混算）。
 // 返回落片结果（TTFTIngestOK / TTFTIngestEntryLimit / TTFTIngestInvalid，M3.3）。
+//
+// 边界丢片（如实，返回 OK 但不落计数、不更新 updated_at）：当 reported_at 逼近窗口边界
+// （其分片起点已 ≤ 淘汰线）且分片索引与更新的在窗分片冲突时，直接丢弃——不得覆写更新数据；
+// 该旧分片本就无法参与后续合并。数据面正常重试窗口（≤4×10s）≪ window，不受影响。
 func (r *TTFTRing) Record(k TTFTKey, buckets *[TTFTBucketCount]uint64, reportedAt int64, windowSec int) TTFTIngestResult {
 	if buckets == nil || reportedAt <= 0 {
 		return TTFTIngestInvalid
@@ -153,6 +157,10 @@ func (r *TTFTRing) Record(k TTFTKey, buckets *[TTFTBucketCount]uint64, reportedA
 	start := (reportedAt / TTFTShardWindowSec) * TTFTShardWindowSec
 	sh := &e.shards[idx]
 	if sh.start != start {
+		if sh.start != 0 && start < sh.start {
+			// 边界丢片：更旧批次与在窗同索引分片冲突（不得覆写更新数据；该旧分片起点已 ≤ 淘汰线）
+			return TTFTIngestOK
+		}
 		*sh = ttftShard{start: start}
 	}
 	for i := range buckets {
@@ -185,6 +193,25 @@ func (r *TTFTRing) Merge(k TTFTKey) (TTFTWindow, bool) {
 	}
 	w.UpdatedAt = e.updatedAt
 	return w, true
+}
+
+// HasRoomFor 容量预检（TT2-08）：keys 中尚未存在的去重键 + 现有条目数 ≤ 上限。
+// 供上报端点整体拒绝（避免部分落片）；并发竞态下的兜底由 Record 的 EntryLimit 承担。
+func (r *TTFTRing) HasRoomFor(keys []TTFTKey) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seen := make(map[TTFTKey]struct{}, len(keys))
+	missing := 0
+	for _, k := range keys {
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		if _, ok := r.entries[k]; !ok {
+			missing++
+		}
+	}
+	return len(r.entries)+missing <= r.maxEntries
 }
 
 // Reset 清空键的全部分片（M3.6 reset 端点复用；返回重置前是否存在条目）。

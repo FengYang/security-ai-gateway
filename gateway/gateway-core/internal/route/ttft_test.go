@@ -156,6 +156,27 @@ func TestTTFTRing_WindowChangeRebuilds(t *testing.T) {
 	}
 }
 
+// TestTTFTRing_StaleLandingDoesNotWipe：边界旧批次（同索引、更旧分片起点，已列淘汰线）丢弃且不破坏在窗数据。
+func TestTTFTRing_StaleLandingDoesNotWipe(t *testing.T) {
+	const t0 = int64(1760000000)
+	now, _ := fakeClock(t0 + 10)
+	r := NewTTFTRing(now)
+	k := TTFTKey{Tenant: "t", Model: "m", Endpoint: "ep", Cache: "miss"}
+
+	r.Record(k, bk(5), t0+10, 300) // 当前分片（idx 8，start t0）
+	// 同索引更旧批次：start = t0-300（idx 8），其分片起点已 ≤ 淘汰线（now-300 = t0-290）
+	if got := r.Record(k, bk(9), t0-290, 300); got != TTFTIngestOK {
+		t.Fatalf("边界旧批次应 ACK（OK），got %v", got)
+	}
+	w, _ := r.Merge(k)
+	if w.Samples != 5 {
+		t.Fatalf("在窗数据不得被覆写/叠加，got samples=%d", w.Samples)
+	}
+	if w.UpdatedAt != t0+10 {
+		t.Fatalf("updated_at 不应被边界旧批次推进，got %d", w.UpdatedAt)
+	}
+}
+
 // TestTTFTRing_Reset：重置清空且二次重置返回 false。
 func TestTTFTRing_Reset(t *testing.T) {
 	const t0 = int64(1760000000)
