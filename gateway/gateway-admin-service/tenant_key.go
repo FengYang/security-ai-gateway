@@ -100,7 +100,7 @@ func (h *httpKeyIssuer) IssueKey(ctx context.Context, tenant, sub, jti string, t
 // registerKeyMux 注册租户 Key 端点（租户令牌 + CSRF）。
 func (h *tenantHandler) registerKeyMux(mux *http.ServeMux) {
 	wrap := func(fn http.HandlerFunc) http.HandlerFunc {
-		return tenantAuthMiddleware(h.jwtSecret, csrfCheck(fn))
+		return tenantAuthMiddleware(h.cfg, csrfCheck(fn))
 	}
 	mux.HandleFunc("GET "+apiKeysPath, wrap(h.handleKeyList))
 	mux.HandleFunc("POST "+apiKeysPath, wrap(h.handleKeyCreate))
@@ -153,8 +153,11 @@ func validKeyName(name string) bool {
 	return n >= 1 && n <= 64
 }
 
-// tenantActor 取当前租户操作人（令牌 sub）。
+// tenantActor 取当前操作人（租户令牌 sub；admin 接管时取管理员登录名，C-6）。
 func tenantActor(r *http.Request) string {
+	if sub, isAdmin := tenantTakeoverFromCtx(r); isAdmin && sub != "" {
+		return sub
+	}
 	if c := tenantFromCtx(r.Context()); c != nil {
 		return c.Sub
 	}

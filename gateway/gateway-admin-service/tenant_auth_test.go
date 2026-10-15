@@ -86,11 +86,21 @@ func TestTenantJWT_EmptyTenant(t *testing.T) {
 	}
 }
 
+// tenantTestCfg 构造仅含共享密钥的最小配置（租户端点门禁测试用）。
+func tenantTestCfg(secret []byte) *config {
+	return &config{
+		jwtSecret:   secret,
+		jwtIssuer:   defaultIssuer,
+		jwtAudience: defaultAudience,
+		roleAdmins:  map[string]struct{}{},
+	}
+}
+
 func TestTenantAuthMiddleware_ValidToken(t *testing.T) {
 	secret := []byte("shared-secret-16chars-minimum")
 	token := newTenantJWT(secret, "1", "t_test", "u@e.com", 3600)
 
-	handler := tenantAuthMiddleware(secret, func(w http.ResponseWriter, r *http.Request) {
+	handler := tenantAuthMiddleware(tenantTestCfg(secret), func(w http.ResponseWriter, r *http.Request) {
 		c := tenantFromCtx(r.Context())
 		if c == nil || c.Tenant != "t_test" {
 			t.Errorf("上下文 tenant 不对: %+v", c)
@@ -107,7 +117,7 @@ func TestTenantAuthMiddleware_ValidToken(t *testing.T) {
 }
 
 func TestTenantAuthMiddleware_NoToken(t *testing.T) {
-	handler := tenantAuthMiddleware([]byte("x"), func(w http.ResponseWriter, r *http.Request) {
+	handler := tenantAuthMiddleware(tenantTestCfg([]byte("x")), func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler 不应被调用")
 	})
 	req := httptest.NewRequest("GET", "/", nil)
@@ -119,7 +129,7 @@ func TestTenantAuthMiddleware_NoToken(t *testing.T) {
 }
 
 func TestTenantAuthMiddleware_BadToken(t *testing.T) {
-	handler := tenantAuthMiddleware([]byte("shared-secret-16chars-minimum"), func(w http.ResponseWriter, r *http.Request) {
+	handler := tenantAuthMiddleware(tenantTestCfg([]byte("shared-secret-16chars-minimum")), func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler 不应被调用")
 	})
 	req := httptest.NewRequest("GET", "/", nil)
@@ -135,7 +145,7 @@ func TestRequireTenantScope(t *testing.T) {
 	secret := []byte("shared-secret-16chars-minimum")
 	token := newTenantJWT(secret, "1", "t_abc", "u@e.com", 3600)
 
-	handler := tenantAuthMiddleware(secret, func(w http.ResponseWriter, r *http.Request) {
+	handler := tenantAuthMiddleware(tenantTestCfg(secret), func(w http.ResponseWriter, r *http.Request) {
 		tenantID, err := requireTenantScope(r)
 		if err != nil || tenantID != "t_abc" {
 			t.Errorf("requireTenantScope: id=%s err=%v", tenantID, err)

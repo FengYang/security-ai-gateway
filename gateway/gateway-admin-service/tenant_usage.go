@@ -34,7 +34,7 @@ const (
 
 // registerTenantUsageMux 注册租户用量/账单端点（租户令牌；只读，无需 CSRF）。
 func (h *tenantHandler) registerTenantUsageMux(mux *http.ServeMux) {
-	wrap := func(fn http.HandlerFunc) http.HandlerFunc { return tenantAuthMiddleware(h.jwtSecret, fn) }
+	wrap := func(fn http.HandlerFunc) http.HandlerFunc { return tenantAuthMiddleware(h.cfg, fn) }
 	mux.HandleFunc("GET "+tenantUsagePath, wrap(h.handleTenantUsage))
 	mux.HandleFunc("GET "+tenantBillsPath, wrap(h.handleTenantBills))
 	mux.HandleFunc("GET "+tenantBillsPath+"/{id}", wrap(h.handleTenantBillItem))

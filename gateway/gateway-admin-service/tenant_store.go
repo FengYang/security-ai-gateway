@@ -165,6 +165,10 @@ type TenantStore interface {
 	GetModelConfig(tenantID string) (*ModelConfig, error)
 	UpsertModelConfig(tx TenantTx, m *ModelConfig) error
 
+	// 开通配置（N1，§3.5 表 ⑧）
+	GetProvisioning(tenantID string) (*TenantProvisioning, error)
+	UpsertProvisioning(tx TenantTx, p *TenantProvisioning) error
+
 	// 套餐升级/降级待确认单（M7）
 	CreateSubscriptionRequest(tx TenantTx, r *SubscriptionRequest) error
 	ListSubscriptionRequests(tenantID string, limit int) ([]*SubscriptionRequest, error)
@@ -260,6 +264,11 @@ func OpenTenantStore(dsn string, wal bool, pepper []byte) (TenantStore, error) {
 	}
 	// 套餐待确认单表（M7）
 	if err := ensureSubscriptionSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// 开通配置表（N1，§3.5 表 ⑧）
+	if err := ensureProvisioningSchema(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -930,4 +939,98 @@ func (s *sqliteTenantStore) IncRegisterRate(ip string, windowSec int) (int, erro
 		return 0, err
 	}
 	return count, nil
+}
+
+// ---------- 开通配置（N1，§3.5 表 ⑧）----------
+
+// provisioningDDL 开通配置表结构（对齐 §3.5 表 ⑧；每租户一行）。
+// access_mode 恒 'a_segmented'（v1.6 锁定：B 型/端到端禁选）；
+// segment2_mode 对齐场景矩阵 CHECK 约束；plugin_set 为 N6 渲染后 JSON。
+const provisioningDDL = `
+CREATE TABLE IF NOT EXISTS tenant_provisionings (
+  tenant_id          TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+  scenario           TEXT    NOT NULL CHECK (scenario IN ('s1','s2','s3a','s3b','s4')),
+  trust_tier         TEXT    NOT NULL CHECK (trust_tier IN ('trusted','untrusted')),
+  access_mode        TEXT    NOT NULL DEFAULT 'a_segmented' CHECK (access_mode = 'a_segmented'),
+  plugin_set         TEXT    NOT NULL DEFAULT '[]',
+  segment1_enabled   INTEGER NOT NULL,
+  segment2_mode      TEXT    NOT NULL CHECK (segment2_mode IN ('none','vendor_sdk','enclave_plaintext','cross_node_mtls','ciphertext_domain')),
+  template_version   TEXT    NOT NULL,
+  provider_cred_refs TEXT    NOT NULL DEFAULT '[]',
+  provisioned_at     INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL
+);
+`
+
+// TenantProvisioning 开通配置（每租户一行）。
+type TenantProvisioning struct {
+	TenantID             string
+	Scenario             string
+	TrustTier            string // trusted | untrusted（轴 A）
+	AccessMode           string // 恒 a_segmented
+	PluginSetJSON        string // N6 渲染后的插件组合 JSON
+	Segment1Enabled      bool   // 段① otpmask 开关（S1=0，其余=1）
+	Segment2Mode         string // none/vendor_sdk/enclave_plaintext/cross_node_mtls/ciphertext_domain
+	TemplateVersion      string // N6 模板版本
+	ProviderCredRefsJSON string // [{name,vault_ref,updated_at}]（仅 vault 句柄 + 元数据，禁明文）
+	ProvisionedAt        int64
+	UpdatedAt            int64
+}
+
+// ensureProvisioningSchema 建表（N1 新表）。
+func ensureProvisioningSchema(db *sql.DB) error {
+	if _, err := db.Exec(provisioningDDL); err != nil {
+		return fmt.Errorf("tenant: init provisioning schema: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTenantStore) GetProvisioning(tenantID string) (*TenantProvisioning, error) {
+	var p TenantProvisioning
+	err := s.db.QueryRow(`SELECT tenant_id, scenario, trust_tier, access_mode, plugin_set,
+		segment1_enabled, segment2_mode, template_version, provider_cred_refs, provisioned_at, updated_at
+		FROM tenant_provisionings WHERE tenant_id = ?`, tenantID).
+		Scan(&p.TenantID, &p.Scenario, &p.TrustTier, &p.AccessMode, &p.PluginSetJSON,
+			&p.Segment1Enabled, &p.Segment2Mode, &p.TemplateVersion, &p.ProviderCredRefsJSON,
+			&p.ProvisionedAt, &p.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant: get provisioning: %w", err)
+	}
+	return &p, nil
+}
+
+// UpsertProvisioning 写入开通配置（每租户一行；更新时保留 provisioned_at）。
+func (s *sqliteTenantStore) UpsertProvisioning(tx TenantTx, p *TenantProvisioning) error {
+	if p == nil || p.TenantID == "" || p.Scenario == "" {
+		return errors.New("tenant: provisioning tenant_id/scenario are required")
+	}
+	if p.ProviderCredRefsJSON == "" {
+		p.ProviderCredRefsJSON = "[]"
+	}
+	if p.PluginSetJSON == "" {
+		p.PluginSetJSON = "[]"
+	}
+	_, err := tx.tx().Exec(`INSERT INTO tenant_provisionings
+		(tenant_id, scenario, trust_tier, access_mode, plugin_set, segment1_enabled,
+		 segment2_mode, template_version, provider_cred_refs, provisioned_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(tenant_id) DO UPDATE SET
+			scenario = excluded.scenario,
+			trust_tier = excluded.trust_tier,
+			access_mode = excluded.access_mode,
+			plugin_set = excluded.plugin_set,
+			segment1_enabled = excluded.segment1_enabled,
+			segment2_mode = excluded.segment2_mode,
+			template_version = excluded.template_version,
+			provider_cred_refs = excluded.provider_cred_refs,
+			updated_at = excluded.updated_at`,
+		p.TenantID, p.Scenario, p.TrustTier, p.AccessMode, p.PluginSetJSON, p.Segment1Enabled,
+		p.Segment2Mode, p.TemplateVersion, p.ProviderCredRefsJSON, p.ProvisionedAt, p.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("tenant: upsert provisioning: %w", err)
+	}
+	return nil
 }

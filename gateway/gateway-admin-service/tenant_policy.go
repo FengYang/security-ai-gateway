@@ -86,7 +86,7 @@ type modelsConfigView struct {
 // registerTenantPolicyMux 注册策略/模型端点（租户令牌 + CSRF（写））。
 func (h *tenantHandler) registerTenantPolicyMux(mux *http.ServeMux) {
 	wrap := func(fn http.HandlerFunc) http.HandlerFunc {
-		return tenantAuthMiddleware(h.jwtSecret, csrfCheck(fn))
+		return tenantAuthMiddleware(h.cfg, csrfCheck(fn))
 	}
 	mux.HandleFunc("GET "+tenantPolicyPath, wrap(h.handleTenantPolicyGet))
 	mux.HandleFunc("PUT "+tenantPolicyPath, wrap(h.handleTenantPolicyPut))

@@ -47,6 +47,9 @@ type tenantHandler struct {
 	audit      *adminAuditChain
 	loginGuard *loginGuard
 	resetGuard *intervalGuard
+
+	// effects 开通变更联动（N4 重签 / N5 下发），由后续子任务注入；零值 = 空操作。
+	effects provisioningEffects
 }
 
 // newTenantHandler 构造租户 handler（captcha 仅在启用时创建）。
@@ -88,7 +91,7 @@ func (h *tenantHandler) registerMux(mux *http.ServeMux) {
 
 	// 租户会话端点（/v1/adminext/tenant/*）：租户令牌 + CSRF（写）
 	mux.HandleFunc(tenantSessionBase+"/logout",
-		tenantAuthMiddleware(h.jwtSecret, csrfCheck(h.handleLogout)))
+		tenantAuthMiddleware(h.cfg, csrfCheck(h.handleLogout)))
 
 	// API Key 管理（M3）
 	h.registerKeyMux(mux)
@@ -104,6 +107,9 @@ func (h *tenantHandler) registerMux(mux *http.ServeMux) {
 
 	// 套餐自助（M7）
 	h.registerTenantSubscriptionMux(mux)
+
+	// 场景化开通向导（N1）
+	h.registerTenantProvisioningMux(mux)
 }
 
 // registerCaptcha 在管理面 mux 注册验证码签发端点（Console 内部，authMiddleware）。

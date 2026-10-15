@@ -39,7 +39,7 @@ type tenantPlanView struct {
 // registerTenantSubscriptionMux 注册套餐自助端点（租户令牌 + CSRF（写））。
 func (h *tenantHandler) registerTenantSubscriptionMux(mux *http.ServeMux) {
 	wrap := func(fn http.HandlerFunc) http.HandlerFunc {
-		return tenantAuthMiddleware(h.jwtSecret, csrfCheck(fn))
+		return tenantAuthMiddleware(h.cfg, csrfCheck(fn))
 	}
 	mux.HandleFunc("GET "+tenantPlansPath, wrap(h.handleTenantPlans))
 	mux.HandleFunc("GET "+tenantSubscriptionPath, wrap(h.handleTenantSubscription))

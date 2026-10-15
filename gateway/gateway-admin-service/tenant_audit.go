@@ -78,7 +78,7 @@ var tenantAuditActions = map[string]struct{}{
 // registerTenantAuditMux 注册租户审计端点（租户令牌；只读）。
 func (h *tenantHandler) registerTenantAuditMux(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+tenantAuditPath,
-		tenantAuthMiddleware(h.jwtSecret, h.handleTenantAudit))
+		tenantAuthMiddleware(h.cfg, h.handleTenantAudit))
 }
 
 // handleTenantAudit 本租户审计摘要（强制租户 + 白名单 + 过滤分页）。

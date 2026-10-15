@@ -350,7 +350,7 @@ func TestAPI_Login_QuotaPending_Returns403(t *testing.T) {
 func TestAPI_Logout_RequiresCSRF(t *testing.T) {
 	h, _, _ := newAPITestHandler(t, testTenantCfg(), nil)
 	token := newTenantJWT(h.jwtSecret, "1", "t_1", "a@b.com", 3600)
-	chain := tenantAuthMiddleware(h.jwtSecret, csrfCheck(h.handleLogout))
+	chain := tenantAuthMiddleware(h.cfg, csrfCheck(h.handleLogout))
 
 	// 缺 CSRF → 403
 	req := httptest.NewRequest("POST", "/v1/adminext/tenant/logout", nil)
