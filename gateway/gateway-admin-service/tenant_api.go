@@ -118,6 +118,9 @@ func (h *tenantHandler) registerMux(mux *http.ServeMux) {
 
 	// 数据面下发状态/重放（N5）
 	h.registerTenantDispatchMux(mux)
+
+	// 承诺边界声明（N4）
+	h.registerTenantStatementMux(mux)
 }
 
 // registerCaptcha 在管理面 mux 注册验证码签发端点（Console 内部，authMiddleware）。

@@ -306,6 +306,8 @@ func main() {
 		tenantH.registerCaptcha(adminMux, cfg)
 		tenantH.registerKeyRevocations(adminMux, cfg)
 		tenantH.registerTenantDirectory(adminMux, cfg)
+		// N4 运维批量重签发承诺边界声明（触发③；管理面内部端点，admin）。
+		tenantH.registerAdminStatementOps(adminMux, cfg)
 		defer func() { _ = ts.Close() }()
 		tenantH.startQuotaCompensator(context.Background(),
 			time.Duration(cfg.tenantCompensateIntervalMin)*time.Minute)
@@ -335,6 +337,8 @@ func main() {
 		tenantH.dispatch = disp
 		tenantH.effects.bumpDispatchVersion = disp.BumpInTx
 		tenantH.effects.enqueueDispatch = disp.Enqueue
+		// N4：开通/变更后重签承诺边界声明（supersedes 链；失败不回滚配置，仅告警）。
+		tenantH.effects.reissueStatement = tenantH.reissueStatementForTenant
 		if n, err := disp.ReplayPending(); err != nil {
 			log.Printf("重启重放下发任务失败：%v", err)
 		} else if n > 0 {

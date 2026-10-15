@@ -169,6 +169,14 @@ type TenantStore interface {
 	GetProvisioning(tenantID string) (*TenantProvisioning, error)
 	UpsertProvisioning(tx TenantTx, p *TenantProvisioning) error
 
+	// 承诺边界声明存证（N4，§3.5 表 ⑨）
+	CreateStatement(tx TenantTx, st *TenantStatement) error
+	GetCurrentStatement(tenantID string) (*TenantStatement, error)
+	GetStatement(tenantID, statementID string) (*TenantStatement, error)
+	ListStatementsByTenant(tenantID string) ([]*TenantStatement, error)
+	// ListProvisionedTenants 列出所有已开通租户（N4 运维批量重签发枚举用）。
+	ListProvisionedTenants() ([]string, error)
+
 	// 下发状态机（N5，§3.5 表 ⑩）
 	GetDispatchState(tenantID string) (*TenantDispatchState, error)
 	BumpDispatchVersion(tx TenantTx, tenantID string, now int64) (int64, error)
@@ -277,6 +285,11 @@ func OpenTenantStore(dsn string, wal bool, pepper []byte) (TenantStore, error) {
 	}
 	// 开通配置表（N1，§3.5 表 ⑧）
 	if err := ensureProvisioningSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// 承诺边界声明存证表（N4，§3.5 表 ⑨）
+	if err := ensureStatementsSchema(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -1046,6 +1059,150 @@ func (s *sqliteTenantStore) UpsertProvisioning(tx TenantTx, p *TenantProvisionin
 		return fmt.Errorf("tenant: upsert provisioning: %w", err)
 	}
 	return nil
+}
+
+// ---------- 承诺边界声明存证（N4，§3.5 表 ⑨）----------
+
+// statementsDDL 承诺边界声明存证表结构（对齐 §3.5 表 ⑨）：
+// content 存声明全文（防事后篡改承诺口径），supersedes_id 构成重签链。
+// 说明：§3.5 表 ⑨ 写作 `REFERENCES tenants(tenant_id)`，租户表主键实为 `id`，
+// 故按真实列名写 `REFERENCES tenants(id)`（与表 ⑧/⑩ FK 同法）。
+const statementsDDL = `
+CREATE TABLE IF NOT EXISTS tenant_statements (
+  statement_id     TEXT PRIMARY KEY,
+  tenant_id        TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  scenario         TEXT NOT NULL,
+  access_mode      TEXT NOT NULL,
+  template_version TEXT NOT NULL,
+  content          TEXT NOT NULL,
+  content_hash     TEXT NOT NULL,
+  supersedes_id    TEXT REFERENCES tenant_statements(statement_id),
+  created_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_statements_tenant ON tenant_statements(tenant_id, created_at DESC);
+`
+
+// TenantStatement 承诺边界声明存证行（N4）。
+type TenantStatement struct {
+	StatementID     string
+	TenantID        string
+	Scenario        string // 生成时快照（防事后随配置漂移）
+	AccessMode      string // 生成时快照
+	TemplateVersion string // 声明模板版本（§4.3.4）
+	Content         string // JSON：声明全文
+	ContentHash     string // SHA-256(content) hex
+	SupersedesID    string // 重签链：指向被替代版本（空 = 首版）
+	CreatedAt       int64
+}
+
+// ensureStatementsSchema 建表（N4 新表）。
+func ensureStatementsSchema(db *sql.DB) error {
+	if _, err := db.Exec(statementsDDL); err != nil {
+		return fmt.Errorf("tenant: init statements schema: %w", err)
+	}
+	return nil
+}
+
+const statementColumns = `statement_id, tenant_id, scenario, access_mode, template_version,
+	content, content_hash, COALESCE(supersedes_id,''), created_at`
+
+// scanStatement 行扫描（*sql.Row / *sql.Rows 共用）。
+func scanStatement(sc rowScanner) (*TenantStatement, error) {
+	var st TenantStatement
+	if err := sc.Scan(&st.StatementID, &st.TenantID, &st.Scenario, &st.AccessMode,
+		&st.TemplateVersion, &st.Content, &st.ContentHash, &st.SupersedesID,
+		&st.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+// CreateStatement 存证一行声明（重签时 SupersedesID 指向被替代版本，构成重签链）。
+func (s *sqliteTenantStore) CreateStatement(tx TenantTx, st *TenantStatement) error {
+	if st == nil || st.StatementID == "" || st.TenantID == "" {
+		return errors.New("tenant: statement_id/tenant_id are required")
+	}
+	var supersedes any
+	if st.SupersedesID != "" {
+		supersedes = st.SupersedesID
+	}
+	_, err := tx.tx().Exec(`INSERT INTO tenant_statements
+		(statement_id, tenant_id, scenario, access_mode, template_version,
+		 content, content_hash, supersedes_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		st.StatementID, st.TenantID, st.Scenario, st.AccessMode, st.TemplateVersion,
+		st.Content, st.ContentHash, supersedes, st.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("tenant: create statement: %w", err)
+	}
+	return nil
+}
+
+// GetCurrentStatement 取当前生效版本（最新且未被任何行 supersede 的行；无 → nil）。
+func (s *sqliteTenantStore) GetCurrentStatement(tenantID string) (*TenantStatement, error) {
+	st, err := scanStatement(s.db.QueryRow(`SELECT `+statementColumns+` FROM tenant_statements
+		WHERE tenant_id = ?
+		  AND statement_id NOT IN (
+		    SELECT supersedes_id FROM tenant_statements
+		    WHERE tenant_id = ? AND supersedes_id IS NOT NULL)
+		ORDER BY created_at DESC, rowid DESC LIMIT 1`, tenantID, tenantID))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant: get current statement: %w", err)
+	}
+	return st, nil
+}
+
+// GetStatement 取指定版本（历史查询，管理端；跨租户越权在此按 tenant_id 过滤，L3）。
+func (s *sqliteTenantStore) GetStatement(tenantID, statementID string) (*TenantStatement, error) {
+	st, err := scanStatement(s.db.QueryRow(`SELECT `+statementColumns+
+		` FROM tenant_statements WHERE tenant_id = ? AND statement_id = ?`, tenantID, statementID))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant: get statement: %w", err)
+	}
+	return st, nil
+}
+
+// ListStatementsByTenant 列出租户全部声明（最新在前；管理端历史视图）。
+func (s *sqliteTenantStore) ListStatementsByTenant(tenantID string) ([]*TenantStatement, error) {
+	rows, err := s.db.Query(`SELECT `+statementColumns+
+		` FROM tenant_statements WHERE tenant_id = ? ORDER BY created_at DESC, rowid DESC`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("tenant: list statements: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*TenantStatement
+	for rows.Next() {
+		st, err := scanStatement(rows)
+		if err != nil {
+			return nil, fmt.Errorf("tenant: scan statement: %w", err)
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+// ListProvisionedTenants 列出所有已开通租户（N4 运维批量重签发枚举用）。
+func (s *sqliteTenantStore) ListProvisionedTenants() ([]string, error) {
+	rows, err := s.db.Query(`SELECT tenant_id FROM tenant_provisionings ORDER BY tenant_id`)
+	if err != nil {
+		return nil, fmt.Errorf("tenant: list provisioned tenants: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("tenant: scan provisioned tenant: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 // ---------- 下发状态机（N5，§3.5 表 ⑩）----------

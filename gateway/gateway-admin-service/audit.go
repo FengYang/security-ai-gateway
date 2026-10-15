@@ -73,6 +73,8 @@ const (
 	auditActionProvisioningUpdate = "provisioning_update"
 	// P1-4 N5 下发重放（附录 D；admin + target_tenant，记录原因与 config_version）。
 	auditActionDispatchReplay = "dispatch_replay"
+	// P1-4 N4 声明批量重签发（附录 D；模板版本升级运维任务，target=statement_id）。
+	auditActionStatementReissue = "statement_reissue"
 )
 
 // auditAnchorInterval 每追加 N 条事件锚定一次链尾哈希。
