@@ -208,6 +208,11 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 // handleEndpointStatus 返回所有端点的配置层面状态（方案 §4.1.4）。
 // P0 限制：仅返回配置层面的静态状态（enabled/priority/weight）；
 // 运行时实时状态（健康度/失败率/熔断状态）通过 §10 可观测性指标获取。
+//
+// P1-6 M3.7（§6.4）：新增 TTFT 只读快照字段 ttft_p95_ms/ttft_valid/ttft_samples
+// （cache 维度合并的端点级视图；分区明细见 /routes/ttft/stats）。
+// 兼容性（TT2-16）：字段为可选增量——无统计时**整体缺失**（指针 omitempty），
+// 老客户端只解析既有字段仍向后兼容（JSON 新增字段被忽略）。
 func (s *Server) handleEndpointStatus(w http.ResponseWriter, r *http.Request) {
 	tbl := s.store.GetRouteTable()
 	if tbl == nil {
@@ -227,12 +232,26 @@ func (s *Server) handleEndpointStatus(w http.ResponseWriter, r *http.Request) {
 		Priority int     `json:"priority"`
 		Enabled  bool    `json:"enabled"`
 		HasAuth  bool    `json:"has_auth"`
+		// P1-6 M3.7：TTFT 快照（可选增量；无统计=缺失，TT2-16）
+		TTFTP95Ms   *int64  `json:"ttft_p95_ms,omitempty"`
+		TTFTValid   *bool   `json:"ttft_valid,omitempty"`
+		TTFTSamples *uint64 `json:"ttft_samples,omitempty"`
 	}
 
+	nowSec := time.Now().Unix()
 	result := []epStatus{}
 	for _, rt := range tbl.Routes {
+		minSamples, staleSec := route.TTFTDefaultMinSamples, route.TTFTDefaultStaleSec
+		if rt.Latency != nil {
+			if rt.Latency.MinSamples > 0 {
+				minSamples = rt.Latency.MinSamples
+			}
+			if rt.Latency.StaleSec > 0 {
+				staleSec = rt.Latency.StaleSec
+			}
+		}
 		for _, ep := range rt.Endpoints {
-			result = append(result, epStatus{
+			st := epStatus{
 				Tenant:   rt.Tenant,
 				Model:    rt.Model,
 				Name:     ep.Name,
@@ -241,7 +260,17 @@ func (s *Server) handleEndpointStatus(w http.ResponseWriter, r *http.Request) {
 				Priority: ep.Priority,
 				Enabled:  ep.Enabled,
 				HasAuth:  ep.Auth.SecretRef != "",
-			})
+			}
+			if wnd, ok := s.ttftEndpointWindow(rt.Tenant, rt.Model, ep.Name); ok {
+				p95, _ := wnd.Quantile(0.95)
+				valid := wnd.Samples >= uint64(minSamples) &&
+					wnd.UpdatedAt > 0 && nowSec-wnd.UpdatedAt <= int64(staleSec)
+				samples := wnd.Samples
+				st.TTFTP95Ms = &p95
+				st.TTFTValid = &valid
+				st.TTFTSamples = &samples
+			}
+			result = append(result, st)
 		}
 	}
 
@@ -249,8 +278,36 @@ func (s *Server) handleEndpointStatus(w http.ResponseWriter, r *http.Request) {
 		"version":   tbl.Version,
 		"endpoints": result,
 		"total":     len(result),
-		"note":      "P0 仅返回配置静态视图；运行时健康度/失败率/熔断状态请通过 Prometheus 指标查看（otpmask_route_*）",
+		"note":      "P0 仅返回配置静态视图；运行时健康度/失败率/熔断状态请通过 Prometheus 指标查看（otpmask_route_*）；TTFT 快照为 cache 维度合并（分区明细见 /routes/ttft/stats）",
 	})
+}
+
+// ttftEndpointWindow 端点级 TTFT 窗口（cache 维度合并：桶求和、samples 求和、updated_at 取最大）。
+// 该端点无任何聚合键 → ok=false（TT2-16：字段缺失=无统计）。
+func (s *Server) ttftEndpointWindow(tenant, model, endpoint string) (route.TTFTWindow, bool) {
+	var agg route.TTFTWindow
+	any := false
+	for _, k := range s.ttftRing.Keys(tenant, model) {
+		if k.Endpoint != endpoint {
+			continue
+		}
+		wnd, ok := s.ttftRing.Merge(k)
+		if !ok {
+			continue
+		}
+		any = true
+		for i := range wnd.Buckets {
+			agg.Buckets[i] += wnd.Buckets[i]
+		}
+		agg.Samples += wnd.Samples
+		if wnd.UpdatedAt > agg.UpdatedAt {
+			agg.UpdatedAt = wnd.UpdatedAt
+		}
+	}
+	if !any {
+		return route.TTFTWindow{}, false
+	}
+	return agg, true
 }
 
 // ============================================================
