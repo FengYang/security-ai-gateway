@@ -499,10 +499,22 @@ func (e *Engine) PickEndpointForTenant(tenant string) Decision {
 	return decision
 }
 
+// strategyUnknownObserver 包级未映射策略观测接缝（P1-6 M4.4；R2-17/TT2-11）。
+//
+// pickByStrategy() 的 default 分支在**每次请求路径命中时**回调（运行时持续可观测，
+// 区别于配置加载期的一次性信号）；由插件装配期注入 →
+// otpmask_route_strategy_unknown_total + 错误日志。回退动作保持 priority
+// （不改既有运行语义）；新增策略须同步登记此处 switch 与插件 routeStrategy()。
+var strategyUnknownObserver func(strategy string)
+
+// SetStrategyUnknownObserver 注入未映射策略观测回调（仅装配期调用，单线程语义）。
+func SetStrategyUnknownObserver(fn func(strategy string)) { strategyUnknownObserver = fn }
+
 // pickByStrategy 按配置的策略选择端点（内部辅助，调用方持锁）。
 // 直接遍历 e.state，零堆分配。
-// P1-6（M1.6）：latency-aware / latency-fastest / hybrid 分发至 latency.go 实现；
-// default 显式信号（未知策略可观测）由 M4.4 接线。
+// P1-6（M1.6/M4.4）：latency-aware / latency-fastest / hybrid 分发至 latency.go 实现；
+// default = 显式信号（R2-17/TT2-11）：观测回调计数 + 回退 priority（运行语义不变），
+// 不再静默。
 func (e *Engine) pickByStrategy() Decision {
 	switch e.config.Strategy {
 	case StrategyPriority:
@@ -516,6 +528,9 @@ func (e *Engine) pickByStrategy() Decision {
 	case StrategyHybrid:
 		return e.pickByHybrid()
 	default:
+		if strategyUnknownObserver != nil {
+			strategyUnknownObserver(string(e.config.Strategy))
+		}
 		return e.pickByPriority()
 	}
 }

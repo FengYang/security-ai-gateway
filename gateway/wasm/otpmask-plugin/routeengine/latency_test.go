@@ -922,3 +922,48 @@ func TestUpdateConfigSmooth_TTFTMigration(t *testing.T) {
 		t.Error("被删除端点应随 EndpointState 一并清理")
 	}
 }
+
+// ============================================================
+// M4.4 验收（本体 v1.5 §4.2 M4.4 / R2-17 / TT2-11）：
+// pickByStrategy default 显式信号（每次请求路径命中计数）+ 回退 priority 语义不变
+// ============================================================
+
+// TestPickByStrategy_UnknownStrategyObserver：未映射策略 → 观测回调（每次命中）+ priority 回退；
+// 已映射策略不触发（不静默但也不误报）。
+func TestPickByStrategy_UnknownStrategyObserver(t *testing.T) {
+	var got []string
+	old := strategyUnknownObserver
+	SetStrategyUnknownObserver(func(s string) { got = append(got, s) })
+	t.Cleanup(func() { SetStrategyUnknownObserver(old) })
+
+	e := ttftEngine(Strategy("latency-smart"), mkEp("a", 2, 100, true), mkEp("b", 1, 100, true))
+	for i := 0; i < 3; i++ {
+		d := e.pickByStrategy()
+		if d.EndpointName != "b" || d.Strategy != StrategyPriority {
+			t.Fatalf("未映射策略应回退 priority 行为，got %q/%q", d.EndpointName, d.Strategy)
+		}
+	}
+	if len(got) != 3 || got[0] != "latency-smart" || got[2] != "latency-smart" {
+		t.Fatalf("未映射策略每次命中均应触发观测回调，got %v", got)
+	}
+
+	// 已映射策略：不触发回调
+	got = nil
+	e.config.Strategy = StrategyLatencyFastest
+	_ = e.pickByStrategy()
+	if len(got) != 0 {
+		t.Fatalf("已映射策略不应触发观测回调，got %v", got)
+	}
+}
+
+// TestPickByStrategy_UnknownObserverNilSafe：未注入观察者时 default 回退仍安全（不 panic）。
+func TestPickByStrategy_UnknownObserverNilSafe(t *testing.T) {
+	old := strategyUnknownObserver
+	SetStrategyUnknownObserver(nil)
+	t.Cleanup(func() { SetStrategyUnknownObserver(old) })
+
+	e := ttftEngine(Strategy("unknown-x"), mkEp("a", 1, 100, true))
+	if d := e.pickByStrategy(); d.EndpointName != "a" || d.Strategy != StrategyPriority {
+		t.Fatalf("nil 观察者下应回退 priority，got %q/%q", d.EndpointName, d.Strategy)
+	}
+}

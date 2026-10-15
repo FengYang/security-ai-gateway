@@ -10,6 +10,8 @@ package main
 //	otpmask_keys_issued_total     请求密钥签发数（入库即计）
 //	otpmask_keys_deleted_total    请求密钥删除数（存量 = issued - deleted）
 //	otpmask_route_degraded_total  路由降级数（§6：L1 处方缺失/失效 → 走 L2 默认路由表）
+//	otpmask_route_strategy_unknown_total 未映射策略命中次数（P1-6 M4.4：routeStrategy/
+//	                              pickByStrategy 两处 default 显式信号，R2-17/TT2-11）
 //	otpmask_route_fetch_cb_total  路由表拉取**回调被执行**次数（异步响应到达回调的次数；
 //	                              恒为 0 说明回调从未执行，例如响应已随 fail-closed 发出后
 //	                              流上下文结束导致挂起回调被丢弃）
@@ -101,6 +103,10 @@ var (
 	metricRouteConfigReload  = &pwCounter{name: "otpmask_route_config_reload_total"}
 	// route_retry_total：非流式重试的实际重发次数（§6.5，端点切换一次计一次）
 	metricRouteRetry = &pwCounter{name: "otpmask_route_retry_total"}
+	// P1-6 M4.4（R2-17/TT2-11）：未映射策略显式信号——配置加载期（routeStrategy default，
+	// 每 route 一次）与请求路径（pickByStrategy default，每次命中）均计数；
+	// 回退动作保持 priority（不改既有运行语义）。
+	metricRouteStrategyUnknown = &pwCounter{name: "otpmask_route_strategy_unknown_total"}
 	// 灰度请求计数（方案 §10 #11：canary_requests_total）
 	// 三组分别计数（whitelist/treatment/control），总和即灰度参与的总请求数。
 	metricRouteCanaryWhitelist = &pwCounter{name: "otpmask_route_canary_whitelist_total"}

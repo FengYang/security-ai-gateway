@@ -19,7 +19,8 @@ func endpointTable(version int, updatedAt int64, tenant, model, strategy string,
 	return t
 }
 
-// TestRouteStrategyParsing 策略字符串解析：兼容 §4.1.3 枚举与引擎内部取值，未知回落 priority。
+// TestRouteStrategyParsing 策略字符串解析：兼容 §4.1.3/§6.1 枚举与引擎内部取值，
+// 未知回落 priority（P1-6 M4.4：未知/空值区分——空值=缺省无信号，未知=显式信号）。
 func TestRouteStrategyParsing(t *testing.T) {
 	cases := map[string]routeengine.Strategy{
 		"":                   routeengine.StrategyPriority,
@@ -30,7 +31,15 @@ func TestRouteStrategyParsing(t *testing.T) {
 		" weight ":           routeengine.StrategyWeighted,
 		"failure-rate-aware": routeengine.StrategyFailureAware,
 		"failure_rate_aware": routeengine.StrategyFailureAware,
-		"unknown":            routeengine.StrategyPriority,
+		// P1-6 M4.4：延迟择优三策略映射
+		"latency-aware":   routeengine.StrategyLatencyAware,
+		"latency_aware":   routeengine.StrategyLatencyAware,
+		"LATENCY-AWARE":   routeengine.StrategyLatencyAware,
+		"latency-fastest": routeengine.StrategyLatencyFastest,
+		"latency_fastest": routeengine.StrategyLatencyFastest,
+		"hybrid":          routeengine.StrategyHybrid,
+		// 未知：显式信号（计数 + 错误日志，host 单测下均 no-op），回退 priority
+		"unknown": routeengine.StrategyPriority,
 	}
 	for in, want := range cases {
 		if got := routeStrategy(in); got != want {
