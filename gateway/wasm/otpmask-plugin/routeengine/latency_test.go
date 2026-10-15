@@ -644,3 +644,96 @@ func TestPickByLatency_SingleAndEmpty(t *testing.T) {
 		t.Fatalf("空组应返回空 Decision，got %q/%q", d2.EndpointName, d2.Reason)
 	}
 }
+
+// ============================================================
+// M1.4 验收（本体 v1.5 §3.5 / §4.1 M1.4 / TT2-02 / TT2-10）：
+// latency-fastest 确定性选路 + tie-break（priority → name 字典序）+
+// 多次调用可复现 + 空决策 + 组上浮
+// ============================================================
+
+// TestPickByLatencyFastest_TieBreakDeterministic：t 并列 → name 字典序；
+// 多次调用结果一致（可复现；map 遍历序随机化下仍须稳定）。
+func TestPickByLatencyFastest_TieBreakDeterministic(t *testing.T) {
+	e := ttftEngine(StrategyLatencyFastest,
+		mkEp("beta", 1, 200, true),
+		mkEp("alpha", 1, 200, true),
+		mkEp("gamma", 1, 200, true),
+	)
+	for i := 0; i < 200; i++ {
+		d := e.pickByLatencyFastest()
+		if d.EndpointName != "alpha" || d.Reason != "latency_fastest" {
+			t.Fatalf("第 %d 次调用：got %q/%q，want alpha/latency_fastest（tie-break 须确定）",
+				i, d.EndpointName, d.Reason)
+		}
+		if d.Strategy != StrategyLatencyFastest {
+			t.Fatalf("Strategy 应回填 latency-fastest（R2-10），got %q", d.Strategy)
+		}
+	}
+}
+
+// TestPickByLatencyFastest_PicksFastestEligible：argmin 生效；无效统计端点退出 TTFT 权。
+func TestPickByLatencyFastest_PicksFastestEligible(t *testing.T) {
+	e := ttftEngine(StrategyLatencyFastest,
+		mkEp("fast", 1, 120, true),
+		mkEp("slow", 1, 900, true),
+		mkEp("fast-but-invalid", 1, 50, false), // 更快但统计无效 → 不参与
+	)
+	d := e.pickByLatencyFastest()
+	if d.EndpointName != "fast" {
+		t.Fatalf("应选有效端点中最快者 fast，got %q/%q", d.EndpointName, d.Reason)
+	}
+}
+
+// TestPickByLatencyFastest_EmptyAndFailover：TT2-10 空决策 + 组上浮（与 failure-aware 一致）。
+func TestPickByLatencyFastest_EmptyAndFailover(t *testing.T) {
+	// (a) 最高优先级组全熔断（此处即全部端点）→ 空 Decision
+	open1 := mkEp("a", 1, 200, true)
+	open1.CircuitBreaker.State = CircuitOpen
+	open2 := mkEp("b", 1, 300, true)
+	open2.CircuitBreaker.State = CircuitOpen
+	e := ttftEngine(StrategyLatencyFastest, open1, open2)
+	d := e.pickByLatencyFastest()
+	if d.EndpointName != "" || d.Reason != "no_usable_endpoints" {
+		t.Fatalf("全熔断应返回空 Decision（TT2-10），got %q/%q", d.EndpointName, d.Reason)
+	}
+
+	// (b) 最高优先级组全熔断 + 次优先组可用 → 上浮到次优先组（与 failure-aware 组语义一致）
+	dead := mkEp("dead", 1, 100, true)
+	dead.CircuitBreaker.State = CircuitOpen
+	backup := mkEp("backup", 2, 700, true)
+	e2 := ttftEngine(StrategyLatencyFastest, dead, backup)
+	d2 := e2.pickByLatencyFastest()
+	if d2.EndpointName != "backup" {
+		t.Fatalf("次优先组可用时应上浮选取 backup，got %q/%q", d2.EndpointName, d2.Reason)
+	}
+}
+
+// TestPickByLatencyFastest_SingleUsableAndEligibleOne：单端点优化（TT2-07）与 R2-19 序 4。
+func TestPickByLatencyFastest_SingleUsableAndEligibleOne(t *testing.T) {
+	// 单可用（统计无效）→ 直接返回（单端点优化同语义）
+	recs := ttftWithObserver(t)
+	e := ttftEngine(StrategyLatencyFastest, mkEp("solo", 1, 500, false))
+	d := e.pickByLatencyFastest()
+	if d.EndpointName != "solo" || d.Reason != "latency_single" {
+		t.Fatalf("单端点：got %q/%q", d.EndpointName, d.Reason)
+	}
+	if len(*recs) != 0 {
+		t.Fatalf("单端点不应计回退：%v", *recs)
+	}
+
+	// E==1 → 等价退单端点 + _low_samples
+	e2 := ttftEngine(StrategyLatencyFastest,
+		mkEp("valid", 1, 300, true),
+		mkEp("invalid", 1, 100, false),
+	)
+	d2 := e2.pickByLatencyFastest()
+	if d2.EndpointName != "valid" || d2.Reason != "latency_single_eligible" {
+		t.Fatalf("E==1：got %q/%q", d2.EndpointName, d2.Reason)
+	}
+	if d2.Strategy != StrategyLatencyFastest {
+		t.Fatalf("Strategy=%q，want latency-fastest（R2-10）", d2.Strategy)
+	}
+	if len(*recs) != 1 || (*recs)[0] != fallbackLowSamples {
+		t.Fatalf("回退计数=%v，want [low_samples]", *recs)
+	}
+}

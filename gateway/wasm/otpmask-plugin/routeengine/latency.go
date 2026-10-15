@@ -256,8 +256,10 @@ func reportLatencyFallback(reason string) {
 	}
 }
 
-// latencyFastestOf 组内**有效**端点 argmin t_i（确定性：并列按 name 字典序；
-// 禁止依赖 map 遍历序，TT2-02）。§3.5 no_rand 确定性回退与 latency-fastest 共用。
+// latencyFastestOf 组内**有效**端点 argmin t_i（确定性：并列按 priority 小者 →
+// name 字典序；禁止依赖 map 遍历序，TT2-02）。§3.5 no_rand 确定性回退、
+// latency-fastest（M1.4）与 R2-19 序 4 共用。组内优先级相同，priority 链为逐字
+// 防御（候选集跨组扩展时仍满足 §3.5 口径）。
 func latencyFastestOf(state map[string]*EndpointState, minPrio int, cfg LatencyConfig) (*EndpointState, bool) {
 	var best *EndpointState
 	var bestT int64
@@ -266,11 +268,54 @@ func latencyFastestOf(state map[string]*EndpointState, minPrio int, cfg LatencyC
 			continue
 		}
 		t := latencyRefMs(ep.TTFT, cfg)
-		if best == nil || t < bestT || (t == bestT && ep.Name < best.Name) {
+		if best == nil || t < bestT ||
+			(t == bestT && (ep.Priority < best.Priority || (ep.Priority == best.Priority && ep.Name < best.Name))) {
 			best, bestT = ep, t
 		}
 	}
 	return best, best != nil
+}
+
+// latencyGroupPrep 延迟策略前置结果（候选组与参考延迟，见 latencyGroupGate）。
+type latencyGroupPrep struct {
+	minPrio int   // 生效组优先级（可用端点中的最高优先级）
+	tMinMs  int64 // 组内有效端点最小参考延迟（已钳制 ≥1ms）
+	usable  int   // 组内可用端点数（IsUsable；探索均匀抽样用）
+}
+
+// latencyGroupGate 延迟策略共用前置门禁（M1.4 抽取；latency-aware / latency-fastest /
+// hybrid 前置语义一致，抽共享避免三处重复漂移）：纯逻辑、零分配、不改写状态。
+//  1. 无可用端点 → 空 Decision（与 failure-aware 一致，TT2-10）；
+//  2. 可用端点=1 → 单端点优化直返（TT2-07：跳过权计算与探索）；
+//  3. 有效端点 E==0 → R2-19 序 1-3：全局回退 failure-aware（保留策略标签，R2-10）；
+//  4. E==1 → R2-19 序 4：等价退单端点（确定性），计 _low_samples。
+//
+// done=true 时 decision 即最终结果；done=false 时保证组内可用≥2 且有效≥2。
+func (e *Engine) latencyGroupGate(cfg LatencyConfig) (prep latencyGroupPrep, decision Decision, done bool) {
+	minPrio, usable, single, hasUsable := latencyGroupScan(e.state)
+	if !hasUsable {
+		return prep, Decision{Reason: "no_usable_endpoints"}, true
+	}
+	if usable == 1 {
+		// §3.5 单端点优化（TT2-07）：跳过权计算与探索，等价 latency-fastest。
+		return latencyGroupPrep{minPrio: minPrio, usable: usable},
+			e.latencyDecisionOf(single, "latency_single"), true
+	}
+	tMinMs, eligible := latencyGroupTMin(e.state, minPrio, cfg)
+	prep = latencyGroupPrep{minPrio: minPrio, tMinMs: tMinMs, usable: usable}
+	switch {
+	case eligible == 0:
+		// R2-19 序 1-3：全局回退 failure-aware（行为 = pickByWeight）。
+		return prep, e.latencyGlobalFallback(e.classifyNoStats(minPrio, cfg)), true
+	case eligible == 1:
+		// R2-19 序 4：等价退单端点（确定性），计 _low_samples。
+		if sole, ok := latencyFastestOf(e.state, minPrio, cfg); ok {
+			reportLatencyFallback(fallbackLowSamples)
+			return prep, e.latencyDecisionOf(sole, "latency_single_eligible"), true
+		}
+		return prep, e.latencyGlobalFallback(fallbackLowSamples), true // 理论不可达
+	}
+	return prep, decision, false
 }
 
 // pickByLatency latency-aware：探索 + 倒数幂加权随机（§3.5；R2-19 回退索引）。
@@ -278,56 +323,38 @@ func latencyFastestOf(state map[string]*EndpointState, minPrio int, cfg LatencyC
 // config.Strategy（R2-10：回退不改写策略标签，回退以 fallback_total{reason} 表达）。
 func (e *Engine) pickByLatency() Decision {
 	cfg := e.config.Latency.normalized()
-	minPrio, usable, single, hasUsable := latencyGroupScan(e.state)
-	if !hasUsable {
-		return Decision{Reason: "no_usable_endpoints"}
-	}
-	if usable == 1 {
-		// §3.5 单端点优化（TT2-07）：跳过权计算与探索，等价 latency-fastest。
-		return e.latencyDecisionOf(single, "latency_single")
+	prep, gate, done := e.latencyGroupGate(cfg)
+	if done {
+		return gate
 	}
 
-	tMin, eligible := latencyGroupTMin(e.state, minPrio, cfg)
-	switch {
-	case eligible == 0:
-		// R2-19 序 1-3：全局回退 failure-aware（行为 = pickByWeight）。
-		return e.latencyGlobalFallback(e.classifyNoStats(minPrio, cfg))
-	case eligible == 1:
-		// R2-19 序 4：等价退单端点（确定性），计 _low_samples。
-		if sole, ok := latencyFastestOf(e.state, minPrio, cfg); ok {
-			reportLatencyFallback(fallbackLowSamples)
-			return e.latencyDecisionOf(sole, "latency_single_eligible")
-		}
-		return e.latencyGlobalFallback(fallbackLowSamples) // 理论不可达
-	}
-
-	maxBase := latencyGroupMaxBase(e.state, minPrio, tMin, cfg)
+	maxBase := latencyGroupMaxBase(e.state, prep.minPrio, prep.tMinMs, cfg)
 	floor := cfg.MinWeight * maxBase
-	totalW := latencyGroupTotalWeight(e.state, minPrio, tMin, floor, cfg)
+	totalW := latencyGroupTotalWeight(e.state, prep.minPrio, prep.tMinMs, floor, cfg)
 	if totalW <= 0 {
 		// 数值退化（理论不可达：≥2 个有效端点 ⇒ 每端点 w > 0）→ 确定性回退。
-		return e.latencyFallbackFastest(minPrio, cfg, "")
+		return e.latencyFallbackFastest(prep.minPrio, cfg, "")
 	}
 
 	// 抽样 1：探索判定（R2-16：两次抽样分别取随机，任一步 ok=false 即确定性回退）。
 	rv1, ok1 := randFloat64()
 	if !ok1 {
-		return e.latencyFallbackFastest(minPrio, cfg, fallbackNoRand)
+		return e.latencyFallbackFastest(prep.minPrio, cfg, fallbackNoRand)
 	}
 	if rv1 < cfg.ExploreRatio {
 		// 探索：在**可用**集合 U 内均匀随机（§3.5；含 TTFT 无效端点——探索为其提供
 		// 刷新统计样本的机会，避免「无效→永无流量→永远无效」的饿死闭环）。
 		rv2, ok2 := randFloat64()
 		if !ok2 {
-			return e.latencyFallbackFastest(minPrio, cfg, fallbackNoRand)
+			return e.latencyFallbackFastest(prep.minPrio, cfg, fallbackNoRand)
 		}
-		idx := int(rv2 * float64(usable))
-		if idx >= usable {
-			idx = usable - 1
+		idx := int(rv2 * float64(prep.usable))
+		if idx >= prep.usable {
+			idx = prep.usable - 1
 		}
 		i := 0
 		for _, ep := range e.state {
-			if ep.Priority != minPrio || !ep.IsUsable() {
+			if ep.Priority != prep.minPrio || !ep.IsUsable() {
 				continue
 			}
 			if i == idx {
@@ -335,27 +362,46 @@ func (e *Engine) pickByLatency() Decision {
 			}
 			i++
 		}
-		return e.latencyFallbackFastest(minPrio, cfg, "") // 理论不可达
+		return e.latencyFallbackFastest(prep.minPrio, cfg, "") // 理论不可达
 	}
 
 	// 利用：按 w_i 加权随机（抽样 2），失败 → 确定性回退（R2-16）。
 	rv2, ok2 := randFloat64()
 	if !ok2 {
-		return e.latencyFallbackFastest(minPrio, cfg, fallbackNoRand)
+		return e.latencyFallbackFastest(prep.minPrio, cfg, fallbackNoRand)
 	}
 	r := rv2 * totalW
 	var cum float64
 	for _, ep := range e.state {
-		if ep.Priority != minPrio || !latencyEligible(ep) {
+		if ep.Priority != prep.minPrio || !latencyEligible(ep) {
 			continue
 		}
-		cum += latencyGroupWeightOf(ep, tMin, floor, cfg)
+		cum += latencyGroupWeightOf(ep, prep.tMinMs, floor, cfg)
 		if r < cum {
 			return e.latencyDecisionOf(ep, "latency_weighted")
 		}
 	}
 	// 浮点误差兜底（r 逼近 totalW 尾部）：确定性回退，不依赖 map 遍历序。
-	return e.latencyFallbackFastest(minPrio, cfg, "")
+	return e.latencyFallbackFastest(prep.minPrio, cfg, "")
+}
+
+// pickByLatencyFastest latency-fastest：确定性最快优先（§3.5 / M1.4）。
+// i* = argmin t_i；并列按 priority 小者 → name 字典序（禁止依赖 map 遍历序，
+// TT2-02）。候选集 = 最高优先级组内有效端点（与 latency-aware/hybrid 同组语义；
+// 最高优先级组全熔断时自然上浮到下一优先级组，与 failure-aware 一致）；组内无
+// 可用端点 → 空 Decision（TT2-10，与 failure-aware 一致）。
+func (e *Engine) pickByLatencyFastest() Decision {
+	cfg := e.config.Latency.normalized()
+	prep, gate, done := e.latencyGroupGate(cfg)
+	if done {
+		return gate
+	}
+	best, ok := latencyFastestOf(e.state, prep.minPrio, cfg)
+	if !ok {
+		// 不可达（门禁 done=false 保证有效端点 ≥2）；保底走全局回退。
+		return e.latencyGlobalFallback(fallbackLowSamples)
+	}
+	return e.latencyDecisionOf(best, "latency_fastest")
 }
 
 // latencyDecisionOf 构造选中结果：Strategy 恒回填本次生效的 config.Strategy（R2-10）。
