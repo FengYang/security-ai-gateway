@@ -42,11 +42,11 @@ func ttftPost(s *Server, body string) *httptest.ResponseRecorder {
 	return rec
 }
 
-// ttftBody 构造单样本上报体。
+// ttftBody 构造单样本上报体（worker = VM 实例 ID 字符串，§6.2/R2-03）。
 func ttftBody(batchID string, reportedAtMs int64, tenant, model, endpoint, cache string, buckets []uint64) string {
 	bs, _ := json.Marshal(buckets)
 	return fmt.Sprintf(
-		`{"node":"envoy-0","worker":2,"batch_id":%q,"reported_at":%d,"samples":[{"tenant":%q,"model":%q,"endpoint":%q,"cache":%q,"buckets":%s}]}`,
+		`{"node":"envoy-0","worker":"vm-2","batch_id":%q,"reported_at":%d,"samples":[{"tenant":%q,"model":%q,"endpoint":%q,"cache":%q,"buckets":%s}]}`,
 		batchID, reportedAtMs, tenant, model, endpoint, cache, bs)
 }
 

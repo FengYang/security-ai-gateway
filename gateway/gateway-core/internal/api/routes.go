@@ -513,7 +513,7 @@ func (s *Server) appendRouteAudit(r *http.Request, action string, from, to int,
 // ttftReportRequest 上报报文（§6.2，数据面 M2.3 构造）。
 type ttftReportRequest struct {
 	Node       string             `json:"node"`
-	Worker     int                `json:"worker"`
+	Worker     string             `json:"worker"` // VM 实例 ID（§6.2/R2-03：字符串；proxy-wasm 无 worker 序号，仅作来源标识、不参与聚合）
 	BatchID    string             `json:"batch_id"`
 	ReportedAt int64              `json:"reported_at"` // 毫秒时间戳
 	Samples    []ttftReportSample `json:"samples"`
