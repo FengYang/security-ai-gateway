@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 
 	"security-ai-gateway/gateway/cryptop"
 )
@@ -57,6 +58,28 @@ type RouteCanary struct {
 	AllowedTenants     []string `json:"allowed_tenants,omitempty"`
 }
 
+// RouteLatency 延迟择优配置段（P1-6 M4.1，本体 v1.5 §6.1 字段表；JSON 严格对齐）。
+//
+// 字段存在性（关键：C-5 签名一致性 + 缺省填充口径，M4.5）：
+//   - `gamma` / `min_weight` / `explore_ratio` / `cache_partition` 的**显式零值合法**
+//     （γ=0 退化为均匀、min_weight=0 无下界、explore_ratio=0 纯利用、
+//     cache_partition=false 不分层），以指针类型区分「未配置（M4.5 填缺省）」与「显式零值」；
+//   - `window_sec` / `min_samples` / `stale_sec` / `max_ttft_ms` / `quantile` 的零值
+//     非法（M4.3 Validate 拒绝），值类型即可区分缺省（M4.5 按零值填默认）。
+//
+// 本结构在 gateway-core `internal/route` 与 routecache **两侧同构**（签名逐字节一致，C-5）。
+type RouteLatency struct {
+	WindowSec      int      `json:"window_sec,omitempty"`      // 滑窗长度（秒），默认 300，范围 60–3600（T 固定 25s，N=ceil(window_sec/25)，R2-08）
+	Quantile       string   `json:"quantile,omitempty"`        // 参考延迟分位："p50"/"p95"，默认 "p95"
+	Gamma          *float64 `json:"gamma,omitempty"`           // 倒数幂指数 γ，默认 1.0，范围 0–5（D-3；0 合法）
+	MinWeight      *float64 `json:"min_weight,omitempty"`      // 归一化前相对权重下界，默认 0.05，范围 0–0.5（D-4；0 合法）
+	ExploreRatio   *float64 `json:"explore_ratio,omitempty"`   // 探索概率，默认 0.05，范围 0–1（D-4；0 合法）
+	MinSamples     int      `json:"min_samples,omitempty"`     // 样本不足判无效，默认 20，≥1（D-8）
+	StaleSec       int      `json:"stale_sec,omitempty"`       // 统计过期阈值（秒），默认 75，≥25 且 ≥2×上报周期（D-8）
+	CachePartition *bool    `json:"cache_partition,omitempty"` // 按 cache 分层统计，默认 true（D-10；false 合法）
+	MaxTTFTMs      int64    `json:"max_ttft_ms,omitempty"`     // 采样上限（毫秒），默认 30000，≥1000（超时按上限归桶，抑制离群）
+}
+
 // TableRoute 默认路由表的一条记录：tenant+model → 目标引擎与端点（拉路径 L2 兜底）。
 // 向后兼容：DefaultEngine / FallbackEngine 为 v1 二元模式字段，保留不动；
 // Endpoints 为 v2 多端点权重路由新增字段。两端通过 CanonicalBytes 保证签名一致。
@@ -65,12 +88,15 @@ type TableRoute struct {
 	Model          string          `json:"model"`
 	DefaultEngine  string          `json:"default_engine"`
 	FallbackEngine string          `json:"fallback_engine,omitempty"`
-	Target         string          `json:"target,omitempty"` // 可选：显式目标端点（缺省用引擎默认）
+	Target         string          `json:"target,omitempty"`    // 可选：显式目标端点（缺省用引擎默认）
 	Endpoints      []TableEndpoint `json:"endpoints,omitempty"` // P0-1 新增：多端点权重配置
 	// P0-1 新增：多端点路由策略（priority 主备 / weighted 权重 / failure-aware 失败率感知）。
 	// 空 = priority（缺省，与既有行为一致）。仅在 Endpoints 非空时生效。
-	Strategy string `json:"strategy,omitempty"`
+	Strategy string       `json:"strategy,omitempty"`
 	Canary   *RouteCanary `json:"canary,omitempty"` // P0-1 新增：灰度切流配置（§7.5）
+	// P1-6 新增：延迟择优配置段（omitempty：旧表序列化逐字节不变，C-5）。
+	// strategy 为 latency-aware / latency-fastest / hybrid 时必须携带本段（M4.3 Validate 校验）。
+	Latency *RouteLatency `json:"latency,omitempty"`
 }
 
 // RouteTable 默认路由表（gateway-core 为事实源，签名后经 GET /routes 下发）。
@@ -282,6 +308,9 @@ func (t *RouteTable) Clone() *RouteTable {
 			canary.AllowedTenants = tenants
 			routes[i].Canary = &canary
 		}
+		if r.Latency != nil {
+			routes[i].Latency = cloneRouteLatency(r.Latency)
+		}
 	}
 	sig := make([]byte, len(t.Signature))
 	copy(sig, t.Signature)
@@ -293,18 +322,43 @@ func (t *RouteTable) Clone() *RouteTable {
 	}
 }
 
+// cloneRouteLatency 深拷贝 latency 段（含指针字段，P1-6 M4.1）。
+func cloneRouteLatency(l *RouteLatency) *RouteLatency {
+	if l == nil {
+		return nil
+	}
+	cp := *l
+	if l.Gamma != nil {
+		v := *l.Gamma
+		cp.Gamma = &v
+	}
+	if l.MinWeight != nil {
+		v := *l.MinWeight
+		cp.MinWeight = &v
+	}
+	if l.ExploreRatio != nil {
+		v := *l.ExploreRatio
+		cp.ExploreRatio = &v
+	}
+	if l.CachePartition != nil {
+		v := *l.CachePartition
+		cp.CachePartition = &v
+	}
+	return &cp
+}
+
 // ============================================================
 // Diff：差异比较（用于审计链记录）
 // ============================================================
 
 // RouteChange 单条路由变更记录。
 type RouteChange struct {
-	Tenant  string `json:"tenant"`
-	Model   string `json:"model"`
-	Change  string `json:"change"` // add / remove / modify
-	Field   string `json:"field,omitempty"`
-	Old     string `json:"old,omitempty"`
-	New     string `json:"new,omitempty"`
+	Tenant string `json:"tenant"`
+	Model  string `json:"model"`
+	Change string `json:"change"` // add / remove / modify
+	Field  string `json:"field,omitempty"`
+	Old    string `json:"old,omitempty"`
+	New    string `json:"new,omitempty"`
 }
 
 // DiffRoutes 比较两张路由表的差异（逐条路由粒度）。
@@ -391,7 +445,78 @@ func diffRouteFields(a, b *TableRoute) []RouteChange {
 			New:   fmt.Sprintf("%v", bCanaryEnabled),
 		})
 	}
+	// latency 段（P1-6 M4.1）：按子字段记录（latency.<字段>；nil 段 ≡ 全缺省）
+	changes = append(changes, diffLatencyFields(a, b)...)
 	return changes
+}
+
+// latencyFieldNames latency 段子字段名（按 §6.1 顺序；与 latencyFields 一一对应）。
+var latencyFieldNames = [...]string{
+	"window_sec", "quantile", "gamma", "min_weight", "explore_ratio",
+	"min_samples", "stale_sec", "cache_partition", "max_ttft_ms",
+}
+
+// diffLatencyFields 比较 latency 段（nil 段 ≡ 全缺省/空段），按子字段记录变更
+// （Field 形如 "latency.gamma"，对齐 canary.enabled 既有粒度，P1-6 M4.1）。
+// 显式零值（指针非 nil）与缺省可区分：如 gamma=0 显式配置记录 "(缺省)" → "0"。
+func diffLatencyFields(a, b *TableRoute) []RouteChange {
+	af := latencyFields(a.Latency)
+	bf := latencyFields(b.Latency)
+	var changes []RouteChange
+	for i, name := range latencyFieldNames {
+		if af[i] == bf[i] {
+			continue
+		}
+		changes = append(changes, RouteChange{
+			Tenant: a.Tenant, Model: a.Model, Change: "modify",
+			Field: "latency." + name, Old: af[i], New: bf[i],
+		})
+	}
+	return changes
+}
+
+// latencyFields 返回 latency 段按 §6.1 顺序的子字段显示值（审计 diff 用）。
+// nil 段 → 全 "(缺省)"；值类型零值 → "(缺省)"（零值非法或即缺省，M4.3）；
+// 指针字段非 nil 时如实显示（含显式零值，如 gamma=0 / cache_partition=false）。
+func latencyFields(l *RouteLatency) [9]string {
+	const def = "(缺省)"
+	if l == nil {
+		return [9]string{def, def, def, def, def, def, def, def, def}
+	}
+	s := func(v string) string {
+		if v == "" {
+			return def
+		}
+		return v
+	}
+	i := func(v int) string {
+		if v == 0 {
+			return def
+		}
+		return strconv.Itoa(v)
+	}
+	i64 := func(v int64) string {
+		if v == 0 {
+			return def
+		}
+		return strconv.FormatInt(v, 10)
+	}
+	f := func(p *float64) string {
+		if p == nil {
+			return def
+		}
+		return strconv.FormatFloat(*p, 'g', -1, 64)
+	}
+	bl := func(p *bool) string {
+		if p == nil {
+			return def
+		}
+		return strconv.FormatBool(*p)
+	}
+	return [9]string{
+		i(l.WindowSec), s(l.Quantile), f(l.Gamma), f(l.MinWeight), f(l.ExploreRatio),
+		i(l.MinSamples), i(l.StaleSec), bl(l.CachePartition), i64(l.MaxTTFTMs),
+	}
 }
 
 // endpointsEqual 两个端点列表是否相等（逐字段比较）。
