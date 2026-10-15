@@ -1,0 +1,33 @@
+# GA-AI 网关 · 租户插件组合基线（N6，§4.3.6 / §3.6.2）
+# 场景：S1 通用模型（明文轨）——无段① otpmask；ai-proxy 直连 17 家 Provider。
+# 链序（§4.3.6，v1.5 修正）：cors → key-auth → ip-restriction → local-rate-limit → ai-proxy → 路由
+# 治理面插件集对齐 §3.6.2 S1 行：key-auth / ai-proxy / ai-statistics / ai-token-ratelimit /
+# ai-quota / request-validation / ip-restriction / replay-protection。
+template_version: n6-v1
+scenario: s1
+segment1: false
+segment2_mode: none
+note: "S1 明文轨：无 otpmask 段①，明文在客户可信域内受治理。"
+chain:
+- name: cors
+  order: 10
+- name: key-auth
+  order: 20
+  params:
+    global_auth: "false"
+- name: ip-restriction
+  order: 30
+- name: replay-protection
+  order: 35
+- name: local-rate-limit
+  order: 40
+- name: request-validation
+  order: 50
+- name: ai-quota
+  order: 60
+- name: ai-token-ratelimit
+  order: 70
+- name: ai-statistics
+  order: 80
+- name: ai-proxy
+  order: 90

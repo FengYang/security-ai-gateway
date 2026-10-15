@@ -1,0 +1,36 @@
+# GA-AI 网关 · 租户插件组合基线（N6，§4.3.6 / §3.6.2）
+# 场景：S3-b 自建密态（段② = 跨节点 mTLS；多机多卡密态互联为业界空白 Q-9）。
+# 约束：不能主张"整链在 TEE 内"；调度层（llm-d 等）接触明文须显式声明。
+# 链序同 S2：otpmask 必须先于 ai-proxy。
+template_version: n6-v1
+scenario: s3b
+segment1: true
+segment2_mode: cross_node_mtls
+note: "S3-b：跨节点 mTLS；明文不出扩展信任域，不能主张整链 TEE；调度层接触明文（Q-9）。"
+chain:
+- name: cors
+  order: 10
+- name: key-auth
+  order: 20
+  params:
+    global_auth: "false"
+- name: ip-restriction
+  order: 30
+- name: replay-protection
+  order: 35
+- name: local-rate-limit
+  order: 40
+- name: otpmask
+  order: 50
+  params:
+    direction: inbound
+- name: request-validation
+  order: 60
+- name: ai-quota
+  order: 70
+- name: ai-token-ratelimit
+  order: 80
+- name: ai-statistics
+  order: 90
+- name: ai-proxy
+  order: 100

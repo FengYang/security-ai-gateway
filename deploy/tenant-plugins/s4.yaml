@@ -1,0 +1,35 @@
+# GA-AI 网关 · 租户插件组合基线（N6，§4.3.6 / §3.6.2）
+# 场景：S4 路线2 密态向量（后端 = masked_vector；段② = 密文域）。
+# 链序同 S2：otpmask 必须先于 ai-proxy。
+template_version: n6-v1
+scenario: s4
+segment1: true
+segment2_mode: ciphertext_domain
+note: "S4：掩码向量后端（masked_vector）；段② = 密文域，同 S3 承诺边界。"
+chain:
+- name: cors
+  order: 10
+- name: key-auth
+  order: 20
+  params:
+    global_auth: "false"
+- name: ip-restriction
+  order: 30
+- name: replay-protection
+  order: 35
+- name: local-rate-limit
+  order: 40
+- name: otpmask
+  order: 50
+  params:
+    direction: inbound
+- name: request-validation
+  order: 60
+- name: ai-quota
+  order: 70
+- name: ai-token-ratelimit
+  order: 80
+- name: ai-statistics
+  order: 90
+- name: ai-proxy
+  order: 100

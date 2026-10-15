@@ -1,0 +1,37 @@
+# GA-AI 网关 · 租户插件组合基线（N6，§4.3.6 / §3.6.2）
+# 场景：S2 第三方密态（A 型治理 + 厂商段②，强制分段密态）。
+# 链序（§4.3.6，v1.5 修正）：cors → key-auth → ip-restriction → local-rate-limit →
+# otpmask → ai-proxy → 路由（段① inbound 解密须先于 ai-proxy 出口）。
+# 关键：otpmask 必须先于 ai-proxy（后者需读明文 prompt 做协议转换）。
+template_version: n6-v1
+scenario: s2
+segment1: true
+segment2_mode: vendor_sdk
+note: "S2：段② = 厂商 SDK 加密通道；本地仅作 A 型治理，不得宣称端到端密态。"
+chain:
+- name: cors
+  order: 10
+- name: key-auth
+  order: 20
+  params:
+    global_auth: "false"
+- name: ip-restriction
+  order: 30
+- name: replay-protection
+  order: 35
+- name: local-rate-limit
+  order: 40
+- name: otpmask
+  order: 50
+  params:
+    direction: inbound
+- name: request-validation
+  order: 60
+- name: ai-quota
+  order: 70
+- name: ai-token-ratelimit
+  order: 80
+- name: ai-statistics
+  order: 90
+- name: ai-proxy
+  order: 100

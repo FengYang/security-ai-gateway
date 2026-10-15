@@ -1,0 +1,36 @@
+# GA-AI 网关 · 租户插件组合基线（N6，§4.3.6 / §3.6.2）
+# 场景：S3-a 自建密态（轴 B = 我方自建飞地；段② = 飞地内明文域）。
+# 提示：-enclave tdx（TDX 机密 VM）+ GPU-CC（显存机密）为 S3-a 主张"明文不出飞地"的前提。
+# 链序同 S2：otpmask 必须先于 ai-proxy。
+template_version: n6-v1
+scenario: s3a
+segment1: true
+segment2_mode: enclave_plaintext
+note: "S3-a：飞地内明文域；可主张'明文不出飞地'（含显存须 GPU-CC）；-enclave tdx。"
+chain:
+- name: cors
+  order: 10
+- name: key-auth
+  order: 20
+  params:
+    global_auth: "false"
+- name: ip-restriction
+  order: 30
+- name: replay-protection
+  order: 35
+- name: local-rate-limit
+  order: 40
+- name: otpmask
+  order: 50
+  params:
+    direction: inbound
+- name: request-validation
+  order: 60
+- name: ai-quota
+  order: 70
+- name: ai-token-ratelimit
+  order: 80
+- name: ai-statistics
+  order: 90
+- name: ai-proxy
+  order: 100
