@@ -67,17 +67,26 @@ type TTFTWindow struct {
 
 // TTFTRing 分片环形聚合器（并发安全；时钟可注入以便测试复现）。
 type TTFTRing struct {
-	mu      sync.Mutex
-	now     func() int64
-	entries map[TTFTKey]*ttftEntry
+	mu         sync.Mutex
+	now        func() int64
+	entries    map[TTFTKey]*ttftEntry
+	maxEntries int // 条目数上限（TT2-08；仅约束新增键）
 }
 
-// NewTTFTRing 创建聚合器；now 为 nil 时使用 time.Now().Unix()（秒级）。
+// NewTTFTRing 创建聚合器；now 为 nil 时使用 time.Now().Unix()（秒级）；条目上限取缺省。
 func NewTTFTRing(now func() int64) *TTFTRing {
+	return NewTTFTRingWithLimit(now, TTFTMaxEntries)
+}
+
+// NewTTFTRingWithLimit 创建聚合器并指定条目数上限（maxEntries ≤ 0 → 取缺省 10000）。
+func NewTTFTRingWithLimit(now func() int64, maxEntries int) *TTFTRing {
 	if now == nil {
 		now = func() int64 { return time.Now().Unix() }
 	}
-	return &TTFTRing{now: now, entries: make(map[TTFTKey]*ttftEntry)}
+	if maxEntries <= 0 {
+		maxEntries = TTFTMaxEntries
+	}
+	return &TTFTRing{now: now, entries: make(map[TTFTKey]*ttftEntry), maxEntries: maxEntries}
 }
 
 // normalizeWindow 归一化窗口配置：< T（含 0）→ 缺省 300s；> 3600 → 144×25s；
@@ -102,18 +111,33 @@ func (e *ttftEntry) evict(now int64) {
 	}
 }
 
+// TTFTIngestResult Record 落片结果（M3.3；供 M3.4/M3.8 计数映射）。
+type TTFTIngestResult int
+
+const (
+	// TTFTIngestOK 正常落片。
+	TTFTIngestOK TTFTIngestResult = iota
+	// TTFTIngestEntryLimit 条目数达上限，新增键被拒（TT2-08；既有键不受影响）。
+	TTFTIngestEntryLimit
+	// TTFTIngestInvalid 非法输入（nil 桶 / reported_at ≤ 0，API 层已把关，防御性拒绝）。
+	TTFTIngestInvalid
+)
+
 // Record 将一批桶计数按 reported_at（秒）落入对应分片（整批归入 reported_at 所在分片）。
 // 落片前执行时间驱动淘汰；窗口配置变化 → 重建条目（统计清零，避免新旧窗口混算）。
-// buckets 为 nil 或 reported_at ≤ 0（非法输入，API 层已把关）时忽略。
-func (r *TTFTRing) Record(k TTFTKey, buckets *[TTFTBucketCount]uint64, reportedAt int64, windowSec int) {
+// 返回落片结果（TTFTIngestOK / TTFTIngestEntryLimit / TTFTIngestInvalid，M3.3）。
+func (r *TTFTRing) Record(k TTFTKey, buckets *[TTFTBucketCount]uint64, reportedAt int64, windowSec int) TTFTIngestResult {
 	if buckets == nil || reportedAt <= 0 {
-		return
+		return TTFTIngestInvalid
 	}
 	windowSec, n := normalizeWindow(windowSec)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, ok := r.entries[k]
 	if !ok {
+		if len(r.entries) >= r.maxEntries {
+			return TTFTIngestEntryLimit
+		}
 		e = &ttftEntry{windowSec: windowSec, shards: make([]ttftShard, n)}
 		r.entries[k] = e
 	} else if e.windowSec != windowSec {
@@ -137,6 +161,7 @@ func (r *TTFTRing) Record(k TTFTKey, buckets *[TTFTBucketCount]uint64, reportedA
 	if reportedAt > e.updatedAt {
 		e.updatedAt = reportedAt
 	}
+	return TTFTIngestOK
 }
 
 // Merge 先执行时间驱动淘汰，再合并键内全部在窗分片（桶求和 + samples + updated_at）。
