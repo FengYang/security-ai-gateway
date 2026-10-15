@@ -38,6 +38,9 @@ type Server struct {
 	// P1-6 M3.5：stats 下发 generated_at 单调性（毫秒，严格递增）。
 	ttftGenMu sync.Mutex
 	ttftGenAt int64
+	// P1-6 M3.6：reset 水位（epoch）——(tenant|model) → 最近 reset 秒；上报 reported_at 早于水位丢弃。
+	ttftResetMu sync.Mutex
+	ttftResetAt map[string]int64
 }
 
 // New 构造 API Server。routerTable 为启动时注入的已签名默认路由表（可为空表）；
@@ -55,8 +58,9 @@ func New(signer *route.Signer, msigner *mcpsec.Signer, rlsigner *ratelimit.Signe
 		signer: signer, msigner: msigner, rlsigner: rlsigner, teeQuota: teeQuota,
 		store: st, token: authToken, mux: http.NewServeMux(),
 		audit: &policyaudit.Chain{}, metrics: newCoreMetrics(),
-		ttftRing:  route.NewTTFTRing(nil),
-		ttftDedup: route.NewTTFTDedup(),
+		ttftRing:    route.NewTTFTRing(nil),
+		ttftDedup:   route.NewTTFTDedup(),
+		ttftResetAt: make(map[string]int64),
 	}
 	if rateLimitTable != nil {
 		s.recordHistory(rateLimitTable)
@@ -150,6 +154,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /routes/ttft/report", s.withAuth(s.handleTTFTReport))
 	// P1-6 M3.5：TTFT 统计下发（控制面 → 数据面；§6.3）
 	s.mux.HandleFunc("GET /routes/ttft/stats", s.withAuth(s.handleTTFTStats))
+	// P1-6 M3.6：TTFT 统计重置（运维；§6.2，落 policyaudit）
+	s.mux.HandleFunc("POST /routes/ttft/reset", s.withAuth(s.handleTTFTReset))
 	s.mux.HandleFunc("POST /routes/rollback", s.withAuth(s.withRouteChangeSpan("rollback", s.handleRouteRollback)))
 	s.mux.HandleFunc("GET /routes/history", s.withAuth(s.handleRouteHistory))
 	s.mux.HandleFunc("POST /routes/push", s.withAuth(s.handleRoutePush))

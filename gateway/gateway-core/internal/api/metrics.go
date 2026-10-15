@@ -31,6 +31,7 @@ type coreMetrics struct {
 	pullReject   map[string]int64 // reason
 	auditEvents  int64
 	reportResult map[string]int64 // P1-6 M3.4：TTFT 上报处理结果（ok/reject/duplicate；渲染见 M3.8）
+	ttftResets   int64            // P1-6 M3.6：TTFT 统计重置次数（渲染见 M3.8）
 }
 
 func newCoreMetrics() *coreMetrics {
@@ -79,6 +80,13 @@ func (m *coreMetrics) incPullReject(reason string) {
 func (m *coreMetrics) incReportResult(result string) {
 	m.mu.Lock()
 	m.reportResult[result]++
+	m.mu.Unlock()
+}
+
+// incTTFTReset 记录 TTFT 统计重置次数（§6.5 gateway_core_route_ttft_reset_total；渲染见 M3.8）。
+func (m *coreMetrics) incTTFTReset() {
+	m.mu.Lock()
+	m.ttftResets++
 	m.mu.Unlock()
 }
 

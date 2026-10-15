@@ -475,13 +475,15 @@ const ttftReportMaxSamples = 1000
 
 // handleTTFTReport POST /routes/ttft/report（至少一次 + 按 batch_id 去重，§6.2）。
 //
-// 处理序（全或无；400 拒绝不消耗 batch_id）：
+// 处理序（400 拒绝不消耗 batch_id）：
 //  1. 结构校验（JSON / batch_id / reported_at / samples 非空与条数上限）；
 //  2. 逐样本值域校验（tenant/model/endpoint/cache、buckets 长度 11 与单桶上限、
-//     reported_at 时间窗——窗口取该 (tenant,model) 路由 latency 配置）+ 白名单（TT2-08）；
-//  3. 单批总样本上限；
+//     reported_at 时间窗——窗口取该 (tenant,model) 路由 latency 配置）+ 白名单（TT2-08）
+//     + reset 水位（M3.6/R2-14：reported_at 早于最近 reset 的旧世代样本丢弃，不落片）；
+//  3. 单批总样本上限（仅计将落片样本）；
 //  4. batch_id 去重：重复 → 200 result=duplicate（ACK 丢弃，数据面据此清待确认队列）；
-//  5. 聚合条目容量预检（超限 503 source_unavailable）→ 落片 → 200 result=ok。
+//  5. 全部样本被水位丢弃 → 200 result=dropped（ACK 丢弃：旧世代批次不重发）；
+//  6. 聚合条目容量预检（超限 503 source_unavailable）→ 落片 → 200 result=ok（部分丢弃附 dropped=N）。
 func (s *Server) handleTTFTReport(w http.ResponseWriter, r *http.Request) {
 	reject := func(msg string) {
 		s.metrics.incReportResult("reject")
@@ -525,6 +527,7 @@ func (s *Server) handleTTFTReport(w http.ResponseWriter, r *http.Request) {
 	}
 	landings := make([]landing, 0, len(req.Samples))
 	var total uint64
+	dropped := 0
 	for i := range req.Samples {
 		sm := &req.Samples[i]
 		if sm.Tenant == "" || sm.Model == "" || sm.Endpoint == "" {
@@ -558,6 +561,11 @@ func (s *Server) handleTTFTReport(w http.ResponseWriter, r *http.Request) {
 			reject(fmt.Sprintf("samples[%d] 未知端点 (%s,%s,%s) 不在当前路由表（TT2-08）", i, sm.Tenant, sm.Model, sm.Endpoint))
 			return
 		}
+		// P1-6 M3.6 reset 水位（R2-14）：周期起始早于最近 reset 的旧世代计数丢弃
+		if reportedAtSec < s.ttftResetWatermark(sm.Tenant, sm.Model) {
+			dropped++
+			continue
+		}
 		for _, c := range b {
 			total += c
 		}
@@ -576,6 +584,12 @@ func (s *Server) handleTTFTReport(w http.ResponseWriter, r *http.Request) {
 	if s.ttftDedup.Seen(req.BatchID, nowSec) {
 		s.metrics.incReportResult("duplicate")
 		writeJSON(w, http.StatusOK, map[string]string{"result": "duplicate"})
+		return
+	}
+	// 全部样本被 reset 水位丢弃（旧世代批次）→ ACK 丢弃（数据面据 200 清待确认队列，不重发）
+	if len(landings) == 0 {
+		s.metrics.incReportResult("reject")
+		writeJSON(w, http.StatusOK, map[string]string{"result": "dropped"})
 		return
 	}
 	// 容量预检（TT2-08：条目数上限；整体拒绝避免部分落片）
@@ -598,6 +612,10 @@ func (s *Server) handleTTFTReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.metrics.incReportResult("ok")
+	if dropped > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"result": "ok", "dropped": dropped})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"result": "ok"})
 }
 
@@ -701,6 +719,92 @@ func (s *Server) handleTTFTStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"generated_at": s.nextTTFTGeneratedAt(),
 		"stats":        stats,
+	})
+}
+
+// ============================================================
+// P1-6 M3.6：TTFT 统计重置端点（运维，admin 语义；§6.2，落 policyaudit）
+// ============================================================
+
+// ttftResetRequest 重置请求体（§6.2）。
+type ttftResetRequest struct {
+	Tenant string `json:"tenant"`
+	Model  string `json:"model"`
+}
+
+// ttftResetWatermark 读取 (tenant,model) 的 reset 水位（秒；0 = 从未 reset）。
+func (s *Server) ttftResetWatermark(tenant, model string) int64 {
+	s.ttftResetMu.Lock()
+	defer s.ttftResetMu.Unlock()
+	return s.ttftResetAt[tenant+"|"+model]
+}
+
+// setTTFTResetWatermark 推进 (tenant,model) 的 reset 水位（单调取最大；等价 R2-14 的 epoch——
+// 上报周期起始早于水位的批次一律丢弃，保证 reset 后一个周期内不出现旧值）。
+func (s *Server) setTTFTResetWatermark(tenant, model string, at int64) {
+	s.ttftResetMu.Lock()
+	defer s.ttftResetMu.Unlock()
+	key := tenant + "|" + model
+	if at > s.ttftResetAt[key] {
+		s.ttftResetAt[key] = at
+	}
+}
+
+// handleTTFTReset POST /routes/ttft/reset（§6.2，admin 语义）。
+//
+// 语义（R2-14）：
+//   - 清空该 (tenant,model) 全部分片（含全部 endpoint/cache 键）；重置前无条目 → 幂等成功（cleared=0）；
+//   - 推进 reset 水位：此后上报中「周期起始（reported_at）早于水位」的样本一律丢弃（旧世代计数不复现）；
+//   - 落 policyaudit（action=route_ttft_reset，fail-closed：落链失败 → 500 audit_failed，对齐路由变更口径）；
+//   - reset_total 计数（渲染见 M3.8）。RBAC 未落地：admin 语义由部署侧收敛（R2-02，见本体 §6.2）。
+func (s *Server) handleTTFTReset(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "请求体读取失败")
+		return
+	}
+	var req ttftResetRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("请求体 JSON 解析失败: %v", err))
+		return
+	}
+	if req.Tenant == "" || req.Model == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "tenant/model 必填")
+		return
+	}
+
+	nowSec := time.Now().Unix()
+	cleared := 0
+	for _, k := range s.ttftRing.Keys(req.Tenant, req.Model) {
+		if s.ttftRing.Reset(k) {
+			cleared++
+		}
+	}
+	s.setTTFTResetWatermark(req.Tenant, req.Model, nowSec)
+	s.metrics.incTTFTReset()
+
+	reqID := r.Header.Get("X-Request-ID")
+	ev := policyaudit.Event{
+		Actor:     actorOf(r),
+		Action:    policyaudit.ActionTTFTReset,
+		RuleID:    req.Tenant + "/" + req.Model,
+		Change:    "reset",
+		NewValue:  fmt.Sprintf("reset_at=%d cleared=%d", nowSec, cleared),
+		RequestID: reqID,
+		Result:    policyaudit.ResultOK,
+	}
+	if _, err := s.audit.Append(ev); err != nil {
+		writeError(w, http.StatusInternalServerError, "audit_failed",
+			fmt.Sprintf("TTFT 统计已重置但审计写入失败（fail-closed；请人工核查审计文件后决定是否重试）: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"result":   "ok",
+		"tenant":   req.Tenant,
+		"model":    req.Model,
+		"cleared":  cleared,
+		"reset_at": nowSec,
 	})
 }
 
