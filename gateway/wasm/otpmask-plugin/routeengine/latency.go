@@ -10,6 +10,8 @@
 // 不含采样、上报、网络调用；读路径无锁、值语义（C-3）。
 package routeengine
 
+import "math"
+
 // ============================================================
 // TTFT 统计结构（写入 EndpointState.TTFT）
 // ============================================================
@@ -107,4 +109,122 @@ func (c LatencyConfig) normalized() LatencyConfig {
 		c.MaxTTFTMs = defaultLatencyMaxTTFTMs
 	}
 	return c
+}
+
+// ============================================================
+// 权函数（M1.2）：无量纲倒数幂 + 相对下界（§3.5；D-3/D-4）
+//
+// 全部为请求内临时量：不改写 EndpointState.Weight、不分配切片（C-3），
+// 扫描均直接遍历 state map（对齐 pickByWeight 的无分配手法）。
+// ============================================================
+
+// latencyRefMs 取端点参考延迟 t_i（毫秒）：按 cfg.Quantile 选 p50/p95，
+// 并钳制到 [1ms, cfg.MaxTTFTMs]：
+//   - 下钳 1ms：防除零（保证 t_min ≥ 1ms、r_i ∈ (0,1]）；
+//   - 上钳 max_ttft_ms：抑制离群（§3.5 / TT2-07）。
+//
+// 前置：cfg 已经 normalized()（MaxTTFTMs ≥ 1000）。
+func latencyRefMs(st TTFTStat, cfg LatencyConfig) int64 {
+	t := st.P95Ms
+	if cfg.Quantile == "p50" {
+		t = st.P50Ms
+	}
+	if t < 1 {
+		t = 1
+	}
+	if t > cfg.MaxTTFTMs {
+		t = cfg.MaxTTFTMs
+	}
+	return t
+}
+
+// latencyBaseOf 计算 base_i = (t_min / t_i)^γ（无量纲，§3.5 量纲与下界 D-3）。
+// 调用方保证 tMinMs / tMs 均已钳制 ≥ 1ms（r ∈ (0,1]，分母分子均非零）。
+func latencyBaseOf(tMinMs, tMs int64, gamma float64) float64 {
+	return math.Pow(float64(tMinMs)/float64(tMs), gamma)
+}
+
+// latencyEligible 端点是否参与延迟加权：可用（IsUsable，沿用 P0-1）且 TTFT 统计有效。
+// §6.3：valid=false 或 updated_at 过期 → 该端点退出版本内 TTFT 权（仅用其余有效端点）。
+// 过期判定由数据面拉取侧完成（M2.6 写入时置 Valid=false），本层信任 Valid 位。
+func latencyEligible(ep *EndpointState) bool {
+	return ep.IsUsable() && ep.TTFT.Valid
+}
+
+// latencyGroupScan 最高优先级组扫描（一次遍历、零分配）：
+//   - minPrio：组优先级（数字越小越高）；
+//   - usable ：组内可用端点数（IsUsable，含 TTFT 无效者）；
+//   - single ：usable==1 时该端点（§3.5 单端点优化 TT2-07：直接返回，跳过权计算）；
+//   - ok     ：是否存在可用端点。
+func latencyGroupScan(state map[string]*EndpointState) (minPrio, usable int, single *EndpointState, ok bool) {
+	minPrio = math.MaxInt
+	for _, ep := range state {
+		if !ep.IsUsable() {
+			continue
+		}
+		if ep.Priority < minPrio {
+			minPrio, usable, single = ep.Priority, 1, ep
+		} else if ep.Priority == minPrio {
+			usable++
+			single = nil
+		}
+	}
+	return minPrio, usable, single, minPrio != math.MaxInt
+}
+
+// latencyGroupTMin 组内**有效**端点的参考延迟最小值 t_min 与有效端点数：
+// t_min = min_{j∈E} max(1ms, t_j)（§3.5，保证 ≥ 1ms）。eligible=0 时 tMinMs=0。
+func latencyGroupTMin(state map[string]*EndpointState, minPrio int, cfg LatencyConfig) (tMinMs int64, eligible int) {
+	tMinMs = math.MaxInt64
+	for _, ep := range state {
+		if ep.Priority != minPrio || !latencyEligible(ep) {
+			continue
+		}
+		if t := latencyRefMs(ep.TTFT, cfg); t < tMinMs {
+			tMinMs = t
+		}
+		eligible++
+	}
+	if eligible == 0 {
+		tMinMs = 0
+	}
+	return tMinMs, eligible
+}
+
+// latencyGroupMaxBase 组内最大 base：max_{j∈E} (t_min / t_j)^γ（§3.5 floor 定义用）。
+// 组内至少 1 个有效端点时其值恒为 1（取到 t_j=t_min 者）；此处如实计算不假设，
+// 以保持与公式逐字一致（field 后续演进时稳健）。
+func latencyGroupMaxBase(state map[string]*EndpointState, minPrio int, tMinMs int64, cfg LatencyConfig) float64 {
+	maxBase := 0.0
+	for _, ep := range state {
+		if ep.Priority != minPrio || !latencyEligible(ep) {
+			continue
+		}
+		if b := latencyBaseOf(tMinMs, latencyRefMs(ep.TTFT, cfg), cfg.Gamma); b > maxBase {
+			maxBase = b
+		}
+	}
+	return maxBase
+}
+
+// latencyGroupWeightOf 单端点权 w_i = max(base_i, floor)（§3.5；floor 在此之前由调用方
+// 以 min_weight × max_j(base_j) 计算）。latency-aware 与 hybrid 第①步共用。
+func latencyGroupWeightOf(ep *EndpointState, tMinMs int64, floor float64, cfg LatencyConfig) float64 {
+	w := latencyBaseOf(tMinMs, latencyRefMs(ep.TTFT, cfg), cfg.Gamma)
+	if w < floor {
+		w = floor
+	}
+	return w
+}
+
+// latencyGroupTotalWeight 组内 Σ w_j（w_j = max(base_j, floor)）——归一化分母。
+func latencyGroupTotalWeight(state map[string]*EndpointState, minPrio int, tMinMs int64, floor float64, cfg LatencyConfig) float64 {
+	total := 0.0
+	for _, ep := range state {
+		if ep.Priority != minPrio || !latencyEligible(ep) {
+			continue
+		}
+		total += latencyGroupWeightOf(ep, tMinMs, floor, cfg)
+	}
+	return total
 }
