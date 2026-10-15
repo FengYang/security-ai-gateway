@@ -6,7 +6,7 @@ package main
 //   - M2.2：固定 11 桶计数（§3.4；逐边界对齐 tee-infer-service/metrics.go ttftBuckets）；
 //   - M2.3：标识解析（node/VM ID，R2-03/G-3）+ 上报体构造 + batch_id + 超限拆分（TT2-08）；
 //   - M2.1：首 token 采样钩子（解密回调 + delta.content 判定，R2-04/R2-05/C-3）；
-//   - M2.4（待）：待确认队列（冻结/确认清零/上限丢弃，R2-06）；
+//   - M2.4：待确认队列（冻结/确认移除/上限丢弃，R2-06/R2-18）；
 //   - M2.5（待）：周期上报 tick（复用 wrapper.RegisterTickFunc 范式）。
 //
 // 本文件不含路由决策/权函数（TT2-19 解耦）；指标注册见 metrics.go（M5）。
@@ -14,6 +14,7 @@ package main
 import (
 	"fmt"
 	"hash/fnv"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -243,6 +244,23 @@ func (c *ttftCounters) lookup(k ttftKey) (ttftBucketCounts, bool) {
 	return *b, true
 }
 
+// freeze 原子快照当前周期全部键计数并清零（周期边界冻结，M2.4）：
+// 返回快照副本；清零即开新周期——冻结之后到达的新样本计入下一周期，不受影响。
+// 无样本 → nil。
+func (c *ttftCounters) freeze() map[ttftKey]ttftBucketCounts {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.m) == 0 {
+		return nil
+	}
+	out := make(map[ttftKey]ttftBucketCounts, len(c.m))
+	for k, b := range c.m {
+		out[k] = *b
+	}
+	c.m = make(map[ttftKey]*ttftBucketCounts) // 新周期独立 map（在飞观测无共享）
+	return out
+}
+
 // ttftStore 插件 VM 级存储实例（§6.2：每个 Envoy worker 加载独立 Wasm VM、各自持桶独立上报）。
 var ttftStore = newTTFTCounters()
 
@@ -306,4 +324,130 @@ func ttftCommitOnComplete(st *respStreamState) {
 	s := st.ttft
 	s.ready = false
 	ttftStore.observe(s.key, s.ms)
+}
+
+// ============================================================
+// M2.4：待确认队列（冻结快照 / 确认移除 / 未确认原样重发 / 超限丢最旧，§6.2 / R2-06 / R2-18）
+// ============================================================
+
+// TTFTReportQueueCap 待确认队列上限（批次数；§6.2/R2-06「如 4 批」）。
+// 超限时丢最旧未确认批次并计入 drop 计数（R2-18）——保新弃旧，防止控制面长期不可达时
+// 无界积压（C-4：内存不随请求/时间增长）。
+const TTFTReportQueueCap = 4
+
+// ttftSamplesFromSnapshot 把冻结快照转为上报样本序列（确定性顺序：
+// endpoint → tenant → model → cache 字典序）。顺序仅用于同周期批次构成可复现、可测；
+// 控制面不依赖样本顺序。零样本键（计数总和为 0）不上报。
+func ttftSamplesFromSnapshot(snap map[ttftKey]ttftBucketCounts) []ttftSample {
+	if len(snap) == 0 {
+		return nil
+	}
+	keys := make([]ttftKey, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := keys[i], keys[j]
+		if a.endpoint != b.endpoint {
+			return a.endpoint < b.endpoint
+		}
+		if a.tenant != b.tenant {
+			return a.tenant < b.tenant
+		}
+		if a.model != b.model {
+			return a.model < b.model
+		}
+		return a.cache < b.cache
+	})
+	samples := make([]ttftSample, 0, len(keys))
+	for _, k := range keys {
+		b := snap[k]
+		if b.total() == 0 {
+			continue // 零样本键不上报
+		}
+		samples = append(samples, ttftSample{
+			Tenant:   k.tenant,
+			Model:    k.model,
+			Endpoint: k.endpoint,
+			Cache:    k.cache,
+			Buckets:  b.counts,
+		})
+	}
+	return samples
+}
+
+// ttftReportQueue VM 级待确认队列（M2.4，§6.2）：
+//   - 周期边界冻结快照 → 构造批次（TT2-08 拆分）→ 尾部入队（同周期批次保序）；
+//   - 仅当控制面**成功响应**（M3 契约：result=ok/dropped/duplicate 均为确认成功，见台账 G-6）
+//     才 ack 出队；
+//   - 未确认批次在下个 tick **原样重发**（batch_id 不变——控制面按 batch_id 去重不双计）；
+//   - 上限 TTFTReportQueueCap 批，超限丢最旧 + drop 计数（R2-06/R2-18）。
+type ttftReportQueue struct {
+	mu      sync.Mutex
+	q       []ttftReport
+	dropped uint64 // 超限丢弃批次数（report_drop_total 数据源，M5 指标注册）
+}
+
+func newTTFTReportQueue() *ttftReportQueue {
+	return &ttftReportQueue{q: make([]ttftReport, 0, TTFTReportQueueCap)}
+}
+
+// freezeCycle 周期边界冻结（M2.4/M2.5 共用）：快照并清零存储 → 构造本周期批次 → 入队。
+// 返回本次入队批次数与本次因超限丢弃批次数；无样本 → 0,0（不产生空批次）。
+func (q *ttftReportQueue) freezeCycle(id ttftIdentity, cycleStartSec int64, store *ttftCounters) (enqueued, dropped int) {
+	samples := ttftSamplesFromSnapshot(store.freeze())
+	if len(samples) == 0 {
+		return 0, 0
+	}
+	return q.appendAll(ttftBuildReports(id, cycleStartSec, samples, TTFTReportMaxSamples))
+}
+
+// appendAll 尾部批量入队（保序）；超上限丢最旧并计数（返回本次丢弃数）。
+func (q *ttftReportQueue) appendAll(reports []ttftReport) (enqueued, dropped int) {
+	if len(reports) == 0 {
+		return 0, 0
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.q = append(q.q, reports...)
+	for len(q.q) > TTFTReportQueueCap {
+		q.q = q.q[1:] // 丢最旧未确认批次
+		q.dropped++
+		dropped++
+	}
+	return len(reports), dropped
+}
+
+// head 取队头批次（发送轮次调用；**不移除**——收到成功响应后由 ack 移除）。
+func (q *ttftReportQueue) head() (ttftReport, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.q) == 0 {
+		return ttftReport{}, false
+	}
+	return q.q[0], true
+}
+
+// ack 移除队头批次（仅控制面成功响应后调用）。未确认时不得调用 → 下个 tick 原样重发。
+func (q *ttftReportQueue) ack() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.q) == 0 {
+		return
+	}
+	q.q = q.q[1:]
+}
+
+// len 当前待确认批次数。
+func (q *ttftReportQueue) len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.q)
+}
+
+// droppedTotal 累计超限丢弃批次数（report_drop_total，R2-18）。
+func (q *ttftReportQueue) droppedTotal() uint64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.dropped
 }

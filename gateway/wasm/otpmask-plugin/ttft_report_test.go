@@ -340,3 +340,155 @@ func TestTTFTCountersObserveIsolation(t *testing.T) {
 		t.Fatal("未观测键应 ok=false")
 	}
 }
+
+// ---- M2.4：待确认队列（冻结/确认移除/原样重发/超限丢最旧）----
+
+// TestTTFTCountersFreezeResets：冻结原子性——快照含全部计数、清零开新周期、空存储冻结为 nil。
+func TestTTFTCountersFreezeResets(t *testing.T) {
+	c := newTTFTCounters()
+	k1 := ttftKey{tenant: "t1", model: "m", endpoint: "e1", cache: "miss"}
+	k2 := ttftKey{tenant: "t1", model: "m", endpoint: "e2", cache: "miss"}
+	c.observe(k1, 5)   // k1 桶0（≤10）
+	c.observe(k1, 12)  // k1 桶1（(10,25]）
+	c.observe(k2, 300) // k2 桶5（(250,500]）
+
+	snap := c.freeze()
+	if len(snap) != 2 || snap[k1].counts[0] != 1 || snap[k1].counts[1] != 1 || snap[k2].counts[5] != 1 {
+		t.Fatalf("冻结快照不符：%+v", snap)
+	}
+	if _, ok := c.lookup(k1); ok {
+		t.Fatal("冻结后应清零")
+	}
+	c.observe(k1, 800) // 新周期样本（(500,1000] → 桶6）
+	snap2 := c.freeze()
+	if len(snap2) != 1 || snap2[k1].counts[6] != 1 {
+		t.Fatalf("新周期快照不符：%+v", snap2)
+	}
+	if snap := c.freeze(); snap != nil {
+		t.Fatalf("空存储冻结应为 nil：%+v", snap)
+	}
+}
+
+// TestTTFTSamplesFromSnapshotOrder：快照转样本——确定性顺序（endpoint→tenant→model→cache）+ 零样本键跳过。
+func TestTTFTSamplesFromSnapshotOrder(t *testing.T) {
+	var a, b, zero ttftBucketCounts
+	a.counts[0] = 3
+	b.counts[1] = 1
+	kA := ttftKey{tenant: "t2", model: "m", endpoint: "e1", cache: "miss"}
+	kB := ttftKey{tenant: "t1", model: "m", endpoint: "e1", cache: "miss"}
+	kZ := ttftKey{tenant: "t3", model: "m", endpoint: "e1", cache: "miss"}
+	samples := ttftSamplesFromSnapshot(map[ttftKey]ttftBucketCounts{kB: b, kZ: zero, kA: a})
+	if len(samples) != 2 {
+		t.Fatalf("零样本键应跳过：%+v", samples)
+	}
+	if samples[0].Tenant != "t1" || samples[1].Tenant != "t2" {
+		t.Fatalf("顺序应按 tenant 字典序：%+v", samples)
+	}
+	if samples[1].Buckets[0] != 3 || samples[0].Buckets[1] != 1 {
+		t.Fatalf("桶计数未映射：%+v", samples)
+	}
+	if got := ttftSamplesFromSnapshot(nil); got != nil {
+		t.Fatalf("nil 快照应为 nil：%+v", got)
+	}
+}
+
+// TestTTFTQueueFreezeResendAck：冻结入队→发送不改队列（失败原样重发同一 batch_id）→成功 ack 出队。
+func TestTTFTQueueFreezeResendAck(t *testing.T) {
+	store := newTTFTCounters()
+	store.observe(ttftKey{tenant: "t-001", model: "qwen-max", endpoint: "tee-gpu-a", cache: "miss"}, 120)
+	store.observe(ttftKey{tenant: "t-001", model: "qwen-max", endpoint: "tee-gpu-b", cache: "miss"}, 45)
+	q := newTTFTReportQueue()
+	id := ttftIdentity{node: "envoy-0", vmID: "abc123"}
+	enq, drp := q.freezeCycle(id, 1760000000, store)
+	if enq != 1 || drp != 0 || q.len() != 1 {
+		t.Fatalf("冻结入队不符：enq=%d drp=%d len=%d", enq, drp, q.len())
+	}
+	h1, ok := q.head()
+	if !ok || h1.BatchID != "envoy-0|abc123|1760000000" || h1.ReportedAt != 1760000000000 || len(h1.Samples) != 2 {
+		t.Fatalf("队头批次不符：%+v", h1)
+	}
+	if h1.Samples[0].Endpoint != "tee-gpu-a" || h1.Samples[1].Endpoint != "tee-gpu-b" {
+		t.Fatalf("样本顺序不符：%+v", h1.Samples)
+	}
+	if h1.Samples[0].Buckets[4] != 1 { // 120ms ∈ (100,250]
+		t.Fatalf("样本桶计数不符：%+v", h1.Samples[0])
+	}
+	// 发送失败（无 ack）：下个 tick 原样重发——同一 batch_id、同一内容（控制面按 batch_id 去重不双计）
+	h2, _ := q.head()
+	if h2.BatchID != h1.BatchID || h2.ReportedAt != h1.ReportedAt ||
+		len(h2.Samples) != len(h1.Samples) || h2.Samples[0] != h1.Samples[0] {
+		t.Fatalf("失败重发应原样：h1=%+v h2=%+v", h1, h2)
+	}
+	// 控制面成功响应 → 出队
+	q.ack()
+	if q.len() != 0 {
+		t.Fatalf("ack 后应出队：len=%d", q.len())
+	}
+	if _, ok := q.head(); ok {
+		t.Fatal("空队列 head 应 ok=false")
+	}
+	q.ack() // 空队列 ack 幂等（不 panic）
+}
+
+// TestTTFTQueueFreezeEmpty：无样本周期不产生批次（0,0，队列不变）。
+func TestTTFTQueueFreezeEmpty(t *testing.T) {
+	q := newTTFTReportQueue()
+	enq, drp := q.freezeCycle(ttftIdentity{node: "n", vmID: "v"}, 100, newTTFTCounters())
+	if enq != 0 || drp != 0 || q.len() != 0 {
+		t.Fatalf("空周期不应入队：enq=%d drp=%d len=%d", enq, drp, q.len())
+	}
+}
+
+// TestTTFTQueueOverflowDropsOldest：超上限丢最旧并计数（R2-06/R2-18）；腾位后恢复入队。
+func TestTTFTQueueOverflowDropsOldest(t *testing.T) {
+	q := newTTFTReportQueue()
+	id := ttftIdentity{node: "n", vmID: "v"}
+	key := ttftKey{tenant: "t", model: "m", endpoint: "e", cache: "miss"}
+	for c := int64(1); c <= 5; c++ { // cap=4 → 第 5 次冻结丢最旧（cycle=1）
+		s := newTTFTCounters()
+		s.observe(key, 10)
+		q.freezeCycle(id, c, s)
+	}
+	if q.len() != TTFTReportQueueCap || q.droppedTotal() != 1 {
+		t.Fatalf("超限应丢最旧：len=%d dropped=%d", q.len(), q.droppedTotal())
+	}
+	h, _ := q.head()
+	if h.ReportedAt != 2*1000 { // cycle=1 批次已丢，队头应为 cycle=2
+		t.Fatalf("丢最旧后队头不符：%+v", h)
+	}
+	// ack 腾位 → 再冻结不再丢
+	q.ack()
+	s := newTTFTCounters()
+	s.observe(key, 10)
+	if _, drp := q.freezeCycle(id, 6, s); drp != 0 || q.droppedTotal() != 1 {
+		t.Fatalf("腾位后不应再丢：dropped=%d", q.droppedTotal())
+	}
+	if q.len() != TTFTReportQueueCap {
+		t.Fatalf("腾位后长度不符：len=%d", q.len())
+	}
+}
+
+// TestTTFTQueueSplitOrderPreserved：同周期拆分批次按序入队、按序确认（TT2-08）。
+func TestTTFTQueueSplitOrderPreserved(t *testing.T) {
+	id := ttftIdentity{node: "n", vmID: "v"}
+	samples := make([]ttftSample, 7)
+	for i := range samples {
+		samples[i] = ttftSample{Tenant: "t", Model: "m", Endpoint: fmt.Sprintf("e%d", i), Cache: "miss"}
+		samples[i].Buckets[0] = 1
+	}
+	reps := ttftBuildReports(id, 100, samples, 3) // 3 批：|1 |2 |3
+	q := newTTFTReportQueue()
+	if enq, drp := q.appendAll(reps); enq != 3 || drp != 0 {
+		t.Fatalf("入队数不符：enq=%d drp=%d", enq, drp)
+	}
+	for _, want := range []string{"n|v|100|1", "n|v|100|2", "n|v|100|3"} {
+		h, ok := q.head()
+		if !ok || h.BatchID != want {
+			t.Fatalf("确认顺序不符：got=%+v want=%s", h, want)
+		}
+		q.ack()
+	}
+	if q.len() != 0 {
+		t.Fatalf("全部确认后应为空：len=%d", q.len())
+	}
+}
