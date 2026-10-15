@@ -191,16 +191,11 @@ func TestRouteLatencyCanonicalAndPresence(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(b)
-	for _, frag := range []string{`"latency":{`, `"quantile":"p95"`, `"gamma":0`, `"explore_ratio":1`, `"cache_partition":false`} {
-		if !strings.Contains(s, frag) {
-			t.Errorf("规范字节缺少片段 %s:\n%s", frag, s)
-		}
-	}
-	// 未配置字段不序列化（omitempty；旧表字节更不含 latency）
-	for _, frag := range []string{"window_sec", "min_weight", "min_samples", "stale_sec", "max_ttft_ms"} {
-		if strings.Contains(s, frag) {
-			t.Errorf("未配置字段 %s 不应序列化：%s", frag, s)
-		}
+	// 与 routecache 侧（routecache_latency_test.go）**同一字面量**共同锁定（C-5）：
+	// 显式零值 gamma=0 / explore_ratio=1 / cache_partition=false 保留；未配置字段不序列化。
+	const want = `{"version":2,"updated_at":1725500000,"routes":[{"tenant":"t-001","model":"qwen-max","default_engine":"cmaas","endpoints":[{"name":"a","url":"https://a.internal/v1","weight":0.5,"priority":1,"enabled":true,"auth":{}}],"strategy":"latency-aware","latency":{"quantile":"p95","gamma":0,"explore_ratio":1,"cache_partition":false}}]}`
+	if s != want {
+		t.Fatalf("含 latency 表的规范字节不符（C-5，基线应与 routecache 侧一致）:\n got = %s\nwant = %s", s, want)
 	}
 	// 往返：显式零值保留（指针存在性），且规范字节逐字节稳定
 	var back RouteTable
