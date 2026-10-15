@@ -168,6 +168,8 @@ type PluginConfig struct {
 	// ---- P1-6：TTFT 严格性能择优（§6.1/§6.2）----
 	// 节点名（上报 batch_id 前缀；R2-03/G-3 双通道——本配置优先，缺省经 Envoy 属性 node.id 取得）。
 	NodeName string `json:"node_name"`
+	// TTFT 上报/拉取周期（秒；§6.4：缺省 10s，**必须 ≤ 分片窗口 T=25s**，不复用 poll_interval）。
+	TTFTPollIntervalSeconds int64 `json:"ttft_poll_interval_seconds"`
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -235,6 +237,8 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.AuditReportQueueMax = json.Get("audit_report_queue_max").Int()
 	// P1-6：TTFT 上报节点名（缺省空 = 走 Envoy 属性 node.id，R2-03/G-3 双通道）。
 	config.NodeName = json.Get("node_name").String()
+	// P1-6 M2.5：TTFT 上报/拉取周期（§6.4；缺省与收口在下方默认段统一处理）。
+	config.TTFTPollIntervalSeconds = json.Get("ttft_poll_interval_seconds").Int()
 	if config.CryptoProfile == "" {
 		config.CryptoProfile = "intl"
 	}
@@ -292,6 +296,16 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	if config.PollIntervalSeconds <= 0 {
 		config.PollIntervalSeconds = 60
 	}
+	// P1-6 M2.5：TTFT 上报/拉取周期（§6.4）——缺省 10s；必须 ≤ 分片窗口 T=25s
+	// （与滑窗覆盖/stale_sec 联动，TT2-19），超出按上限收口并告警；不复用 poll_interval。
+	if config.TTFTPollIntervalSeconds <= 0 {
+		config.TTFTPollIntervalSeconds = 10
+	}
+	if config.TTFTPollIntervalSeconds > 25 {
+		log.Warnf("otpmask-plugin: ttft_poll_interval_seconds=%d 超出分片窗口上限 25s，已收口（§6.4/TT2-19）",
+			config.TTFTPollIntervalSeconds)
+		config.TTFTPollIntervalSeconds = 25
+	}
 	// 段① 凭据拉取缺省（门禁 #8）；无读取令牌 = 不启用（fail-closed：不发半配置请求）。
 	if config.CredentialService == "" {
 		// 与 deploy/k8s/gateway-admin-service.yaml 的命名空间一致（otpmask）。
@@ -315,6 +329,8 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	initCredentialRuntime(*config)
 	// 限流表拉取（Phase 1 门禁 #7 / 判据 5；未启用则零影响：不拉取、不介入请求）。
 	initRateLimitRuntime(*config, log)
+	// P1-6 M2.5：TTFT 上报运行态（未配置控制面通道则置空 → 零行为变化；采集仍本地累计）。
+	initTTFTRuntime(*config, log)
 	// 租户 API Key 吊销拉取（M3 §8 依赖 3；未启用则零影响）。
 	initKeyRevocationRuntime(*config, log)
 	// P0-4 §12.3：装配 cryptop sidecar 客户端 + 启动期载入 capabilities（R-18）。

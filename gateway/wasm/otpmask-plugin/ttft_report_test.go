@@ -492,3 +492,210 @@ func TestTTFTQueueSplitOrderPreserved(t *testing.T) {
 		t.Fatalf("全部确认后应为空：len=%d", q.len())
 	}
 }
+
+// ---- M2.5：周期上报 tick ----
+
+// ttftTestLog logs.Log 测试桩（仅计数 Warnf，其余 no-op）。
+type ttftTestLog struct{ warns int }
+
+func (l *ttftTestLog) Trace(string)                     {}
+func (l *ttftTestLog) Tracef(string, ...interface{})    {}
+func (l *ttftTestLog) Debug(string)                     {}
+func (l *ttftTestLog) Debugf(string, ...interface{})    {}
+func (l *ttftTestLog) Info(string)                      {}
+func (l *ttftTestLog) Infof(string, ...interface{})     {}
+func (l *ttftTestLog) Warn(string)                      { l.warns++ }
+func (l *ttftTestLog) Warnf(string, ...interface{})     { l.warns++ }
+func (l *ttftTestLog) Error(string)                     {}
+func (l *ttftTestLog) Errorf(string, ...interface{})    {}
+func (l *ttftTestLog) Critical(string)                  {}
+func (l *ttftTestLog) Criticalf(string, ...interface{}) {}
+func (l *ttftTestLog) ResetID(string)                   {}
+
+// TestTTFTInitRuntimeGatingAndInterval：配置门（未配置服务 → 不启用）+ 周期缺省/收口（≤25s）。
+func TestTTFTInitRuntimeGatingAndInterval(t *testing.T) {
+	old := ttftRuntime
+	defer func() { ttftRuntime = old }()
+	lg := &ttftTestLog{}
+
+	initTTFTRuntime(PluginConfig{}, lg)
+	if ttftRuntime.enabled {
+		t.Fatal("未配置控制面通道不应启用")
+	}
+	if ttftRuntime.intervalMs != 10000 {
+		t.Fatalf("缺省周期应为 10s：%d", ttftRuntime.intervalMs)
+	}
+	initTTFTRuntime(PluginConfig{GatewayCoreService: "core.svc", GatewayCorePort: 19090, TTFTPollIntervalSeconds: 60}, lg)
+	if !ttftRuntime.enabled || ttftRuntime.intervalMs != 25000 {
+		t.Fatalf("启用/收口不符：enabled=%v interval=%d", ttftRuntime.enabled, ttftRuntime.intervalMs)
+	}
+	initTTFTRuntime(PluginConfig{GatewayCoreService: "core.svc", GatewayCorePort: 19090, TTFTPollIntervalSeconds: 5}, lg)
+	if !ttftRuntime.enabled || ttftRuntime.intervalMs != 5000 {
+		t.Fatalf("合法周期应保留：enabled=%v interval=%d", ttftRuntime.enabled, ttftRuntime.intervalMs)
+	}
+}
+
+// TestTTFTEnsureIdentityCachedOnce：标识懒解析一次并缓存；node_name 配置优先（G-3 双通道）。
+func TestTTFTEnsureIdentityCachedOnce(t *testing.T) {
+	oldGet := ttftGetProperty
+	defer func() { ttftGetProperty = oldGet }()
+	calls := 0
+	ttftGetProperty = func(path []string) (string, error) {
+		calls++
+		if path[0] == "node" {
+			return "envoy-9", nil
+		}
+		return "vm-9", nil
+	}
+	rt := &ttftRuntimeState{}
+	id := rt.ensureIdentity()
+	if id.node != "envoy-9" || id.vmID != "vm-9" {
+		t.Fatalf("标识解析不符：%+v", id)
+	}
+	if calls != 2 {
+		t.Fatalf("node/vm_id 属性应各读一次：calls=%d", calls)
+	}
+	_ = rt.ensureIdentity()
+	if calls != 2 {
+		t.Fatalf("缓存后不应再读属性：calls=%d", calls)
+	}
+	rt2 := &ttftRuntimeState{nodeName: "cfg-node"}
+	if id2 := rt2.ensureIdentity(); id2.node != "cfg-node" || id2.vmID != "vm-9" {
+		t.Fatalf("配置 node_name 应优先：%+v", id2)
+	}
+}
+
+// TestTTFTNextCycleStart：周期起点推进（首 tick = now-interval；其后取上次冻结时刻）。
+func TestTTFTNextCycleStart(t *testing.T) {
+	rt := &ttftRuntimeState{intervalMs: 10000}
+	if s := rt.nextCycleStart(1000); s != 990 {
+		t.Fatalf("首 tick 起点应为 now-10s：%d", s)
+	}
+	if s := rt.nextCycleStart(1010); s != 1000 {
+		t.Fatalf("次 tick 起点应为上次冻结时刻：%d", s)
+	}
+	if s := rt.nextCycleStart(1020); s != 1010 {
+		t.Fatalf("周期起点应单调推进：%d", s)
+	}
+}
+
+// TestTTFTReportTickFreezeSendOrchestration：冻结入队/清零/空周期不入队/FIFO 保序/超限丢最旧。
+// inflight 置位跳过网络发送（传输回调语义另测）。
+func TestTTFTReportTickFreezeSendOrchestration(t *testing.T) {
+	oldRT, oldQ, oldStore := ttftRuntime, ttftQueue, ttftStore
+	defer func() { ttftRuntime, ttftQueue, ttftStore = oldRT, oldQ, oldStore }()
+	ttftStore = newTTFTCounters()
+	ttftQueue = newTTFTReportQueue()
+	ttftRuntime = ttftRuntimeState{
+		enabled: true, intervalMs: 10000,
+		identityReady: true, identity: ttftIdentity{node: "envoy-0", vmID: "abc"},
+		inflight: true, // 跳过网络发送（聚焦冻结/队列编排）
+	}
+	key := ttftKey{tenant: "t-001", model: "qwen-max", endpoint: "tee-gpu-a", cache: "miss"}
+
+	ttftStore.observe(key, 120)
+	ttftReportTickAt(1000)
+	h, ok := ttftQueue.head()
+	if !ok || h.BatchID != "envoy-0|abc|990" || len(h.Samples) != 1 {
+		t.Fatalf("冻结入队不符：%+v ok=%v", h, ok)
+	}
+	if _, ok := ttftStore.lookup(key); ok {
+		t.Fatal("冻结后存储应清零（开新周期）")
+	}
+	// 空周期：不产生新批次
+	ttftReportTickAt(1010)
+	if ttftQueue.len() != 1 {
+		t.Fatalf("空周期不应入队：len=%d", ttftQueue.len())
+	}
+	// 第二周期入队：FIFO 保序（队头仍为第一批）
+	ttftStore.observe(key, 30)
+	ttftReportTickAt(1020)
+	if ttftQueue.len() != 2 {
+		t.Fatalf("第二周期应入队：len=%d", ttftQueue.len())
+	}
+	if h2, _ := ttftQueue.head(); h2.BatchID != "envoy-0|abc|990" {
+		t.Fatalf("FIFO 保序被破坏：head=%s", h2.BatchID)
+	}
+	// 超限丢最旧（cap=4）：再入 3 批 → 共 5 批 → 丢 1（cycle=990）
+	for i := int64(0); i < 3; i++ {
+		ttftStore.observe(key, 10)
+		ttftReportTickAt(1030 + i*10)
+	}
+	if ttftQueue.len() != TTFTReportQueueCap || ttftQueue.droppedTotal() != 1 {
+		t.Fatalf("超限丢最旧不符：len=%d dropped=%d", ttftQueue.len(), ttftQueue.droppedTotal())
+	}
+	if h3, _ := ttftQueue.head(); h3.BatchID != "envoy-0|abc|1010" {
+		t.Fatalf("丢最旧后队头应为第二周期批次：%s", h3.BatchID)
+	}
+}
+
+// TestTTFTOnReportResponseContract：200+ok/dropped/duplicate → 确认出队；
+// 其余（400/404/503/非契约载荷）→ 保留重发（至少一次）；ackByID 按身份精确匹配。
+func TestTTFTOnReportResponseContract(t *testing.T) {
+	old := ttftQueue
+	defer func() { ttftQueue = old }()
+	id := ttftIdentity{node: "n", vmID: "v"}
+
+	seed := func() string {
+		ttftQueue = newTTFTReportQueue()
+		var s ttftSample
+		s.Tenant, s.Model, s.Endpoint, s.Cache = "t", "m", "e", "miss"
+		s.Buckets[0] = 1
+		reps := ttftBuildReports(id, 100, []ttftSample{s}, 0)
+		ttftQueue.appendAll(reps)
+		return reps[0].BatchID
+	}
+
+	for _, c := range []struct {
+		body string
+	}{
+		{`{"result":"ok"}`},
+		{`{"result":"ok","dropped":3}`},
+		{`{"result":"dropped"}`},
+		{`{"result":"duplicate"}`},
+	} {
+		batchID := seed()
+		ttftOnReportResponse(200, []byte(c.body), batchID)
+		if ttftQueue.len() != 0 {
+			t.Fatalf("确认成功应出队：body=%s len=%d", c.body, ttftQueue.len())
+		}
+	}
+	for _, c := range []struct {
+		status int
+		body   string
+	}{
+		{400, `{"error":"invalid_request"}`},
+		{404, `{"error":"not_found"}`},
+		{503, `{"error":"source_unavailable"}`},
+		{200, `{"foo":"bar"}`},
+		{200, `not-json`},
+		{500, ``},
+	} {
+		batchID := seed()
+		ttftOnReportResponse(c.status, []byte(c.body), batchID)
+		if ttftQueue.len() != 1 {
+			t.Fatalf("未确认应保留重发：status=%d body=%s len=%d", c.status, c.body, ttftQueue.len())
+		}
+	}
+
+	// ackByID：不匹配 no-op、精确移除（防误删新队头）
+	ttftQueue = newTTFTReportQueue()
+	samples := []ttftSample{
+		{Tenant: "t", Model: "m", Endpoint: "e1", Cache: "miss"},
+		{Tenant: "t", Model: "m", Endpoint: "e2", Cache: "miss"},
+	}
+	samples[0].Buckets[0], samples[1].Buckets[0] = 1, 1
+	reps := ttftBuildReports(id, 100, samples, 1) // 2 批：|1 |2
+	ttftQueue.appendAll(reps)
+	ttftQueue.ackByID("no-such-batch")
+	if ttftQueue.len() != 2 {
+		t.Fatalf("不匹配 ack 不应改动：len=%d", ttftQueue.len())
+	}
+	ttftQueue.ackByID(reps[0].BatchID)
+	if ttftQueue.len() != 1 {
+		t.Fatalf("精确移除后应为 1：len=%d", ttftQueue.len())
+	}
+	if h, _ := ttftQueue.head(); h.BatchID != reps[1].BatchID {
+		t.Fatalf("应仅移除匹配批次：head=%s want=%s", h.BatchID, reps[1].BatchID)
+	}
+}

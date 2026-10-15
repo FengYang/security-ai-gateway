@@ -7,19 +7,24 @@ package main
 //   - M2.3：标识解析（node/VM ID，R2-03/G-3）+ 上报体构造 + batch_id + 超限拆分（TT2-08）；
 //   - M2.1：首 token 采样钩子（解密回调 + delta.content 判定，R2-04/R2-05/C-3）；
 //   - M2.4：待确认队列（冻结/确认移除/上限丢弃，R2-06/R2-18）；
-//   - M2.5（待）：周期上报 tick（复用 wrapper.RegisterTickFunc 范式）。
+//   - M2.5：周期上报 tick（ttft_poll_interval_seconds 缺省 10s ≤ T=25s；cb/ok/reject/drop 指标）。
 //
 // 本文件不含路由决策/权函数（TT2-19 解耦）；指标注册见 metrics.go（M5）。
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"net/http"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
+	logs "github.com/higress-group/wasm-go/pkg/log"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
+	"github.com/tidwall/gjson"
 
 	"security-ai-gateway/gateway/wasm/otpmask-plugin/streamparser"
 )
@@ -438,6 +443,19 @@ func (q *ttftReportQueue) ack() {
 	q.q = q.q[1:]
 }
 
+// ackByID 按 batch_id 移除已确认批次（M2.5 传输回调使用；防「超限丢最旧」竞态下
+// 误删新队头——按身份匹配而非盲弹队头；批次已被丢弃时 no-op）。
+func (q *ttftReportQueue) ackByID(batchID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i := range q.q {
+		if q.q[i].BatchID == batchID {
+			q.q = append(q.q[:i], q.q[i+1:]...)
+			return
+		}
+	}
+}
+
 // len 当前待确认批次数。
 func (q *ttftReportQueue) len() int {
 	q.mu.Lock()
@@ -450,4 +468,202 @@ func (q *ttftReportQueue) droppedTotal() uint64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.dropped
+}
+
+// ============================================================
+// M2.5：周期上报 tick（冻结→发送→确认/重发；§6.2 / §6.4 / §6.5）
+// ============================================================
+
+// TTFT 上报/拉取周期边界（§6.4）：缺省 10s；必须 ≤ 分片窗口 T=25s（防滑窗覆盖不足/过期误判）。
+const (
+	TTFTReportIntervalDefaultSec = 10
+	TTFTReportIntervalMaxSec     = 25
+)
+
+// ttftGetProperty proxy-wasm 属性读取入口（单测注入；wasm 运行态为 proxywasm.GetProperty）。
+var ttftGetProperty = func(path []string) (string, error) {
+	v, err := proxywasm.GetProperty(path)
+	return string(v), err
+}
+
+// ttftLogWarnf 上报链路告警（单测环境 no-op；hostcall 仅在 wasm 运行时可用——同 metricsHostGuard 纪律）。
+func ttftLogWarnf(format string, args ...interface{}) {
+	if metricsHostGuard {
+		return
+	}
+	proxywasm.LogWarnf(format, args...)
+}
+
+// ttftTruncate 日志截断（防异常响应体刷日志）。
+func ttftTruncate(b []byte) string {
+	if len(b) > 120 {
+		b = b[:120]
+	}
+	return string(b)
+}
+
+// ttftRuntimeState TTFT 上报运行态（VM 级；parseConfig 时初始化/刷新）。
+type ttftRuntimeState struct {
+	enabled    bool // 控制面通道（service/port）配置齐备才注册 tick
+	service    string
+	port       int64
+	token      string // 静态通道令牌（运行态凭据端点拉取优先，回退至此）
+	intervalMs int64
+
+	nodeName      string       // 配置 node_name（优先于 Envoy node.id，G-3 双通道）
+	identity      ttftIdentity // VM 实例标识（懒解析一次后稳定复用）
+	identityReady bool
+	lastFreezeSec int64 // 上一周期起始秒（batch_id 周期起始；0 = 尚未冻结）
+	inflight      bool  // 单飞：同 VM 同一时刻至多一个在飞上报
+}
+
+// ttftRuntime 上报运行态单例（VM 级）；ttftQueue 待确认队列单例（§6.2：每 VM 独立上报）。
+var (
+	ttftRuntime ttftRuntimeState
+	ttftQueue   = newTTFTReportQueue()
+)
+
+// initTTFTRuntime 按配置初始化/刷新 TTFT 上报运行态并注册 tick。
+// 未配置控制面通道（service/port）→ 置空不注册（零行为变化；采集仍本地累计，M5 指标可见）。
+// ⚠️ 每次插件启动/热更新都重新注册（wasm-go 会清空全局 tick 注册表；同 routefetch.go 范式）。
+func initTTFTRuntime(config PluginConfig, log logs.Log) {
+	rt := &ttftRuntime
+	rt.enabled = false
+	rt.identityReady = false
+	rt.lastFreezeSec = 0
+	rt.inflight = false
+	rt.nodeName = config.NodeName
+
+	intervalMs := config.TTFTPollIntervalSeconds * 1000
+	if intervalMs <= 0 {
+		intervalMs = TTFTReportIntervalDefaultSec * 1000
+	}
+	if intervalMs > TTFTReportIntervalMaxSec*1000 {
+		// 防御性收口（parseConfig 已告警收口；此处兜底直接调用方）。
+		intervalMs = TTFTReportIntervalMaxSec * 1000
+	}
+	if intervalMs < 100 {
+		intervalMs = 100
+	}
+	rt.intervalMs = intervalMs
+
+	rt.service = config.GatewayCoreService
+	rt.port = config.GatewayCorePort
+	rt.token = config.GatewayCoreToken
+
+	if rt.service == "" || rt.port <= 0 {
+		log.Infof("otpmask-plugin: TTFT 上报未启用（未配置 gateway_core_service/port；采集仍本地累计、无网络行为）")
+		return
+	}
+	rt.enabled = true
+	wrapper.RegisterTickFunc(rt.intervalMs, ttftReportTick)
+	log.Infof("otpmask-plugin: TTFT 上报 tick 已注册 period_ms=%d（每次插件启动/热更新重新注册）", rt.intervalMs)
+}
+
+// ensureIdentity 解析并缓存上报标识（每 VM 一次；属性通道不可得时如实兜底）。
+func (rt *ttftRuntimeState) ensureIdentity() ttftIdentity {
+	if !rt.identityReady {
+		node := ttftResolveNodeName(rt.nodeName, ttftGetProperty)
+		rt.identity = ttftIdentity{
+			node: node,
+			vmID: ttftResolveVMID(ttftGetProperty, node, time.Now().UnixNano()),
+		}
+		rt.identityReady = true
+	}
+	return rt.identity
+}
+
+// nextCycleStart 计算本次冻结的周期起始秒并推进周期指针（首 tick 以 now-interval 为起点）。
+// 返回值即 batch_id 的周期起始秒：冻结后不变（重发同 batch_id），逐周期单调递增。
+func (rt *ttftRuntimeState) nextCycleStart(nowSec int64) int64 {
+	start := rt.lastFreezeSec
+	if start <= 0 {
+		start = nowSec - rt.intervalMs/1000
+	}
+	rt.lastFreezeSec = nowSec
+	return start
+}
+
+// ttftReportTick 周期上报任务（wrapper.RegisterTickFunc 回调）。
+func ttftReportTick() {
+	ttftReportTickAt(time.Now().Unix())
+}
+
+// ttftReportTickAt tick 主流程（nowSec 注入可测）：
+// 周期边界冻结快照入待确认队列 → 尝试发送队头（成功确认出队；未确认下个 tick 原样重发）。
+func ttftReportTickAt(nowSec int64) {
+	rt := &ttftRuntime
+	if !rt.enabled {
+		return
+	}
+	cycleStart := rt.nextCycleStart(nowSec)
+	if _, dropped := ttftQueue.freezeCycle(rt.ensureIdentity(), cycleStart, ttftStore); dropped > 0 {
+		metricTTFTReportDrop.add(uint64(dropped)) // 队列超限丢最旧（R2-06/R2-18）
+	}
+	rt.sendHead()
+}
+
+// sendHead 发送队头批次（单飞；发送不改队列——成功响应经 ttftOnReportResponse ack 出队）。
+func (rt *ttftRuntimeState) sendHead() {
+	if rt.inflight {
+		return // 上一批在飞（回调未归）→ 本 tick 跳过（无并发在飞、不重排）
+	}
+	batch, ok := ttftQueue.head()
+	if !ok {
+		return
+	}
+	body, err := json.Marshal(batch)
+	if err != nil {
+		// 防御：ttftReport 全静态字段恒可序列化；如发生按未确认处理（保留重发）
+		metricTTFTReportReject.incr()
+		ttftLogWarnf("otpmask-plugin: TTFT 上报编码失败（保留待确认队列）: %v", err)
+		return
+	}
+	headers := [][2]string{{"Content-Type", "application/json"}}
+	token := rt.token
+	if v := runtimeCoreChannelToken(); v != "" { // 运行态通道令牌优先（C 项；回退静态配置）
+		token = v
+	}
+	if token != "" {
+		headers = append(headers, [2]string{"Authorization", "Bearer " + token})
+	}
+	cli := wrapper.NewClusterClient(wrapper.FQDNCluster{FQDN: rt.service, Port: rt.port})
+	rt.inflight = true
+	err = cli.Post("/routes/ttft/report", headers, body,
+		func(statusCode int, _ http.Header, respBody []byte) {
+			rt.inflight = false
+			ttftOnReportResponse(statusCode, respBody, batch.BatchID)
+		})
+	if err != nil {
+		rt.inflight = false
+		metricTTFTReportReject.incr()
+		ttftLogWarnf("otpmask-plugin: TTFT 上报触发失败（保留待确认队列，下个 tick 原样重发）: %v", err)
+	}
+}
+
+// ttftOnReportResponse 上报响应处理（M3 契约，台账 G-6）：
+//
+//	200 且 result ∈ {ok, dropped, duplicate} ⇒ 确认成功（ack 出队；ok=落片、dropped=旧世代
+//	批次弃发、duplicate=控制面按 batch_id 去重）；其余（400/404/503/网络错/非契约载荷）
+//	一律视为**未确认** ⇒ 保留批次下个 tick 原样重发（至少一次；队列上限丢最旧兜底防积压）。
+func ttftOnReportResponse(statusCode int, respBody []byte, batchID string) {
+	metricTTFTReportCb.incr()
+	if statusCode == http.StatusOK {
+		switch ttftParseReportResult(respBody) {
+		case "ok", "dropped", "duplicate":
+			ttftQueue.ackByID(batchID)
+			metricTTFTReportOK.incr()
+			return
+		}
+		ttftLogWarnf("otpmask-plugin: TTFT 上报返回 200 但载荷非确认结构（保留重发）body=%s", ttftTruncate(respBody))
+	} else {
+		ttftLogWarnf("otpmask-plugin: TTFT 上报返回 %d（保留待确认队列，下个 tick 原样重发）body=%s",
+			statusCode, ttftTruncate(respBody))
+	}
+	metricTTFTReportReject.incr()
+}
+
+// ttftParseReportResult 解析上报响应 result 字段（缺失/非法 → ""）。
+func ttftParseReportResult(respBody []byte) string {
+	return gjson.GetBytes(respBody, "result").String()
 }
