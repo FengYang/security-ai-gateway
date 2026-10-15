@@ -165,8 +165,8 @@ func TestTTFTRing_StaleLandingDoesNotWipe(t *testing.T) {
 
 	r.Record(k, bk(5), t0+10, 300) // 当前分片（idx 8，start t0）
 	// 同索引更旧批次：start = t0-300（idx 8），其分片起点已 ≤ 淘汰线（now-300 = t0-290）
-	if got := r.Record(k, bk(9), t0-290, 300); got != TTFTIngestOK {
-		t.Fatalf("边界旧批次应 ACK（OK），got %v", got)
+	if got := r.Record(k, bk(9), t0-290, 300); got != TTFTIngestStale {
+		t.Fatalf("边界旧批次应 Stale（已受理但边界丢弃），got %v", got)
 	}
 	w, _ := r.Merge(k)
 	if w.Samples != 5 {

@@ -661,7 +661,17 @@ func (s *Server) handleTTFTReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, ld := range landings {
-		if res := s.ttftRing.Record(ld.key, &ld.buckets, reportedAtSec, ld.windowSec); res != route.TTFTIngestOK {
+		switch s.ttftRing.Record(ld.key, &ld.buckets, reportedAtSec, ld.windowSec) {
+		case route.TTFTIngestOK:
+			var n uint64
+			for _, c := range ld.buckets {
+				n += c
+			}
+			s.metrics.incTTFTSamples(ld.key.Tenant, ld.key.Model, ld.key.Endpoint, ld.key.Cache, n)
+		case route.TTFTIngestStale:
+			// 边界丢片（批次已受理；样本未落计数）→ 计入响应 dropped
+			dropped++
+		default:
 			// 防御路径（预检后仅并发竞态可触达）；batch_id 已登记，重试将按 duplicate ACK
 			s.metrics.incReportResult("reject")
 			writeError(w, http.StatusServiceUnavailable, "source_unavailable", "TTFT 聚合器拒绝落片")
