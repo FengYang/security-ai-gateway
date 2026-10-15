@@ -153,10 +153,10 @@ type PluginConfig struct {
 	// 未配置 = 走原 CryptoClient 验签路径（行为与改造前完全一致）。
 	// 配置后 = 证明验证全部经 attest-verify sidecar /verify（含签名链 + report_data + 度量基线），
 	// 插件侧只做 nonce 回显（公开值，本地比较），其余 fail-closed。
-	AttestVerifyService    string `json:"attest_verify_service"`     // sidecar cluster 名（如 attest-verify.static）
-	AttestVerifyPort       int64  `json:"attest_verify_port"`        // sidecar 端口（缺省 19191）
-	AttestVerifyToken      string `json:"attest_verify_token"`       // 共享验证令牌（X-Verify-Token，可选）
-	AttestVerifyTimeoutMS  int64  `json:"attest_verify_timeout_ms"`  // 调用超时（缺省 2000ms；quote 验证比密码操作重）
+	AttestVerifyService   string `json:"attest_verify_service"`    // sidecar cluster 名（如 attest-verify.static）
+	AttestVerifyPort      int64  `json:"attest_verify_port"`       // sidecar 端口（缺省 19191）
+	AttestVerifyToken     string `json:"attest_verify_token"`      // 共享验证令牌（X-Verify-Token，可选）
+	AttestVerifyTimeoutMS int64  `json:"attest_verify_timeout_ms"` // 调用超时（缺省 2000ms；quote 验证比密码操作重）
 
 	// ---- P1-7 T2b（§6.5 / D-13）：数据面未达 TEE 流量上报通道（插件侧）----
 	// 仅当 audit_report_token 配置时启用（缺省关闭，零行为变化，符合插件惯例）。
@@ -164,6 +164,10 @@ type PluginConfig struct {
 	AuditReportToken    string `json:"audit_report_token"`     // 独立只读上报令牌（X-Admin-Token）
 	AuditReportFlushMs  int64  `json:"audit_report_flush_ms"`  // tick 批量投递间隔（缺省 1000ms）
 	AuditReportQueueMax int64  `json:"audit_report_queue_max"` // 有界队列容量（缺省 32，§6.5 队列三要素）
+
+	// ---- P1-6：TTFT 严格性能择优（§6.1/§6.2）----
+	// 节点名（上报 batch_id 前缀；R2-03/G-3 双通道——本配置优先，缺省经 Envoy 属性 node.id 取得）。
+	NodeName string `json:"node_name"`
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -229,6 +233,8 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.AuditReportToken = json.Get("audit_report_token").String()
 	config.AuditReportFlushMs = json.Get("audit_report_flush_ms").Int()
 	config.AuditReportQueueMax = json.Get("audit_report_queue_max").Int()
+	// P1-6：TTFT 上报节点名（缺省空 = 走 Envoy 属性 node.id，R2-03/G-3 双通道）。
+	config.NodeName = json.Get("node_name").String()
 	if config.CryptoProfile == "" {
 		config.CryptoProfile = "intl"
 	}
