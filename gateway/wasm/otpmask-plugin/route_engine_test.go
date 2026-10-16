@@ -220,3 +220,96 @@ func TestBuildEngineConfig_LatencyWiring(t *testing.T) {
 		t.Fatalf("旧表应策略透传且 latency 全缺省：%+v", cfg2)
 	}
 }
+
+// TestBuildEngineConfig_EdgeBranches P1-6 M6.6 补测（F-4）：配置映射的边界/冗余分支——
+// 无名端点跳过、canary 段逐字段映射、凭证注册失败仅告警（不影响端点纳入、不 panic）。
+func TestBuildEngineConfig_EdgeBranches(t *testing.T) {
+	oldGuard, oldSink := metricsHostGuard, routeConfigWarnLog
+	t.Cleanup(func() { metricsHostGuard, routeConfigWarnLog = oldGuard, oldSink })
+	warns := 0
+	// 放行告警分支；本用例路径无其它 hostcall（策略合法 → 不计 unknown 指标；凭证注册为纯解析/内存）
+	metricsHostGuard = false
+	routeConfigWarnLog = func(string, ...interface{}) { warns++ }
+
+	cfg := buildEngineConfig(&routecache.TableRoute{
+		Tenant: "t1", Model: "m1", Strategy: "priority",
+		Endpoints: []routecache.TableEndpoint{
+			{Name: "", URL: "https://void.internal/v1", Weight: 1, Priority: 1, Enabled: true}, // 无名 → 跳过
+			{Name: "ep-bad", URL: "https://bad.internal/v1", Weight: 1, Priority: 1, Enabled: true,
+				Auth: routecache.EndpointAuth{SecretRef: "bogus://nope"}}, // scheme 非法 → 注册失败告警
+			{Name: "ep-ok", URL: "https://ok.internal/v1", Weight: 0.5, Priority: 2, Enabled: true},
+		},
+		Canary: &routecache.RouteCanary{
+			Enabled: true, TargetEndpoint: "ep-ok", TargetWeight: 0.2, RampStep: 0.05,
+			RampIntervalMs: 60000, RollbackThreshold: 0.5, RollbackMinSamples: 200,
+			AllowedTenants: []string{"t1"},
+		},
+	})
+	if len(cfg.Endpoints) != 2 {
+		t.Fatalf("无名端点应跳过：%+v", cfg.Endpoints)
+	}
+	if cfg.Endpoints[0].Name != "ep-bad" || cfg.Endpoints[1].Name != "ep-ok" {
+		t.Fatalf("端点顺序/名称应保序：%+v", cfg.Endpoints)
+	}
+	if cfg.Endpoints[1].Weight != 0.5 || cfg.Endpoints[1].Priority != 2 || !cfg.Endpoints[1].Enabled {
+		t.Fatalf("端点字段应原样映射：%+v", cfg.Endpoints[1])
+	}
+	if warns != 1 {
+		t.Fatalf("凭证注册失败应告警恰 1 次（注册失败不影响端点纳入），got %d", warns)
+	}
+	if !cfg.Canary.Enabled || cfg.Canary.TargetEndpoint != "ep-ok" || cfg.Canary.TargetWeight != 0.2 ||
+		cfg.Canary.RampStep != 0.05 || cfg.Canary.RampIntervalMs != 60000 ||
+		cfg.Canary.RollbackThreshold != 0.5 || cfg.Canary.RollbackMinSamples != 200 ||
+		len(cfg.Canary.AllowedTenants) != 1 || cfg.Canary.AllowedTenants[0] != "t1" {
+		t.Fatalf("canary 段应逐字段映射：%+v", cfg.Canary)
+	}
+
+	// nil canary / 无端点 → 零值（未启用灰度、不产生端点）
+	cfg2 := buildEngineConfig(&routecache.TableRoute{Strategy: "priority"})
+	if cfg2.Canary.Enabled || len(cfg2.Endpoints) != 0 {
+		t.Fatalf("无 canary/端点应保持零值：%+v", cfg2)
+	}
+
+	// 守卫分支：host 单测态（默认）下告警为 no-op，且不影响端点纳入
+	metricsHostGuard = true
+	cfg3 := buildEngineConfig(&routecache.TableRoute{
+		Strategy: "priority",
+		Endpoints: []routecache.TableEndpoint{{Name: "ep-bad", URL: "https://bad.internal/v1", Weight: 1, Priority: 1,
+			Auth: routecache.EndpointAuth{SecretRef: "nope://x"}}},
+	})
+	if warns != 1 {
+		t.Fatalf("守卫态不应调用日志宿（warns 应保持 1），got %d", warns)
+	}
+	if len(cfg3.Endpoints) != 1 || cfg3.Endpoints[0].Name != "ep-bad" {
+		t.Fatalf("注册失败不应影响端点纳入：%+v", cfg3.Endpoints)
+	}
+}
+
+// TestRouteStrategyErrorfGuardBranches P1-6 M6.6 补测（F-4）：未映射策略日志的守卫两分支——
+// 放行分支调用日志宿恰一次；守卫分支 no-op（防 hostcall panic）。并复核 default 显式信号：
+// 未知策略回落 priority（不静默、不 panic）。
+func TestRouteStrategyErrorfGuardBranches(t *testing.T) {
+	oldGuard, oldSink := metricsHostGuard, routeStrategyErrorLog
+	t.Cleanup(func() { metricsHostGuard, routeStrategyErrorLog = oldGuard, oldSink })
+	n := 0
+	routeStrategyErrorLog = func(string, ...interface{}) { n++ }
+
+	// 放行分支：直调 helper（避免经 routeStrategy 触发指标 hostcall）
+	metricsHostGuard = false
+	routeStrategyErrorf("未映射路由策略 %q", "mystery")
+	if n != 1 {
+		t.Fatalf("放行分支应调用日志宿恰一次，got %d", n)
+	}
+
+	// 守卫分支：no-op
+	metricsHostGuard = true
+	routeStrategyErrorf("未映射路由策略 %q", "mystery")
+	if n != 1 {
+		t.Fatalf("守卫分支不应调用日志宿，got %d", n)
+	}
+
+	// default 显式信号：未知策略回落 priority（单测守卫下指标/日志均为 no-op）
+	if got := routeStrategy("mystery-strategy"); got != routeengine.StrategyPriority {
+		t.Fatalf("未知策略应回落 priority，got %q", got)
+	}
+}

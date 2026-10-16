@@ -390,7 +390,7 @@ func buildEngineConfig(tr *routecache.TableRoute) routeengine.Config {
 		// 注册端点凭证（secret_ref 非空时）
 		if ep.Auth.SecretRef != "" {
 			if err := registerEndpointCredentials(ep.Name, ep.Auth.SecretRef); err != nil {
-				proxywasm.LogWarnf("otpmask-plugin: 端点 %q 凭证注册失败: %v", ep.Name, err)
+				routeConfigWarnf("otpmask-plugin: 端点 %q 凭证注册失败: %v", ep.Name, err)
 			}
 		}
 		eps = append(eps, routeengine.EndpointConfig{
@@ -493,13 +493,28 @@ func routeStrategy(s string) routeengine.Strategy {
 	}
 }
 
+// routeConfigWarnLog / routeStrategyErrorLog 配置期日志宿（默认直连 proxywasm；
+// 经包级变量收口，单测可覆写以断言调用——与 report.go 的 auditInfoLog/auditWarnLog 同范式）。
+var (
+	routeConfigWarnLog    = func(format string, args ...interface{}) { proxywasm.LogWarnf(format, args...) }
+	routeStrategyErrorLog = func(format string, args ...interface{}) { proxywasm.LogErrorf(format, args...) }
+)
+
+// routeConfigWarnf 路由表配置期告警（host 单测下 no-op，防 proxywasm hostcall panic）。
+func routeConfigWarnf(format string, args ...interface{}) {
+	if metricsHostGuard {
+		return
+	}
+	routeConfigWarnLog(format, args...)
+}
+
 // routeStrategyErrorf 未映射策略错误日志（host 单测下 no-op，防 proxywasm hostcall panic；
 // 复用 metrics.go 的 metricsHostGuard 作为"非 Wasm 运行态"守卫）。
 func routeStrategyErrorf(format string, args ...interface{}) {
 	if metricsHostGuard {
 		return
 	}
-	proxywasm.LogErrorf(format, args...)
+	routeStrategyErrorLog(format, args...)
 }
 
 // routeEndpointSuccess 判定一次端点响应是否算成功（§6.5.8 错误分类与处理矩阵）：

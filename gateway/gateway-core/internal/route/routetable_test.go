@@ -345,3 +345,45 @@ func TestValidateStrategyLatencyCombos(t *testing.T) {
 		}
 	}
 }
+
+// TestRouteTableCloneLatencyDeepCopy P1-6 M6.6 补测（F-7）：Clone 对 latency 段（含指针
+// 字段）、canary.AllowedTenants 与 endpoints 切片均为**深拷贝**——修改副本不得回写原表
+// （历史快照/回滚口径安全；cloneRouteLatency 即为此引入，M4.1）。
+func TestRouteTableCloneLatencyDeepCopy(t *testing.T) {
+	gamma, minW, explore, cache := 1.5, 0.05, 0.05, true
+	orig := &RouteTable{
+		Version: 7, UpdatedAt: 1725500000,
+		Routes: []TableRoute{{
+			Tenant: "t1", Model: "m1", Strategy: "latency-aware",
+			Endpoints: []TableEndpoint{{Name: "e1", URL: "https://e1.internal/v1", Weight: 1, Priority: 1, Enabled: true}},
+			Canary:    &RouteCanary{Enabled: true, TargetEndpoint: "e1", AllowedTenants: []string{"t1"}},
+			Latency: &RouteLatency{
+				WindowSec: 300, Quantile: "p95", Gamma: &gamma, MinWeight: &minW,
+				ExploreRatio: &explore, CachePartition: &cache, MinSamples: 20, StaleSec: 75, MaxTTFTMs: 30000,
+			},
+		}},
+	}
+	cp := orig.Clone()
+	if cp == orig || cp.Routes[0].Latency == orig.Routes[0].Latency || cp.Routes[0].Canary == orig.Routes[0].Canary {
+		t.Fatal("Clone 应返回新表与新子结构指针（深拷贝）")
+	}
+	// 修改副本：latency 指针字段 / canary 子切片 / 端点切片
+	*cp.Routes[0].Latency.Gamma = 9.9
+	*cp.Routes[0].Latency.CachePartition = false
+	cp.Routes[0].Canary.AllowedTenants[0] = "t-hacked"
+	cp.Routes[0].Endpoints[0].URL = "https://evil.internal/v1"
+	if *orig.Routes[0].Latency.Gamma != 1.5 || !*orig.Routes[0].Latency.CachePartition {
+		t.Fatal("latency 指针字段应为深拷贝（副本修改不得回写原表）")
+	}
+	if orig.Routes[0].Canary.AllowedTenants[0] != "t1" {
+		t.Fatal("canary.AllowedTenants 应为深拷贝")
+	}
+	if orig.Routes[0].Endpoints[0].URL != "https://e1.internal/v1" {
+		t.Fatal("endpoints 切片应为深拷贝")
+	}
+	// nil 段：Clone 保持 nil（旧表不注入空 latency/canary 段，C-5 逐字节口径）
+	plain := &RouteTable{Version: 1, Routes: []TableRoute{{Tenant: "t2", Model: "m2"}}}
+	if pcp := plain.Clone(); pcp.Routes[0].Latency != nil || pcp.Routes[0].Canary != nil {
+		t.Fatal("nil latency/canary 应保持 nil（不得注入空段）")
+	}
+}
