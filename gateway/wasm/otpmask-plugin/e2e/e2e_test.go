@@ -15,10 +15,13 @@
 // 测试覆盖：
 //  1. TestE2E_BasicRoute        基础路由
 //  2. TestE2E_RouteHotUpdate    路由表热更新
-//  3. TestE2E_SignatureReject   签名验证（错误签名被拒）
-//  4. TestE2E_VersionRollback   版本回退防护
-//  5. TestE2E_MultiTenant       多租户隔离
-//  6. TestE2E_DegradedMode      降级模式（控制面失联）
+//  3. TestE2E_MultiTenant       多租户隔离
+//  4. TestE2E_VersionMonotonic  版本号单调递增
+//  5. TestE2E_SignaturePresent  路由表签名存在
+//  6. TestE2E_ControlPlaneHealth 控制面健康检查
+//  7. TestE2E_LatencyAwareRoute  latency-aware 多端点路由（P1-6 M6.3）
+//  8. TestE2E_LatencyAwareStatsAggregation 上报→聚合→统计下发（P1-6 M6.3）
+//  9. TestE2E_LatencyAwareMetrics 选路计数（需 E2E_GATEWAY_METRICS_URL，P1-6 M6.3）
 package e2e
 
 import (
@@ -27,7 +30,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -132,18 +138,38 @@ func httpPOST(t *testing.T, url string, body any, headers map[string]string) (in
 // ============================================================
 
 type routeTableResp struct {
-	Version   int             `json:"version"`
-	UpdatedAt int64           `json:"updated_at"`
-	Routes    []tableRoute    `json:"routes"`
-	Signature string          `json:"signature"`
+	Version   int          `json:"version"`
+	UpdatedAt int64        `json:"updated_at"`
+	Routes    []tableRoute `json:"routes"`
+	Signature string       `json:"signature"`
 }
 
 type tableRoute struct {
-	Tenant         string          `json:"tenant"`
-	Model          string          `json:"model"`
-	DefaultEngine  string          `json:"default_engine"`
-	FallbackEngine string          `json:"fallback_engine,omitempty"`
-	Target         string          `json:"target,omitempty"`
+	Tenant         string `json:"tenant"`
+	Model          string `json:"model"`
+	DefaultEngine  string `json:"default_engine"`
+	FallbackEngine string `json:"fallback_engine,omitempty"`
+	Target         string `json:"target,omitempty"`
+	// P1-6 M6.3：多端点 / 延迟择优（与 gateway-core route.TableRoute 同字段名）。
+	Endpoints []tableEndpoint `json:"endpoints,omitempty"`
+	Strategy  string          `json:"strategy,omitempty"`
+	Latency   *routeLatency   `json:"latency,omitempty"`
+}
+
+// tableEndpoint 与 gateway-core route.TableEndpoint 同字段名。
+type tableEndpoint struct {
+	Name     string  `json:"name"`
+	URL      string  `json:"url,omitempty"`
+	Weight   float64 `json:"weight,omitempty"`
+	Priority int     `json:"priority,omitempty"`
+	Enabled  bool    `json:"enabled,omitempty"`
+}
+
+// routeLatency 与 gateway-core route.RouteLatency 子集（同字段名）。
+type routeLatency struct {
+	Quantile   string `json:"quantile,omitempty"`
+	MinSamples int    `json:"min_samples,omitempty"`
+	StaleSec   int    `json:"stale_sec,omitempty"`
 }
 
 func coreHeaders(cfg e2eConfig) map[string]string {
@@ -187,8 +213,8 @@ type inferReq struct {
 
 func gatewayHeaders(cfg e2eConfig, tenant string) map[string]string {
 	return map[string]string{
-		"X-API-Key":    cfg.APIKey,
-		"X-Tenant-ID":  tenant,
+		"X-API-Key":   cfg.APIKey,
+		"X-Tenant-ID": tenant,
 	}
 }
 
@@ -256,7 +282,7 @@ func TestE2E_RouteHotUpdate(t *testing.T) {
 		t.Fatalf("查询新增路由失败: code=%d", code)
 	}
 	var resp struct {
-		Version int         `json:"version"`
+		Version int        `json:"version"`
 		Route   tableRoute `json:"route"`
 	}
 	json.Unmarshal(body, &resp)
@@ -345,4 +371,157 @@ func TestE2E_ControlPlaneHealth(t *testing.T) {
 		t.Fatalf("控制面健康检查失败: code=%d body=%s", code, string(body))
 	}
 	t.Logf("✅ 控制面健康: %s", string(body))
+}
+
+// ============================================================
+// P1-6 M6.3：latency-aware 端到端（真实控制面 + 网关）
+// ============================================================
+
+const (
+	e2eLatencyTenant = "e2e-latency"
+	e2eLatencyModel  = "latency-model"
+)
+
+// upsertLatencyAwareRoute 下发一条双端点 latency-aware 路由（min_samples=1 便于快速判有效）。
+func upsertLatencyAwareRoute(t *testing.T, cfg e2eConfig) {
+	t.Helper()
+	route := tableRoute{
+		Tenant: e2eLatencyTenant, Model: e2eLatencyModel, DefaultEngine: "tee",
+		Strategy: "latency-aware",
+		Endpoints: []tableEndpoint{
+			{Name: "tee-a", URL: "http://tee-a.otpmask.svc.cluster.local:19090", Weight: 1, Priority: 1, Enabled: true},
+			{Name: "tee-b", URL: "http://tee-b.otpmask.svc.cluster.local:19090", Weight: 1, Priority: 1, Enabled: true},
+		},
+		Latency: &routeLatency{Quantile: "p95", MinSamples: 1, StaleSec: 300},
+	}
+	if code := upsertRoute(t, cfg, e2eLatencyTenant, e2eLatencyModel, route); code != http.StatusOK {
+		t.Fatalf("下发 latency-aware 路由失败: code=%d", code)
+	}
+}
+
+// warmLatencySamples 触发 n 次 /infer 以产生 TTFT 样本（供上报聚合），并验证决策路径不阻断。
+func warmLatencySamples(t *testing.T, cfg e2eConfig, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if code := sendInfer(t, cfg, e2eLatencyTenant, e2eLatencyModel); code != http.StatusOK {
+			t.Fatalf("latency-aware 路由请求应 200（第 %d/%d 次）: got %d（环境需具备健康 tee-a/tee-b 端点）", i+1, n, code)
+		}
+	}
+}
+
+// ttftStatsResp /routes/ttft/stats 响应（P1-6 M3 契约）。
+type ttftStatsResp struct {
+	GeneratedAt int64 `json:"generated_at"`
+	Stats       []struct {
+		Tenant    string `json:"tenant"`
+		Model     string `json:"model"`
+		Endpoint  string `json:"endpoint"`
+		Cache     string `json:"cache"`
+		P50Ms     int64  `json:"p50_ms"`
+		P95Ms     int64  `json:"p95_ms"`
+		Samples   int64  `json:"samples"`
+		Valid     bool   `json:"valid"`
+		UpdatedAt int64  `json:"updated_at"`
+	} `json:"stats"`
+}
+
+func getTTFTStats(t *testing.T, cfg e2eConfig, tenant string) *ttftStatsResp {
+	t.Helper()
+	u := cfg.CoreURL + "/routes/ttft/stats?tenant=" + url.QueryEscape(tenant)
+	code, body := httpGET(t, u, coreHeaders(cfg))
+	if code != http.StatusOK {
+		t.Fatalf("获取 TTFT 统计失败: code=%d body=%s", code, string(body))
+	}
+	var resp ttftStatsResp
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("解析 TTFT 统计失败: %v body=%s", err, string(body))
+	}
+	return &resp
+}
+
+// TestE2E_LatencyAwareRoute 下发 latency-aware 多端点路由并验证请求路径兼容（不阻断）。
+func TestE2E_LatencyAwareRoute(t *testing.T) {
+	cfg := loadConfig(t)
+	upsertLatencyAwareRoute(t, cfg)
+	warmLatencySamples(t, cfg, 5)
+	t.Log("✅ latency-aware 多端点路由请求路径正常（决策不阻断）")
+}
+
+// TestE2E_LatencyAwareStatsAggregation 上报→聚合→统计下发全链路（真实控制面）。
+//
+// 前置：latency-aware 路由 + 若干 /infer 产生 TTFT 样本。上报周期缺省 10s、聚合窗口 T=25s，
+// 故在 120s 内轮询 /routes/ttft/stats，命中即校验契约（字段齐全 + 端点取自路由配置）。
+func TestE2E_LatencyAwareStatsAggregation(t *testing.T) {
+	cfg := loadConfig(t)
+	upsertLatencyAwareRoute(t, cfg)
+	warmLatencySamples(t, cfg, 30)
+
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		resp := getTTFTStats(t, cfg, e2eLatencyTenant)
+		if len(resp.Stats) > 0 {
+			epSet := map[string]bool{}
+			for _, s := range resp.Stats {
+				if s.Tenant != e2eLatencyTenant || s.Model != e2eLatencyModel || s.Cache == "" || s.Samples <= 0 {
+					t.Fatalf("统计契约不符: %+v", s)
+				}
+				epSet[s.Endpoint] = true
+				if s.P95Ms < s.P50Ms {
+					t.Fatalf("分位关系不符: p50=%d p95=%d", s.P50Ms, s.P95Ms)
+				}
+			}
+			if !epSet["tee-a"] && !epSet["tee-b"] {
+				t.Fatalf("统计端点未取自路由配置: %v", epSet)
+			}
+			t.Logf("✅ 上报→聚合→统计下发闭环（端点 %v，generated_at=%d）", epSet, resp.GeneratedAt)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("120s 内未观察到统计下发（上报/聚合未就绪）")
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// scrapeCounter 从 Prometheus 文本抓取指定指标值之和（无则 0）。
+func scrapeCounter(t *testing.T, metricsURL, name string) float64 {
+	t.Helper()
+	code, body := httpGET(t, metricsURL, nil)
+	if code != http.StatusOK {
+		t.Fatalf("抓取指标失败: code=%d", code)
+	}
+	var sum float64
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == name || strings.HasPrefix(line, name+"{") || strings.HasPrefix(line, name+" ") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				if v, err := strconv.ParseFloat(fields[len(fields)-1], 64); err == nil {
+					sum += v
+				}
+			}
+		}
+	}
+	return sum
+}
+
+// TestE2E_LatencyAwareMetrics 选路计数增长（需 E2E_GATEWAY_METRICS_URL 暴露 Envoy/Prometheus stats）。
+func TestE2E_LatencyAwareMetrics(t *testing.T) {
+	metricsURL := os.Getenv("E2E_GATEWAY_METRICS_URL")
+	if metricsURL == "" {
+		t.Skip("跳过：未配置 E2E_GATEWAY_METRICS_URL（Envoy /stats/prometheus）")
+	}
+	cfg := loadConfig(t)
+	upsertLatencyAwareRoute(t, cfg)
+
+	base := scrapeCounter(t, metricsURL, "otpmask_route_latency_pick_weighted_total")
+	warmLatencySamples(t, cfg, 10)
+	after := scrapeCounter(t, metricsURL, "otpmask_route_latency_pick_weighted_total")
+	if after <= base {
+		t.Fatalf("选路计数应增长: before=%v after=%v", base, after)
+	}
+	t.Logf("✅ latency-aware 选路计数增长: %v → %v", base, after)
 }

@@ -212,3 +212,38 @@ func jsonIndex(haystack []byte, needle string) int {
 	}
 	return -1
 }
+
+// TestAuditLogHelpersNoSelfRecursion G-5 回归：auditInfof / auditWarnf 不得自递归。
+//
+// 历史缺陷：两函数在守卫放行分支内调用自身（自递归，无终止条件），生产态
+// （metricsHostGuard=false）触达即无限递归栈溢出。本用例经日志宿接缝断言：
+// 放行分支各调用日志宿恰一次（若自递归 → 栈溢出，测试进程崩溃即判失败）；
+// 守卫分支为 no-op。
+func TestAuditLogHelpersNoSelfRecursion(t *testing.T) {
+	oldGuard := metricsHostGuard
+	oldInfo, oldWarn := auditInfoLog, auditWarnLog
+	t.Cleanup(func() {
+		metricsHostGuard = oldGuard
+		auditInfoLog, auditWarnLog = oldInfo, oldWarn
+	})
+
+	var info, warn int
+	auditInfoLog = func(string, ...interface{}) { info++ }
+	auditWarnLog = func(string, ...interface{}) { warn++ }
+
+	// 放行分支（模拟生产 Wasm 运行态）：各调用一次。
+	metricsHostGuard = false
+	auditInfof("info x=%d", 1)
+	auditWarnf("warn y=%d", 2)
+	if info != 1 || warn != 1 {
+		t.Fatalf("放行分支应各调用日志宿一次：info=%d warn=%d", info, warn)
+	}
+
+	// 守卫分支（单测/非 Wasm 运行态）：no-op，不调用日志宿。
+	metricsHostGuard = true
+	auditInfof("info")
+	auditWarnf("warn")
+	if info != 1 || warn != 1 {
+		t.Fatalf("守卫分支不应调用日志宿：info=%d warn=%d", info, warn)
+	}
+}

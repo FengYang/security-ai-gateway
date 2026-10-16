@@ -96,6 +96,13 @@ func (r *routeRuntimeState) fetchParams() (key []byte, service string, port int6
 
 // initRouteRuntime 按配置初始化/刷新路由运行时；未启用则置空（决策不介入）。
 func initRouteRuntime(config PluginConfig, log logs.Log) {
+	// P1-6 M4.4（R2-17/TT2-11）：未映射策略请求路径信号接线（引擎 default 分支每次命中回调）
+	// → otpmask_route_strategy_unknown_total + 错误日志；回退动作保持 priority（运行语义不变）。
+	// 装配期调用（每次配置加载幂等重设），单线程语义。
+	routeengine.SetStrategyUnknownObserver(func(strategy string) {
+		metricRouteStrategyUnknown.incr()
+		log.Errorf("otpmask-plugin: 未映射路由策略 %q（请求路径命中）→ 回退 priority（新策略须同步登记 routeStrategy 与 pickByStrategy 两处 switch）", strategy)
+	})
 	routeRuntime.key = nil
 	routeRuntime.cache = nil
 	routeRuntime.service = ""
@@ -293,6 +300,8 @@ func finishRouteDecision(ctx wrapper.HttpContext, log logs.Log, tenant, model, r
 			case "control":
 				metricRouteCanaryControl.incr()
 			}
+			// P1-6 M5.2（§6.5）：延迟策略选路计数（按策略拆名；回退保留策略标签亦计入，R2-10）
+			recordLatencyPick(epd.Strategy)
 		}
 	}
 
@@ -381,7 +390,7 @@ func buildEngineConfig(tr *routecache.TableRoute) routeengine.Config {
 		// 注册端点凭证（secret_ref 非空时）
 		if ep.Auth.SecretRef != "" {
 			if err := registerEndpointCredentials(ep.Name, ep.Auth.SecretRef); err != nil {
-				proxywasm.LogWarnf("otpmask-plugin: 端点 %q 凭证注册失败: %v", ep.Name, err)
+				routeConfigWarnf("otpmask-plugin: 端点 %q 凭证注册失败: %v", ep.Name, err)
 			}
 		}
 		eps = append(eps, routeengine.EndpointConfig{
@@ -409,23 +418,103 @@ func buildEngineConfig(tr *routecache.TableRoute) routeengine.Config {
 		Strategy:  routeStrategy(tr.Strategy),
 		Endpoints: eps,
 		Canary:    canaryCfg,
+		// P1-6 M4.5：latency 段解析（缺省填充按字段存在性；仅延迟策略参与选路）。
+		Latency: buildLatencyConfig(tr.Latency),
 	}
 }
 
+// buildLatencyConfig 由路由表 latency 段构造引擎延迟配置（P1-6 M4.5，§6.1）。
+//
+// 缺省填充按**字段存在性**完成：gamma / min_weight / explore_ratio / cache_partition
+// 为指针字段（非 nil = 显式值，含合法零值 gamma=0 / min_weight=0 / explore_ratio=0 /
+// cache_partition=false）；其余字段零值 ≡ 未配置（零值非法，Validate 已把关），
+// 与 LatencyConfig.normalized() 的兜底钳制口径一致。
+// nil 段（未携带 latency 的表）→ 全缺省（防御性：延迟策略本应在 Validate 层要求携带）。
+func buildLatencyConfig(l *routecache.RouteLatency) routeengine.LatencyConfig {
+	cfg := routeengine.DefaultLatencyConfig()
+	if l == nil {
+		return cfg
+	}
+	if l.WindowSec != 0 {
+		cfg.WindowSec = l.WindowSec
+	}
+	if l.Quantile != "" {
+		cfg.Quantile = l.Quantile
+	}
+	if l.Gamma != nil {
+		cfg.Gamma = *l.Gamma
+	}
+	if l.MinWeight != nil {
+		cfg.MinWeight = *l.MinWeight
+	}
+	if l.ExploreRatio != nil {
+		cfg.ExploreRatio = *l.ExploreRatio
+	}
+	if l.MinSamples != 0 {
+		cfg.MinSamples = l.MinSamples
+	}
+	if l.StaleSec != 0 {
+		cfg.StaleSec = l.StaleSec
+	}
+	if l.CachePartition != nil {
+		cfg.CachePartition = *l.CachePartition
+	}
+	if l.MaxTTFTMs != 0 {
+		cfg.MaxTTFTMs = l.MaxTTFTMs
+	}
+	return cfg
+}
+
 // routeStrategy 解析路由策略字符串（大小写与连接符不敏感）。
-// 兼容方案 §4.1.3 枚举（priority/weighted/failure-rate-aware）与引擎内部取值；
-// 未知/空值回落 priority（主备，最保守）。
+// 兼容方案 §4.1.3/§6.1 枚举（priority/weighted/failure-rate-aware/latency-aware/
+// latency-fastest/hybrid）与引擎内部取值；空值 = priority（缺省，与既有行为一致，
+// 不产生信号）。
+// default = 显式信号（P1-6 M4.4；R2-17/TT2-11）：计入 otpmask_route_strategy_unknown_total
+// + 错误日志（配置加载期，每 route 一次），回退动作保持 priority（不改既有运行语义）；
+// 新增策略须同步登记本 switch 与 routeengine.pickByStrategy()（评审 checklist）。
 func routeStrategy(s string) routeengine.Strategy {
 	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "primary-backup", "priority", "primary_backup":
+		return routeengine.StrategyPriority
 	case "weighted", "weight":
 		return routeengine.StrategyWeighted
 	case "failure-rate-aware", "failure_rate_aware", "failure-rate", "failureaware":
 		return routeengine.StrategyFailureAware
-	case "primary-backup", "priority", "primary_backup":
-		return routeengine.StrategyPriority
+	case "latency-aware", "latency_aware":
+		return routeengine.StrategyLatencyAware
+	case "latency-fastest", "latency_fastest":
+		return routeengine.StrategyLatencyFastest
+	case "hybrid":
+		return routeengine.StrategyHybrid
 	default:
+		metricRouteStrategyUnknown.incr()
+		routeStrategyErrorf("otpmask-plugin: 未映射路由策略 %q → 回退 priority（新策略须同步登记 routeStrategy 与 pickByStrategy 两处 switch）", s)
 		return routeengine.StrategyPriority
 	}
+}
+
+// routeConfigWarnLog / routeStrategyErrorLog 配置期日志宿（默认直连 proxywasm；
+// 经包级变量收口，单测可覆写以断言调用——与 report.go 的 auditInfoLog/auditWarnLog 同范式）。
+var (
+	routeConfigWarnLog    = func(format string, args ...interface{}) { proxywasm.LogWarnf(format, args...) }
+	routeStrategyErrorLog = func(format string, args ...interface{}) { proxywasm.LogErrorf(format, args...) }
+)
+
+// routeConfigWarnf 路由表配置期告警（host 单测下 no-op，防 proxywasm hostcall panic）。
+func routeConfigWarnf(format string, args ...interface{}) {
+	if metricsHostGuard {
+		return
+	}
+	routeConfigWarnLog(format, args...)
+}
+
+// routeStrategyErrorf 未映射策略错误日志（host 单测下 no-op，防 proxywasm hostcall panic；
+// 复用 metrics.go 的 metricsHostGuard 作为"非 Wasm 运行态"守卫）。
+func routeStrategyErrorf(format string, args ...interface{}) {
+	if metricsHostGuard {
+		return
+	}
+	routeStrategyErrorLog(format, args...)
 }
 
 // routeEndpointSuccess 判定一次端点响应是否算成功（§6.5.8 错误分类与处理矩阵）：

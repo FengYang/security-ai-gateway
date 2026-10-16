@@ -35,20 +35,30 @@ import (
 // defaultAuditReportQueueMax 上报队列缺省容量（§6.5 队列三要素，与 rpm-shadow 对齐）。
 const defaultAuditReportQueueMax = 32
 
+// auditInfoLog / auditWarnLog 日志宿（默认直连 proxywasm）；经包级变量收口，单测可覆写以断言调用。
+//
+// 修复（G-5）：原实现 `auditInfof`/`auditWarnf` 在守卫放行分支内**调用自身**（自递归，
+// 无终止条件）——生产态（`metricsHostGuard=false`）触达即无限递归栈溢出。此处改为直连
+// `proxywasm.LogInfof/LogWarnf`。
+var (
+	auditInfoLog = func(format string, args ...interface{}) { proxywasm.LogInfof(format, args...) }
+	auditWarnLog = func(format string, args ...interface{}) { proxywasm.LogWarnf(format, args...) }
+)
+
 // auditInfof / auditWarnf 上报通道日志（host 单测下 no-op，防 proxywasm hostcall panic；
 // 复用 metrics.go 的 metricsHostGuard 作为"非 Wasm 运行态"守卫）。
 func auditInfof(format string, args ...interface{}) {
 	if metricsHostGuard {
 		return
 	}
-	auditInfof(format, args...)
+	auditInfoLog(format, args...)
 }
 
 func auditWarnf(format string, args ...interface{}) {
 	if metricsHostGuard {
 		return
 	}
-	auditWarnf(format, args...)
+	auditWarnLog(format, args...)
 }
 
 // auditReportTimeoutMs 单次上报 HTTP 超时（与 rpm-shadow-plugin reportTimeoutMs 同法：无类型常量，

@@ -3,6 +3,7 @@ package routeengine
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 // ============================================================
@@ -56,10 +57,10 @@ func BenchmarkPickEndpoint_10FailureAware(b *testing.B) {
 		}
 	}
 	e := NewEngine(Config{
-		Strategy:         StrategyFailureAware,
-		Endpoints:        eps,
-		EWMAMinSamples:   10,
-		EWMAAlpha:        0.2,
+		Strategy:          StrategyFailureAware,
+		Endpoints:         eps,
+		EWMAMinSamples:    10,
+		EWMAAlpha:         0.2,
 		CircuitMinSamples: 20,
 	})
 	// 预热：建立统计基线
@@ -126,11 +127,11 @@ func BenchmarkRecordResult_Failure(b *testing.B) {
 		Endpoints: []EndpointConfig{
 			{Name: "ep1", Weight: 1.0, Priority: 1, Enabled: true},
 		},
-		EWMAMinSamples:      5,
-		EWMAAlpha:           0.5,
+		EWMAMinSamples:       5,
+		EWMAAlpha:            0.5,
 		CircuitFailureThresh: 0.5,
-		CircuitMinSamples:   10,
-		CircuitCooldownMs:   60000,
+		CircuitMinSamples:    10,
+		CircuitCooldownMs:    60000,
 	})
 	// 先积累一些成功样本
 	for i := 0; i < 10; i++ {
@@ -155,10 +156,10 @@ func BenchmarkRecordResult_10EndpointsMixed(b *testing.B) {
 		}
 	}
 	e := NewEngine(Config{
-		Strategy:         StrategyFailureAware,
-		Endpoints:        eps,
-		EWMAMinSamples:   10,
-		EWMAAlpha:        0.2,
+		Strategy:          StrategyFailureAware,
+		Endpoints:         eps,
+		EWMAMinSamples:    10,
+		EWMAAlpha:         0.2,
 		CircuitMinSamples: 20,
 	})
 	// 预热
@@ -327,6 +328,127 @@ func BenchmarkUpdateConfigSmooth_100Endpoints(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		e.UpdateConfigSmooth(newConfig)
+	}
+}
+
+// ============================================================
+// P1-6 M6.4：延迟策略选路基准确认（目标 < 20μs/次，TT2-02/TT2-05）
+//
+// 说明：`RandSource` 为进程级注入接缝；基准注入**同步**随机源以使加权/探索热路径
+// 被执行（而非随机源不可用的确定性回退分支）。统计画像全部设为「有效」，确保走
+// 加权路径而非 no_samples 回退。
+// ============================================================
+
+// benchRand 同步确定性随机源（基准用；避免走 no_rand 回退）。
+type benchRand struct{ v float64 }
+
+func (r benchRand) Float64() (float64, bool) { return r.v, true }
+
+// benchSetupRand 注入基准随机源，基准结束复位。
+func benchSetupRand(b *testing.B) {
+	SetRandSource(benchRand{v: 0.5})
+	b.Cleanup(func() { SetRandSource(nil) })
+}
+
+// benchLatencyEngine 构造 n 端点、全部具备有效 TTFT 画像的延迟策略引擎。
+func benchLatencyEngine(n int, strategy Strategy, withStats bool) *Engine {
+	eps := make([]EndpointConfig, n)
+	for i := 0; i < n; i++ {
+		eps[i] = EndpointConfig{
+			Name:     fmt.Sprintf("ep-%03d", i),
+			Weight:   1.0 / float64(n),
+			Priority: 1,
+			Enabled:  true,
+		}
+	}
+	e := NewEngine(Config{
+		Strategy:  strategy,
+		Endpoints: eps,
+		Latency:   DefaultLatencyConfig(),
+	})
+	if withStats {
+		now := time.Now().Unix()
+		for i := 0; i < n; i++ {
+			e.SetEndpointTTFT(eps[i].Name, TTFTStat{
+				P50Ms:     int64(100 + i*10),
+				P95Ms:     int64(120 + i*20),
+				Samples:   500,
+				Valid:     true,
+				UpdatedAt: now,
+				Cache:     "miss",
+			})
+		}
+	}
+	return e
+}
+
+// BenchmarkPickEndpoint_LatencyAware_10 10 端点 latency-aware（加权 + 探索热路径）。
+func BenchmarkPickEndpoint_LatencyAware_10(b *testing.B) {
+	benchSetupRand(b)
+	e := benchLatencyEngine(10, StrategyLatencyAware, true)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = e.PickEndpoint()
+	}
+}
+
+// BenchmarkPickEndpoint_LatencyAware_100 100 端点 latency-aware（O(端点数)）。
+func BenchmarkPickEndpoint_LatencyAware_100(b *testing.B) {
+	benchSetupRand(b)
+	e := benchLatencyEngine(100, StrategyLatencyAware, true)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = e.PickEndpoint()
+	}
+}
+
+// BenchmarkPickEndpoint_LatencyAware_100_NoStats 100 端点无画像（确定性回退路径）。
+func BenchmarkPickEndpoint_LatencyAware_100_NoStats(b *testing.B) {
+	benchSetupRand(b)
+	e := benchLatencyEngine(100, StrategyLatencyAware, false)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = e.PickEndpoint()
+	}
+}
+
+// BenchmarkPickEndpoint_LatencyFastest_100 100 端点 latency-fastest（argmin 确定性）。
+func BenchmarkPickEndpoint_LatencyFastest_100(b *testing.B) {
+	e := benchLatencyEngine(100, StrategyLatencyFastest, true)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = e.PickEndpoint()
+	}
+}
+
+// BenchmarkPickEndpoint_Hybrid_100 100 端点 hybrid（失败率 × TTFT 三步合并）。
+func BenchmarkPickEndpoint_Hybrid_100(b *testing.B) {
+	benchSetupRand(b)
+	e := benchLatencyEngine(100, StrategyHybrid, true)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = e.PickEndpoint()
+	}
+}
+
+// BenchmarkSetEndpointTTFT_100 100 端点统计写入路径（M2.6 下发写入开销）。
+func BenchmarkSetEndpointTTFT_100(b *testing.B) {
+	e := benchLatencyEngine(100, StrategyLatencyAware, false)
+	now := time.Now().Unix()
+	names := make([]string, 100)
+	for i := range names {
+		names[i] = fmt.Sprintf("ep-%03d", i)
+	}
+	stat := TTFTStat{P50Ms: 110, P95Ms: 130, Samples: 500, Valid: true, UpdatedAt: now, Cache: "miss"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		e.SetEndpointTTFT(names[i%100], stat)
 	}
 }
 

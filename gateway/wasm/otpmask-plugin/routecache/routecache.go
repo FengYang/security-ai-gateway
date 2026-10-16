@@ -44,6 +44,23 @@ type RouteCanary struct {
 	AllowedTenants     []string `json:"allowed_tenants,omitempty"`
 }
 
+// RouteLatency 延迟择优配置段（P1-6 M4.2；与 gateway-core internal/route 的
+// RouteLatency **JSON 严格对齐**，签名一致性依赖于此，C-5）。
+//
+// 字段存在性：gamma / min_weight / explore_ratio / cache_partition 用指针保存
+// 「显式零值」与「未配置」（缺省填充在 buildEngineConfig，M4.5）；其余字段零值非法。
+type RouteLatency struct {
+	WindowSec      int      `json:"window_sec,omitempty"`      // 滑窗长度（秒），默认 300，范围 60–3600
+	Quantile       string   `json:"quantile,omitempty"`        // 参考延迟分位："p50"/"p95"，默认 "p95"
+	Gamma          *float64 `json:"gamma,omitempty"`           // 倒数幂指数 γ，默认 1.0，范围 0–5（0 合法）
+	MinWeight      *float64 `json:"min_weight,omitempty"`      // 归一化前相对权重下界，默认 0.05，范围 0–0.5（0 合法）
+	ExploreRatio   *float64 `json:"explore_ratio,omitempty"`   // 探索概率，默认 0.05，范围 0–1（0 合法）
+	MinSamples     int      `json:"min_samples,omitempty"`     // 样本不足判无效，默认 20，≥1
+	StaleSec       int      `json:"stale_sec,omitempty"`       // 统计过期阈值（秒），默认 75，≥25
+	CachePartition *bool    `json:"cache_partition,omitempty"` // 按 cache 分层统计，默认 true（false 合法）
+	MaxTTFTMs      int64    `json:"max_ttft_ms,omitempty"`     // 采样上限（毫秒），默认 30000，≥1000
+}
+
 // TableRoute 路由表条目（与 gateway-core internal/route 的 JSON 对齐）。
 type TableRoute struct {
 	Tenant         string          `json:"tenant"`
@@ -54,8 +71,10 @@ type TableRoute struct {
 	Endpoints      []TableEndpoint `json:"endpoints,omitempty"` // P0-1 新增：多端点权重配置
 	// P0-1 新增：多端点路由策略（priority/weighted/failure-aware）。空 = priority。
 	// 与 gateway-core internal/route.TableRoute 的 JSON 严格对齐（签名一致性）。
-	Strategy string      `json:"strategy,omitempty"`
+	Strategy string       `json:"strategy,omitempty"`
 	Canary   *RouteCanary `json:"canary,omitempty"` // P0-1 新增：灰度切流配置（§7.5）
+	// P1-6 新增：延迟择优配置段（omitempty：旧表序列化逐字节不变，C-5）。
+	Latency *RouteLatency `json:"latency,omitempty"`
 }
 
 // RouteTable 签名路由表（JSON 与网关侧对齐）。
@@ -81,7 +100,7 @@ func (t *RouteTable) canon() []byte {
 // 估算方法（保守高估，宁可算大也不算小，避免超限漏判）：
 //   - 固定开销：Version + UpdatedAt + Signature 实际字节 + slice 头（24字节）
 //   - 每条 TableRoute：Tenant+Model+DefaultEngine+FallbackEngine+Target+Strategy 字符串长度
-//     + Endpoints slice 头 + Canary 指针（8字节）
+//   - Endpoints slice 头 + Canary 指针（8字节）
 //   - 每个 TableEndpoint：Name+URL 字符串长度 + Auth 两个字符串 + 结构体字段固定开销
 //   - 每个 Canary：TargetEndpoint 字符串 + AllowedTenants 各字符串 + 固定字段
 //
@@ -115,6 +134,12 @@ func (t *RouteTable) EstimatedSize() int {
 			for _, tn := range r.Canary.AllowedTenants {
 				size += len(tn) + 16
 			}
+		}
+		// Latency 段（P1-6 M4.2）：指针 + 字符串 + 固定字段（int/int64 + 4 指针）
+		if r.Latency != nil {
+			size += 8 // 指针本身
+			size += len(r.Latency.Quantile)
+			size += 88 // 固定字段（WindowSec/MinSamples/StaleSec/MaxTTFTMs + Gamma/MinWeight/ExploreRatio/CachePartition 指针 + padding）
 		}
 	}
 	return size
@@ -159,7 +184,7 @@ type Cache struct {
 	keyRef   string
 	table    *RouteTable // 当前生效表（最高已验签版本）
 	maxStale time.Duration
-	maxSize  int         // 0 = 不限制
+	maxSize  int // 0 = 不限制
 	now      func() time.Time
 	onReject func(reason string, newVersion int)
 }
@@ -187,10 +212,10 @@ func NewWithOptions(verifier Verifier, keyRef string, opt Options) *Cache {
 
 // Update 用签名路由表更新缓存（CPS 交付：签名校验经 §4.7 注入的 verifier，proxy-wasm 无阻塞 HTTP）。
 // 规则（按顺序，全部通过才接受）：
-//   1. 签名无效 / 校验不可用 → 拒绝（reason=bad_signature）；
-//   2. 版本 < 当前缓存 → 拒绝（防回滚，reason=replay）；
-//   3. 大小超过 MaxSize → 拒绝（防 DoS，reason=too_large）；
-//   4. 否则替换为更高（或同）版本。
+//  1. 签名无效 / 校验不可用 → 拒绝（reason=bad_signature）；
+//  2. 版本 < 当前缓存 → 拒绝（防回滚，reason=replay）；
+//  3. 大小超过 MaxSize → 拒绝（防 DoS，reason=too_large）；
+//  4. 否则替换为更高（或同）版本。
 func (c *Cache) Update(t *RouteTable, cb func(accepted bool)) {
 	if t == nil || c.verifier == nil {
 		c.onRejectSafe("bad_signature", 0)

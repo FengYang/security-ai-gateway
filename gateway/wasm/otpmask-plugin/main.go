@@ -49,6 +49,8 @@ func init() {
 		// （MemKeyStore 无 TTL，不做此清理会致 seed 永久残留）。
 		wrapper.ProcessStreamDoneBy(onStreamDone),
 	)
+	// P1-6 M5.2（§6.5）：装配期注入延迟策略回退观测（五原因拆名 Counter）。
+	initLatencyMetrics()
 }
 
 // PluginConfig 插件配置（控制台 YAML 自动转 JSON 下发）。
@@ -153,10 +155,10 @@ type PluginConfig struct {
 	// 未配置 = 走原 CryptoClient 验签路径（行为与改造前完全一致）。
 	// 配置后 = 证明验证全部经 attest-verify sidecar /verify（含签名链 + report_data + 度量基线），
 	// 插件侧只做 nonce 回显（公开值，本地比较），其余 fail-closed。
-	AttestVerifyService    string `json:"attest_verify_service"`     // sidecar cluster 名（如 attest-verify.static）
-	AttestVerifyPort       int64  `json:"attest_verify_port"`        // sidecar 端口（缺省 19191）
-	AttestVerifyToken      string `json:"attest_verify_token"`       // 共享验证令牌（X-Verify-Token，可选）
-	AttestVerifyTimeoutMS  int64  `json:"attest_verify_timeout_ms"`  // 调用超时（缺省 2000ms；quote 验证比密码操作重）
+	AttestVerifyService   string `json:"attest_verify_service"`    // sidecar cluster 名（如 attest-verify.static）
+	AttestVerifyPort      int64  `json:"attest_verify_port"`       // sidecar 端口（缺省 19191）
+	AttestVerifyToken     string `json:"attest_verify_token"`      // 共享验证令牌（X-Verify-Token，可选）
+	AttestVerifyTimeoutMS int64  `json:"attest_verify_timeout_ms"` // 调用超时（缺省 2000ms；quote 验证比密码操作重）
 
 	// ---- P1-7 T2b（§6.5 / D-13）：数据面未达 TEE 流量上报通道（插件侧）----
 	// 仅当 audit_report_token 配置时启用（缺省关闭，零行为变化，符合插件惯例）。
@@ -164,6 +166,12 @@ type PluginConfig struct {
 	AuditReportToken    string `json:"audit_report_token"`     // 独立只读上报令牌（X-Admin-Token）
 	AuditReportFlushMs  int64  `json:"audit_report_flush_ms"`  // tick 批量投递间隔（缺省 1000ms）
 	AuditReportQueueMax int64  `json:"audit_report_queue_max"` // 有界队列容量（缺省 32，§6.5 队列三要素）
+
+	// ---- P1-6：TTFT 严格性能择优（§6.1/§6.2）----
+	// 节点名（上报 batch_id 前缀；R2-03/G-3 双通道——本配置优先，缺省经 Envoy 属性 node.id 取得）。
+	NodeName string `json:"node_name"`
+	// TTFT 上报/拉取周期（秒；§6.4：缺省 10s，**必须 ≤ 分片窗口 T=25s**，不复用 poll_interval）。
+	TTFTPollIntervalSeconds int64 `json:"ttft_poll_interval_seconds"`
 }
 
 func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
@@ -229,6 +237,10 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.AuditReportToken = json.Get("audit_report_token").String()
 	config.AuditReportFlushMs = json.Get("audit_report_flush_ms").Int()
 	config.AuditReportQueueMax = json.Get("audit_report_queue_max").Int()
+	// P1-6：TTFT 上报节点名（缺省空 = 走 Envoy 属性 node.id，R2-03/G-3 双通道）。
+	config.NodeName = json.Get("node_name").String()
+	// P1-6 M2.5：TTFT 上报/拉取周期（§6.4；缺省与收口在下方默认段统一处理）。
+	config.TTFTPollIntervalSeconds = json.Get("ttft_poll_interval_seconds").Int()
 	if config.CryptoProfile == "" {
 		config.CryptoProfile = "intl"
 	}
@@ -286,6 +298,16 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	if config.PollIntervalSeconds <= 0 {
 		config.PollIntervalSeconds = 60
 	}
+	// P1-6 M2.5：TTFT 上报/拉取周期（§6.4）——缺省 10s；必须 ≤ 分片窗口 T=25s
+	// （与滑窗覆盖/stale_sec 联动，TT2-19），超出按上限收口并告警；不复用 poll_interval。
+	if config.TTFTPollIntervalSeconds <= 0 {
+		config.TTFTPollIntervalSeconds = 10
+	}
+	if config.TTFTPollIntervalSeconds > 25 {
+		log.Warnf("otpmask-plugin: ttft_poll_interval_seconds=%d 超出分片窗口上限 25s，已收口（§6.4/TT2-19）",
+			config.TTFTPollIntervalSeconds)
+		config.TTFTPollIntervalSeconds = 25
+	}
 	// 段① 凭据拉取缺省（门禁 #8）；无读取令牌 = 不启用（fail-closed：不发半配置请求）。
 	if config.CredentialService == "" {
 		// 与 deploy/k8s/gateway-admin-service.yaml 的命名空间一致（otpmask）。
@@ -309,6 +331,8 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	initCredentialRuntime(*config)
 	// 限流表拉取（Phase 1 门禁 #7 / 判据 5；未启用则零影响：不拉取、不介入请求）。
 	initRateLimitRuntime(*config, log)
+	// P1-6 M2.5：TTFT 上报运行态（未配置控制面通道则置空 → 零行为变化；采集仍本地累计）。
+	initTTFTRuntime(*config, log)
 	// 租户 API Key 吊销拉取（M3 §8 依赖 3；未启用则零影响）。
 	initKeyRevocationRuntime(*config, log)
 	// P0-4 §12.3：装配 cryptop sidecar 客户端 + 启动期载入 capabilities（R-18）。
@@ -426,6 +450,10 @@ const ctxKeyTenantID = "otpmask-tenant-id"
 
 // ctxKeyRespStatus 响应状态码缓存键（同因：body 阶段读不到响应伪头 :status）。
 const ctxKeyRespStatus = "otpmask-resp-status"
+
+// ctxKeyTTFTCache TEE 响应头的缓存命中标识缓存键（P1-6 M2.7；body 阶段读不到响应头，
+// 与 :status 同因——响应头阶段读取并保存；契约未落地时头名为空、不读取，恒 miss）。
+const ctxKeyTTFTCache = "otpmask-ttft-cache"
 
 // ctxKeyRouteEndpoint / ctxKeyRouteEntry / ctxKeyRouteStart 请求级路由上下文（P0-1 多端点路由）。
 // 请求头阶段写入，响应头阶段读取以回写 EWMA/熔断/延迟结果。
@@ -568,6 +596,11 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig, log log
 	// body 阶段读不到响应伪头 :status → 此处缓存（SSE 增量 vs 整包路径判定依赖）。
 	st := responseStatus()
 	ctx.SetContext(ctxKeyRespStatus, st)
+	// P1-6 M2.7（D-10）：TEE 侧缓存命中标识——契约未落地（头名为空）时不读取、恒 miss；
+	// 契约定稿后自动 hit/miss 归维（body 阶段读不到响应头，故此处缓存）。
+	if ttftCacheHeaderName != "" {
+		ctx.SetContext(ctxKeyTTFTCache, ttftCacheDimFromHeaders(proxywasm.GetHttpResponseHeader))
+	}
 	// P0-1 多端点路由结果回写（EWMA 失败率/熔断/动态权重）；未选择端点时为 no-op。
 	if code, err := strconv.Atoi(st); err == nil {
 		recordRouteResult(ctx, code)
@@ -1130,6 +1163,8 @@ type respStreamState struct {
 	// B1：强标标识已注入（每流至多一次；上游 SawLabel 时不注入——单一注入点规则兜底）。
 	labelInjected bool
 	keys          []string // 本请求在 KeyStore 登记的密钥 key（onStreamDone 兜底删除）
+	// P1-6 M2.1：TTFT 首 token 采样状态（懒建；实现见 ttft_report.go）。
+	ttft *ttftRespSample
 }
 
 // ctxKeyRespStream 请求级响应流状态的上下文键。
@@ -1246,8 +1281,13 @@ func driveStream(ctx wrapper.HttpContext, config PluginConfig, st *respStreamSta
 				return
 			}
 			noteContentFilter(st) // OG-16：content_filter 审核终止边沿计数
+			// P1-6 M2.1：首内容 token 采样（label 注入之前——仅模型内容参与判定，R2-04）
+			ttftOnDecryptedOut(ctx, config, st, out)
 			out = maybeInjectContentLabel(st, config, out)
 			injectStream(ctx, st, out)
+			if st.dec != nil && st.dec.Completed() {
+				ttftCommitOnComplete(st) // P1-6 M2.1：流完整结束 → 提交候选（唯一提交点）
+			}
 			if !st.closed && len(st.rawPending) > 0 {
 				driveStream(ctx, config, st, log)
 			}

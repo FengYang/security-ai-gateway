@@ -94,3 +94,40 @@ func TestGetRoutes(t *testing.T) {
 	}
 	_ = tbl
 }
+
+// P1-6 M4.3：PUT /routes 非法 latency 组合 → 400 invalid_route（用户可见契约）；
+// 合法组合对照 → 200。
+func TestUpsertRouteLatencyValidation(t *testing.T) {
+	s := testServer()
+	put := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/routes/t1/m1", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	// 非法：latency 策略缺 latency 段
+	rec := put(`{"default_engine":"cmaas","strategy":"hybrid","endpoints":[{"name":"a","url":"https://a/v1","weight":1,"priority":1,"enabled":true}]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("latency 策略缺段应 400，got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var e struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatal(err)
+	}
+	if e.Code != "invalid_route" {
+		t.Fatalf("错误码应 invalid_route，got %q（body=%s）", e.Code, rec.Body.String())
+	}
+	// 非法：gamma 越界（0–5）
+	rec = put(`{"default_engine":"cmaas","strategy":"latency-aware","latency":{"gamma":6},"endpoints":[{"name":"a","url":"https://a/v1","weight":1,"priority":1,"enabled":true}]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("gamma 越界应 400，got %d body=%s", rec.Code, rec.Body.String())
+	}
+	// 对照：合法组合（§6.1 示例字段）应 200
+	rec = put(`{"default_engine":"cmaas","strategy":"latency-aware","latency":{"window_sec":300,"quantile":"p95","gamma":1,"min_weight":0.05,"explore_ratio":0.05,"min_samples":20,"stale_sec":75,"cache_partition":true,"max_ttft_ms":30000},"endpoints":[{"name":"a","url":"https://a/v1","weight":1,"priority":1,"enabled":true}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("合法组合应 200，got %d body=%s", rec.Code, rec.Body.String())
+	}
+}

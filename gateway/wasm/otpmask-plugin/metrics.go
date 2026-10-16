@@ -10,11 +10,24 @@ package main
 //	otpmask_keys_issued_total     请求密钥签发数（入库即计）
 //	otpmask_keys_deleted_total    请求密钥删除数（存量 = issued - deleted）
 //	otpmask_route_degraded_total  路由降级数（§6：L1 处方缺失/失效 → 走 L2 默认路由表）
+//	otpmask_route_strategy_unknown_total 未映射策略命中次数（P1-6 M4.4：routeStrategy/
+//	                              pickByStrategy 两处 default 显式信号，R2-17/TT2-11）
 //	otpmask_route_fetch_cb_total  路由表拉取**回调被执行**次数（异步响应到达回调的次数；
 //	                              恒为 0 说明回调从未执行，例如响应已随 fail-closed 发出后
 //	                              流上下文结束导致挂起回调被丢弃）
 //	otpmask_route_fetch_ok_total  路由表验签通过并写入缓存次数
 //	otpmask_route_fetch_reject_total 路由表被拒次数（验签失败 / 版本回滚 / 路由未启用 / 非 200）
+//	otpmask_route_ttft_report_cb_total     TTFT 上报回调被执行次数（恒 0 ⇒ 回调被丢弃；§6.5）
+//	otpmask_route_ttft_report_ok_total     TTFT 上报确认成功次数（200 且 result=ok/dropped/duplicate）
+//	otpmask_route_ttft_report_reject_total TTFT 上报未确认次数（非 200 / 非契约载荷；保留待确认队列重发）
+//	otpmask_route_ttft_report_drop_total   待确认队列超限丢弃最旧批次数（R2-06/R2-18）
+//	otpmask_route_ttft_stats_fetch_cb_total     TTFT 统计拉取回调被执行次数（恒 0 ⇒ 回调被丢弃）
+//	otpmask_route_ttft_stats_fetch_ok_total     TTFT 统计拉取确认成功次数（200 契约载荷 / 404 无统计）
+//	otpmask_route_ttft_stats_fetch_reject_total TTFT 统计拉取被拒次数（网络错/5xx/非契约载荷）
+//	otpmask_route_ttft_seconds_bucket_le_*  首 token 延迟累积直方图（11 桶，秒制上界；M5.1，§6.5）
+//	otpmask_route_latency_pick_weighted/fastest/hybrid_total  延迟策略选路计数（按策略拆名；M5.2）
+//	otpmask_route_ttft_fallback_unreachable/stale/low_samples/no_samples/no_rand_total
+//	                               TTFT 统计缺失/无效/不可达回退计数（五原因拆名；M5.2，R2-19）
 //	otpmask_cred_fetch_cb_total   段① 凭据拉取**回调被执行**次数（恒 0 ⇒ 回调被丢弃）
 //	otpmask_cred_fetch_ok_total   段① 凭据校验通过并写入运行态次数
 //	otpmask_cred_fetch_reject_total 段① 凭据被拒次数（非 200 / 解析失败 / 载荷非法；插件保留旧值）
@@ -28,6 +41,8 @@ import (
 	"strings"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
+
+	"security-ai-gateway/gateway/wasm/otpmask-plugin/routeengine"
 )
 
 // metricsHostGuard 单测环境守卫：true 时 incr 为 no-op（防 hostcall panic）。
@@ -69,6 +84,30 @@ var (
 	metricRouteFetchCb     = &pwCounter{name: "otpmask_route_fetch_cb_total"}
 	metricRouteFetchOK     = &pwCounter{name: "otpmask_route_fetch_ok_total"}
 	metricRouteFetchReject = &pwCounter{name: "otpmask_route_fetch_reject_total"}
+	// P1-6 M2.5（§6.5）：TTFT 上报通道四件套（cb/ok/reject/drop）。
+	//   cb 恒 0 ⇒ 回调被丢弃（对齐 route_fetch_cb 语义）；
+	//   reject 持续增长 ⇒ 控制面不可达或响应非契约（保留待确认队列，下个 tick 原样重发）；
+	//   drop ⇒ 待确认队列超限丢最旧（R2-18 命名统一为独立 Counter）。
+	metricTTFTReportCb     = &pwCounter{name: "otpmask_route_ttft_report_cb_total"}
+	metricTTFTReportOK     = &pwCounter{name: "otpmask_route_ttft_report_ok_total"}
+	metricTTFTReportReject = &pwCounter{name: "otpmask_route_ttft_report_reject_total"}
+	metricTTFTReportDrop   = &pwCounter{name: "otpmask_route_ttft_report_drop_total"}
+	// P1-6 M2.6（§6.5）：TTFT 统计拉取三件套（cb/ok/reject）。
+	metricTTFTStatsFetchCb     = &pwCounter{name: "otpmask_route_ttft_stats_fetch_cb_total"}
+	metricTTFTStatsFetchOK     = &pwCounter{name: "otpmask_route_ttft_stats_fetch_ok_total"}
+	metricTTFTStatsFetchReject = &pwCounter{name: "otpmask_route_ttft_stats_fetch_reject_total"}
+	// P1-6 M5.2（§6.5）：延迟策略选路计数（按策略拆名；proxy-wasm Counter 不支持标签）。
+	// 语义：请求在 latency 策略下完成端点选择即计数——回退保留策略标签（R2-10），回退亦
+	// 计入本组；回退子集另经 fallback 五原因拆名表达（R2-19）。
+	metricRouteLatencyPickWeighted = &pwCounter{name: "otpmask_route_latency_pick_weighted_total"}
+	metricRouteLatencyPickFastest  = &pwCounter{name: "otpmask_route_latency_pick_fastest_total"}
+	metricRouteLatencyPickHybrid   = &pwCounter{name: "otpmask_route_latency_pick_hybrid_total"}
+	// P1-6 M5.2（§6.5/R2-19 序 1-5）：TTFT 回退计数（五原因拆名）。
+	metricRouteTTFTFallbackUnreachable = &pwCounter{name: "otpmask_route_ttft_fallback_unreachable_total"}
+	metricRouteTTFTFallbackStale       = &pwCounter{name: "otpmask_route_ttft_fallback_stale_total"}
+	metricRouteTTFTFallbackLowSamples  = &pwCounter{name: "otpmask_route_ttft_fallback_low_samples_total"}
+	metricRouteTTFTFallbackNoSamples   = &pwCounter{name: "otpmask_route_ttft_fallback_no_samples_total"}
+	metricRouteTTFTFallbackNoRand      = &pwCounter{name: "otpmask_route_ttft_fallback_no_rand_total"}
 	// 段① 凭据运行态拉取（门禁 #8）：cb 恒为 0 ⇒ 回调从未执行（异步回调被丢弃）；
 	// reject 持续增长 ⇒ 端点不可用/令牌错误/载荷非法（插件保留旧值继续服务）。
 	metricCredFetchCb     = &pwCounter{name: "otpmask_cred_fetch_cb_total"}
@@ -101,6 +140,10 @@ var (
 	metricRouteConfigReload  = &pwCounter{name: "otpmask_route_config_reload_total"}
 	// route_retry_total：非流式重试的实际重发次数（§6.5，端点切换一次计一次）
 	metricRouteRetry = &pwCounter{name: "otpmask_route_retry_total"}
+	// P1-6 M4.4（R2-17/TT2-11）：未映射策略显式信号——配置加载期（routeStrategy default，
+	// 每 route 一次）与请求路径（pickByStrategy default，每次命中）均计数；
+	// 回退动作保持 priority（不改既有运行语义）。
+	metricRouteStrategyUnknown = &pwCounter{name: "otpmask_route_strategy_unknown_total"}
 	// 灰度请求计数（方案 §10 #11：canary_requests_total）
 	// 三组分别计数（whitelist/treatment/control），总和即灰度参与的总请求数。
 	metricRouteCanaryWhitelist = &pwCounter{name: "otpmask_route_canary_whitelist_total"}
@@ -119,6 +162,45 @@ var (
 )
 
 // ============================================================
+// P1-6 M5.2：选路/回退观测接线（§6.5；请求路径仅计数，无日志/无网络，C-4）
+// ============================================================
+
+// latencyPickCounters 延迟策略 → 拆名 Counter（键为 routeengine 策略枚举；
+// 非 latency 三形态不在此表 → recordLatencyPick 天然不计）。
+var latencyPickCounters = map[routeengine.Strategy]*pwCounter{
+	routeengine.StrategyLatencyAware:   metricRouteLatencyPickWeighted,
+	routeengine.StrategyLatencyFastest: metricRouteLatencyPickFastest,
+	routeengine.StrategyHybrid:         metricRouteLatencyPickHybrid,
+}
+
+// ttftFallbackCounters 回退原因 → 拆名 Counter（键为 routeengine.Fallback* 常量——
+// 唯一取值来源，防双份字面量漂移；未列原因静默忽略）。
+var ttftFallbackCounters = map[string]*pwCounter{
+	routeengine.FallbackUnreachable: metricRouteTTFTFallbackUnreachable,
+	routeengine.FallbackStale:       metricRouteTTFTFallbackStale,
+	routeengine.FallbackLowSamples:  metricRouteTTFTFallbackLowSamples,
+	routeengine.FallbackNoSamples:   metricRouteTTFTFallbackNoSamples,
+	routeengine.FallbackNoRand:      metricRouteTTFTFallbackNoRand,
+}
+
+// recordLatencyPick 按策略记录一次选路（route.go 端点选择点调用）。
+func recordLatencyPick(strategy routeengine.Strategy) {
+	if c, ok := latencyPickCounters[strategy]; ok {
+		c.incr()
+	}
+}
+
+// initLatencyMetrics 装配期注入延迟策略观测（仅启动时调用一次）：
+// routeengine 包级回退回调 → otpmask_route_ttft_fallback_*_total 五原因拆名。
+func initLatencyMetrics() {
+	routeengine.SetLatencyFallbackObserver(func(reason string) {
+		if c, ok := ttftFallbackCounters[reason]; ok {
+			c.incr()
+		}
+	})
+}
+
+// ============================================================
 // Histogram 模拟（用 Counter 分桶，方案 §10.1.3，缺失项 3 方案 A）
 // ============================================================
 //
@@ -133,12 +215,17 @@ var (
 // bucket 配置（与方案 §10.1.3 对齐）：
 //   延迟：[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, +Inf]（9 桶）
 //   token：[10, 100, 500, 1000, 2000, 5000, 10000, +Inf]（8 桶）
+//   TTFT：[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30]（11 桶；= M2.2 上报桶秒制换算）
 
 // latencyBuckets 延迟桶上界（秒），与方案 §10.1.3 对齐。
 var latencyBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0}
 
 // tokenBuckets token 数桶上界。
 var tokenBuckets = []float64{10, 100, 500, 1000, 2000, 5000, 10000}
+
+// ttftBuckets TTFT 桶上界（秒；M5.1）——与上报内存桶 `ttftBucketUpperBoundsMs`（M2.2，
+// 毫秒制 11 桶）逐边界一致：同一次采样事件由两套计数分别维护（§6.5 语义区分注记）。
+var ttftBuckets = []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0}
 
 // latencyBucketCounters 按延迟桶索引对应的 Counter（懒初始化）。
 // 命名格式：otpmask_route_latency_seconds_bucket{le="0.005"}
@@ -147,6 +234,10 @@ var latencyBucketCounters []*pwCounter
 
 // tokenBucketCounters 按 token 桶索引对应的 Counter（懒初始化）。
 var tokenBucketCounters []*pwCounter
+
+// ttftBucketCounters 按 TTFT 桶索引对应的 Counter（懒初始化；M5.1）。
+// 命名格式：otpmask_route_ttft_seconds_bucket_le_0_025（le 值编码进指标名）。
+var ttftBucketCounters []*pwCounter
 
 func init() {
 	// 预初始化 Histogram 桶 Counter（与 bucket 一一对应，按顺序）。
@@ -160,6 +251,12 @@ func init() {
 	for i, le := range tokenBuckets {
 		tokenBucketCounters[i] = &pwCounter{
 			name: "otpmask_route_tokens_bucket_le_" + formatFloatForMetric(le),
+		}
+	}
+	ttftBucketCounters = make([]*pwCounter, len(ttftBuckets))
+	for i, le := range ttftBuckets {
+		ttftBucketCounters[i] = &pwCounter{
+			name: "otpmask_route_ttft_seconds_bucket_le_" + formatFloatForMetric(le),
 		}
 	}
 }
@@ -189,6 +286,18 @@ func observeTokens(tokens int) {
 	for i, le := range tokenBuckets {
 		if v <= le {
 			tokenBucketCounters[i].incr()
+		}
+	}
+}
+
+// observeTTFT 记录一次首 token 延迟（毫秒；M5.1，累积直方图语义：所有 le ≥ value 的桶 +1）。
+// 调用点与上报内存桶一致（ttftCommitOnComplete → ttftStore.observe）——
+// 两个计数体系由同一次采样事件分别维护（§6.5 语义区分注记，勿混用两个口径）。
+func observeTTFT(ms int64) {
+	valueSec := float64(ms) / 1000 // 毫秒 → 秒（桶上界为秒制）
+	for i, le := range ttftBuckets {
+		if valueSec <= le {
+			ttftBucketCounters[i].incr()
 		}
 	}
 }

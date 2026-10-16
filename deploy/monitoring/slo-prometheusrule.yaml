@@ -101,3 +101,109 @@ spec:
             summary: "请求拒绝率 > 5%"
             description: "近 10 分钟拒绝率 {{ $value | humanizePercentage }}。按 reason 拆分（otpmask_denies_total）核实：内容安全拦截 / 配额 / 签名 / 重放。"
             runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--全链路tracing.md"
+
+    # ---- P1-6：TTFT 严格性能择优告警（§6.5 / TT2-06；数据面 otpmask_route_* + 控制面 gateway_core_route_ttft_*）----
+    - name: ai-ttft.rules
+      interval: 30s
+      rules:
+        # ---- 上报失败率高（warning）：5m 内 reject/ok > 10% ----
+        - alert: AITTFTReportRejectHigh
+          expr: |
+            (
+              rate(otpmask_route_ttft_report_reject_total[5m]) or vector(0)
+            ) / clamp_min(
+              rate(otpmask_route_ttft_report_ok_total[5m]) or vector(0), 0.000001
+            ) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+            category: ttft
+            team: ai-gateway-ops
+          annotations:
+            summary: "TTFT 上报失败率 > 10%（近 5m）"
+            description: "上报 reject 与 ok 速率比 {{ $value | humanizePercentage }} 超阈值。核对控制面可达性（gateway_core service/port）与通道令牌（TT2-06 上线 checklist）。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--TTFT严格性能择优.md"
+        # ---- 回调丢弃（critical）：上报/拉取回调 5m 零执行且延迟策略有流量（对齐 fetch_cb_total 语义）----
+        - alert: AITTFTCallbackDropped
+          expr: |
+            (
+              (increase(otpmask_route_ttft_report_cb_total[5m]) or vector(0)) == 0
+            )
+            and on() (
+              (increase(otpmask_route_ttft_stats_fetch_cb_total[5m]) or vector(0)) == 0
+            )
+            and on() (
+              (sum(increase(otpmask_route_latency_pick_weighted_total[5m])) or vector(0))
+              + (sum(increase(otpmask_route_latency_pick_fastest_total[5m])) or vector(0))
+              + (sum(increase(otpmask_route_latency_pick_hybrid_total[5m])) or vector(0)) > 0
+            )
+          for: 5m
+          labels:
+            severity: critical
+            category: ttft
+            team: ai-gateway-ops
+          annotations:
+            summary: "TTFT 上报/拉取回调 5m 零执行（疑似被丢弃）"
+            description: "延迟策略有流量（pick 计数增长）但回调恒 0 执行 ⇒ 回调被丢弃（响应已随 fail-closed 发出 / 流上下文结束）。核对 report_cb_total 与 report_ok_total 差值定位。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--TTFT严格性能择优.md"
+        # ---- 回退率高（warning）：五原因合计回退率 > 20%（R2-19 序 1-5）----
+        - alert: AITTFTFallbackRateHigh
+          expr: |
+            (
+              (sum(rate(otpmask_route_ttft_fallback_unreachable_total[5m])) or vector(0))
+              + (sum(rate(otpmask_route_ttft_fallback_stale_total[5m])) or vector(0))
+              + (sum(rate(otpmask_route_ttft_fallback_low_samples_total[5m])) or vector(0))
+              + (sum(rate(otpmask_route_ttft_fallback_no_samples_total[5m])) or vector(0))
+              + (sum(rate(otpmask_route_ttft_fallback_no_rand_total[5m])) or vector(0))
+            ) / clamp_min(
+              sum(rate(otpmask_route_requests_total[5m])) or vector(0), 0.000001
+            ) > 0.2
+          for: 10m
+          labels:
+            severity: warning
+            category: ttft
+            team: ai-gateway-ops
+          annotations:
+            summary: "TTFT 延迟策略回退率 > 20%（近 10m）"
+            description: "回退率 {{ $value | humanizePercentage }}。按原因拆名定位：unreachable=控制面不可达；stale=统计陈旧（核对上报/拉取 tick 与 stale_sec）；low_samples/no_samples=样本不足（非流式占比高属预期，持续则核对采样接线）；no_rand=随机源不可用。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--TTFT严格性能择优.md"
+        # ---- 统计陈旧端点比例（warning）：单租户陈旧端点 > 30% ----
+        - alert: AITTFTStatsStaleRatio
+          expr: |
+            count(gateway_core_route_ttft_last_update_seconds < (time() - 120)) by (tenant)
+            / clamp_min(count(gateway_core_route_ttft_last_update_seconds) by (tenant), 1) > 0.3
+          for: 10m
+          labels:
+            severity: warning
+            category: ttft
+            team: ai-gateway-ops
+          annotations:
+            summary: "TTFT 统计陈旧端点比例 > 30%（近 10m）"
+            description: "租户 {{ $labels.tenant }} 陈旧比例 {{ $value | humanizePercentage }}。无更新端点经上报 404 失效 / 上报断流；结合上报成功率与回调丢弃告警排查。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--TTFT严格性能择优.md"
+        # ---- 重置异常（warning）：1h 内重置 > 5 次 ----
+        - alert: AITTFTResetFrequent
+          expr: |
+            increase(gateway_core_route_ttft_reset_total[1h]) > 5
+          for: 5m
+          labels:
+            severity: warning
+            category: ttft
+            team: ai-gateway-ops
+          annotations:
+            summary: "TTFT 统计重置频繁（1h 内 > 5 次）"
+            description: "疑似控制面重启或统计数据被盗改触发清空；核对控制面实例稳定性与 TTFT 存储目录变更记录。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--TTFT严格性能择优.md"
+        # ---- 上报延迟过大（warning）：最近落片距今 > 300s ----
+        - alert: AITTFTStatsUpdateLag
+          expr: |
+            time() - gateway_core_route_ttft_last_update_seconds > 300
+          for: 10m
+          labels:
+            severity: warning
+            category: ttft
+            team: ai-gateway-ops
+          annotations:
+            summary: "TTFT 统计落片延迟 > 300s"
+            description: "{{ $labels.tenant }}/{{ $labels.model }}/{{ $labels.endpoint }} 最近落片距今 {{ $value | printf \"%.0f\" }}s。数据面上报断流（周期 tick / 队列满丢弃）或控制面聚合故障。"
+            runbook_url: "docs/详细设计/P1/GA-AI网关能力补齐方案--P1--TTFT严格性能择优.md"

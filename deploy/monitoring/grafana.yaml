@@ -431,6 +431,110 @@ data:
       "uid": "otpmask-audit",
       "version": 1
     }
+
+  # P1-6 M5.4：TTFT 严格性能择优看板（§6.5 最小清单六面板；数据面 otpmask_route_* + 控制面 gateway_core_route_ttft_*）
+  otpmask-ttft.json: |
+    {
+      "annotations": {"list": []},
+      "editable": true,
+      "graphTooltip": 0,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "description": "§6.5 最小清单①：控制面 Gauge gateway_core_route_ttft_p95_ms/_p50_ms（标签 tenant/model/endpoint/cache）。窗口内无新样本的端点自动退场（reset 后 404 失效语义）。",
+          "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "id": 1,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "gateway_core_route_ttft_p95_ms{tenant=~\"$tenant\", model=~\"$model\"}", "legendFormat": "{{endpoint}} · p95", "refId": "A"},
+            {"expr": "gateway_core_route_ttft_p50_ms{tenant=~\"$tenant\", model=~\"$model\"}", "legendFormat": "{{endpoint}} · p50", "refId": "B"}
+          ],
+          "title": "TTFT P50/P95 趋势（分端点）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "description": "§6.5 最小清单②：数据面 Counter 按策略拆名（weighted=latency-aware / fastest / hybrid）。回退保留策略标签亦计入（R2-10）；各策略流量占比。",
+          "fieldConfig": {"defaults": {}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "id": 2,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "sum by (__name__) (rate({__name__=~\"otpmask_route_latency_pick_.*_total\"}[5m]))", "legendFormat": "{{__name__}}", "refId": "A"}
+          ],
+          "title": "端点选中比例（按策略，5m）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "description": "§6.5 最小清单③：五原因拆名 Counter（R2-19 序 1-5）。unreachable=控制面不可达；stale=统计陈旧；low_samples/no_samples=样本不足；no_rand=随机源不可用。",
+          "fieldConfig": {"defaults": {}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "id": 3,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "sum by (__name__) (rate({__name__=~\"otpmask_route_ttft_fallback_.*_total\"}[5m]))", "legendFormat": "{{__name__}}", "refId": "A"}
+          ],
+          "title": "回退率（按原因拆分，5m）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "description": "§6.5 最小清单④：ok / (ok + reject)（clamp_min 防缺样本除零）。reject 持续增长定位控制面可达性与内网 token。",
+          "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "id": 4,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "rate(otpmask_route_ttft_report_ok_total[5m]) / clamp_min(rate(otpmask_route_ttft_report_ok_total[5m]) + rate(otpmask_route_ttft_report_reject_total[5m]), 0.000001)", "legendFormat": "上报成功率", "refId": "A"},
+            {"expr": "rate(otpmask_route_ttft_stats_fetch_ok_total[5m]) / clamp_min(rate(otpmask_route_ttft_stats_fetch_ok_total[5m]) + rate(otpmask_route_ttft_stats_fetch_reject_total[5m]), 0.000001)", "legendFormat": "拉取成功率", "refId": "B"}
+          ],
+          "title": "上报/拉取通道成功率（5m）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "description": "§6.5 最小清单⑤：每端点时龄 = now − 最近落片秒。>stale_sec（默认 75s，2.5×周期口径见 §6.3）触发 D-8 陈旧回退。",
+          "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+          "id": 5,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "time() - gateway_core_route_ttft_last_update_seconds{tenant=~\"$tenant\", model=~\"$model\"}", "legendFormat": "{{tenant}}/{{model}}/{{endpoint}}", "refId": "A"}
+          ],
+          "title": "统计新鲜度（now − 最近落片，秒）",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "Prometheus"},
+          "description": "§6.5 最小清单⑥：数据面累积直方图桶速率（M5.1）。数据面桶计数无 endpoint 标签，为全局分布近似；分端点分位见面板①。",
+          "fieldConfig": {"defaults": {}, "overrides": []},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+          "id": 6,
+          "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "none"}},
+          "targets": [
+            {"expr": "sum by (__name__) (rate({__name__=~\"otpmask_route_ttft_seconds_bucket_le_.*\"}[5m]))", "legendFormat": "{{__name__}}", "refId": "A"}
+          ],
+          "title": "TTFT 桶分布（数据面全局速率，5m）",
+          "type": "timeseries"
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["otpmask", "ttft", "p1-6"],
+      "templating": {"list": [
+        {"allValue": ".*", "current": {}, "datasource": {"type": "prometheus", "uid": "Prometheus"}, "definition": "label_values(gateway_core_route_ttft_p95_ms, tenant)", "hide": 0, "includeAll": true, "label": "tenant", "multi": true, "name": "tenant", "options": [], "query": "label_values(gateway_core_route_ttft_p95_ms, tenant)", "refresh": 2, "regex": "", "skipUrlSync": false, "sort": 1, "type": "query"},
+        {"allValue": ".*", "current": {}, "datasource": {"type": "prometheus", "uid": "Prometheus"}, "definition": "label_values(gateway_core_route_ttft_p95_ms, model)", "hide": 0, "includeAll": true, "label": "model", "multi": true, "name": "model", "options": [], "query": "label_values(gateway_core_route_ttft_p95_ms, model)", "refresh": 2, "regex": "", "skipUrlSync": false, "sort": 1, "type": "query"}
+      ]},
+      "time": {"from": "now-6h", "to": "now"},
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "OTP-Mask TTFT 择优看板（延迟画像/选路/回退/上报，P1-6）",
+      "uid": "otpmask-ttft",
+      "version": 1
+    }
 ---
 apiVersion: apps/v1
 kind: Deployment

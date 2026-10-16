@@ -57,10 +57,10 @@ const (
 // 配置热更新通过整 map 替换实现原子切换。
 type EndpointState struct {
 	// —— 配置层（从路由表加载）——
-	Name     string  // 端点名称（唯一标识）
-	URL      string  // 端点地址
-	Priority int     // 优先级（数字越小越高）
-	Enabled  bool    // 是否启用
+	Name       string  // 端点名称（唯一标识）
+	URL        string  // 端点地址
+	Priority   int     // 优先级（数字越小越高）
+	Enabled    bool    // 是否启用
 	BaseWeight float64 // 配置的基础权重（0-1，同优先级组内和为1）
 
 	// —— 失败率统计层（EWMA，方案 §6.2）——
@@ -71,6 +71,10 @@ type EndpointState struct {
 
 	// —— 流量层（动态权重，被失败率/熔断影响后）——
 	Weight float64 // 当前实际权重（0-1，同优先级组内归一化后使用）
+
+	// —— P1-6 延迟统计层（TTFT 快照，值语义、读路径无锁）——
+	// 由数据面周期拉取（ttftfetch.go，M2.6）写入；选路时只读，不就地改写（C-3）。
+	TTFT TTFTStat
 }
 
 // IsUsable 返回端点是否可以被选中（启用 + 非熔断打开 + 权重 > 0）。
@@ -89,9 +93,14 @@ func (e *EndpointState) IsUsable() bool {
 type Strategy string
 
 const (
-	StrategyPriority      Strategy = "priority"       // 主备模式（按优先级）
-	StrategyWeighted      Strategy = "weighted"       // 权重模式（同优先级按比例）
-	StrategyFailureAware  Strategy = "failure-aware"  // 失败率感知（动态权重调整）
+	StrategyPriority     Strategy = "priority"      // 主备模式（按优先级）
+	StrategyWeighted     Strategy = "weighted"      // 权重模式（同优先级按比例）
+	StrategyFailureAware Strategy = "failure-aware" // 失败率感知（动态权重调整）
+
+	// —— P1-6 延迟择优（M1.3；本体 §6.1 strategy 枚举扩展）——
+	StrategyLatencyAware   Strategy = "latency-aware"   // TTFT 倒数加权随机（D-3/D-4）
+	StrategyLatencyFastest Strategy = "latency-fastest" // 最快优先（确定性；γ→∞ 极限形式）
+	StrategyHybrid         Strategy = "hybrid"          // 失败率 × TTFT 三步合并（M1.5）
 )
 
 // CanaryConfig 灰度切流配置（方案 §7.5）。
@@ -130,6 +139,9 @@ type Config struct {
 
 	// 灰度切流配置（方案 §7.5，可选）
 	Canary CanaryConfig
+
+	// P1-6 延迟择优配置（strategy 为 latency-*/hybrid 时生效；§6.1）
+	Latency LatencyConfig
 }
 
 // EndpointConfig 端点配置（来自 TableRoute.Endpoints）。
@@ -176,6 +188,44 @@ func (e *Engine) SetBillingHook(hook BillingNotifier) {
 	e.billingHook = hook
 }
 
+// SetTTFTStatsUnreachable 标记 TTFT 统计通道不可达（R2-19 序 1）。
+// 由数据面拉取 tick（M2.6）在控制面不可达 / 聚合器 503 时调用；请求路径只读该标志。
+func (e *Engine) SetTTFTStatsUnreachable(v bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.ttftUnreachable = v
+}
+
+// SetEndpointTTFT 写入端点 TTFT 统计（M1.6 写入接缝；M2.6 周期拉取 tick 调用）。
+//
+// 数据面把控制面 stats 下发结果（§6.3；含 valid / updated_at 过期判定后的最终值）
+// 写入运行态；未知名返回 false（调用方决定是否计数）。统计值不参与路由表签名
+// （D-6）；请求路径只读该字段，写路径显式加锁（engine 锁保护）。
+func (e *Engine) SetEndpointTTFT(name string, stat TTFTStat) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ep, ok := e.state[name]
+	if !ok {
+		return false
+	}
+	ep.TTFT = stat
+	return true
+}
+
+// LatencyConfigOf 返回延迟配置副本（P1-6 M2.6：统计写入侧读取 stale_sec 做过期判定；读路径加锁）。
+func (e *Engine) LatencyConfigOf() LatencyConfig {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.config.Latency
+}
+
+// TTFTStatsUnreachable 返回统计通道不可达标志（R2-19 序 1；诊断与测试读取）。
+func (e *Engine) TTFTStatsUnreachable() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.ttftUnreachable
+}
+
 // Engine 路由引擎实例。
 //
 // 用法：
@@ -191,6 +241,9 @@ type Engine struct {
 	state       map[string]*EndpointState // name -> state
 	canary      *CanaryManager            // 灰度管理器（nil = 未启用灰度）
 	billingHook BillingNotifier           // 计费通知器（nil = 不通知）
+
+	// P1-6：R2-19 序 1 的控制面不可达标志（数据面拉取 tick 维护；请求路径只读）
+	ttftUnreachable bool
 }
 
 // NewEngine 创建路由引擎。
@@ -332,9 +385,10 @@ func (e *Engine) UpdateConfig(config Config) {
 //   - UpdateConfigSmooth：同名端点保留 EWMA 失败率和熔断器状态（平滑迁移）
 //
 // 迁移规则：
-//   - 新配置中有、旧状态中也有的端点 → 保留失败率和熔断器状态，更新配置层（权重/优先级/启用）
-//   - 新配置中有、旧状态中没有的端点 → 全新初始化
-//   - 旧状态中有、新配置中没有的端点 → 丢弃
+//   - 新配置中有、旧状态中也有的端点 → 保留失败率和熔断器状态，更新配置层（权重/优先级/启用）；
+//     其中 TTFT 统计（P1-6，TT2-04）：URL 未变保留，URL 变更重置 valid=false
+//   - 新配置中有、旧状态中没有的端点 → 全新初始化（TTFT 零值 = valid=false）
+//   - 旧状态中有、新配置中没有的端点 → 丢弃（TTFT 随 EndpointState 一并清理）
 //   - 配置层变更（如基础权重、优先级）立即生效，失败率统计保留
 //
 // 设计依据：方案 §4.1 配置热更新（平滑迁移，避免配置变更导致统计丢失、瞬时雪崩）
@@ -355,6 +409,10 @@ func (e *Engine) UpdateConfigSmooth(config Config) {
 
 		if oldEp, ok := oldState[epCfg.Name]; ok {
 			// 同名端点：保留失败率和熔断器状态，更新配置层
+			// TT2-04：URL 变更 → TTFT 重置无效（避免旧地址画像污染新端点）
+			if oldEp.URL != epCfg.URL {
+				oldEp.TTFT = TTFTStat{}
+			}
 			oldEp.Name = epCfg.Name
 			oldEp.URL = epCfg.URL
 			oldEp.Priority = epCfg.Priority
@@ -374,7 +432,7 @@ func (e *Engine) UpdateConfigSmooth(config Config) {
 
 			e.state[epCfg.Name] = oldEp
 		} else {
-			// 新端点：全新初始化
+			// 新端点：全新初始化（TTFT 零值 = valid=false，TT2-04）
 			e.state[epCfg.Name] = &EndpointState{
 				Name:       epCfg.Name,
 				URL:        epCfg.URL,
@@ -455,15 +513,38 @@ func (e *Engine) PickEndpointForTenant(tenant string) Decision {
 	return decision
 }
 
+// strategyUnknownObserver 包级未映射策略观测接缝（P1-6 M4.4；R2-17/TT2-11）。
+//
+// pickByStrategy() 的 default 分支在**每次请求路径命中时**回调（运行时持续可观测，
+// 区别于配置加载期的一次性信号）；由插件装配期注入 →
+// otpmask_route_strategy_unknown_total + 错误日志。回退动作保持 priority
+// （不改既有运行语义）；新增策略须同步登记此处 switch 与插件 routeStrategy()。
+var strategyUnknownObserver func(strategy string)
+
+// SetStrategyUnknownObserver 注入未映射策略观测回调（仅装配期调用，单线程语义）。
+func SetStrategyUnknownObserver(fn func(strategy string)) { strategyUnknownObserver = fn }
+
 // pickByStrategy 按配置的策略选择端点（内部辅助，调用方持锁）。
 // 直接遍历 e.state，零堆分配。
+// P1-6（M1.6/M4.4）：latency-aware / latency-fastest / hybrid 分发至 latency.go 实现；
+// default = 显式信号（R2-17/TT2-11）：观测回调计数 + 回退 priority（运行语义不变），
+// 不再静默。
 func (e *Engine) pickByStrategy() Decision {
 	switch e.config.Strategy {
 	case StrategyPriority:
 		return e.pickByPriority()
 	case StrategyWeighted, StrategyFailureAware:
 		return e.pickByWeight()
+	case StrategyLatencyAware:
+		return e.pickByLatency()
+	case StrategyLatencyFastest:
+		return e.pickByLatencyFastest()
+	case StrategyHybrid:
+		return e.pickByHybrid()
 	default:
+		if strategyUnknownObserver != nil {
+			strategyUnknownObserver(string(e.config.Strategy))
+		}
 		return e.pickByPriority()
 	}
 }
