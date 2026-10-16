@@ -42,13 +42,13 @@ const (
 	auditActionCredentialDelete = "credential_delete"
 	auditActionQuotaSet         = "quota_set"
 	// P0-3 计费域动作（§4.3.5）。
-	auditActionPlanUpsert  = "plan_upsert"
-	auditActionPlanBind    = "plan_bind"
-	auditActionBillFreeze  = "bill_freeze"
+	auditActionPlanUpsert   = "plan_upsert"
+	auditActionPlanBind     = "plan_bind"
+	auditActionBillFreeze   = "bill_freeze"
 	auditActionBillUnfreeze = "bill_unfreeze"
-	auditActionBillIssue   = "bill_issue"
-	auditActionBillExport  = "bill_export"
-	auditActionBillVerify  = "bill_verify"
+	auditActionBillIssue    = "bill_issue"
+	auditActionBillExport   = "bill_export"
+	auditActionBillVerify   = "bill_verify"
 	// P0-4 §4.3.10：密码 profile/mask_prg 切换（B5-c）。
 	auditActionCryptopProfileSwitch = "cryptop.profile.switch"
 	// P1-4 租户自助门户动作（附录 D 审计动作清单）。
@@ -116,7 +116,7 @@ type adminAuditEvent struct {
 	// R-13：空/缺省 = SHA-256；"sm3" = SM3；R-12：其它值非法。
 	// 注：`KeyFingerprint` 为**标识类**字段（API 可见、跨服务引用），恒 SHA-256，不随本标签迁移。
 	// 写入端打标随服务 profile 接线落地（B4）；本批先建分派机制。
-	HashAlg  string `json:"hash_alg,omitempty"`
+	HashAlg string `json:"hash_alg,omitempty"`
 	// Detail M5（策略/模型变更摘要，附录 D）：**证据字段，不进 hash()**（与 HashAlg 同法），
 	// 保持既有链格式不变；空 = 不写。
 	Detail   string `json:"detail,omitempty"`

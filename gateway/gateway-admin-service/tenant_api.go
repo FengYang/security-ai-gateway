@@ -39,8 +39,8 @@ type tenantHandler struct {
 	jwtSecret  []byte // 租户会话令牌校验密钥（= cfg.jwtSecret，共享密钥，§6.1）
 	mailer     tenantMailer
 	captcha    *captchaStore
-	binder     quotaBinder     // nil = billing 域未启用
-	issuer     keyIssuer       // nil = Key 签发通道未配置（§6.11）
+	binder     quotaBinder          // nil = billing 域未启用
+	issuer     keyIssuer            // nil = Key 签发通道未配置（§6.11）
 	usage      *usageHandler        // M4：tee-infer 用量代理（复用）
 	billing    *billingHandler      // M4：账单查询/导出（复用；nil = billing 未启用）
 	catalog    *modelCatalogHandler // M5：模型目录（复用；nil = 目录未接线）

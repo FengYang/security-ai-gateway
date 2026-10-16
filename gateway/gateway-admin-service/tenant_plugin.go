@@ -521,22 +521,22 @@ type governanceCapability struct {
 
 // governanceCapabilities §5.3.2 全 16 项能力（顺序对齐原表行号）。
 var governanceCapabilities = []governanceCapability{
-	{"租户身份入口认证", "key-auth", true, false},         // 1
-	{"租户 JWT（tenant claim）", "auth-service HS256", true, false}, // 2 复用现有
-	{"SSO / OIDC", "oidc", false, false},                  // 3 Phase 3 增强候选
-	{"外部 IdP / IAM", "external-auth", false, false},     // 4 增强候选
-	{"Token 限流 / 并发", "ai-token-ratelimit", true, false}, // 5
-	{"配额（日/月/模型/Tier）", "ai-quota", true, false},     // 6 复用底座
-	{"用量统计", "ai-statistics", true, false},             // 7 复用底座
-	{"模型代理 / 协议转换", "ai-proxy", true, false},         // 8
-	{"请求参数校验", "request-validation", true, false},      // 9
-	{"IP 黑白名单", "ip-restriction", true, false},           // 10
-	{"防重放", "replay-protection", true, false},             // 11
+	{"租户身份入口认证", "key-auth", true, false},                            // 1
+	{"租户 JWT（tenant claim）", "auth-service HS256", true, false},      // 2 复用现有
+	{"SSO / OIDC", "oidc", false, false},                             // 3 Phase 3 增强候选
+	{"外部 IdP / IAM", "external-auth", false, false},                  // 4 增强候选
+	{"Token 限流 / 并发", "ai-token-ratelimit", true, false},             // 5
+	{"配额（日/月/模型/Tier）", "ai-quota", true, false},                     // 6 复用底座
+	{"用量统计", "ai-statistics", true, false},                           // 7 复用底座
+	{"模型代理 / 协议转换", "ai-proxy", true, false},                         // 8
+	{"请求参数校验", "request-validation", true, false},                    // 9
+	{"IP 黑白名单", "ip-restriction", true, false},                       // 10
+	{"防重放", "replay-protection", true, false},                        // 11
 	{"内容安全（Guardrail）", "ai-security-guard/qwen3guard", false, true}, // 12 结构不可复用
-	{"敏感数据脱敏（Guardrail）", "ai-data-masking", false, true},          // 13 结构不可复用
-	{"复杂策略外置", "opa", false, false},                    // 14 增强候选
-	{"数据出境地域策略", "geo-ip", true, false},               // 15 复用候选
-	{"WAF / 防爬", "waf/bot-detect/request-block", false, false}, // 16 按需
+	{"敏感数据脱敏（Guardrail）", "ai-data-masking", false, true},            // 13 结构不可复用
+	{"复杂策略外置", "opa", false, false},                                  // 14 增强候选
+	{"数据出境地域策略", "geo-ip", true, false},                              // 15 复用候选
+	{"WAF / 防爬", "waf/bot-detect/request-block", false, false},       // 16 按需
 }
 
 // higressReuseRate 计算治理面插件复用率（V-S9：≥ 70%）。

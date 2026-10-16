@@ -30,8 +30,8 @@ const (
 	bcryptCost = 12
 
 	// tenantUserStatusActive / Locked 等状态常量。
-	tenantUserStatusActive = "active"
-	tenantUserStatusLocked = "locked"
+	tenantUserStatusActive  = "active"
+	tenantUserStatusLocked  = "locked"
 	tenantUserStatusPending = "pending" // 未验证邮箱
 
 	// tenantStatus* 租户状态（§3.2 状态机：pending → quota_pending → active；disabled = 停用）。
@@ -121,11 +121,11 @@ type TenantUser struct {
 
 // MailActionToken 邮件动作令牌实体。
 type MailActionToken struct {
-	TokenHash     string
-	TenantUserID  int64
-	Action        string
-	ExpiresAt     int64
-	ConsumedAt    int64
+	TokenHash    string
+	TenantUserID int64
+	Action       string
+	ExpiresAt    int64
+	ConsumedAt   int64
 }
 
 // ---------- Store 接口 ----------

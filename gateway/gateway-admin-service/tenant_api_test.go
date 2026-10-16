@@ -143,10 +143,10 @@ func TestAPI_Register_Success_Returns202(t *testing.T) {
 func TestAPI_Register_InvalidParams_Returns400(t *testing.T) {
 	h, _, _ := newAPITestHandler(t, testTenantCfg(), nil)
 	cases := map[string]string{
-		"非法邮箱":    `{"email":"bad","password":"Password123!","tenant_name":"ab","agree_terms":true}`,
-		"弱密码":     `{"email":"a@b.com","password":"short","tenant_name":"ab","agree_terms":true}`,
-		"密码类别不足":  `{"email":"a@b.com","password":"abcdefghij","tenant_name":"ab","agree_terms":true}`,
-		"租户名过短":   `{"email":"a@b.com","password":"Password123!","tenant_name":"a","agree_terms":true}`,
+		"非法邮箱":   `{"email":"bad","password":"Password123!","tenant_name":"ab","agree_terms":true}`,
+		"弱密码":    `{"email":"a@b.com","password":"short","tenant_name":"ab","agree_terms":true}`,
+		"密码类别不足": `{"email":"a@b.com","password":"abcdefghij","tenant_name":"ab","agree_terms":true}`,
+		"租户名过短":  `{"email":"a@b.com","password":"Password123!","tenant_name":"a","agree_terms":true}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -461,11 +461,11 @@ func TestValidEmail(t *testing.T) {
 
 func TestValidPassword(t *testing.T) {
 	cases := map[string]bool{
-		"Password123!": true,          // 四类
-		"abcdefghij1":  false,         // 仅两类（小写+数字）
-		"Abcdefgh12":   true,          // 大写+小写+数字
-		"short1A":      false,         // 过短
-		"abcdefghijk":  false,         // 仅一类
+		"Password123!": true,  // 四类
+		"abcdefghij1":  false, // 仅两类（小写+数字）
+		"Abcdefgh12":   true,  // 大写+小写+数字
+		"short1A":      false, // 过短
+		"abcdefghijk":  false, // 仅一类
 	}
 	for in, want := range cases {
 		if got := validPassword(in); got != want {
