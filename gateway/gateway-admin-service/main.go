@@ -345,6 +345,14 @@ func main() {
 			log.Printf("重启重放下发任务：%d 个租户（pending/applying）", n)
 		}
 
+		// N3 证明状态源（§4.3.3）：未配置 = 未接线 → 看板降级 unknown + 强制未闭环（C-19）。
+		if src := newHTTPAttestStatusSource(cfg.attestStatusURL, cfg.attestStatusToken,
+			time.Duration(cfg.attestStatusTimeoutSec)*time.Second); src != nil {
+			tenantH.attest = src
+		} else {
+			log.Printf("提示：ATTEST_STATUS_URL 未配置——N3 证明看板降级 unknown 并强制未闭环（C-19）")
+		}
+
 		log.Printf("租户自助门户已启用：store=%s smtp=%v captcha=%v billing=%v dispatch=%v",
 			cfg.tenantStorePath, tenantH.mailer != nil, cfg.captchaEnabled, binder != nil, applier != nil)
 	} else {

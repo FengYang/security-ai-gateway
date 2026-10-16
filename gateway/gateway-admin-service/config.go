@@ -68,6 +68,12 @@ type config struct {
 	gatewayCoreURL     string // GATEWAY_CORE_URL（处方 API 基址）
 	gatewayCoreToken   string // GATEWAY_CORE_DISPATCH_TOKEN（内部服务令牌）
 	dispatchTimeoutSec int    // GATEWAY_CORE_DISPATCH_TIMEOUT_SEC
+
+	// 证明状态源（N3，§4.3.3）：attest-verify 状态（内部通道）。
+	// attestStatusURL 为空 = 未接线 → 看板降级 unknown + 强制未闭环（C-19），不阻断启动。
+	attestStatusURL        string // ATTEST_STATUS_URL（状态源基址）
+	attestStatusToken      string // ATTEST_STATUS_TOKEN（内部服务令牌，可空）
+	attestStatusTimeoutSec int    // ATTEST_STATUS_TIMEOUT_SEC
 }
 
 // defaultIssuer / defaultAudience 内部令牌的签发方与本服务受众默认值。
@@ -251,6 +257,15 @@ func loadTenantConfig(cfg *config) error {
 	}
 	if cfg.gatewayCoreURL != "" && cfg.gatewayCoreToken == "" {
 		return fmt.Errorf("配置缺失：GATEWAY_CORE_URL 已配置但 GATEWAY_CORE_DISPATCH_TOKEN 未设置（下发须内部服务令牌，fail-closed）")
+	}
+
+	// H. 证明状态源（N3，§4.3.3）：attest-verify 状态（内部通道）。
+	// 未配置 URL = 未接线（看板降级 unknown + 强制未闭环），不阻断门户启动。
+	cfg.attestStatusURL = strings.TrimRight(strings.TrimSpace(os.Getenv("ATTEST_STATUS_URL")), "/")
+	cfg.attestStatusToken = os.Getenv("ATTEST_STATUS_TOKEN")
+	cfg.attestStatusTimeoutSec = envInt("ATTEST_STATUS_TIMEOUT_SEC", defaultAttestTimeoutSec)
+	if cfg.attestStatusTimeoutSec <= 0 {
+		cfg.attestStatusTimeoutSec = defaultAttestTimeoutSec
 	}
 	return nil
 }

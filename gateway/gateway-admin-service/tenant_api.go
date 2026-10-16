@@ -52,6 +52,8 @@ type tenantHandler struct {
 	effects provisioningEffects
 	// dispatch N5 下发调度器（nil = 未接线；管理员手动重放依赖它）。
 	dispatch *dispatcher
+	// attest N3 证明状态源（nil = 未接线 → 降级 unknown + 强制未闭环，C-19）。
+	attest attestStatusSource
 }
 
 // newTenantHandler 构造租户 handler（captcha 仅在启用时创建）。
@@ -121,6 +123,9 @@ func (h *tenantHandler) registerMux(mux *http.ServeMux) {
 
 	// 承诺边界声明（N4）
 	h.registerTenantStatementMux(mux)
+
+	// 远程证明状态看板（N3）
+	h.registerTenantAttestMux(mux)
 }
 
 // registerCaptcha 在管理面 mux 注册验证码签发端点（Console 内部，authMiddleware）。
