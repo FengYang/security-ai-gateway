@@ -9,6 +9,12 @@
 #
 # 密钥来源：otpmask-keys Secret（jwt-secret / broker-key-*）；凭据目录经
 # readonly 卷挂载（deploy/secrets/broker-providers → /var/run/broker-secrets）。
+#
+# C-18（M9）/N10（§4.3.10）：
+#   * 管理面**必须单副本**（tenant store SQLite 多写者 + 进程内限流计数；水平扩展须先迁移
+#     共享数据库，P2 规划）——本清单 replicas=1 并配 PDB（maxUnavailable=0，驱逐显式失败）；
+#   * 轴 A=untrusted 部署形态：门户须运行于机密 VM（nodeSelector/toleration 见下），
+#     tenant store 挂 TEE 加密块设备 / cryptosvc 信封加密卷，镜像度量以 annotation 标注。
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -25,7 +31,8 @@ metadata:
   labels:
     app: gateway-admin-service
 spec:
-  replicas: 2
+  # C-18（M9 修订 2→1）：单副本是硬约束，违反 = 数据不一致 + 风控绕过。
+  replicas: 1
   selector:
     matchLabels:
       app: gateway-admin-service
@@ -37,6 +44,8 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: "19095"
+        # N10：镜像度量（发布时回填实际值；与门户启动自检口径一致，§4.3.10 item 1）。
+        otpmask.io/image-measurement: "sha256:REPLACE_WITH_RELEASE_MEASUREMENT"
     spec:
       serviceAccountName: gateway-admin-service
       securityContext:
@@ -94,6 +103,32 @@ spec:
         # 兼容写法（单集合）：ADMIN_CREDENTIAL_SETS 已配置时本项被忽略
         - name: ADMIN_CREDENTIAL_FILE
           value: "/var/run/credentials/otpmask-keys.env"
+        # ---- 多租户自助门户（N1–N10）----
+        # N10：tenant store 挂 TEE 加密块设备 / cryptosvc 信封加密卷（禁明文落宿主盘，
+        # §4.3.10 item 3）；卷定义见下方 tenant-store（PVC gateway-admin-tenant-store）。
+        - name: TENANT_STORE_PATH
+          value: "/var/lib/otpmask-tenant/tenants.db"
+        # fail-closed：门户启用后必填（缺失即拒启动）。创建：
+        #   kubectl -n otpmask create secret generic otpmask-tenant \
+        #     --from-literal=token-pepper=$(openssl rand -hex 32)
+        - name: TENANT_TOKEN_PEPPER
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-tenant
+              key: token-pepper
+        # Key 签发通道（门户启用必填，fail-closed；§6.11：auth-service POST /v1/issue，:19200）。
+        # 按实际部署命名空间/地址调整。
+        - name: AUTH_SERVICE_URL
+          value: "http://auth-service.otpmask.svc.cluster.local:19200"
+        # N3/N10：attest-verify 状态源（内部通道）。上游当前为网关 Pod 内回环 sidecar
+        # （127.0.0.1:19191，无跨 Pod 聚合通道）——在聚合通道接通前**保持未配置**：
+        #   * N3 看板降级 unknown + 强制"未闭环"（C-19，不冒充已验证）；
+        #   * N10 untrusted 档启动自检将 fail-closed 拒启动（V-S3）——须先接通聚合通道，
+        #     再启用 untrusted 租户。
+        # - name: ATTEST_STATUS_URL
+        #   value: "http://<attest-status-aggregator>:<port>"
+        - name: ATTEST_STATUS_TIMEOUT_SEC
+          value: "5"
         ports:
         - name: http-admin
           containerPort: 19095
@@ -109,6 +144,10 @@ spec:
         - name: otpmask-credentials
           mountPath: /var/run/credentials
           readOnly: true
+        # N10：tenant store 加密卷（禁 hostPath / 普通 emptyDir；须为 TEE 加密块设备或
+        # cryptosvc 信封加密卷，§4.3.10 item 3）。
+        - name: tenant-store
+          mountPath: /var/lib/otpmask-tenant
         resources:
           requests:
             cpu: 100m
@@ -160,6 +199,21 @@ spec:
           # `info.Mode().Perm() != 0o600` → 503 fail-closed）。Secret 卷默认 0644 → 端点恒 503、
           # 插件永远拿不到通道令牌（限流表/影子表拉取恒失败）。P0b-1 实测补齐。
           defaultMode: 0600
+      # N10：tenant store 加密卷（§4.3.10 item 3）。PVC 定义见文件末
+      # （storageClassName 须为机密 VM 的加密块设备存储类）。
+      - name: tenant-store
+        persistentVolumeClaim:
+          claimName: gateway-admin-tenant-store
+      # N10（§4.3.10 item 1）：轴 A=untrusted 部署形态——门户须运行于机密 VM（启动自检
+      # fail-closed，异常即拒启动）。轴 A=trusted（普通客户可信域）部署请删除
+      # nodeSelector/tolerations 两项；Helm 部署经 values n10.enabled 开关切换。
+      nodeSelector:
+        otpmask.io/confidential-vm: "true"
+      tolerations:
+      - key: otpmask.io/confidential-vm
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
 ---
 # 管理面 Service：仅控制台与监控可达（见 NetworkPolicy）
 apiVersion: v1
@@ -294,3 +348,38 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: gateway-admin-service-tracing
+---
+# N10（§4.3.10 item 3）：tenant store 加密卷。
+# 非可信基础设施下 SQLite（bcrypt 密码哈希、策略 overlay、模型配置）不可明文落宿主磁盘，
+# 须置于 TEE 加密块设备（机密 VM 直通加密盘）或 cryptosvc 信封加密卷。
+# storageClassName 须为部署环境的加密存储类（示例名 tee-encrypted，按实环境调整）；
+# 禁用 hostPath / 非加密 emptyDir。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gateway-admin-tenant-store
+  namespace: otpmask
+  labels:
+    app: gateway-admin-service
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: tee-encrypted
+  resources:
+    requests:
+      storage: 1Gi
+---
+# C-18（M9）：管理面单副本部署约束的 PDB 配套。
+# replicas=1 + maxUnavailable=0 → 节点驱逐（drain）不被静默放行（须运维显式介入），
+# 避免驱逐/滚动期间出现双副本造成 tenant store 多写者不一致 + 风控计数绕过。
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway-admin-service
+  namespace: otpmask
+  labels:
+    app: gateway-admin-service
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: gateway-admin-service

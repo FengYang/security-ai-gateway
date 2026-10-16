@@ -250,3 +250,56 @@ func (h *tenantHandler) handleTenantAttest(w http.ResponseWriter, r *http.Reques
 	}
 	tenantWriteJSON(w, http.StatusOK, assembleAttestView(scenario, tenantID, time.Now().Unix(), raw, srcErr))
 }
+
+// ---------- N10 启动自检（§4.3.10，V-S3）----------
+
+// n10SelfCheckTimeout 启动自检超时（避免阻塞启动序列）。
+const n10SelfCheckTimeout = 10 * time.Second
+
+// portalTrustAxis 判定门户轴 A（§3.6.3）：任一已开通租户 trust_tier=untrusted → 需自检。
+// 判定所需数据读取失败 → 返回错误（无法判定轴 A 即 fail-closed）。
+func portalTrustAxis(store TenantStore) (bool, error) {
+	ids, err := store.ListProvisionedTenants()
+	if err != nil {
+		return false, fmt.Errorf("N10 轴 A 判定失败（枚举开通租户）: %w", err)
+	}
+	for _, id := range ids {
+		p, err := store.GetProvisioning(id)
+		if err != nil {
+			return false, fmt.Errorf("N10 轴 A 判定失败（读取租户 %s 开通配置）: %w", id, err)
+		}
+		if p != nil && p.TrustTier == trustTierUntrusted {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// n10StartupSelfCheck 门户启动自检（N10 item 6，落点 main.go 启动序列）：
+//   - 轴 A=trusted（或无已开通租户）→ 跳过自检仅记日志（避免无可信环境时无法启动）；
+//   - 轴 A=untrusted → **强制**调用 attest-verify 度量自检；不可达/未接线/度量异常
+//     （overall != verified，含 mock 自签与未知）→ fail-closed 拒启动并告警（V-S3）。
+func n10StartupSelfCheck(store TenantStore, src attestStatusSource) error {
+	untrusted, err := portalTrustAxis(store)
+	if err != nil {
+		return err
+	}
+	if !untrusted {
+		log.Printf("[n10] 启动自检：轴 A=trusted（无 untrusted 租户），跳过 attest-verify 度量自检")
+		return nil
+	}
+	if src == nil {
+		return errors.New("[n10] 轴 A=untrusted 但 attest-verify 未接线（ATTEST_STATUS_URL 未配置），fail-closed 拒启动")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), n10SelfCheckTimeout)
+	defer cancel()
+	items, err := src.FetchAttestStatus(ctx)
+	if err != nil {
+		return fmt.Errorf("[n10] 轴 A=untrusted，attest-verify 自检不可用，fail-closed 拒启动: %w", err)
+	}
+	if overall := deriveAttestOverall(items); overall != attestStatusVerified {
+		return fmt.Errorf("[n10] 轴 A=untrusted，度量自检异常（overall=%s），fail-closed 拒启动并告警", overall)
+	}
+	log.Printf("[n10] 启动自检通过：轴 A=untrusted，attest-verify 度量 verified（%d 项）", len(items))
+	return nil
+}

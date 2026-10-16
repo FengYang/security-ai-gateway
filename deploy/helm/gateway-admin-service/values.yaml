@@ -1,7 +1,15 @@
 # gateway-admin-service Helm values（M2 A-2）
 # 参数化对齐 docs/管理门户-apiTokens-Secret化-M2细化方案.md §2.2.5。
 
-replicaCount: 2
+# C-18（M9 修订 2→1）：管理面**必须单副本**——tenant store 为 SQLite 多写者、限流计数
+# 为进程内实现，水平扩展须先迁移共享数据库（P2 规划）。违反 = 数据不一致 + 风控绕过。
+replicaCount: 1
+
+# C-18/M9：单副本 PDB 配套。maxUnavailable=0 → 节点驱逐不被静默放行（须运维显式介入），
+# 避免驱逐/滚动期间静默出现双副本。
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 0
 
 image:
   repository: security-ai-gateway/gateway-admin-service
@@ -88,3 +96,37 @@ podAnnotations:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# N10（§4.3.10）：非可信基础设施（轴 A=untrusted）下的门户自保护。
+#   * enabled=true：限定机密 VM 机型调度 + 镜像度量 annotation（门户启动自检 fail-closed）；
+#   * 轴 A=trusted（普通客户可信域）保持 false。
+n10:
+  enabled: false
+  # 机密 VM 机型调度（节点须带对应标签/污点；按云厂商机型调整）。
+  nodeSelector:
+    otpmask.io/confidential-vm: "true"
+  tolerations:
+    - key: otpmask.io/confidential-vm
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+  # 镜像度量 annotation（发布时回填；与门户启动自检口径一致，§4.3.10 item 1）。
+  imageMeasurement: ""
+  # N3/N10：attest-verify 状态源（内部通道）。未配置 = N3 看板降级 unknown + 强制"未闭环"
+  # （C-19）；轴 A=untrusted 时启动自检 fail-closed 拒启动（V-S3）——须先接通聚合通道。
+  attestStatusURL: ""
+  attestStatusToken: ""
+  attestStatusTimeoutSec: 5
+  # tenant store 加密卷（§4.3.10 item 3）：TEE 加密块设备 / cryptosvc 信封加密卷。
+  # enabled=true 启用门户存储（TENANT_STORE_PATH 指向该卷）；凭据经 existingSecret 注入。
+  tenantStore:
+    enabled: false
+    # 须为机密 VM 加密块设备存储类（按实环境调整；禁 hostPath / 非加密 emptyDir）。
+    storageClassName: tee-encrypted
+    size: 1Gi
+    mountPath: /var/lib/otpmask-tenant
+    # 门户启用必填（fail-closed）：Secret 键 = token-pepper（≥32 字节随机）。
+    existingSecret: ""
+    tokenPepperKey: token-pepper
+    # Key 签发通道（§6.11：auth-service POST /v1/issue，:19200）；门户启用必填。
+    authServiceURL: ""

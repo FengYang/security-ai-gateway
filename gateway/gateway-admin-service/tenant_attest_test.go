@@ -343,3 +343,94 @@ func TestHTTPAttestStatusSource_Errors(t *testing.T) {
 		t.Error("不可达应报错")
 	}
 }
+
+// ---------- N10 启动自检（§4.3.10，V-S3）----------
+
+func TestPortalTrustAxis(t *testing.T) {
+	store := newTestStore(t)
+
+	// 无开通租户 → trusted（fresh 部署可启动）。
+	if untrusted, err := portalTrustAxis(store); err != nil || untrusted {
+		t.Fatalf("无租户应 trusted: untrusted=%v err=%v", untrusted, err)
+	}
+
+	// 仅 trusted 租户 → trusted。
+	tid1, _ := seedTenantUser(t, store, "n10a@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
+	provisionForTest(t, store, tid1, scenarioS1, trustTierTrusted)
+	if untrusted, err := portalTrustAxis(store); err != nil || untrusted {
+		t.Fatalf("仅 trusted 租户应 trusted: untrusted=%v err=%v", untrusted, err)
+	}
+
+	// 出现 untrusted 租户 → untrusted（须强制自检）。
+	tid2, _ := seedTenantUser(t, store, "n10b@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
+	provisionForTest(t, store, tid2, scenarioS2, trustTierUntrusted)
+	if untrusted, err := portalTrustAxis(store); err != nil || !untrusted {
+		t.Fatalf("含 untrusted 租户应 untrusted: untrusted=%v err=%v", untrusted, err)
+	}
+
+	// 判定数据读取失败 → 错误（fail-closed，不默认 trusted）。
+	if _, err := portalTrustAxis(&errTenantStore{TenantStore: store, listProvErr: errors.New("boom")}); err == nil {
+		t.Error("枚举失败应报错（fail-closed）")
+	}
+}
+
+func TestN10StartupSelfCheck(t *testing.T) {
+	// trusted 档（无 untrusted 租户）→ 跳过自检（即使未接线也可启动）。
+	t.Run("trusted 跳过", func(t *testing.T) {
+		store := newTestStore(t)
+		tid, _ := seedTenantUser(t, store, "n10c@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
+		provisionForTest(t, store, tid, scenarioS3a, trustTierTrusted)
+		if err := n10StartupSelfCheck(store, nil); err != nil {
+			t.Errorf("trusted 档应跳过自检正常启动: %v", err)
+		}
+	})
+
+	untrustedStore := func(t *testing.T) *sqliteTenantStore {
+		t.Helper()
+		store := newTestStore(t)
+		tid, _ := seedTenantUser(t, store, "n10d@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
+		provisionForTest(t, store, tid, scenarioS2, trustTierUntrusted)
+		return store
+	}
+
+	// untrusted 档异常若干类 → fail-closed 拒启动。
+	t.Run("untrusted 未接线拒启动", func(t *testing.T) {
+		if err := n10StartupSelfCheck(untrustedStore(t), nil); err == nil {
+			t.Error("untrusted 且未接线应拒启动")
+		}
+	})
+	t.Run("untrusted 源不可用拒启动", func(t *testing.T) {
+		src := &fakeAttestSource{err: errors.New("timeout")}
+		if err := n10StartupSelfCheck(untrustedStore(t), src); err == nil {
+			t.Error("untrusted 且源不可用应拒启动")
+		}
+	})
+	t.Run("untrusted mock 自签拒启动", func(t *testing.T) {
+		src := &fakeAttestSource{items: []attestItem{
+			{Component: "tee-infer", Status: attestStatusMockSigned, ClosedLoop: false}}}
+		if err := n10StartupSelfCheck(untrustedStore(t), src); err == nil {
+			t.Error("untrusted 且 mock 自签应拒启动（V-S3 异度量）")
+		}
+	})
+	t.Run("untrusted 未闭环拒启动", func(t *testing.T) {
+		src := &fakeAttestSource{items: []attestItem{
+			{Component: "tee-infer", Status: attestStatusVerified, ClosedLoop: false}}}
+		if err := n10StartupSelfCheck(untrustedStore(t), src); err == nil {
+			t.Error("untrusted 且未闭环应拒启动（V-S3 异度量）")
+		}
+	})
+	t.Run("untrusted 度量 verified 通过", func(t *testing.T) {
+		src := &fakeAttestSource{items: []attestItem{
+			{Component: "tee-infer", Status: attestStatusVerified, ClosedLoop: true}}}
+		if err := n10StartupSelfCheck(untrustedStore(t), src); err != nil {
+			t.Errorf("untrusted 且度量 verified 应通过: %v", err)
+		}
+	})
+	t.Run("判定失败拒启动", func(t *testing.T) {
+		store := untrustedStore(t)
+		poisoned := &errTenantStore{TenantStore: store, listProvErr: errors.New("boom")}
+		if err := n10StartupSelfCheck(poisoned, nil); err == nil {
+			t.Error("轴 A 判定失败应拒启动（fail-closed）")
+		}
+	})
+}

@@ -18,6 +18,9 @@ spec:
       annotations:
         {{- toYaml .Values.podAnnotations | nindent 8 }}
         prometheus.io/port: {{ .Values.admin.port | quote }}
+        {{- if and .Values.n10.enabled .Values.n10.imageMeasurement }}
+        otpmask.io/image-measurement: {{ .Values.n10.imageMeasurement | quote }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "gateway-admin-service.serviceAccountName" . }}
       securityContext:
@@ -70,6 +73,29 @@ spec:
         - name: ADMIN_OTEL_COLLECTOR_RESTART
           value: {{ .Values.tracingAllowlist.restart | quote }}
         {{- end }}
+        {{- if .Values.n10.attestStatusURL }}
+        # N3/N10：attest-verify 状态源（内部通道；未配置 = 看板降级 + untrusted 档自检 fail-closed）
+        - name: ATTEST_STATUS_URL
+          value: {{ .Values.n10.attestStatusURL | quote }}
+        - name: ATTEST_STATUS_TIMEOUT_SEC
+          value: {{ .Values.n10.attestStatusTimeoutSec | quote }}
+        {{- if .Values.n10.attestStatusToken }}
+        - name: ATTEST_STATUS_TOKEN
+          value: {{ .Values.n10.attestStatusToken | quote }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.n10.tenantStore.enabled }}
+        # N10：tenant store 加密卷（§4.3.10 item 3）+ 门户启用必填（fail-closed）
+        - name: TENANT_STORE_PATH
+          value: {{ printf "%s/tenants.db" .Values.n10.tenantStore.mountPath | quote }}
+        - name: TENANT_TOKEN_PEPPER
+          valueFrom:
+            secretKeyRef:
+              name: {{ required "n10.tenantStore.existingSecret 必填（门户启用需含 token-pepper 的 Secret）" .Values.n10.tenantStore.existingSecret }}
+              key: {{ .Values.n10.tenantStore.tokenPepperKey }}
+        - name: AUTH_SERVICE_URL
+          value: {{ required "n10.tenantStore.authServiceURL 必填（§6.11 auth-service /v1/issue）" .Values.n10.tenantStore.authServiceURL | quote }}
+        {{- end }}
         ports:
         - name: http-admin
           containerPort: {{ .Values.admin.port }}
@@ -79,11 +105,18 @@ spec:
           containerPort: {{ .Values.broker.port }}
           protocol: TCP
         {{- end }}
-        {{- if and .Values.broker.enabled .Values.brokerSecrets.existingSecret }}
+        {{- if or (and .Values.broker.enabled .Values.brokerSecrets.existingSecret) .Values.n10.tenantStore.enabled }}
         volumeMounts:
+        {{- if and .Values.broker.enabled .Values.brokerSecrets.existingSecret }}
         - name: broker-secrets
           mountPath: {{ .Values.broker.secretsDir }}
           readOnly: true
+        {{- end }}
+        {{- if .Values.n10.tenantStore.enabled }}
+        # N10：tenant store 加密卷（禁 hostPath / 非加密 emptyDir）
+        - name: tenant-store
+          mountPath: {{ .Values.n10.tenantStore.mountPath }}
+        {{- end }}
         {{- end }}
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
@@ -105,18 +138,34 @@ spec:
           readOnlyRootFilesystem: true
           capabilities:
             drop: ["ALL"]
-      {{- if and .Values.broker.enabled .Values.brokerSecrets.existingSecret }}
+      {{- if or (and .Values.broker.enabled .Values.brokerSecrets.existingSecret) .Values.n10.tenantStore.enabled }}
       volumes:
+      {{- if and .Values.broker.enabled .Values.brokerSecrets.existingSecret }}
       # 凭据目录（每 provider 一个 key，值 = 凭据文件内容）；目录缺失即回落环境变量路径
       - name: broker-secrets
         secret:
           secretName: {{ .Values.brokerSecrets.existingSecret }}
       {{- end }}
-      {{- with .Values.nodeSelector }}
+      {{- if .Values.n10.tenantStore.enabled }}
+      # N10：tenant store 加密卷（§4.3.10 item 3，storageClassName 须为加密块设备）
+      - name: tenant-store
+        persistentVolumeClaim:
+          claimName: {{ printf "%s-tenant-store" (include "gateway-admin-service.fullname" .) }}
+      {{- end }}
+      {{- end }}
+      {{- $nodeSelector := .Values.nodeSelector }}
+      {{- if .Values.n10.enabled }}
+      {{- $nodeSelector = merge (dict) .Values.n10.nodeSelector $nodeSelector }}
+      {{- end }}
+      {{- with $nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.tolerations }}
+      {{- $tolerations := .Values.tolerations }}
+      {{- if .Values.n10.enabled }}
+      {{- $tolerations = concat .Values.tolerations .Values.n10.tolerations }}
+      {{- end }}
+      {{- with $tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

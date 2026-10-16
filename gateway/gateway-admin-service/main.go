@@ -353,6 +353,12 @@ func main() {
 			log.Printf("提示：ATTEST_STATUS_URL 未配置——N3 证明看板降级 unknown 并强制未闭环（C-19）")
 		}
 
+		// N10 启动自检（§4.3.10，V-S3）：轴 A=untrusted（任一已开通租户 trust_tier=untrusted）时
+		// 强制 attest-verify 度量自检，异常 → fail-closed 拒启动；trusted 档跳过仅记日志。
+		if err := n10StartupSelfCheck(ts, tenantH.attest); err != nil {
+			log.Fatalf("N10 门户自保护自检失败（fail-closed）：%v", err)
+		}
+
 		log.Printf("租户自助门户已启用：store=%s smtp=%v captcha=%v billing=%v dispatch=%v",
 			cfg.tenantStorePath, tenantH.mailer != nil, cfg.captchaEnabled, binder != nil, applier != nil)
 	} else {

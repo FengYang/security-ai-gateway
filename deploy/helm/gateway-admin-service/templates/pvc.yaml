@@ -1,0 +1,17 @@
+{{- if .Values.n10.tenantStore.enabled }}
+# N10（§4.3.10 item 3）：tenant store 加密卷（TEE 加密块设备 / cryptosvc 信封加密卷）。
+# 非可信基础设施下 SQLite（bcrypt 密码哈希、策略 overlay、模型配置）不可明文落宿主磁盘；
+# storageClassName 须为部署环境的加密存储类；禁用 hostPath / 非加密 emptyDir。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-tenant-store" (include "gateway-admin-service.fullname" .) }}
+  labels:
+    {{- include "gateway-admin-service.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.n10.tenantStore.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.n10.tenantStore.size | quote }}
+{{- end }}

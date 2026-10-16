@@ -1,0 +1,17 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# C-18/M9：管理面单副本部署约束的 PDB 配套。
+# replicaCount=1 + maxUnavailable=0 → 节点驱逐（drain）不被静默放行（须运维显式介入），
+# 避免驱逐/滚动期间静默出现双副本（tenant store 多写者不一致 + 风控计数绕过）。
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "gateway-admin-service.fullname" . }}
+  labels:
+    {{- include "gateway-admin-service.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "gateway-admin-service.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
