@@ -66,12 +66,14 @@ type teeAuditEvent struct {
 	IsRetry   bool   `json:"is_retry"`
 }
 
-// tenantAuditActions 允许的 action 枚举（§6.7：附录 D 13 动作 + 数据面 infer/deny/key_issue）。
+// tenantAuditActions 允许的 action 枚举（§6.7：附录 D 16 动作 + 数据面 infer/deny/key_issue；
+// N1/N4/N5 新增 provisioning_update / statement_reissue / dispatch_replay）。
 var tenantAuditActions = map[string]struct{}{
 	"tenant_register": {}, "tenant_login": {}, "tenant_logout": {}, "password_reset": {},
 	"api_key_create": {}, "api_key_rotate": {}, "api_key_revoke": {},
 	"policy_update": {}, "policy_apply": {}, "model_config_update": {},
 	"plan_upgrade": {}, "plan_downgrade": {}, "plan_bind": {},
+	"provisioning_update": {}, "statement_reissue": {}, "dispatch_replay": {},
 	"infer": {}, "deny": {}, "key_issue": {},
 }
 

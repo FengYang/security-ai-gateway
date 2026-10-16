@@ -887,8 +887,9 @@ func (h *tenantHandler) handlePasswordResetConfirm(w http.ResponseWriter, r *htt
 		return
 	}
 
-	// 既有会话吊销由 Console 会话层执行（§6.2 会话归属）；此处仅落审计
-	h.auditAppend(req.Email, auditActionPasswordReset)
+	// 既有会话吊销由 Console 会话层执行（§6.2 会话归属）；此处仅落审计。
+	// Actor 用邮箱哈希前缀（与登录/注册同法），审计绝不落明文邮箱（附录 D）。
+	h.auditAppend(emailFingerprint(req.Email), auditActionPasswordReset)
 	log.Printf("[tenant-reset-confirm] 密码重置成功 user_id=%d", user.ID)
 	tenantWriteJSON(w, http.StatusOK, map[string]string{"status": "password_reset"})
 }

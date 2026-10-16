@@ -210,8 +210,8 @@ func (h *tenantHandler) handleTenantPolicyPut(w http.ResponseWriter, r *http.Req
 	}
 	h.dispatchEnqueue(tenantID)
 
-	// 审计：仅条目数/类目数摘要（不存具体词，附录 D）
-	h.auditAppendDetail(tenantActor(r), auditActionPolicyUpdate, tenantID,
+	// 审计：Target=policy_overlay（附录 D）、Tenant 标注归属；仅条目数/类目数摘要（不存具体词）
+	h.auditAppendTenantDetail(tenantActor(r), auditActionPolicyUpdate, tenantID, "policy_overlay",
 		fmt.Sprintf("wl=%d bl=%d cat=%d", len(wl.Entries), len(bl.Entries), len(req.CategoryActions)))
 
 	// 返回更新后完整结构（version+1）
@@ -231,7 +231,8 @@ func (h *tenantHandler) handleTenantPolicyApply(w http.ResponseWriter, r *http.R
 		return
 	}
 	// 如实登记：租户级策略限域生效判据尚未实现，不伪造生效
-	h.auditAppendDetail(tenantActor(r), auditActionPolicyApply, tenantID, "unavailable")
+	// 审计：Target=policy_overlay（附录 D），detail 记"未就绪"（不落全量枚举）
+	h.auditAppendTenantDetail(tenantActor(r), auditActionPolicyApply, tenantID, "policy_overlay", "unavailable")
 	tenantWriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "tenant_scope_unavailable"})
 }
 
@@ -448,8 +449,8 @@ func (h *tenantHandler) handleTenantModelsConfigPut(w http.ResponseWriter, r *ht
 	}
 	h.dispatchEnqueue(tenantID)
 
-	// 审计：记模型 ID 列表与默认模型（非敏感，附录 D）
-	h.auditAppendDetail(tenantActor(r), auditActionModelConfigUpdate, tenantID,
+	// 审计：Target=default_model（附录 D），Detail 记模型 ID 列表与默认模型（非敏感）
+	h.auditAppendTenantDetail(tenantActor(r), auditActionModelConfigUpdate, tenantID, req.DefaultModel,
 		fmt.Sprintf("allowed=%s default=%s", strings.Join(allowed, ","), req.DefaultModel))
 
 	tenantWriteJSON(w, http.StatusOK, modelsConfigView{
@@ -579,6 +580,20 @@ func (h *tenantHandler) auditAppendDetail(actor, action, target, detail string) 
 	}
 	if err := h.audit.append(adminAuditEvent{
 		Actor: actor, Action: action, Target: target, Detail: detail, Result: "ok",
+	}); err != nil {
+		log.Printf("[tenant-policy] 审计落链失败 action=%s: %v", action, err)
+	}
+}
+
+// auditAppendTenantDetail 落审计，同时标注 Tenant（归属）与 Target（目标资源，附录 D）：
+// policy_update / policy_apply → Target=policy_overlay；model_config_update → Target=default_model。
+// Target 不再复用 tenant_id，租户归属由 Tenant 字段承载（哈希链含两字段）。
+func (h *tenantHandler) auditAppendTenantDetail(actor, action, tenantID, target, detail string) {
+	if h.audit == nil {
+		return
+	}
+	if err := h.audit.append(adminAuditEvent{
+		Actor: actor, Action: action, Tenant: tenantID, Target: target, Detail: detail, Result: "ok",
 	}); err != nil {
 		log.Printf("[tenant-policy] 审计落链失败 action=%s: %v", action, err)
 	}

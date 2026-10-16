@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"security-ai-gateway/gateway/gateway-admin-service/billing"
@@ -86,10 +87,17 @@ func (h *billingHandler) BindFree(ctx context.Context, tenantID, actor string) (
 	}
 
 	if h.audit != nil {
+		// 附录 D：Target=plan_id（对齐既有 auditActionPlanBind），Tenant 承载租户归属。
+		// 审计绝不落明文邮箱：actor 为邮箱时仅存哈希前缀（与 register/login 同法）。
+		auditActor := actor
+		if strings.Contains(auditActor, "@") {
+			auditActor = emailFingerprint(auditActor)
+		}
 		if err := h.audit.append(adminAuditEvent{
-			Actor:  actor,
+			Actor:  auditActor,
 			Action: auditActionPlanBind,
-			Target: tenantID,
+			Tenant: tenantID,
+			Target: freePlanID,
 			Result: "ok",
 		}); err != nil {
 			log.Printf("[tenant-billing] 审计落链失败 tenant=%s: %v", tenantID, err)

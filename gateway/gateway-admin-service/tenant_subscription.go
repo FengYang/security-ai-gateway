@@ -169,8 +169,14 @@ func (h *tenantHandler) handleTenantSubscriptionUpgrade(w http.ResponseWriter, r
 	if direction == "downgrade" {
 		action = auditActionPlanDowngrade
 	}
-	h.auditAppendDetail(actor, action, req.PlanID,
-		fmt.Sprintf("%s->%s req=%s", curPlanID, req.PlanID, requestID))
+	// 附录 D：Target=plan_id；降级须记录生效日（次月 1 日，D-9），升级立即生效。
+	detail := fmt.Sprintf("%s->%s req=%s", curPlanID, req.PlanID, requestID)
+	if direction == "downgrade" {
+		now := time.Now()
+		eff := time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, now.Location())
+		detail += " eff=" + eff.Format("2006-01-02")
+	}
+	h.auditAppendTenantDetail(actor, action, tenantID, req.PlanID, detail)
 	log.Printf("[tenant-subscription] %s 请求已登记 tenant=%s %s→%s req=%s",
 		direction, tenantID, curPlanID, req.PlanID, requestID)
 	tenantWriteJSON(w, http.StatusOK, map[string]any{"request_id": requestID, "status": "pending"})

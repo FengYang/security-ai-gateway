@@ -275,7 +275,8 @@ func (h *tenantHandler) reissueStatementCore(tenantID, reason string, now int64,
 		return "", err
 	}
 	if auditReissue {
-		h.auditAppendDetail(actor, auditActionStatementReissue, st.StatementID,
+		// 附录 D：Target=statement_id；Tenant 标注归属；Detail=模板版本/被取代版本/原因。
+		h.auditAppendTenantDetail(actor, auditActionStatementReissue, tenantID, st.StatementID,
 			fmt.Sprintf("template_version=%s supersedes=%s reason=%s", ver, st.SupersedesID, reason))
 	}
 	return st.StatementID, nil
