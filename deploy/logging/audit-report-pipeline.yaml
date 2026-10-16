@@ -1,0 +1,295 @@
+# P1-7 T2c（D-15/D-18/D-19）：数据面拒绝的采集与回灌管道（Fluent Bit）。
+#
+# 目标：把**不可由 otpmask 插件采集**的三类数据面拒绝（401 鉴权失败 / 403 IP 封禁 / 429 限流）
+# 经网关原生访问日志采集，批量回灌 tee-infer `POST /audit/report`（不新建端点、不新建链）。
+#
+# 采集器选型（D-19(b)）：Fluent Bit（标准采集器，原生 HTTP output + at-least-once/背压）。
+#   ⚠️ 不复用 Promtail——`promtail.yaml` 的 clients 只送 Loki，无 HTTP output（实测）。
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ⚠️ 状态：**V-13 已闭合，且已在容器 sidecar 形态下复测通过（2026-10-14）；仍未纳入 kustomization、未上线**
+#   （剩余上线前置见文末：镜像推 registry + 纳入 kustomization）。两处未决项均已解除：
+#
+# 【阻塞① · 前置实测】✅ **已完成（2026-10-14 K3s 实测，准入④ 闭合）**
+#   留证：《docs/详细设计/P1/P1-7-T2c-X-Mse-Consumer注入行为实测报告.md》。实测结论：
+#     (a) 认证通过后**确实注入** X-Mse-Consumer（基线场景可见 `otpmask-customer-a`）；
+#     (b) **403 路由授权拒绝（consumer 不在 allow）亦注入** ⇒ **归真实租户**；
+#     (c) **429 限流与 403 IP 封禁实测为 `-`（未注入）⇒ 归哨兵租户**——
+#         **推翻** v1.12「发生在 key-auth 之后 ⇒ 可得」的假设；
+#     (d) 401 未注入（与假设一致）⇒ 哨兵租户。
+#   ⇒ **grep/映射规则已可确定**：403 须按 `response_code_details` 区分「授权拒绝」与
+#     「IP 封禁」两个子类（结论相反），**不可只按状态码 403 判定**；
+#     D-18 据此由三层收为两层（A 层＝仅 403 授权拒绝；B 层＝401/429/403-IP）。
+#
+# 【阻塞② · 签名缺口（D-13 与 Fluent Bit 能力不匹配）】**已按 D-20 裁决：取候选 (ii)**
+#   /audit/report 要求 `X-Audit-Report-Sig = hex(HMAC-SHA256(token, 原始 body))`，
+#   且 body 须为 `{"reports":[...]}`；而 Fluent Bit 的 HTTP output 在**输出阶段重新序列化**载荷，
+#   过滤器（Lua）无法对最终字节签名，其内置 `http` output 亦不能产出该包裹结构。
+#   裁决（D-20）：采集器后接**极薄签名器**（读 Fluent Bit 批次 → 序列化 → HMAC → POST），
+#   量级 < 100 行，属投递适配器而非采集引擎（不违反 D-19 精神），复用同一上报令牌
+#   ⇒ **不新增信任边界、不改动 tee-infer 既有上报契约（避免重跑 T12 四域安全测试）**。
+#   后备：若 mTLS 落地（依赖 P1-5 国密 TLS）或运维拒绝新增组件，回退评估候选 (i) 端点变体。
+#   ⇒ 本文件给出「采集 + 筛选」的确定性部分；整形与租户解析由 sidecar 签名器承担。
+#
+# 【2026-10-14 联调结论】链路已打通、**V-13 已闭合**（auth_failed 120 / consumer_unauthorized
+#   121 / rate_limited 127，各 ≥100；403 授权拒绝子类归真实租户；签名器 dropped=0、failed=0）。
+#   形态已按 D-20 收敛为 **sidecar**（本 DaemonSet 内两个容器，127.0.0.1 本地通道，无 Service）。
+# 【2026-10-14 复测（同日稍后）】镜像到位后**以真实容器形态重跑 V-13 通过**（上一段为节点二进制
+#   替代形态）：签名器与 Fluent Bit 均为 DaemonSet 内容器，2/2 Ready，统计见文末上线前置②。
+#   复测期间为复用宿主上的 tee-infer 联调实例，测试副本临时启用了 `hostNetwork`；
+#   **本交付清单不设 hostNetwork**——生产由 Pod 经 Service 访问 tee-infer（见 AUDIT_REPORT_URL）。
+#
+# ⚠️ **上线前置（2026-10-14 复测后更新）**：
+#   ① **镜像** ✅ **已在测试机产出并导入**：测试机已装 Docker 29.9.0（**与 K3s 隔离**——
+#      `daemon.json` 关闭 iptables/bridge/ip-forward 以免打断 K3s 网络；构建须 `--network=host`）。
+#      `audit-sign-relay:latest` 已构建（28.7 MB），经 `docker save` +
+#      `ctr -n k8s.io --address /run/k3s/containerd/containerd.sock images import` 进入 K3s，
+#      Pod 可调度（Events: "already present on machine"）。
+#      ⚠️ **仍待**：推至集群可拉取的 registry 并改用可拉取 tag——当前为**本地导入**，
+#      换节点/重建节点即失效，仅适用于单节点验证。
+#   ② **联调复测** ✅ **已完成（容器 sidecar 形态，非节点二进制替代）**：V-13 全判据闭合
+#      ——auth_failed 126 / consumer_unauthorized 126 / rate_limited 175（各 ≥100）；
+#      403 授权拒绝归真实租户 tenant-a（`consumer_map`=126），401/429 落哨兵（`unauthenticated`=301）；
+#      **反向用例**：自报 `X-Tenant-ID: tenant-FAKE` 在链上 **0 条**；
+#      签名器 batches=17 / items=427 / forwarded=17 / **dropped=0 / failed=0** / 上游 200。
+#      复测另暴露并修正本清单 **4 处缺陷**（fluent-bit 镜像、日志 Path、SA、映射表），见各处 ⚠️ 注释。
+#   ③ **仍待**：推 registry + 纳入 kustomization 后方可上线。
+# ─────────────────────────────────────────────────────────────────────────────
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: audit-report-token
+  namespace: otpmask
+  labels:
+    app: audit-report-pipeline
+type: Opaque
+stringData:
+  # ⚠️ 占位值，部署前必须替换；生产应改用 SealedSecret / 外部密钥管理，**禁止明文入库**。
+  # 令牌须与 tee-infer 的 -audit-report-token 一致；**不得回落管理令牌**（A3-11）。
+  AUDIT_REPORT_TOKEN: "CHANGE_ME_AUDIT_REPORT_TOKEN"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-replay-scripts
+  namespace: otpmask
+  labels:
+    app: audit-report-pipeline
+data:
+  # ⚠️ 本内嵌副本须与 deploy/logging/audit_replay.lua **保持一致**（以文件为准）。
+  #    2026-10-14 联调后该函数已由「整形器」收敛为「筛选器」，整形/租户解析下沉到签名器。
+  audit_replay.lua: |
+    -- 与 deploy/logging/audit_replay.lua 同源；kustomize 部署时以文件为准，此处为自包含副本。
+    -- P1-7 T2c（D-18/D-20）：Fluent Bit Lua **筛选器**——只放行数据面拒绝（401/403/429）。
+    --
+    -- ⚠️ 2026-10-14 联调修正（勿回退）：
+    --   1) 该过滤器**不允许替换 record**（返回新表 ⇒ invalid table returned）；
+    --   2) 丢弃必须用 **return -1**（单值），用 return 2 同样触发上述错误；
+    --   ⇒ 故整形与租户解析下沉到极薄签名器（cmd/audit-sign-relay，TRANSFORM=on）。
+    local REPLAY_CODES = { ["401"] = true, ["403"] = true, ["429"] = true }
+
+    function replay_filter(tag, timestamp, record)
+      local code = tostring(record["response_code"] or "")
+      if not REPLAY_CODES[code] then
+        return -1
+      end
+      record["audit_replay"] = "1"
+      return 2, timestamp, record
+    end
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-report-pipeline-config
+  namespace: otpmask
+  labels:
+    app: audit-report-pipeline
+data:
+  parsers.conf: |
+    [PARSER]
+        Name        cri
+        Format      regex
+        Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+    [PARSER]
+        Name        gateway_access_json
+        Format      json
+        Time_Key    start_time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush        5
+        Daemon       Off
+        Log_Level    info
+        Parsers_File /fluent-bit/etc/parsers.conf
+
+    # 采集：Higress 网关访问日志（随 Pod stdout 落 /var/log/pods）。
+    # ⚠️ 2026-10-14 复测修正：原 Path 为 `higress-system_envoy-gateway*`，而实际网关 Pod 名为
+    #    `higress-gateway-<rs>-<pod>`、容器名为 `higress-gateway` ⇒ **原路径一个文件都匹配不到**
+    #    （Fluent Bit 日志可见 inotify 无任何文件加入），管道静默无输出。已按实测路径修正。
+    #    仍提醒：Path 需按集群实际 Pod 命名/容器名调整（多副本网关由 glob 覆盖）。
+    [INPUT]
+        Name              tail
+        Path              /var/log/pods/higress-system_higress-gateway-*/higress-gateway/*.log
+        Tag               gateway.access
+        Parser            cri
+        Refresh_Interval  5
+        Rotate_Wait       30
+        DB                /var/lib/fluent-bit/audit-replay.db
+        Mem_Buf_Limit     32MB
+
+    # CRI 外层剥离后，内层为访问日志 JSON。
+    [FILTER]
+        Name    parser
+        Match   gateway.access
+        Key_Name log
+        Parser  gateway_access_json
+        Reserve_Data On
+
+    # 仅保留数据面拒绝（401/403/429）；其余丢弃（本管道只回灌拒绝事件）。
+    [FILTER]
+        Name    grep
+        Match   gateway.access
+        Regex   response_code ^(401|403|429)$
+
+    # 记录整形 + 租户三层解析（D-18）。见上方脚本说明。
+    [FILTER]
+        Name    lua
+        Match   gateway.access
+        script  /fluent-bit/scripts/audit_replay.lua
+        call    replay_filter
+
+    # 【OUTPUT 段 · 按 D-20 候选 (ii)；签名器为**同 Pod 的 sidecar**，走 127.0.0.1 本地通道】
+    # 关键差异：OUTPUT **不直连 tee-infer**，而是投递到同 Pod 内的极薄签名器
+    # （`audit-sign-relay`，实现见 `cmd/audit-sign-relay/`），由它整形 + HMAC 签名后转发。
+    # 理由：Fluent Bit 在输出阶段重新序列化，Lua 过滤器无法对最终字节签名；
+    #      其内置 http output 亦不能产出 `{"reports":[...]}` 包裹结构。
+    #
+    # ⚠️ 形态已按 D-20 收敛：**不再存在独立 Deployment / Service**（原 audit-sign-relay.yaml 已删除）。
+    #    理由（2026-10-14 复盘）：独立 Deployment + ClusterIP Service 会让集群内任意 Pod
+    #    都能向签名器投递——而签名器自身不鉴权、会用自己令牌签任何收到的内容 ⇒
+    #    等同于开放一个「任意事件注入审计链」的入口（A3-10 要防的证据投毒）。
+    [OUTPUT]
+        Name        http
+        Match       gateway.access
+        Host        127.0.0.1
+        Port        9090
+        URI         /audit/batch
+        Format      json_lines
+        Retry_Limit 3
+        # 不上报令牌、不签名——这两项由同 Pod 的签名器负责（令牌不经过 Fluent Bit 配置）
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: audit-report-pipeline
+  namespace: otpmask
+  labels:
+    app: audit-report-pipeline
+spec:
+  selector:
+    matchLabels:
+      app: audit-report-pipeline
+  template:
+    metadata:
+      labels:
+        app: audit-report-pipeline
+    spec:
+      # ⚠️ 2026-10-14 复测修正：原值 `promtail` 在 otpmask 命名空间下**不存在**（既有 promtail
+      #    SA 位于 higress-system），按原值部署 Pod 会因 SA 缺失而创建失败。改用 default。
+      #    待办：若需最小权限，另行创建专用 SA 并绑定仅读 /var/log/pods 的 RBAC（纳入 T14）。
+      serviceAccountName: default
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: fluent-bit
+          # ⚠️ 2026-10-14 复测修正：`cr.fluentbit.io/fluentbit/fluent-bit:{3.1,3.2.2}` 实测均
+          #    **解析失败**（manifest not found），按原值部署必然 ImagePullBackOff。
+          #    改用 docker.io 官方镜像 `fluent/fluent-bit:3.2.2`（已验证可拉取并跑通 V-13）。
+          #    离线/内网环境：须预置镜像，或 `docker save` + `ctr -n k8s.io images import` 导入。
+          image: fluent/fluent-bit:3.2.2
+          imagePullPolicy: IfNotPresent
+          # ⚠️ 资源占用纳入 T11 性能基线（A4-11）；不得与网关同机争抢（D-19 约束②）。
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 300m, memory: 256Mi }
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/fluent-bit.conf
+              subPath: fluent-bit.conf
+            - name: config
+              mountPath: /fluent-bit/etc/parsers.conf
+              subPath: parsers.conf
+            - name: scripts
+              mountPath: /fluent-bit/scripts/audit_replay.lua
+              subPath: audit_replay.lua
+            - name: tenant-map
+              mountPath: /fluent-bit/scripts/consumer-tenant.json
+              subPath: consumer-tenant.json
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: buffer
+              mountPath: /var/lib/fluent-bit
+        # ── 极薄签名器（D-20 候选 ii）：与 Fluent Bit 同 Pod，仅经 127.0.0.1 通信 ──
+        - name: audit-sign-relay
+          image: audit-sign-relay:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # 只监听 Pod 内回环地址 ⇒ 不对外暴露任何入口（无 Service）
+            - name: LISTEN_ADDR
+              value: "127.0.0.1:9090"
+            - name: AUDIT_REPORT_URL
+              value: "http://tee-infer-service.otpmask.svc.cluster.local:19090/audit/report"
+            - name: AUDIT_REPORT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: audit-report-token
+                  key: AUDIT_REPORT_TOKEN
+            # TRANSFORM=on：由签名器完成整形 + 租户解析（Lua 侧受 Fluent Bit 约束无法替换 record）
+            - name: TRANSFORM
+              value: "on"
+            - name: MAP_PATH
+              value: "/etc/audit-report/consumer-tenant.json"
+            - name: MAX_RETRY
+              value: "3"
+            - name: BACKOFF_MS
+              value: "200"
+            - name: UPSTREAM_TIMEOUT_MS
+              value: "5000"
+          ports:
+            - name: relay
+              containerPort: 9090
+          readinessProbe:
+            httpGet: { path: /healthz, port: 9090 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 9090 }
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: tenant-map
+              mountPath: /etc/audit-report/consumer-tenant.json
+              subPath: consumer-tenant.json
+              readOnly: true
+      volumes:
+        - name: config
+          configMap: { name: audit-report-pipeline-config }
+        - name: scripts
+          configMap: { name: audit-replay-scripts }
+        - name: tenant-map
+          configMap: { name: consumer-tenant-map }
+        - name: varlog
+          hostPath: { path: /var/log }
+        - name: buffer
+          emptyDir: {}

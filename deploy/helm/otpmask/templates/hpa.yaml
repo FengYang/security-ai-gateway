@@ -25,6 +25,7 @@ spec:
   behavior:
     scaleDown:
       stabilizationWindowSeconds: {{ .Values.hpa.scaleDownStabilizationSeconds }}
+{{- if not .Values.persistence.enabled }}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -51,3 +52,4 @@ spec:
     scaleDown:
       stabilizationWindowSeconds: {{ .Values.hpa.scaleDownStabilizationSeconds }}
 {{- end }}
+{{- end }}{{/* not .Values.persistence.enabled：单写者形态下禁用 tee-infer HPA（D-14） */}}

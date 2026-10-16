@@ -78,9 +78,40 @@ teeInfer:
   # 与管理令牌，否则 tee-infer 启动守卫会拒绝启动（fail-closed）。
   # 注：本 Chart 暂未模板化 -enclave/-admin-token，生产启用前需扩展（见部署指南）。
   devMode: true
+  # 【P1-7 T0 · A4-13】内存上调 512Mi → 1–2 Gi：
+  # 审计留痕启用 WORM 持久化（persistence.enabled）后，冷启动需扫描事件文件建立
+  # **偏移量索引**、归档与区间检索需**文件区间扫描排序缓冲**，原 512Mi 上限不足
+  # （依据本体 §10.2 A3-27 压测复核结论）。
+  # ⚠️ 当前取区间**下限** 1Gi（requests 由 128Mi 同步上调至 512Mi）——A4-13 要求
+  # 「以压测结论为准并登记实测值」，而 T11 性能基线尚未实测；待 T11 压测后回填实测值，
+  # 若实测不足则上调至 2Gi（上限）。
   resources:
-    requests: { cpu: 100m, memory: 128Mi }
-    limits: { cpu: 1000m, memory: 512Mi }
+    requests: { cpu: 100m, memory: 512Mi }
+    limits: { cpu: 1000m, memory: 1Gi }
+  # 【P1-7 T0 · §7.1 第 6 项 A3-03】审计 fail-closed 开关：
+  # true = 审计写失败时拒绝业务请求；此时启动期自检要求 WORM 后端已装配
+  # （由 persistence.enabled 提供 -audit-file），否则 tee-infer **拒绝启动**。
+  # 默认 false 保持既有 fail-open 兼容行为；亦为 T15 租户级灰度/回退的总开关。
+  auditFailClosed: false
+  # 【P1-7 T15 · §7.10】租户级审计灰度开关（启动档位；运行时切换走 PUT /audit/canary）：
+  #   all    = 全量留痕（缺省，生产终态；与未装配本开关行为一致）
+  #   canary = 仅 auditCanaryTenants 名单内租户留痕（上线灰度；空名单拒绝启动）
+  #   off    = 一键回退：租户归属事件不落链（控制类事件仍落链；已归档数据不回删）
+  # 回退 SOP 见《P1-7-T15-审计灰度与回退SOP.md》。
+  auditCanary: all
+  auditCanaryTenants: "" # canary 档名单（逗号分隔），如 "tenant-a,tenant-b"
+
+# P1-7 T0：审计 WORM 持久化（D-14 单写者形态 / D-17 落盘强度）。
+# ⚠️ 准入③：本段默认值（尤其 storageClass / size / 单写者）须与运维确认后方可上生产。
+persistence:
+  enabled: true                 # 启用 -audit-file/-audit-anchor + PVC（D-14 默认生产形态）
+  size: 20Gi                    # 归档前 WORM 事件文件容量（按留存期与日量估算）
+  storageClass: ""              # 空 = 集群默认 StorageClass（须由运维拍板 StorageClass）
+  accessMode: ReadWriteOnce     # RWO：单写者单副本（D-14）
+  mountPath: /var/lib/otpmask/audit
+  auditFile: /var/lib/otpmask/audit/audit.jsonl
+  auditAnchor: /var/lib/otpmask/audit/anchor.jsonl
+  fsync: batch                  # batch（每 1000 条或每 1 秒）| per_event（合规档，D-17）
 
 # 水平扩缩容（autoscaling/v2，需 metrics-server）
 hpa:

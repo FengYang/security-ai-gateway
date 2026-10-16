@@ -2343,7 +2343,16 @@ type secConfigView struct {
 	SystemPromptSet  bool   `json:"system_prompt_set"`
 	AuditEnabled     bool   `json:"audit_enabled"`
 	// 审计/日志留存期声明（天；0=未声明）。声明式，删除由存储层生命周期策略执行。
-	AuditRetentionDays int               `json:"audit_retention_days"`
+	AuditRetentionDays int `json:"audit_retention_days"`
+	// P1-7 T0（D-17 / A4-01）：审计 WORM 落盘强度只读视图（启动期定档）。
+	AuditFsyncMode     string            `json:"audit_fsync_mode"`     // batch | per_event | ""（内存模式）
+	AuditFsyncEvery    int               `json:"audit_fsync_every"`    // batch 档：每 N 条
+	AuditFsyncInterval string            `json:"audit_fsync_interval"` // batch 档：每 T（Go Duration 字符串）
+	AuditFsyncCount    uint64            `json:"audit_fsync_count"`    // 累计 fsync 次数
+	// P1-7 T15（§7.10）：租户级灰度开关只读视图（运行时切换走 PUT /audit/canary）。
+	AuditCanaryMode    string   `json:"audit_canary_mode"`    // all | canary | off
+	AuditCanaryTenants []string `json:"audit_canary_tenants"` // canary 档名单（排序稳定）
+	AuditCanarySkipped uint64   `json:"audit_canary_skipped"` // 累计灰度跳过事件数
 	Guardrail          guardrailSnapshot `json:"guardrail"`
 	// GA-输出侧内容审查（OG-3）：当前模式与策略版本（只读；运行时覆盖/持久化归 OG-8）。
 	OutputGuard outputGuardSnapshot `json:"output_guard"`
@@ -2455,6 +2464,20 @@ func (s *teeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		SystemPromptSet:    s.systemPrompt != "",
 		AuditEnabled:       s.audit != nil,
 		AuditRetentionDays: s.auditRetentionDays,
+	}
+	// P1-7 T0（D-17）：落盘强度档位与累计 fsync 次数（内存模式 → 保持空值）。
+	// P1-7 T15（§7.10）：灰度开关快照（与 WormFsyncInfo 同源，s.audit 非空时填充）。
+	if s.audit != nil {
+		if m, e, iv, cnt, ok := s.audit.WormFsyncInfo(); ok {
+			view.AuditFsyncMode = m
+			view.AuditFsyncEvery = e
+			view.AuditFsyncInterval = iv
+			view.AuditFsyncCount = cnt
+		}
+		cm, tenants, skipped := s.audit.CanarySnapshot()
+		view.AuditCanaryMode = string(cm)
+		view.AuditCanaryTenants = tenants
+		view.AuditCanarySkipped = skipped
 	}
 	if v, ok := s.piiModeOverride.Load().(string); ok && v != "" {
 		view.PIIModeSource = "runtime"
@@ -3924,6 +3947,21 @@ func limitBody(next http.Handler) http.Handler {
 	})
 }
 
+// auditFsyncConfigFromFlag 解析 -audit-fsync 档位（P1-7 T0 / D-17）。
+// batch（默认）= 每 1000 条或每 1 秒 fsync（先到者触发）；per_event = 每事件 fsync（合规档）。
+func auditFsyncConfigFromFlag(v string) (WormFsyncConfig, error) {
+	switch v {
+	case "", "batch":
+		return defaultWormFsyncConfig(), nil
+	case "per_event":
+		c := defaultWormFsyncConfig()
+		c.Mode = FsyncPerEvent
+		return c, nil
+	default:
+		return WormFsyncConfig{}, fmt.Errorf("未知 -audit-fsync 档位: %q（batch|per_event）", v)
+	}
+}
+
 func main() {
 	addr := flag.String("listen", ":19090", "监听地址")
 	sigKeyHex := flag.String("sig-key", "", "协议签名密钥 K_sig（32 字节 hex；默认随机生成并打印）")
@@ -3940,10 +3978,23 @@ func main() {
 	cmaasModel := flag.String("cmaas-model", "", "C-MaaS 缺省模型 code（cmaas-glm-5.2 等；请求未指定模型时使用）")
 	auditFile := flag.String("audit-file", "", "审计事件 WORM 文件路径（JSON Lines 只追加；为空 = 内存模式）")
 	auditAnchor := flag.String("audit-anchor", "", "审计锚定文件路径（链尾哈希追加；仅 audit-file 开启时生效）")
+	auditFsync := flag.String("audit-fsync", "batch", "审计 WORM 落盘强度（P1-7 T0 / D-17）：batch=每 1000 条或每 1 秒 fsync（默认；掉电最多丢最近 1000 条/1 秒）｜per_event=每事件 fsync（合规档，须重估 V-10 p99）")
 	auditAnchorInterval := flag.Duration("audit-anchor-interval", time.Hour, "审计周期锚定间隔（T10，MOD8；默认 1h；仅 -audit-anchor 配置时生效）。锚定链尾哈希供 audit-verify 复核截断（D-9）")
 	auditReportToken := flag.String("audit-report-token", "", "数据面上报只读令牌（A3-11：缺省即拒绝注册 /audit/report，fail-closed，不回落 -admin-token）")
 	auditReportTenants := flag.String("audit-report-tenants", "", "上报令牌可声明的 tenant_id 集合（逗号分隔；插件侧 A3-10 租户归属校验；缺省=网关级，服务端解析租户 D-18）")
+	// P1-7 T0（§7.1 第 6 项）：启动期自检入参。
+	// -audit-fail-closed 使 fail-closed 首次可从部署层配置——此前 SetFailClosed 无产品调用点，
+	// failClosed 恒为 false ⇒ A3-03 自检永不触发；本开关亦为 T15 租户级灰度/回退预留。
+	auditFailClosed := flag.Bool("audit-fail-closed", false, "审计写失败是否拒绝业务请求（A3-03 fail-closed）；true 时启动期自检要求 WORM 后端已装配（-audit-file），否则拒绝启动")
+	// -audit-replicas 由部署层注入（helm 按 persistence.enabled 计算实际副本数），
+	// 用于 D-14 单写者自检：进程自身无法感知 K8s 副本数。
+	auditReplicas := flag.Int("audit-replicas", 1, "本服务副本数（部署注入，须与 Deployment spec.replicas 一致；D-14 单写者自检：>1 且启用共享 PVC 时拒绝启动）")
 	auditRetention := flag.Int("audit-retention-days", defaultAuditRetentionDays, "审计/日志留存期声明（天；0=不声明；>0 须 ≥180 法定硬底）。仅声明：服务不删除审计数据（保 WORM 链完整），删除由存储层生命周期策略按本值执行")
+	// P1-7 T15（§7.10）：租户级灰度开关（启动档位；运行时切换走 PUT /audit/canary）。
+	// all=全量留痕（缺省，与现网零差异）；canary=仅名单内租户留痕（上线灰度）；
+	// off=租户归属事件不落链（一键回退态；控制类事件仍落链，已归档数据不回删）。
+	auditCanary := flag.String("audit-canary", string(canaryAll), "审计留痕灰度档位（T15）：all=全量（缺省）｜canary=仅 -audit-canary-tenants 名单内租户留痕｜off=一键回退（租户事件不落链，控制类事件仍落链）")
+	auditCanaryTenants := flag.String("audit-canary-tenants", "", "canary 档生效的租户名单（逗号分隔；-audit-canary canary 时必填，空名单拒绝启动）")
 	tsaMode := flag.String("tsa", "mock", "RFC 3161 可信时间戳服务：mock（本地自签）| rfc3161（外部 TSA）| off（不绑定 TST）")
 	tsaRFC3161URL := flag.String("tsa-rfc3161-url", "", "外部 RFC 3161 TSA 服务 URL（-tsa rfc3161 时必填）")
 	tsaRFC3161RootCert := flag.String("tsa-rfc3161-root-cert", "", "外部 TSA 根证书路径（PEM；空=使用系统根证书池，生产环境建议显式配置）")
@@ -4176,16 +4227,40 @@ func main() {
 	}
 	var audit *auditChain
 	if *auditFile != "" {
-		audit, err = newAuditChainWORM(*auditFile, *auditAnchor)
+		fsyncCfg, ferr := auditFsyncConfigFromFlag(*auditFsync)
+		if ferr != nil {
+			log.Fatalf("审计落盘强度配置非法（fail-closed 拒绝启动）: %v", ferr)
+		}
+		audit, err = newAuditChainWORMWithConfig(*auditFile, *auditAnchor, fsyncCfg)
 		if err != nil {
 			log.Fatalf("初始化 WORM 审计失败（fail-closed 拒绝启动）: %v", err)
 		}
 		audit.tsa = tsa
 		rec := audit.anchorNow()
-		log.Printf("审计模式: WORM 文件=%s 锚定=%s 恢复事件=%d（锚定 %s, TST=%v）",
-			*auditFile, orDefault(*auditAnchor, "-"), audit.len(), orDefault(chainHashOf(rec), "-"), rec != nil && rec.TST != nil)
+		// P1-7 T0（D-17）：落盘强度档位在启动日志暴露（单一计数点归属 fileWorm）。
+		on, oe, oi, _, _ := audit.WormFsyncInfo()
+		log.Printf("审计模式: WORM 文件=%s 锚定=%s 恢复事件=%d（锚定 %s, TST=%v）落盘强度 fsync=%s(每%d条/每%s)",
+			*auditFile, orDefault(*auditAnchor, "-"), audit.len(), orDefault(chainHashOf(rec), "-"), rec != nil && rec.TST != nil,
+			on, oe, oi)
 	} else {
 		audit = newAuditChainWithTSA(tsa)
+	}
+
+	// P1-7 T0（§7.1 第 6 项）：启动期 fail-closed 自检（D-14 单写者 / A3-03 / A3-11）。
+	// 三条判据见 audit_bootstrap.go；任一不满足即 log.Fatalf 拒绝启动。
+	audit.SetFailClosed(*auditFailClosed)
+	if err := auditStartupGuard(audit, auditStartupConfig{
+		AuditFile:   *auditFile,
+		Replicas:    *auditReplicas,
+		ReportToken: *auditReportToken,
+	}); err != nil {
+		log.Fatalf("审计启动期自检未通过（fail-closed，拒绝启动）: %v", err)
+	}
+
+	// P1-7 T15（§7.10）：启动档位应用（fail-closed：模式字面量非法 / canary 空名单即拒绝启动）。
+	// 运行时切换走 PUT /audit/canary（管理令牌）；每次切换自身落链。
+	if err := audit.SetCanary(*auditCanary, *auditCanaryTenants); err != nil {
+		log.Fatalf("审计灰度开关配置非法（fail-closed 拒绝启动）: %v", err)
 	}
 
 	// P0-2 语义缓存 + §6.10：启动期装配运行时快照（默认 mode=off，与现网逐字节一致）。
@@ -4240,6 +4315,8 @@ func main() {
 	// 唯一生产点 = auditChain.appendOrFail（audit.go:319）。
 	srv.audit.SetWormWriteFailHook(func(policy string) { srv.metrics.incWormWriteFail(policy) })
 	srv.audit.SetFailClosedRejectHook(func() { srv.metrics.incAuditFailClosedReject() })
+	// P1-7 T15：租户级灰度跳过计数（otpmask_audit_canary_skipped_total）。
+	srv.audit.SetCanarySkipHook(func() { srv.metrics.incAuditCanarySkipped() })
 	// T10（MOD8）：周期锚定循环（默认 1h）。仅当锚定文件已配置（-audit-anchor）时启用；
 	// 复用既有 anchorNow()，将链尾哈希追加为时间戳快照，供 audit-verify 复核截断（D-9）。
 	if *auditAnchor != "" && *auditAnchorInterval > 0 {
@@ -4550,6 +4627,7 @@ func main() {
 	mux.HandleFunc("/audit/verify", srv.handleAuditVerify)                             // M9-3 哈希链校验
 	mux.HandleFunc("/audit/anchor", srv.handleAuditAnchor)                             // C-5 审计锚定
 	mux.HandleFunc("/audit/retention", srv.handleAuditRetention)                       // P1-7 T9：留存/分层声明读写（§6.4）
+	mux.HandleFunc("/audit/canary", srv.handleAuditCanary)                             // P1-7 T15：租户级灰度开关读写（§7.10；GET 快照 / PUT 切换并落链）
 	mux.HandleFunc("/metrics", srv.handleMetrics)                                      // M10 可观测性
 	mux.HandleFunc("/config", srv.handleConfig)                                        // M3-B 安全中心：配置只读快照
 	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig)                     // M3-B 高敏复核：Guardrail 降级生效点
