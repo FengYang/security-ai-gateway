@@ -8,7 +8,8 @@ higress-mcp.py —— 启用 / 回滚 Higress 原生 MCP Server（`higress-confi
   python3 scripts/higress-mcp.py --rollback
 
 行为（--profile native，对应"情况① 客户自建可信内网"）：
-  1) 前置校验：Redis 服务与端点可达（若指向集群内 Redis）；
+  1) 前置校验：Redis 服务与端点可达（若指向集群内 Redis）+ cryptop 就绪（RK-9，轻量
+     只读：sidecar 容器 + Secret；缺省时 native 显式警告继续、secure 预检失败，P2-1 §7.2.3）；
   2) **合并**（非覆盖）写入 `data.higress.mcpServer`（保留 tracing 等既有键）；
   3) 滚动重启 gateway 并等待 Ready；
   4) 冒烟：断言 `mcpServer.enable=true` 已加载 + 探测 MCP 入口（信息性）。
@@ -33,7 +34,7 @@ higress-mcp.py —— 启用 / 回滚 Higress 原生 MCP Server（`higress-confi
   --sse-suffix             MCP 客户端 SSE 后缀，默认 /sse
 
 前置：export SSH_PASSWORD（严禁硬编码）。
-依据：《GA-Higress-MCP接入与打通-技术实现方案》v1.5 §4.1 / §4.3 / §8。
+依据：《GA-Higress-MCP接入与打通-技术实现方案》v1.7 §4.1 / §4.3 / §6.3.2 / §7.2.3 / §8。
 注意：`higress-config` 的 `higress` 字段还含 tracing 等**运行期追加**内容，故本脚本只
       **合并/删除 `mcpServer` 键**，绝不以整份 ConfigMap 覆盖（防丢 tracing）。
 """
@@ -59,6 +60,11 @@ TEE_SVC_PORT = "19090"
 SECURE_INGRESS = "mcp-secure-tools"   # deploy/higress/ingress-mcp.yaml
 SECURE_PATH = "/mcp-servers/secure-tools"
 OTPMASK_PLUGIN = "otpmask"            # deploy/higress/otpmask-plugin.yaml（matchRules 含 SECURE_INGRESS）
+
+# ---- T-1 前置校验（cryptop 就绪，RK-9）常量 ----
+GW_DEPLOY = "higress-gateway"         # 网关 Deployment（sidecar 注入对象）
+CRYPTO_SIDECAR = "cryptopsvc"         # sidecar 容器名（cryptopsvc-sidecar-patch.yaml）
+CRYPTO_SECRET = "cryptop-static-keys" # 静态密钥 Secret（同 patch 文件创造）
 
 
 def _run(cmd, timeout=300):
@@ -147,6 +153,49 @@ def check_redis(addr):
                 print(f"   [警告] redis-cli PING 异常: {pong.strip()[:80]}")
     else:
         print("   [跳过] 非集群内默认 Redis（R2 形态）；请自行确认可达性")
+
+
+def check_cryptop(profile, dry_run):
+    """T-1 前置校验：cryptop 就绪（RK-9，段① 密态链路必需；轻量只读）。
+
+    语义（P2-1 §7.2.3）：加密依赖不可用**不得静默**——native（明文轨）显式警告后继续；
+    secure（敏感轨）预检失败即拒绝（fail-closed）。
+    深度验证（Pod 内 19097 探活 / config_dump 簇物化）属 T-1 ① 部署闭环留证，见
+    《GA-Higress-MCP接入与打通》§6.3.2「P0 前置检查清单」。
+    """
+    print("\n-- cryptop 前置校验（RK-9；检查清单见 §6.3.2）")
+    if dry_run:
+        print("   [dry-run] 将执行以下只读校验（零变更）：")
+        print(f"     ① 网关 Deployment（{GW_DEPLOY}）含 sidecar 容器 {CRYPTO_SIDECAR}")
+        print(f"     ② Secret {CRYPTO_SECRET} 存在")
+        return
+    ok = True
+    names, _, rc = _run(
+        f"kubectl get deployment {GW_DEPLOY} -n {CM_NS} "
+        "-o jsonpath='{.spec.template.spec.containers[*].name}'"
+    )
+    has_sidecar = rc == 0 and CRYPTO_SIDECAR in names.split()
+    print(f"   ① sidecar 容器（{CRYPTO_SIDECAR}）: {'存在' if has_sidecar else '缺失'}")
+    ok = ok and has_sidecar
+    _, _, rc = _run(f"kubectl get secret {CRYPTO_SECRET} -n {CM_NS}")
+    has_secret = rc == 0
+    print(f"   ② Secret（{CRYPTO_SECRET}）: {'存在' if has_secret else '缺失'}")
+    ok = ok and has_secret
+    if ok:
+        print("   cryptop 前置满足")
+        return
+    fix = (
+        "按 deploy/higress/cryptopsvc-sidecar-patch.yaml 注入（P2-1 T-1；"
+        "清单见《GA-Higress-MCP接入与打通》§6.3.2）"
+    )
+    if profile == "secure":
+        raise SystemExit(
+            f"[secure] cryptop 前置未满足（RK-9）：{fix}；敏感轨 fail-closed，拒绝继续。"
+        )
+    print(
+        f"   [警告] cryptop 前置未满足（RK-9）：{fix}；"
+        "native（明文轨）继续启用，段① 密态链路当前不可用。"
+    )
 
 
 def write_mcp_server(redis_addr, sse_suffix, dry_run):
@@ -424,8 +473,9 @@ def remote_main(argv):
     if profile not in ("native", "secure"):
         raise SystemExit(f"未知 profile: {profile}（仅支持 native|secure）")
 
-    print("=== Step 1: Redis 前置校验 ===")
+    print("=== Step 1: 前置校验（Redis + cryptop）===")
     check_redis(redis_addr)
+    check_cryptop(profile, dry_run)
 
     print("\n=== Step 2: 合并写入 mcpServer 段 ===")
     changed = write_mcp_server(redis_addr, sse_suffix, dry_run)
