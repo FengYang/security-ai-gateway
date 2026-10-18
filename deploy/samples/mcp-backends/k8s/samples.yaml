@@ -1,0 +1,169 @@
+# P2-1 T-2 样例 MCP 后端部署清单（联调样例；不进入产品发布物）
+# ---------------------------------------------------------------------------
+# 用法：
+#   ① 构建 + 离线导入镜像（见 ../README.md；build-images.py 或 Dockerfile 两法）
+#   ② kubectl apply -f deploy/samples/mcp-backends/k8s/samples.yaml
+#   ③ 网关侧注册（见 ../README.md「注册到 Higress」；启用受 U-1/U-4 实测约束）
+# 清理：kubectl delete -f deploy/samples/mcp-backends/k8s/samples.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-samples
+  labels:
+    purpose: mcp-samples
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-demo
+  namespace: mcp-samples
+  labels:
+    app: mcp-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-demo
+  template:
+    metadata:
+      labels:
+        app: mcp-demo
+    spec:
+      containers:
+        - name: mcp-demo
+          image: otpmask/mcp-demo:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: LISTEN
+              value: ":8080"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-demo
+  namespace: mcp-samples
+spec:
+  selector:
+    app: mcp-demo
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-fs-data
+  namespace: mcp-samples
+data:
+  README.txt: |
+    mcp-fs 样例数据（P2-1 T-2）。
+    仅联调样例，请勿放置任何真实敏感数据。
+  demo.txt: |
+    这是 mcp-fs 的样例文本文件，可通过 read_text 工具读取。
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-fs
+  namespace: mcp-samples
+  labels:
+    app: mcp-fs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-fs
+  template:
+    metadata:
+      labels:
+        app: mcp-fs
+    spec:
+      containers:
+        - name: mcp-fs
+          image: otpmask/mcp-fs:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: LISTEN
+              value: ":8080"
+            - name: FS_ROOT
+              value: "/data"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: data
+          configMap:
+            name: mcp-fs-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-fs
+  namespace: mcp-samples
+spec:
+  selector:
+    app: mcp-fs
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
