@@ -53,7 +53,10 @@ L3L4_KEYWORDS = [
     "说明", "跟踪", "规格", "计划",
 ]
 # L2 本体强制覆盖：文件名含 L3/L4 关键词、但实为设计本体（不该被要求三字段）
-L2_FORCE = {"GA-AI网关能力补齐方案--P0--侧信道风险披露说明.md"}
+L2_FORCE = {
+    "GA-AI网关能力补齐方案--P0--侧信道风险披露说明.md",
+    "GA-AI网关能力补齐方案--P2--行业解决方案模板.md",
+}
 
 # R05：评审轮次
 ROUND_RE = re.compile(r"第\s*([\d.]+)\s*轮")
@@ -73,6 +76,8 @@ META_CONTEXT_RE = re.compile(r"已改|已按|修订|变更|改为|废止|作废|
 R07_ACCEPTED_PAIRS = {
     # 本体（方案设计）↔ 分册（M2 细化方案）
     frozenset({"管理门户-apiTokens-Secret化方案设计.md", "管理门户-apiTokens-Secret化-M2细化方案.md"}),
+    # 能力本体（P1-1）↔ P2 实施任务书（P2-1；文件名为研发计划 §10 规定，分工声明见两侧头部）
+    frozenset({"GA-AI网关能力补齐方案--P1--MCP协议网关.md", "GA-AI网关能力补齐方案--P2--MCP协议网关化.md"}),
 }
 
 SKIP_DIRS = {".git", "node_modules", "vendor", ".trae", "html-snapshots", "_shared", "assets"}
