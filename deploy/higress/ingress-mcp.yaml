@@ -45,27 +45,51 @@ spec:
   - secretName: default
 ---
 # ============================================================================
-# 非敏感轨：/mcp-servers/public-tools → Higress MCP Server（内置托管）
+# 非敏感轨：public（样例后端 mcp-demo / mcp-fs）→ 显式路由骨架（**待 U-1/U-4 实测后启用**）
 # ----------------------------------------------------------------------------
-# ⚠️ **当前为注释骨架；启用前须先闭环 待实测 U-4**：
-#   官方客户端 URL 为 `/mcp-servers/<name>/sse`，若 Higress MCP Server 已由**内置路由**承载该前缀，
-#   则**本 Ingress 不需要**（叠加可能与内置路由冲突）；若确需显式路由，后端指向「MCP 后端」registry
-#   （deploy/higress/mcp-bridge-registries.yaml 的 `mcp-tools`，该项亦为注释骨架，待真实后端就位）。
-#   故本段**默认不启用**，待 U-4 实测结论 + 真实 MCP 后端就位后再取消注释。
+# ⚠️ **当前为注释骨架**：
+#   · 官方客户端 URL 为 `/mcp-servers/<name>/sse`；若 Higress MCP Server 已由**内置路由**承载该前缀，
+#     则**可能不需要**显式 Ingress（叠加可能冲突）——以 U-4 集群实测为准；
+#   · 若确需显式路由：后端指向 deploy/higress/mcp-bridge-registries.yaml 的 `mcp-demo` / `mcp-fs`
+#     registry（注释骨架），与 secure-tools 同型用 **McpBridge resource backend**（防 cluster_not_found）；
+#   · 启用顺序：先部署 deploy/samples/mcp-backends/（P2-1 T-2 ①）→ 取消 registries 注释（②）
+#     → 再取消本段注释（③）。
 # ============================================================================
 # apiVersion: networking.k8s.io/v1
 # kind: Ingress
 # metadata:
-#   name: mcp-public-tools
+#   name: mcp-public-demo
 #   namespace: higress-system
 #   annotations:
-#     higress.io/destination: mcp-tools.dns:8080
+#     higress.io/destination: mcp-demo.dns:8080
 # spec:
 #   ingressClassName: higress
 #   rules:
 #   - http:
 #       paths:
-#       - path: /mcp-servers/public-tools
+#       - path: /mcp-servers/mcp-demo
+#         pathType: Prefix
+#         backend:
+#           resource:
+#             apiGroup: networking.higress.io
+#             kind: McpBridge
+#             name: default
+#   tls:
+#   - secretName: default
+# ---
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: mcp-public-fs
+#   namespace: higress-system
+#   annotations:
+#     higress.io/destination: mcp-fs.dns:8080
+# spec:
+#   ingressClassName: higress
+#   rules:
+#   - http:
+#       paths:
+#       - path: /mcp-servers/mcp-fs
 #         pathType: Prefix
 #         backend:
 #           resource:

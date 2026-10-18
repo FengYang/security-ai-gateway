@@ -189,19 +189,28 @@ spec:
     port: 19191
     type: static
     protocol: HTTP
-  # ---- MCP 后端（非敏感轨：Higress MCP Server 的工具上游）----
-  # 用途：为 `/mcp-servers/public-tools` 提供工具后端（方案 §3.2.2 非敏感轨）。
+  # ---- MCP 后端（非敏感轨：Higress MCP Server 的工具上游；P2-1 T-2 真实化）----
+  # 用途：为 `/mcp-servers/*` 提供工具后端（方案 §3.2.2 非敏感轨）。
   #
-  # ⚠️ **当前为注释骨架，勿直接启用**：本仓库**尚无**真实 MCP 工具后端服务（集群实测：无 mcp-* Service）。
-  #    启用前必须：① 部署真实后端；② 把 domain/port 换成实际值。
-  #    保留注释的原因：本 McpBridge 为 `name=default` **单例**且 registries 为**整表替换**语义，
-  #    写入不存在的后端会注册"幽灵服务"（dns 解析失败 → 请求 503 + controller 反复告警）。
+  # ⚠️ **启用条件（apply 前逐条确认；未满足勿启用）**：
+  #    ① 样例后端已部署：kubectl apply -f deploy/samples/mcp-backends/k8s/samples.yaml
+  #       （namespace mcp-samples；mcp-demo / mcp-fs 均就绪）；
+  #    ② U-1/U-4 集群实测通过（public 轨接入形态与路径前缀决策）；
+  #    ③ domain/port 与实际 Service 一致（样例默认 mcp-samples 命名空间）。
+  #    未满足即写入的后果：本 McpBridge 为 `name=default` **单例**且 registries 为**整表替换**
+  #    语义 —— 注册不存在的后端会形成"幽灵服务"（dns 解析失败 → 请求 503 + controller 告警）。
   #
   # 命名约束（同本文件既有说明）：dns 类型 domain 须为合法域名格式 → 用集群内 FQDN；
   #    引用侧（Ingress 的 `higress.io/destination`）写 `<name>.dns:<port>`。
   #
-  # - name: mcp-tools
-  #   domain: mcp-tools.<namespace>.svc.cluster.local
+  # - name: mcp-demo
+  #   domain: mcp-demo.mcp-samples.svc.cluster.local
+  #   port: 8080
+  #   type: dns
+  #   protocol: HTTP
+  #
+  # - name: mcp-fs
+  #   domain: mcp-fs.mcp-samples.svc.cluster.local
   #   port: 8080
   #   type: dns
   #   protocol: HTTP

@@ -69,16 +69,21 @@ kubectl apply -f deploy/higress/security-plugins-extended.yaml   # WAF(非 CRS �
 kubectl apply -f deploy/higress/gateway-hpa.yaml                 # 网关 HPA（依赖 metrics-server）
 
 # 8.（P1 新增）启用 Higress 原生 MCP Server（**情况① native**：客户自建可信内网）
-#    前置：Higress 需具备 Redis ——默认**复用** otpmask/redis-ratelimit（方案 §4.3 R1）；
-#    亦可用官方 `--set global.enableRedis=true` 生成 redis-stack-server（R2）
+#    前置①：Higress 需具备 Redis ——默认**复用** otpmask/redis-ratelimit（方案 §4.3 R1）；
+#           亦可用官方 `--set global.enableRedis=true` 生成 redis-stack-server（R2）
+#    前置②（P2-1 T-1 起脚本内置预检）：cryptop 就绪（RK-9）——native 缺省**显式警告**继续、
+#           secure 缺省**预检失败**（fail-closed）；检查清单见《GA-Higress-MCP接入与打通》§6.3.2
 python3 scripts/higress-mcp.py --profile native --dry-run   # 先预览将写入的 mcpServer 段（不改配置）
 python3 scripts/higress-mcp.py --profile native             # 合并写入 higress-config + 重启网关 + 冒烟
+#    （T-2 ② 配置化）以片段文件为源写入（match_list/servers 等按实测形态）：
+# python3 scripts/higress-mcp.py --profile native --mcp-server-file deploy/higress/mcp-bridge.yaml
 #    回滚（删除 mcpServer 并重启）：python3 scripts/higress-mcp.py --rollback
 #    说明：脚本**只合并/删除 `data.higress.mcpServer` 键**，保留 tracing 等既有键（防覆盖丢失）
 
-# 9.（情况② secure，P2 阶段）分轨路由与 MCP 后端来源（**当前为骨架，启用前须闭环 U-4 + 真实 MCP 后端**）
-# kubectl apply -f deploy/higress/ingress-mcp.yaml       # 含 secure-tools（可启用）+ public-tools（注释态）
-# 另需把 deploy/higress/mcp-bridge-registries.yaml 的「MCP 后端」段按实际后端取消注释
+# 9.（情况② secure，P2 阶段）分轨路由与 MCP 后端来源（**启用前须闭环 U-1/U-4 实测**）
+# kubectl apply -f deploy/higress/ingress-mcp.yaml       # secure-tools（可启用）+ public 轨（样例骨架）
+# 样例后端（P2-1 T-2）：deploy/samples/mcp-backends/README.md；部署完成后再取消
+# deploy/higress/mcp-bridge-registries.yaml「MCP 后端」段（mcp-demo / mcp-fs）注释
 ```
 
 ## 3. 灰度切换（生产）

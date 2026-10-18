@@ -32,6 +32,9 @@ higress-mcp.py —— 启用 / 回滚 Higress 原生 MCP Server（`higress-confi
   --redis-address          默认 redis-ratelimit.otpmask.svc.cluster.local:6379（方案 §4.3 R1）
                            R2（官方 helm enableRedis）改为 redis-stack-server.higress-system.svc.cluster.local:6379
   --sse-suffix             MCP 客户端 SSE 后缀，默认 /sse
+  --mcp-server-file        以片段文件（含 `mcpServer` 键）为源写入 mcpServer 段（T-2 ②
+                            配置化：match_list/servers 按实测形态填写；缺省用内置空骨架）；
+                            经本机入口运行时会自动随 bundle 上传（远程以 K3S_BUNDLE_DIR 定位）
 
 前置：export SSH_PASSWORD（严禁硬编码）。
 依据：《GA-Higress-MCP接入与打通-技术实现方案》v1.7 §4.1 / §4.3 / §6.3.2 / §7.2.3 / §8。
@@ -77,7 +80,19 @@ def _run(cmd, timeout=300):
 
 
 def local_main(argv):
-    k3s_remote.run_script(os.path.abspath(__file__), *argv, timeout=900)
+    """本机入口：上传本脚本（+ `--mcp-server-file` 片段所在目录）到节点，以 --remote 执行。"""
+    bundle_dir = None
+    frag = _opt(argv, "--mcp-server-file")
+    if frag:
+        frag_abs = os.path.abspath(frag)
+        if not os.path.isfile(frag_abs):
+            raise SystemExit(f"--mcp-server-file 不存在: {frag_abs}")
+        bundle_dir = os.path.dirname(frag_abs)
+        argv = list(argv)
+        argv[argv.index("--mcp-server-file") + 1] = os.path.basename(frag_abs)
+    k3s_remote.run_script(
+        os.path.abspath(__file__), *argv, timeout=900, bundle_dir=bundle_dir
+    )
 
 
 def _opt(argv, name, default=None):
@@ -198,17 +213,46 @@ def check_cryptop(profile, dry_run):
     )
 
 
-def write_mcp_server(redis_addr, sse_suffix, dry_run):
+def _load_mcp_server_section(path):
+    """读取片段文件中的 `mcpServer` 映射（T-2 ② 配置化；R-8 仅合并该键）。"""
+    import yaml
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = yaml.safe_load(f) or {}
+    except OSError as e:
+        raise SystemExit(f"--mcp-server-file 不可读: {path}（{e}）")
+    sec = doc.get("mcpServer") if isinstance(doc, dict) else None
+    if not isinstance(sec, dict):
+        raise SystemExit(f"--mcp-server-file 缺少 mcpServer 映射: {path}")
+    for key in ("match_list", "servers"):
+        if key in sec and not isinstance(sec[key], list):
+            raise SystemExit(f"--mcp-server-file 的 {key} 必须为列表: {path}")
+    return sec
+
+
+def write_mcp_server(redis_addr, sse_suffix, dry_run, mcp_server_file=None):
     cm, hig = _read_higress()
     existed = "mcpServer" in hig
-    hig["mcpServer"] = {
-        "enable": True,
-        "sse_path_suffix": sse_suffix,
-        "redis": {"address": redis_addr, "username": "", "password": "", "db": 0},
-        # 官方未给出 match_list 语义（方案 U-6）→ 保持空，不臆测
-        "match_list": [],
-        "servers": [],
-    }
+    if mcp_server_file:
+        print(f"-- 片段文件: {mcp_server_file}")
+        sec = _load_mcp_server_section(mcp_server_file)
+    else:
+        sec = {}
+    # 安全兜底：enable 强制开；sse 后缀/redis/两列表缺省补齐（片段值优先）
+    sec["enable"] = True
+    sec.setdefault("sse_path_suffix", sse_suffix)
+    redis = sec.setdefault("redis", {})
+    if not redis.get("address"):
+        redis.setdefault("username", "")
+        redis.setdefault("password", "")
+        redis.setdefault("db", 0)
+        redis["address"] = redis_addr
+    elif redis["address"] != redis_addr:
+        print(f"   [注意] 片段自带 redis.address={redis['address']}（--redis-address 未生效）")
+    sec.setdefault("match_list", [])
+    sec.setdefault("servers", [])
+    hig["mcpServer"] = sec
     import yaml
 
     frag = yaml.safe_dump(
@@ -458,6 +502,15 @@ def remote_main(argv):
     tee_url = _opt(argv, "--tee-url")
     tee_token = _opt(argv, "--tee-token", os.environ.get("OTP_TEE_ADMIN_TOKEN", ""))
     mcp_policy_file = _opt(argv, "--mcp-policy-file")
+    mcp_server_file = _opt(argv, "--mcp-server-file")
+    if mcp_server_file and not os.path.isabs(mcp_server_file):
+        bundle = os.environ.get("K3S_BUNDLE_DIR", "")
+        if not bundle:
+            raise SystemExit(
+                "--mcp-server-file 为相对路径但未设置 K3S_BUNDLE_DIR"
+                "（应经本机入口 local_main 上传后执行）"
+            )
+        mcp_server_file = os.path.join(bundle, mcp_server_file)
 
     if do_rollback:
         changed = rollback(dry_run)
@@ -478,7 +531,7 @@ def remote_main(argv):
     check_cryptop(profile, dry_run)
 
     print("\n=== Step 2: 合并写入 mcpServer 段 ===")
-    changed = write_mcp_server(redis_addr, sse_suffix, dry_run)
+    changed = write_mcp_server(redis_addr, sse_suffix, dry_run, mcp_server_file)
     if not changed:
         if profile == "native":
             print("\n[dry-run] 结束（未变更）")
