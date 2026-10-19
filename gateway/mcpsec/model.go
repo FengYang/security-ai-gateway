@@ -71,14 +71,16 @@ func (t TableTool) ToolTrack() string {
 	return t.Track
 }
 
-// QualifiedName 工具限定名：Namespace 非空 ⇒ "namespace/name"，否则裸名。
-// T-3：命名空间缺省以注册域 server 前缀补全；同名冲突裁决按限定名去重
+// NamespacedName 命名空间名：Namespace 非空 ⇒ "<namespace>__<name>"，否则裸名。
+// T-3 口径（对齐 C-MCP-1 §6.3 D-3/A-1）：`__` 分隔、访问器命名 NamespacedName()（**禁** Name()）；
+// Namespace 不含 `_`（控制面校验）⇒ 首个 `__` 即分隔符，命名空间名可无歧义解析。
+// 命名空间缺省以注册域 server 前缀补全；同名冲突裁决按命名空间名去重
 // （U-5 默认：前缀命名空间 + 校验拒绝冲突）。
-func (t TableTool) QualifiedName() string {
+func (t TableTool) NamespacedName() string {
 	if t.Namespace == "" {
 		return t.Name
 	}
-	return t.Namespace + "/" + t.Name
+	return t.Namespace + "__" + t.Name
 }
 
 // CatalogServer 目录内后端摘要（T-3 变更要求：id/baseUrl 摘要/track/prefix；**不含凭据**

@@ -170,12 +170,12 @@ func TestCatalogServersSignedAndTamper(t *testing.T) {
 	}
 }
 
-// TestTableToolQualifiedName T-3：限定名口径（命名空间化后同名不同空间不串扰）。
-func TestTableToolQualifiedName(t *testing.T) {
-	if got := (TableTool{Name: "q"}).QualifiedName(); got != "q" {
+// TestTableToolNamespacedName T-3：命名空间名口径（对齐 C-MCP-1 §6.3 D-3/A-1：`__` 分隔）。
+func TestTableToolNamespacedName(t *testing.T) {
+	if got := (TableTool{Name: "q"}).NamespacedName(); got != "q" {
 		t.Fatalf("无命名空间应为裸名，got %q", got)
 	}
-	if got := (TableTool{Name: "q", Namespace: "fin"}).QualifiedName(); got != "fin/q" {
-		t.Fatalf("命名空间化应为 fin/q，got %q", got)
+	if got := (TableTool{Name: "q", Namespace: "fin"}).NamespacedName(); got != "fin__q" {
+		t.Fatalf("命名空间化应为 fin__q（`__` 分隔），got %q", got)
 	}
 }

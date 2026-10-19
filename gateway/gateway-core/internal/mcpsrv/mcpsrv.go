@@ -6,7 +6,8 @@
 //
 // 口径（U-5 默认，未决项不得静默变更，D-6）：
 //   - 命名空间化：工具缺省 Namespace ＝ 该 server 的 Prefix（"工具默认以 server 前缀命名空间化"）；
-//   - 冲突裁决：前缀/生效命名空间排他 + 目录内限定名去重，冲突即校验拒绝（fail-closed）。
+//     对外命名空间名 = "<prefix>__<name>"（`__` 分隔，C-MCP-1 §6.3 D-3/A-1）；
+//   - 冲突裁决：前缀/生效命名空间排他 + 目录内命名空间名去重，冲突即校验拒绝（fail-closed）。
 package mcpsrv
 
 import (
@@ -35,6 +36,10 @@ var (
 	idRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9.\-]{0,62}$`)
 	prefixRe = regexp.MustCompile(`^[a-z0-9][a-z0-9\-]{0,31}$`)
 )
+
+// ValidNamespace 命名空间/前缀格式判据（同注册域 prefix 规则：^[a-z0-9][a-z0-9-]{0,31}$）。
+// 禁 `_` ⇒ "<namespace>__<name>" 首个 `__` 即分隔符，命名空间名可无损解析（C-MCP-1 D-3）。
+func ValidNamespace(s string) bool { return prefixRe.MatchString(s) }
 
 // Server 后端注册条目（gateway-core /tools/servers* 管理域，D-4）。
 type Server struct {

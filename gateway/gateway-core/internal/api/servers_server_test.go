@@ -233,7 +233,7 @@ func TestServersCatalogLinkageAndConvergence(t *testing.T) {
 	if !s.msigner.ValidCatalog(&got) || got.Version != 4 {
 		t.Fatalf("收敛后目录验签/版本不符: version=%d", got.Version)
 	}
-	if len(got.Tools) != 2 || got.Tools[0].QualifiedName() != "ops/t2" || got.Tools[1].QualifiedName() != "t3" {
+	if len(got.Tools) != 2 || got.Tools[0].NamespacedName() != "ops__t2" || got.Tools[1].NamespacedName() != "t3" {
 		t.Fatalf("目录收敛结果不符: %+v", got.Tools)
 	}
 	if len(got.Servers) != 1 || got.Servers[0].ID != "s2" {
@@ -256,29 +256,29 @@ func TestServersCatalogLinkageAndConvergence(t *testing.T) {
 func TestCatalogToolsConflictRejected(t *testing.T) {
 	s := testServer()
 	mustServer(t, s, `{"id":"s1","base_url":"http://s1:8080","prefix":"fin"}`)
-	// 同一后端同名工具（同限定名）→ 409
+	// 同一后端同名工具（同命名空间名）→ 409
 	dup := `{"kind":"catalog","data":{"tools":[
 		{"name":"q","catalog_owner":"o","server":"s1"},
 		{"name":"q","catalog_owner":"o","server":"s1"}]}}`
 	if rec := doToolPolicy(s, dup, "tok"); rec.Code != http.StatusConflict {
 		t.Fatalf("同名冲突应 409，got %d body=%s", rec.Code, rec.Body.String())
 	}
-	// 显式 namespace 与 server 前缀派生撞车（fin/q vs fin/q）→ 409
+	// 显式 namespace 与 server 前缀派生撞车（fin__q vs fin__q）→ 409
 	clash := `{"kind":"catalog","data":{"tools":[
 		{"name":"q","catalog_owner":"o","namespace":"fin"},
 		{"name":"q","catalog_owner":"o","server":"s1"}]}}`
 	if rec := doToolPolicy(s, clash, "tok"); rec.Code != http.StatusConflict {
-		t.Fatalf("跨来源限定名撞车应 409，got %d", rec.Code)
+		t.Fatalf("跨来源命名空间名撞车应 409，got %d", rec.Code)
 	}
 	// 未注册后端引用 → 400
 	unknown := `{"kind":"catalog","data":{"tools":[{"name":"q","catalog_owner":"o","server":"nope"}]}}`
 	if rec := doToolPolicy(s, unknown, "tok"); rec.Code != http.StatusBadRequest {
 		t.Fatalf("未注册后端应 400，got %d", rec.Code)
 	}
-	// name 含 '/' → 400（与限定名分隔符互斥）
-	slash := `{"kind":"catalog","data":{"tools":[{"name":"a/b","catalog_owner":"o"}]}}`
-	if rec := doToolPolicy(s, slash, "tok"); rec.Code != http.StatusBadRequest {
-		t.Fatalf("含 '/' 的工具名应 400，got %d", rec.Code)
+	// namespace 非法（含 `_`，破坏 "<ns>__<name>" 无歧义解析）→ 400
+	badNS := `{"kind":"catalog","data":{"tools":[{"name":"q","catalog_owner":"o","namespace":"a_b"}]}}`
+	if rec := doToolPolicy(s, badNS, "tok"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("非法 namespace 应 400，got %d", rec.Code)
 	}
 	// 同名不同命名空间：放行（前缀命名空间化后不冲突）
 	ok := `{"kind":"catalog","data":{"tools":[

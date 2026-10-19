@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"security-ai-gateway/gateway/gateway-core/internal/mcpsrv"
@@ -164,16 +163,16 @@ func (s *Server) reSignCatalogWithRegistry(now int64) (*mcpsec.ToolCatalog, erro
 // checkCatalogTools 目录 × 注册域联动校验（T-3，fail-closed）：
 //   - 工具声明的 server 必须已注册（未注册即 400，防悬空引用）；
 //   - Namespace 缺省以该 server 前缀补全（"工具默认以 server 前缀命名空间化"）；
-//   - 限定名同名冲突 → 409（U-5 默认：前缀命名空间 + 校验拒绝冲突）。
+//   - Namespace 非空须匹配 ^[a-z0-9][a-z0-9-]{0,31}$（禁 `_`：保证 "<ns>__<name>" 可无损解析，C-MCP-1 D-3）；
+//   - 命名空间名同名冲突 → 409（U-5 默认：前缀命名空间 + 校验拒绝冲突）。
 //
 // 返回 (status, code, msg)；status == 0 表示通过。
 func (s *Server) checkCatalogTools(c *mcpsec.ToolCatalog) (int, string, string) {
 	seen := make(map[string]bool, len(c.Tools))
 	for i := range c.Tools {
 		t := &c.Tools[i]
-		if t.Name == "" || strings.Contains(t.Name, "/") {
-			// 禁 "/"：与限定名（namespace/name）分隔符互斥，保证限定名可无损解析且唯一。
-			return http.StatusBadRequest, "invalid_request", fmt.Sprintf("工具 name 非法（非空且不含 '/'）: %q", t.Name)
+		if t.Name == "" {
+			return http.StatusBadRequest, "invalid_request", "工具 name 不能为空"
 		}
 		if t.Server != "" {
 			sv := s.store.GetMCPServer(t.Server)
@@ -185,10 +184,14 @@ func (s *Server) checkCatalogTools(c *mcpsec.ToolCatalog) (int, string, string) 
 				t.Namespace = sv.Prefix
 			}
 		}
+		if t.Namespace != "" && !mcpsrv.ValidNamespace(t.Namespace) {
+			return http.StatusBadRequest, "invalid_request",
+				fmt.Sprintf("工具 %q 的 namespace 非法（须 ^[a-z0-9][a-z0-9-]{0,31}$，禁 `_`）: %q", t.Name, t.Namespace)
+		}
 		key := t.Namespace + "\x00" + t.Name
 		if seen[key] {
 			return http.StatusConflict, "conflict",
-				fmt.Sprintf("同名工具冲突 %q（U-5 默认：前缀命名空间 + 校验拒绝冲突）", t.QualifiedName())
+				fmt.Sprintf("同名工具冲突 %q（U-5 默认：前缀命名空间 + 校验拒绝冲突）", t.NamespacedName())
 		}
 		seen[key] = true
 	}

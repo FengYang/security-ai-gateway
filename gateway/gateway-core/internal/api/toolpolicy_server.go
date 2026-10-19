@@ -123,24 +123,24 @@ type trackChange struct {
 
 // diffTrackChanges 比较新旧目录的**有效轨**（ToolTrack()：空值视同 secure），
 // 返回同一工具发生跨轨迁移的记录。新增/删除工具不算 Track 变更（不在此列）。
-// 键＝限定名（T-3：命名空间化后同名不同空间不串扰）。
+// 键＝命名空间名（T-3：命名空间化后同名不同空间不串扰）。
 func diffTrackChanges(prev, next *mcpsec.ToolCatalog) []trackChange {
 	if prev == nil || next == nil {
 		return nil
 	}
 	old := make(map[string]string, len(prev.Tools))
 	for i := range prev.Tools {
-		old[prev.Tools[i].QualifiedName()] = prev.Tools[i].ToolTrack()
+		old[prev.Tools[i].NamespacedName()] = prev.Tools[i].ToolTrack()
 	}
 	var out []trackChange
 	for i := range next.Tools {
 		t := next.Tools[i]
-		was, ok := old[t.QualifiedName()]
+		was, ok := old[t.NamespacedName()]
 		if !ok {
 			continue // 新增工具：非 Track 变更
 		}
 		if now := t.ToolTrack(); now != was {
-			out = append(out, trackChange{Tool: t.QualifiedName(), From: was, To: now})
+			out = append(out, trackChange{Tool: t.NamespacedName(), From: was, To: now})
 		}
 	}
 	return out
