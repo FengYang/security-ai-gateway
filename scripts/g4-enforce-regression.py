@@ -20,7 +20,10 @@ import time
 
 import paramiko
 
-HOST, USER, PASS = "192.168.31.166", "root", "yf0537"
+HOST, USER = "192.168.31.166", "root"
+PASS = os.environ.get("SSH_PASSWORD")
+if not PASS:
+    raise SystemExit("[FATAL] 环境变量 SSH_PASSWORD 未设置（口令仅经环境变量注入，严禁硬编码/入库）")
 BIN_DIR, POLICY_DIR = "/opt/og16-g4/bin", "/opt/og16-g4/policy"
 SIDECAR_DIR = "/opt/og16-g4/sidecar"
 SIDECAR_PY = f"{SIDECAR_DIR}/mock-sidecar-a106.py"

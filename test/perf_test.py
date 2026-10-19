@@ -9,7 +9,9 @@ import os
 
 NODE_IP = "192.168.31.168"
 NODE_USER = "root"
-NODE_PASS = "yf0537"
+NODE_PASS = os.environ.get("SSH_PASSWORD")
+if not NODE_PASS:
+    raise SystemExit("[FATAL] 环境变量 SSH_PASSWORD 未设置（口令仅经环境变量注入，严禁硬编码/入库）")
 GW_POD = "higress-gateway-dc6665557-xhhxc"
 GW_PORT = 30000
 SIG_KEY_HEX = "3031323334353637383961626364656630313233343536373839616263646566"

@@ -7,6 +7,7 @@
   3. 空配置 / 缺字段 → 路由不启用（兼容旧行为）
   4. 超长 tenant/model → 不会 panic / 正常处理
 """
+import os
 import paramiko
 import time
 import json
@@ -16,7 +17,9 @@ import base64
 
 NODE_IP = "192.168.31.168"
 NODE_USER = "root"
-NODE_PASS = "yf0537"
+NODE_PASS = os.environ.get("SSH_PASSWORD")
+if not NODE_PASS:
+    raise SystemExit("[FATAL] 环境变量 SSH_PASSWORD 未设置（口令仅经环境变量注入，严禁硬编码/入库）")
 GW_LABEL = "app=higress-gateway"
 GW_NAMESPACE = "higress-system"
 GW_PORT = 30000

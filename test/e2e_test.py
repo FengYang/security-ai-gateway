@@ -3,13 +3,16 @@ E2E 功能验证脚本
 通过 SSH 操作 K3S 节点，验证 otpmask 插件的核心功能。
 依赖: pip install paramiko
 """
+import os
 import paramiko
 import time
 
 # ====== 配置 ======
 NODE_IP = "192.168.31.168"
 NODE_USER = "root"
-NODE_PASS = "yf0537"
+NODE_PASS = os.environ.get("SSH_PASSWORD")
+if not NODE_PASS:
+    raise SystemExit("[FATAL] 环境变量 SSH_PASSWORD 未设置（口令仅经环境变量注入，严禁硬编码/入库）")
 GW_POD = "higress-gateway-dc6665557-xhhxc"  # 网关 Pod 名
 GW_PORT = 30000  # 容器内 HTTP 端口
 API_KEY = "CHANGE_ME_API_KEY_A"

@@ -22,6 +22,7 @@ WasmPlugin 配置热更新验证脚本（验证 tick 循环在热更新后仍能
   python hotupdate_verify.py --key poll_interval --value 15
 退出码: 0=通过  1=失败
 """
+import os
 import argparse
 import base64
 import json
@@ -33,7 +34,9 @@ import paramiko
 # ====== 配置（与 test/deploy_wasm.py 等既有脚本一致）======
 NODE_IP = "192.168.31.168"
 NODE_USER = "root"
-NODE_PASS = "yf0537"
+NODE_PASS = os.environ.get("SSH_PASSWORD")
+if not NODE_PASS:
+    raise SystemExit("[FATAL] 环境变量 SSH_PASSWORD 未设置（口令仅经环境变量注入，严禁硬编码/入库）")
 
 NAMESPACE = "higress-system"
 PLUGIN_NAME = "otpmask"

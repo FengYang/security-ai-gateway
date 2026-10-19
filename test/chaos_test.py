@@ -6,6 +6,7 @@
   3. 替换错误验签密钥 → 验证 fail-closed 安全边界
 依赖: pip install paramiko
 """
+import os
 import paramiko
 import time
 import json
@@ -13,7 +14,9 @@ import json
 # ====== 配置 ======
 NODE_IP = "192.168.31.168"
 NODE_USER = "root"
-NODE_PASS = "yf0537"
+NODE_PASS = os.environ.get("SSH_PASSWORD")
+if not NODE_PASS:
+    raise SystemExit("[FATAL] 环境变量 SSH_PASSWORD 未设置（口令仅经环境变量注入，严禁硬编码/入库）")
 GW_POD = "higress-gateway-dc6665557-xhhxc"
 GW_PORT = 30000
 API_KEY = "CHANGE_ME_API_KEY_A"
@@ -65,7 +68,7 @@ def scenario1_control_plane_failure(c):
     codes = batch_request(c, n=5, interval=1)
     all_ok = all(c == "400" for c in codes)
     print(f"  故障中 5 次: {codes}")
-    print(f"  结果: {'✅ 全部正常（缓存降级生效）" if all_ok else "❌ 有失败")
+    print(f"  结果: {'✅ 全部正常（缓存降级生效）' if all_ok else '❌ 有失败'}")
 
     time.sleep(20)  # 等恢复
     after = curl_infer(c)

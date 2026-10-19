@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """G-4 快速冒烟测试：验证新版 wasm + content_filter 支持"""
+import os
 import paramiko
 import time
 import json
@@ -8,7 +9,9 @@ import sys
 
 HOST = "192.168.31.166"
 USER = "root"
-PASS = "yf0537"
+PASS = os.environ.get("SSH_PASSWORD")
+if not PASS:
+    raise SystemExit("[FATAL] 环境变量 SSH_PASSWORD 未设置（口令仅经环境变量注入，严禁硬编码/入库）")
 
 
 def run(c, cmd, timeout=30):

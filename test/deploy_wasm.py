@@ -6,6 +6,7 @@ WASM 插件部署脚本
   python deploy_wasm.py v6          # 编译新版本，版本标签 v6
   python deploy_wasm.py v6 --apply  # 编译并立即 patch WasmPlugin 生效
 """
+import os
 import paramiko
 import argparse
 import json
@@ -13,7 +14,9 @@ import json
 # ====== 配置 ======
 NODE_IP = "192.168.31.168"
 NODE_USER = "root"
-NODE_PASS = "yf0537"
+NODE_PASS = os.environ.get("SSH_PASSWORD")
+if not NODE_PASS:
+    raise SystemExit("[FATAL] 环境变量 SSH_PASSWORD 未设置（口令仅经环境变量注入，严禁硬编码/入库）")
 SRC_ROOT = r"c:\Users\Robin\Desktop\方案\security-ai-gateway"
 SRC_RELATIVE = "gateway/wasm/otpmask-plugin"
 BUILD_DIR = "/root/build/security-ai-gateway/gateway/wasm/otpmask-plugin"

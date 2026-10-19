@@ -10,12 +10,16 @@
 流程：备份 → 依次探测 4 项覆盖字段 → JSON patch remove → rollout → 校验（无覆盖字段 / 模式 / 策略版本 /
 进程 uid / 启动日志）→ 端到端冒烟；任一校验失败自动反向 patch 回滚。
 """
+import os
 import json
 import sys
 
 import paramiko
 
-HOST, USER, PASS = "192.168.31.166", "root", "yf0537"
+HOST, USER = "192.168.31.166", "root"
+PASS = os.environ.get("SSH_PASSWORD")
+if not PASS:
+    raise SystemExit("[FATAL] 环境变量 SSH_PASSWORD 未设置（口令仅经环境变量注入，严禁硬编码/入库）")
 NS = "otpmask"
 DEPLOY = "tee-infer-service"
 BACKUP = "/opt/og16-g4/tee-infer-deploy-preg4-cleanup.json"

@@ -1,8 +1,12 @@
+import os
 import paramiko
 
 c = paramiko.SSHClient()
 c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-c.connect('192.168.31.168', username='root', password='yf0537', timeout=10)
+_ssh_password = os.environ.get("SSH_PASSWORD")
+if not _ssh_password:
+    raise SystemExit("[FATAL] 环境变量 SSH_PASSWORD 未设置（口令仅经环境变量注入，严禁硬编码/入库）")
+c.connect('192.168.31.168', username='root', password=_ssh_password, timeout=10)
 
 # 检查压测工具
 for tool in ['wrk', 'ab', 'hey', 'go', 'curl']:
