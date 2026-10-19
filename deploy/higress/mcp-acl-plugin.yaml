@@ -1,0 +1,57 @@
+# mcp-acl 插件 WasmPlugin 挂载（P2-1 T-4：public 轨工具级 ACL，网关侧元数据级）。
+#
+# 角色：`Mcp-Method: tools/call` 时以 `Mcp-Name` 头 × 租户 → RBAC 放行表 × 工具目录
+# 联合校验（default deny）；拒绝＝HTTP 200 + JSON-RPC error（-32602，C-MCP-2 §5.7.3
+# 分层：401/403 仅鉴权层）；fail-closed（策略/验签/拉取不可用一律拒绝，绝不降级放行）。
+# 硬约束（本体 §7.2）：不读 body（R-6/D-3）；零密码 import（R-4，验签经 cryptop
+# sidecar）；与 secure 轨目录同源但执行点独立（R-5，不共享工具）。
+#
+# 作用域＝白名单制：仅绑定 public 轨路由；defaultConfigDisable: true ⇒ 未匹配路由
+# 不运行（含 mcp-secure-tools——其 ACL 执行点在 TEE 内，不径本插件）。
+#
+# 覆盖口径（U-9 实测登记，C-MCP-2 v1.9 §6.2/§6.3）：Higress 2.2.5 的 mcp-server
+# 处理器忽略 MCP 头且无头/体一致性校验（无 -32020）→ 主动伪造头/体不一致仍可绕过
+# 元数据级 ACL；纵深防御＝新版 mcp-server 插件（-32020）或 secure 轨 TEE。
+#
+# 构建：GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o main.wasm ./gateway/wasm/mcp-acl-plugin
+# url 为插件 wasm 拉取地址（OCI 或 HTTP）；占位值待构建推送后替换。
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: mcp-acl
+  namespace: higress-system
+spec:
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/mcp-acl:0.1.0
+  failStrategy: FAIL_CLOSE
+  defaultConfigDisable: true
+  matchRules:
+  # public 轨白名单：路由名 = Ingress 名（见 ingress-mcp.yaml）。
+  # 插件出站目标必须写 McpBridge 注册名（gateway-core.dns / cryptop-svc.static），
+  # 勿填跨命名空间 FQDN（簇不存在 → hostcall bad argument → fail-closed）。
+  - ingress:
+    - mcp-public-demo
+    - mcp-public-fs
+    config:
+      # ---- 本体 §6.3 契约四键 ----
+      fail_strategy: "FAIL_CLOSED" # 仅支持 FAIL_CLOSED（其余值配置解析即失败 → FAIL_CLOSE）
+      policy_ref: "/tools/policy?kind=policy"
+      catalog_ref: "/tools/policy?kind=catalog"
+      policy_version: "0" # >0：策略版本下限（低于即拒收并保留旧策略）
+      # ---- 拉取通道（与 otpmask 同框架：周期 tick + K_rx 验签 + 版本单调 + 失败保留旧策略；
+      #      从未拉到 → fail-closed 全拒，不学限流表的 degraded 放行）----
+      gateway_core_service: "gateway-core.dns"
+      gateway_core_port: "8085"
+      gateway_core_token: "" # 内网 Bearer；生产经部署流水线/Secret 注入，勿硬编码
+      route_verify_key_ref: "otpmask/route-verify/v1" # K_rx 句柄；须与 gateway-core core-sig-key 同值
+      poll_interval: "60"
+      max_stale_seconds: "0" # 0=不过期（失败保留旧策略）；>0 超阈即拒（reason=policy_stale）
+      policy_max_size_bytes: "1048576"
+      # ---- 判定参数 ----
+      tenant_header: "x-tenant-id" # 租户载体（与 cluster-key-rate-limit 同源口径）
+      # ---- cryptop sidecar（验签唯一出站；插件零密码）----
+      crypto_service: "cryptop-svc.static"
+      crypto_service_port: "19097"
+      crypto_profile: "intl"
+      crypto_call_timeout_ms: "50"
+      crypto_circuit_threshold: "5"
+      crypto_circuit_cooldown_ms: "30000"

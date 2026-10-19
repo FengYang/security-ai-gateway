@@ -82,8 +82,8 @@ tidy:
 #   ⚠️ go 命令显式 `-mod=mod`（2026-10-19 加固）：仓库根存在未追踪 vendor/ 时，裸 `go list`
 #   会以 inconsistent vendoring 失败且 stdout 为空 ⇒ `$$(...)` 捕获空串 ⇒ 门禁**空跑假绿**
 #   （T-4 复现实测 NOFLAG_EXIT=1 OUTLEN=0）；显式 -mod=mod 消除该静默失效路径（与 CI 既有口径一致）。
-# 插件包清单（wasm-guard 断言①覆盖范围）：**新增插件必须加入本清单**。
-WASM_PLUGIN_PKGS ?= ./gateway/wasm/otpmask-plugin/...
+# 插件包清单（wasm-guard 断言①覆盖范围）：**新增插件必须加入本清单**（T-4 起含 mcp-acl）。
+WASM_PLUGIN_PKGS ?= ./gateway/wasm/otpmask-plugin/... ./gateway/wasm/mcp-acl-plugin/...
 
 .PHONY: wasm-guard
 wasm-guard:
@@ -101,6 +101,21 @@ wasm-guard:
 	@out=$$($(GO) list -mod=mod -deps -f '{{.ImportPath}}' security-ai-gateway/protocol/go | grep -E '(^crypto/(aes|cipher|hmac|sha256|sha512|ecdh|ecdsa)|gmsm)' || true); \
 	if [ -n "$$out" ]; then echo "FAIL: protocol/go 链入密码包——"; echo "$$out"; exit 1; fi; \
 	echo "PASS: protocol/go 零密码"
+
+# ---- P2-1 T-4：mcp-acl 插件（网关侧工具级 ACL）----
+MCP_ACL_PKG = ./gateway/wasm/mcp-acl-plugin/...
+MCP_ACL_MAIN_PKG = ./gateway/wasm/mcp-acl-plugin
+MCP_ACL_POLICYCACHE_PKG = ./gateway/wasm/mcp-acl-plugin/policycache/
+
+# mcp-acl-test —— 插件单测（policycache 验签/版本/授权矩阵 + 决策分类；渗透用例本地段）
+.PHONY: mcp-acl-test
+mcp-acl-test:
+	$(GO) test -mod=mod -count=1 -cover -timeout 120s $(MCP_ACL_POLICYCACHE_PKG) $(MCP_ACL_PKG)
+
+# mcp-acl-build —— 编译插件 wasm（wasip1 reactor；产物供 OCI/HTTP 分发）
+.PHONY: mcp-acl-build
+mcp-acl-build:
+	GOOS=wasip1 GOARCH=wasm $(GO) build -mod=mod -buildmode=c-shared -o gateway/wasm/mcp-acl-plugin/main.wasm $(MCP_ACL_MAIN_PKG)
 
 # ---- P0-1 多模型智能路由：测试/基准/竞态/E2E ----
 ROUTE_ENGINE_PKG = ./gateway/wasm/otpmask-plugin/routeengine/
