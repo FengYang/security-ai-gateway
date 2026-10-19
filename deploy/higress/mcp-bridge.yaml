@@ -23,8 +23,9 @@ mcpServer:
   enable: true
   # MCP 客户端 SSE 后缀；官方客户端 URL 契约：http://<gateway>/mcp-servers/<name>/sse
   sse_path_suffix: /sse
-  # Redis：官方列为必填。⚠️ 注意：MCP 2026-07-28 已**无状态化**（移除协议级会话），
-  # 故 Redis 的**实际用途需重新核实**（方案 §4.3 / 待实测 U-1）。核实前按官方保留。
+  # Redis：官方列为必填（配置保留）。MCP 2026-07-28 已**无状态化**（移除协议级会话）；
+  # U-4 实测（2026-10-19）Streamable HTTP 链路未观察到 Redis 会话依赖
+  # （官方 FAQ：SSE 会话保持才需要 Redis；Streamable HTTP 可省）。
   redis:
     # R1（复用现有，默认）：指向集群内既有 Redis
     address: redis-ratelimit.otpmask.svc.cluster.local:6379
@@ -37,7 +38,9 @@ mcpServer:
   #   字段：match_rule_domain / match_rule_path / match_rule_type(prefix) /
   #         upstream_type(sse) / enable_path_rewrite / path_rewrite_prefix
   #   （来源：《MCP Server 快速开始（对接现存 SSE Server）》《…（Docker 版）》常见问题 #1）。
-  #   本环境后端为 Streamable HTTP（无状态）→ 是否需登记待 U-4 集群实测；登记时按上列字段填写。
+  #   **U-4 实测闭环（2026-10-19，集群）**：本环境后端为 Streamable HTTP（无状态）→
+  #   `match_list: []` 下 public 轨全链路正常（tools/list / tools/call × 双后端；官方 FAQ
+  #   亦明确 Streamable HTTP 可不用 Redis 会话保持）→ **保持空登记**；SSE 后端接入时再按上列字段填写。
   match_list: []
   # DB 类内置 MCP Server 在此配置（官方快速开始示例均为 `servers: []`）；REST/OpenAPI 转换型
   # 走**控制台 MCP 管理界面**；存量 MCP 后端（SSE/Streamable HTTP）接入形态＝服务来源+路由+

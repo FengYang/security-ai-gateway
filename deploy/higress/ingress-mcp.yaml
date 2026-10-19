@@ -45,56 +45,60 @@ spec:
   - secretName: default
 ---
 # ============================================================================
-# 非敏感轨：public（样例后端 mcp-demo / mcp-fs）→ 显式路由骨架（**待 U-1/U-4 实测后启用**）
+# 非敏感轨：public（样例后端 mcp-demo / mcp-fs）→ 显式路由（**2026-10-19 集群实证启用**）
 # ----------------------------------------------------------------------------
-# ⚠️ **当前为注释骨架**：
-#   · 官方客户端 URL 为 `/mcp-servers/<name>/sse`；若 Higress MCP Server 已由**内置路由**承载该前缀，
-#     则**可能不需要**显式 Ingress（叠加可能冲突）——以 U-4 集群实测为准；
-#   · 若确需显式路由：后端指向 deploy/higress/mcp-bridge-registries.yaml 的 `mcp-demo` / `mcp-fs`
-#     registry（注释骨架），与 secure-tools 同型用 **McpBridge resource backend**（防 cluster_not_found）；
-#   · 启用顺序：先部署 deploy/samples/mcp-backends/（P2-1 T-2 ①）→ 取消 registries 注释（②）
-#     → 再取消本段注释（③）。
+# U-1 实测（2026-10-19）：Higress 内置路由**不承载** `/mcp-servers/*` 任意后端
+#   （未注册服务路径实测 404，key-auth 通过后亦然）→ **必须显式 Ingress**；
+#   public 轨存量后端客户端 URL 契约：`http://<gateway>/mcp-servers/<name>`（**基路径**）。
+# U-4 实测（2026-10-19）：后端为 Streamable HTTP（无状态）→ `match_list`/Redis 会话保持
+#   **非必需**（`mcpServer.enable=true` + `match_list: []` 下全链路正常）。
+# 路径重写：`higress.io/rewrite-target: /mcp`（前缀替换语义：/mcp-servers/<name> → 后端 /mcp；
+#   带后缀请求拼接为 /mcp/<suffix>，故客户端应使用基路径）。
+# 后端指向 deploy/higress/mcp-bridge-registries.yaml 的 `mcp-demo` / `mcp-fs` registry，
+#   与 secure-tools 同型用 **McpBridge resource backend**（防 cluster_not_found）。
 # ============================================================================
-# apiVersion: networking.k8s.io/v1
-# kind: Ingress
-# metadata:
-#   name: mcp-public-demo
-#   namespace: higress-system
-#   annotations:
-#     higress.io/destination: mcp-demo.dns:8080
-# spec:
-#   ingressClassName: higress
-#   rules:
-#   - http:
-#       paths:
-#       - path: /mcp-servers/mcp-demo
-#         pathType: Prefix
-#         backend:
-#           resource:
-#             apiGroup: networking.higress.io
-#             kind: McpBridge
-#             name: default
-#   tls:
-#   - secretName: default
-# ---
-# apiVersion: networking.k8s.io/v1
-# kind: Ingress
-# metadata:
-#   name: mcp-public-fs
-#   namespace: higress-system
-#   annotations:
-#     higress.io/destination: mcp-fs.dns:8080
-# spec:
-#   ingressClassName: higress
-#   rules:
-#   - http:
-#       paths:
-#       - path: /mcp-servers/mcp-fs
-#         pathType: Prefix
-#         backend:
-#           resource:
-#             apiGroup: networking.higress.io
-#             kind: McpBridge
-#             name: default
-#   tls:
-#   - secretName: default
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-public-demo
+  namespace: higress-system
+  annotations:
+    higress.io/destination: mcp-demo.dns:8080
+    higress.io/rewrite-target: /mcp
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /mcp-servers/mcp-demo
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-public-fs
+  namespace: higress-system
+  annotations:
+    higress.io/destination: mcp-fs.dns:8080
+    higress.io/rewrite-target: /mcp
+spec:
+  ingressClassName: higress
+  rules:
+  - http:
+      paths:
+      - path: /mcp-servers/mcp-fs
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default
+  tls:
+  - secretName: default

@@ -16,8 +16,10 @@
 #   依据：官方文档 key-auth / ip-restriction / cluster-key-rate-limit（higress.cn/docs/latest）
 #   + 本地 standalone 实测。
 #
-# 覆盖路径：密态推理入口 `/infer`（ingress: infer）与明文 Provider 入口 `/provider/<name>/...`
-# （ingress: ai-* 共 17 条，GF.3.2 厂商路由）。此前三类插件仅覆盖 `/infer`。
+# 覆盖路径：密态推理入口 `/infer`（ingress: infer）、MCP 密态轨 `mcp-secure-tools`、
+# MCP 明文轨 `mcp-public-demo` / `mcp-public-fs`（2026-10-19 并入，P2-1 T-2③；与
+# `mcp-secure-tools` 同规则登记，key-auth 另有实例级 `global_auth: true` 兜底）与明文
+# Provider 入口 `/provider/<name>/...`（ingress: ai-* 共 17 条，GF.3.2 厂商路由）。
 
 ---
 # Key Auth：消费者 API Key 认证（调用方层；otpmask 内部 JWT 保留为租户层，二者叠加）
@@ -50,6 +52,8 @@ spec:
   - ingress:
     - infer
     - mcp-secure-tools
+    - mcp-public-demo
+    - mcp-public-fs
     config:
       allow:
       - otpmask-customer-a
@@ -95,6 +99,8 @@ spec:
   - ingress:
     - infer
     - mcp-secure-tools
+    - mcp-public-demo
+    - mcp-public-fs
     config:
       allow:
       - "0.0.0.0/0" # 生产改为内网/管理网段 CIDR
@@ -174,6 +180,8 @@ spec:
   - ingress:
     - infer
     - mcp-secure-tools
+    - mcp-public-demo
+    - mcp-public-fs
     config: &tenant_qps
       rule_name: otpmask-tenant-qps # 租户总配额（/infer 与 /provider/* 共用同一计数器）
       rule_items:
@@ -227,6 +235,8 @@ spec:
   - ingress:
     - infer
     - mcp-secure-tools
+    - mcp-public-demo
+    - mcp-public-fs
     config:
       # allow_origins 必须是**字符串列表**（`["*"]` 或具体源）；写成 `- prefix: "*"` 会被插件
       # 判为非法预检（实测 204 且**不带任何 CORS 头**，网关日志 `cors.preflight.invalid`）

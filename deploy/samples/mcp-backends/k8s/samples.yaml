@@ -3,7 +3,7 @@
 # 用法：
 #   ① 构建 + 离线导入镜像（见 ../README.md；build-images.py 或 Dockerfile 两法）
 #   ② kubectl apply -f deploy/samples/mcp-backends/k8s/samples.yaml
-#   ③ 网关侧注册（见 ../README.md「注册到 Higress」；启用受 U-1/U-4 实测约束）
+#   ③ 网关侧注册（见 ../README.md「注册到 Higress」；U-1/U-4 已实测，2026-10-19 启用）
 # 清理：kubectl delete -f deploy/samples/mcp-backends/k8s/samples.yaml
 apiVersion: v1
 kind: Namespace

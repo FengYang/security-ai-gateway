@@ -26,6 +26,7 @@
 | 镜像可达性 | **受限网络事实**：`registry.k8s.io` 与 `docker.io` 在集群内**被拒**（connection refused）→ k8s 组件镜像须改源（本次用 `registry.cn-hangzhou.aliyuncs.com/google_containers/*`），监控栈镜像须宿主预拉 + 节点导入；`higress-registry.cn-hangzhou.cr.aliyuncs.com` 可达 | 2026-09-13（P0b-1 本地） |
 | 变更记录 | 2026-09-13：建立基线（P0b-1 本地 kind）。**待替换**：P0b-2 真实集群（单机 x86+k3s 或 3 节点）实测后另记 | 2026-09-13 |
 | 变更记录（新增） | **2026-10-10**：真实集群（k3s `192.168.31.168`）实测 **Higress `higress-2.2.5`**（helm release 6；`global.local=true`；网关端口 30000/30001）。上表 v2.1.5 为 P0b-1 历史值；**启用 MCP 能力须 ≥ 2.2.4** | 2026-10-10 |
+| 变更记录（2026-10-19） | 集群节点 IP 迁移 `192.168.31.168` → **`192.168.31.248`**（DHCP 换址，原址不可达）。**MCP public 轨真实化（P2-1 T-2③④）**：McpBridge 增注册 `mcp-demo`/`mcp-fs`；新增 Ingress `mcp-public-demo`/`mcp-public-fs`（`higress.io/rewrite-target: /mcp` 前缀重写）；`higress-config.mcpServer` native 启用（`scripts/higress-mcp.py --profile native --mcp-server-file`，`match_list` 空登记）；两插件清单（security-plugins.yaml、mcp-bridge*.yaml）同步回写。双后端 `tools/list`+`tools/call` 经官方 go-sdk 客户端（`deploy/samples/mcp-backends/client-smoke`）联调通过。U-1/U-4 实测闭环（内置路由不承载 `/mcp-servers/*`；Streamable HTTP 无需 `match_list`/Redis 会话保持）。留证：`docs/verify/mcp/GA-MCP-P2-1-任务验收留证.md` | 2026-10-19 |
 
 ## 1. 迁移原理
 
