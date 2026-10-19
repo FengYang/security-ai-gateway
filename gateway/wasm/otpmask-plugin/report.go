@@ -4,7 +4,14 @@ package main
 //
 // 复用 rpm-shadow-plugin 的成熟队列范式（有界队列 + tick 批量投递 + 失败重入队 +
 // 溢出丢弃计数），但投递目标为 tee-infer 的 POST /audit/report（逐笔请求事件），
-// 并按 D-13 组装 HMAC-SHA256 请求体签名（X-Audit-Report-Sig）与 timestamp_ns。
+// 并按 D-13 组装请求体签名（X-Audit-Report-Sig）与 timestamp_ns。
+//
+// 签名求值位置（R-11 对齐，2026-10-19 修订）：**经 cryptop sidecar `/v1/hmac`**
+// （`symmetricHMAC`；密钥字节恒驻 sidecar，C-5），插件侧零密码——原实现直算 HMAC
+// 违反 §9.1「Wasm 内无密码运算」（wasm-guard ①a），已迁移。sidecar 不可用 ⇒
+// **不签名不投递**（批次重入队等下个 tick，fail-closed，A3-14 可见）。
+// 部署约束：`audit_report_token` 须为 **32 字节**（签名密钥 = 令牌 UTF-8 字节，hex 登记
+// `otpmask/audit-sign/v1`；cryptop R-16 对称键长校验；部署件 cryptopsvc-sidecar-patch.yaml）。
 //
 // 设计要点：
 //   - **有界队列**（缺省 32，§6.5 队列三要素）：溢出**丢弃并计数**（otpmask_audit_report_dropped_total）；
@@ -17,8 +24,6 @@ package main
 // 非推理请求（result=non_infer）。具体信号见 onHttpRequestHeaders / onHttpResponseHeaders 的接线处。
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -159,6 +164,7 @@ func (q *auditReportQueue) length() int {
 // auditReportRuntime 上报通道运行态（tick 函数读取，parseConfig 写入）。
 type auditReportRuntime struct {
 	token   string
+	signRef string // 上报签名 KeyRef（D-13；HMAC 求值经 cryptop sidecar，R-11）
 	teeSvc  string
 	teePort int64
 }
@@ -169,11 +175,12 @@ var (
 	auditReportMu  sync.Mutex
 )
 
-// signAuditReportBody 计算请求体 HMAC-SHA256 签名（D-13 完整性保护，纯函数，可单测）。
-func signAuditReportBody(token string, body []byte) string {
-	mac := hmac.New(sha256.New, []byte(token))
-	mac.Write(body)
-	return hex.EncodeToString(mac.Sum(nil))
+// requeueAuditReports 失败重投（下个 tick 重试）；通道已被热更新关闭（queue=nil）时丢弃（不 panic）。
+func requeueAuditReports(items []auditReportItemDTO) {
+	if auditReportQ == nil {
+		return
+	}
+	auditReportQ.push(items)
 }
 
 // enqueueDataPlaneReport 将一条数据面未达 TEE 事件入队（请求路径调用，非阻塞）。
@@ -188,7 +195,8 @@ func enqueueDataPlaneReport(item auditReportItemDTO) {
 	auditReportQ.push([]auditReportItemDTO{item})
 }
 
-// sendAuditReports 批量投递（**仅 tick 调用**，不在请求路径）。失败重新入队重试。
+// sendAuditReports 批量投递（**仅 tick 调用**，不在请求路径）。
+// 流程：组装 body → 经 cryptop sidecar 求签（R-11）→ POST；任一步失败重入队重试。
 func sendAuditReports(items []auditReportItemDTO) {
 	if len(items) == 0 {
 		return
@@ -198,31 +206,45 @@ func sendAuditReports(items []auditReportItemDTO) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		metricAuditReportFail.add(uint64(len(items)))
-		auditReportQ.push(items) // 编码失败仍重入队（极端情况）
+		requeueAuditReports(items) // 编码失败仍重入队（极端情况）
 		auditWarnf("otpmask-plugin: 审计上报编码失败（重新入队）: %v", err)
 		return
 	}
-	sig := signAuditReportBody(cfg.token, body)
+	// R-11（插件零密码）：请求体签名求值经 cryptop sidecar（/v1/hmac）；
+	// sidecar 不可用 ⇒ 不签名不投递（fail-closed，重入队等下个 tick）。
+	symmetricHMAC(cfg.signRef, body, func(mac []byte, herr error) {
+		if herr != nil {
+			metricAuditReportFail.add(uint64(len(items)))
+			requeueAuditReports(items)
+			auditWarnf("otpmask-plugin: 审计上报签名不可用（重新入队；R-11/C-4）: %v", herr)
+			return
+		}
+		postAuditReport(cfg, items, body, hex.EncodeToString(mac))
+	})
+}
+
+// postAuditReport 投递已签名批次（自签名回调进入；失败重入队）。
+func postAuditReport(cfg auditReportRuntime, items []auditReportItemDTO, body []byte, sig string) {
 	headers := [][2]string{
 		{"Content-Type", "application/json"},
 		{"X-Admin-Token", cfg.token},
 		{"X-Audit-Report-Sig", sig},
 	}
 	cli := wrapper.NewClusterClient(wrapper.FQDNCluster{FQDN: cfg.teeSvc, Port: cfg.teePort})
-	err = cli.Post("/audit/report", headers, body,
+	err := cli.Post("/audit/report", headers, body,
 		func(statusCode int, _ http.Header, respBody []byte) {
 			if statusCode == http.StatusOK {
 				metricAuditReportSent.add(uint64(len(items)))
 				return
 			}
 			metricAuditReportFail.add(uint64(len(items)))
-			auditReportQ.push(items) // 失败重投（request_id 确定性 ⇒ tee-infer 幂等去重，不会重复落链）
+			requeueAuditReports(items) // 失败重投（request_id 确定性 ⇒ tee-infer 幂等去重，不会重复落链）
 			auditWarnf("otpmask-plugin: 审计上报返回 %d（已重新入队，body=%s）",
 				statusCode, truncateReport(string(respBody), 120))
 		}, auditReportTimeoutMs)
 	if err != nil {
 		metricAuditReportFail.add(uint64(len(items)))
-		auditReportQ.push(items)
+		requeueAuditReports(items)
 		auditWarnf("otpmask-plugin: 审计上报触发失败（已重新入队）: %v", err)
 	}
 }
@@ -258,7 +280,7 @@ func initAuditReportChannel(cfg PluginConfig) {
 		teePort = 19090
 	}
 	auditReportMu.Lock()
-	auditReportCfg = auditReportRuntime{token: cfg.AuditReportToken, teeSvc: teeSvc, teePort: teePort}
+	auditReportCfg = auditReportRuntime{token: cfg.AuditReportToken, signRef: auditReportSignKeyRef(cfg), teeSvc: teeSvc, teePort: teePort}
 	auditReportQ = newAuditReportQueue(int(cfg.AuditReportQueueMax))
 	auditReportMu.Unlock()
 	wrapper.RegisterTickFunc(flushMs, onAuditReportFlushTick)

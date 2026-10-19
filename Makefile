@@ -79,20 +79,26 @@ tidy:
 #         （捕获「插件经自研包间接链入密码」；本仓包可精确定位，不受 net/http 噪声影响）；
 #     ②  framing 包 protocol/go 自身零密码不变量。
 #   任一违例 → 打印清单并非 0 退出。go list 的 Imports 字段不含 _test.go 依赖，天然排除测试。
+#   ⚠️ go 命令显式 `-mod=mod`（2026-10-19 加固）：仓库根存在未追踪 vendor/ 时，裸 `go list`
+#   会以 inconsistent vendoring 失败且 stdout 为空 ⇒ `$$(...)` 捕获空串 ⇒ 门禁**空跑假绿**
+#   （T-4 复现实测 NOFLAG_EXIT=1 OUTLEN=0）；显式 -mod=mod 消除该静默失效路径（与 CI 既有口径一致）。
+# 插件包清单（wasm-guard 断言①覆盖范围）：**新增插件必须加入本清单**。
+WASM_PLUGIN_PKGS ?= ./gateway/wasm/otpmask-plugin/...
+
 .PHONY: wasm-guard
 wasm-guard:
 	@echo "== wasm-guard 断言①a：插件源码 direct import 零密码（R-11/§9.1）=="
-	@out=$$($(GO) list -f '{{range .Imports}}{{.}}{{"\n"}}{{end}}' ./gateway/wasm/otpmask-plugin/... | grep -E '^(crypto/|github.com/emmansun/gmsm|security-ai-gateway/cipher/mask|security-ai-gateway/protocol/go/cryptoops)' | sort -u || true); \
+	@out=$$($(GO) list -mod=mod -f '{{range .Imports}}{{.}}{{"\n"}}{{end}}' $(WASM_PLUGIN_PKGS) | grep -E '^(crypto/|github.com/emmansun/gmsm|security-ai-gateway/cipher/mask|security-ai-gateway/protocol/go/cryptoops)' | sort -u || true); \
 	if [ -n "$$out" ]; then echo "FAIL: 插件源码直接 import 密码包——"; echo "$$out"; exit 1; fi; \
 	echo "PASS: 插件源码零密码 import"
 	@echo "== wasm-guard 断言①b：闭包内本仓包与 gmsm 无密码 =="
-	@badmod=$$($(GO) list -deps -f '{{.ImportPath}}' ./gateway/wasm/otpmask-plugin/... | grep -E '^github.com/emmansun/gmsm' || true); \
+	@badmod=$$($(GO) list -mod=mod -deps -f '{{.ImportPath}}' $(WASM_PLUGIN_PKGS) | grep -E '^github.com/emmansun/gmsm' || true); \
 	if [ -n "$$badmod" ]; then echo "FAIL: 插件链入 gmsm——"; echo "$$badmod"; exit 1; fi; \
-	bad=$$($(GO) list -deps -f '{{.ImportPath}} {{range .Imports}}{{.}} {{end}}' ./gateway/wasm/otpmask-plugin/... | grep -E '^security-ai-gateway/' | grep -E ' (crypto/[a-z0-9/]+|github\.com/emmansun/gmsm|security-ai-gateway/cipher/mask|security-ai-gateway/protocol/go/cryptoops)( |$$)' || true); \
+	bad=$$($(GO) list -mod=mod -deps -f '{{.ImportPath}} {{range .Imports}}{{.}} {{end}}' $(WASM_PLUGIN_PKGS) | grep -E '^security-ai-gateway/' | grep -E ' (crypto/[a-z0-9/]+|github\.com/emmansun/gmsm|security-ai-gateway/cipher/mask|security-ai-gateway/protocol/go/cryptoops)( |$$)' || true); \
 	if [ -n "$$bad" ]; then echo "FAIL: 闭包内本仓包链入密码求值包——"; echo "$$bad"; exit 1; fi; \
 	echo "PASS: 闭包内本仓包零密码"
 	@echo "== wasm-guard 断言②：protocol/go framing 包零密码不变量 =="
-	@out=$$($(GO) list -deps -f '{{.ImportPath}}' security-ai-gateway/protocol/go | grep -E '(^crypto/(aes|cipher|hmac|sha256|sha512|ecdh|ecdsa)|gmsm)' || true); \
+	@out=$$($(GO) list -mod=mod -deps -f '{{.ImportPath}}' security-ai-gateway/protocol/go | grep -E '(^crypto/(aes|cipher|hmac|sha256|sha512|ecdh|ecdsa)|gmsm)' || true); \
 	if [ -n "$$out" ]; then echo "FAIL: protocol/go 链入密码包——"; echo "$$out"; exit 1; fi; \
 	echo "PASS: protocol/go 零密码"
 

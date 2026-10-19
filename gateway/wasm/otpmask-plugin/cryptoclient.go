@@ -202,6 +202,9 @@ const (
 	keyRefJWT = "otpmask/jwt/v1"
 	// keyRefRouteVerify 路由表/限流表验签 K_rx 句柄（与 gateway-core 同一密钥族）；配置 route_verify_key_ref 可覆盖。
 	keyRefRouteVerify = "otpmask/route-verify/v1"
+	// keyRefAuditReport 审计上报请求体签名句柄（P1-7 D-13；密钥值 = audit_report_token 的
+	// UTF-8 字节、须 32 字节以满足 cryptop R-16，hex 登记静态密钥）；配置 audit_report_sign_ref 可覆盖。
+	keyRefAuditReport = "otpmask/audit-sign/v1"
 )
 
 // jwtVerifyKeyRef 取 JWT 验签密钥句柄（配置优先，缺省 §6.3 约定名）。
@@ -218,6 +221,14 @@ func routeVerifyKeyRef(config PluginConfig) string {
 		return config.RouteVerifyKeyRef
 	}
 	return keyRefRouteVerify
+}
+
+// auditReportSignKeyRef 取审计上报签名密钥句柄（配置优先，缺省 §6.3 约定名）。
+func auditReportSignKeyRef(config PluginConfig) string {
+	if config.AuditReportSignRef != "" {
+		return config.AuditReportSignRef
+	}
+	return keyRefAuditReport
 }
 
 // symmetricVerifyMAC 经 cryptop sidecar 校验**对称 MAC**（CPS，§5.4.5）：
@@ -240,6 +251,17 @@ func symmetricVerifyMAC(keyRef string, data, sig []byte, cb func(ok bool, err er
 		}
 		cb(macConstEqual(mac, sig), nil)
 	})
+}
+
+// symmetricHMAC 经 cryptop sidecar 计算**对称 MAC**（CPS `/v1/hmac`；P1-7 D-13 上报体
+// 签名，R-11 插件零密码）。与 symmetricVerifyMAC 同一 HTTP 面、同一 fail-closed 口径
+// （C-4，无本地回退）：sidecar 不可用 ⇒ 返回错误，调用侧不得投递未签名批次。
+func symmetricHMAC(keyRef string, data []byte, cb func(mac []byte, err error)) {
+	if keyRef == "" || !cryptoUsable() {
+		cb(nil, errCryptoUnavailable)
+		return
+	}
+	CryptoClient.HMAC(cryptoclient.KeyRef(keyRef), data, cb)
 }
 
 // sidecarTableVerifier 实现 routecache.Verifier / ratelimitcache.Verifier：

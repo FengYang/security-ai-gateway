@@ -77,6 +77,12 @@ jobs:
           GOOS=wasip1 GOARCH=wasm go build -mod=mod -buildmode=c-shared \
             -o gateway/wasm/otpmask-plugin/main.wasm ./gateway/wasm/otpmask-plugin
 
+      # 6b. wasm-guard 门禁（§9.1「Wasm 内无密码运算」/ R-11；①a/①b/② 三断言）
+      #     2026-10-19 接入：此前仅手工执行；曾因工作区 vendor/ 导致 go list 静默失败
+      #     ⇒ 门禁空跑假绿，既有违例（report.go 直算 HMAC）未被发现（T-4 留证）。
+      - name: wasm-guard
+        run: make wasm-guard
+
       # 7. 脚本语法（纯静态：bash -n + 全部 ps1 解析）
       - name: Linux scripts syntax
         run: |

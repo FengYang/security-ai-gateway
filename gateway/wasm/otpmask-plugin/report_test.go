@@ -2,7 +2,8 @@ package main
 
 // report_test.go — P1-7 T2b 数据面未达 TEE 流量上报通道单测（纯逻辑，hostcall 守卫下运行）。
 //
-// 覆盖：① 请求体 HMAC-SHA256 签名确定性；② 有界队列 FIFO/溢出丢弃计数（A3-14）；
+// 覆盖：① 请求体签名求值经 cryptop sidecar 且与原直算口径**逐字节一致**（R-11 迁移证明，
+// 2026-10-19）+ sidecar 不可用 ⇒ fail-closed 重入队；② 有界队列 FIFO/溢出丢弃计数（A3-14）；
 // ③ 通道未启用=零行为变化（no-op）；④ 触发点判定（推理路径/非推理、缓存命中信号）；
 // ⑤ 路径规范化与模式判定；⑥ 上报体 JSON 字段名与 §6.5 契约一致。
 
@@ -14,26 +15,49 @@ import (
 	"testing"
 )
 
-func TestSignAuditReportBody(t *testing.T) {
-	const token = "audit-report-token-abc123"
+// TestAuditReportSignViaSidecarMatchesLegacy 迁移证明（R-11，2026-10-19）：签名求值经
+// cryptop sidecar（/v1/hmac），与旧「插件内直算 HMAC-SHA256」**逐字节一致**
+// ⇒ tee-infer 侧（D-13）验签口径零变化。
+func TestAuditReportSignViaSidecarMatchesLegacy(t *testing.T) {
+	installSeam(t) // in-process cryptop sidecar（cryptoseam_test.go；已登记 keyRefAuditReport=testSecret）
 	body := []byte(`{"reports":[{"request_id":"r-1","result":"non_infer"}]}`)
 
-	got := signAuditReportBody(token, body)
-
-	// 手工复算（等价实现，验证算法与拼接口径）
-	mac := hmac.New(sha256.New, []byte(token))
-	mac.Write(body)
-	want := hex.EncodeToString(mac.Sum(nil))
+	var got string
+	var serr error
+	symmetricHMAC(keyRefAuditReport, body, func(mac []byte, err error) {
+		serr = err
+		if mac != nil {
+			got = hex.EncodeToString(mac)
+		}
+	})
+	if serr != nil {
+		t.Fatalf("sidecar 签名失败: %v", serr)
+	}
+	// 旧口径复算：HMAC-SHA256(key=令牌 UTF-8 字节, body)
+	m := hmac.New(sha256.New, testSecret)
+	m.Write(body)
+	want := hex.EncodeToString(m.Sum(nil))
 	if got != want {
-		t.Fatalf("签名不符: want %s got %s", want, got)
+		t.Fatalf("sidecar 签名与 D-13 旧口径不一致: want %s got %s", want, got)
 	}
-	// 换令牌 → 签名必变（防伪造）
-	if signAuditReportBody(token+"x", body) == got {
-		t.Fatal("不同令牌应产生不同签名")
-	}
-	// 篡改 body → 签名必变（防篡改）
-	if signAuditReportBody(token, append(body, ' ')) == got {
-		t.Fatal("body 变更应导致签名变化")
+}
+
+// TestAuditReportSignUnavailableRequeues sidecar 不可用 ⇒ 不签名不投递、批次重入队（fail-closed/C-4）。
+func TestAuditReportSignUnavailableRequeues(t *testing.T) {
+	savedQ, savedCfg := auditReportQ, auditReportCfg
+	savedClient, savedReady := CryptoClient, cryptoReady
+	defer func() {
+		auditReportQ, auditReportCfg = savedQ, savedCfg
+		CryptoClient, cryptoReady = savedClient, savedReady
+	}()
+	CryptoClient = nil
+	cryptoReady = false
+	auditReportQ = newAuditReportQueue(4)
+	auditReportCfg = auditReportRuntime{token: "t", signRef: keyRefAuditReport, teeSvc: "tee.test", teePort: 19090}
+
+	sendAuditReports([]auditReportItemDTO{{RequestID: "r-9", Result: resultNonInfer}})
+	if auditReportQ.length() != 1 {
+		t.Fatalf("sidecar 不可用时批次应重入队（fail-closed）：len=%d", auditReportQ.length())
 	}
 }
 

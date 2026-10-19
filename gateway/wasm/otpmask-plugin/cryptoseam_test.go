@@ -62,8 +62,9 @@ func installSeam(t *testing.T) {
 		t.Fatalf("cryptop.New(intl): %v", err)
 	}
 	srv, err := cryptopsvc.NewServer(p, cryptopsvc.Config{
-		// §12.3 crypto_static_keys：登记插件静态 MAC 密钥句柄（JWT HS256 密钥）。
-		StaticKeys: map[string][]byte{keyRefJWT: testSecret},
+		// §12.3 crypto_static_keys：登记插件静态 MAC 密钥句柄（JWT HS256 密钥 +
+		// 审计上报签名 P1-7 D-13；密钥值 = 令牌 UTF-8 字节）。
+		StaticKeys: map[string][]byte{keyRefJWT: testSecret, keyRefAuditReport: testSecret},
 	})
 	if err != nil {
 		t.Fatalf("cryptopsvc.NewServer: %v", err)

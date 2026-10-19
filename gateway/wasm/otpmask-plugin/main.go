@@ -163,9 +163,12 @@ type PluginConfig struct {
 	// ---- P1-7 T2b（§6.5 / D-13）：数据面未达 TEE 流量上报通道（插件侧）----
 	// 仅当 audit_report_token 配置时启用（缺省关闭，零行为变化，符合插件惯例）。
 	// 令牌须与 tee-infer 的 -audit-report-token（及 -audit-report-tenants 绑定集合）一致。
-	AuditReportToken    string `json:"audit_report_token"`     // 独立只读上报令牌（X-Admin-Token）
+	AuditReportToken    string `json:"audit_report_token"`     // 独立只读上报令牌（X-Admin-Token；须 32 字节，见下方 KeyRef 约束）
 	AuditReportFlushMs  int64  `json:"audit_report_flush_ms"`  // tick 批量投递间隔（缺省 1000ms）
 	AuditReportQueueMax int64  `json:"audit_report_queue_max"` // 有界队列容量（缺省 32，§6.5 队列三要素）
+	// 上报体签名 KeyRef（D-13 / R-11：HMAC 求值经 cryptop sidecar；缺省 otpmask/audit-sign/v1；
+	// 密钥 = audit_report_token 的 UTF-8 字节，须 32 字节满足 cryptop R-16，hex 登记静态密钥）。
+	AuditReportSignRef string `json:"audit_report_sign_ref"`
 
 	// ---- P1-6：TTFT 严格性能择优（§6.1/§6.2）----
 	// 节点名（上报 batch_id 前缀；R2-03/G-3 双通道——本配置优先，缺省经 Envoy 属性 node.id 取得）。
@@ -237,6 +240,7 @@ func parseConfig(json gjson.Result, config *PluginConfig, log logs.Log) error {
 	config.AuditReportToken = json.Get("audit_report_token").String()
 	config.AuditReportFlushMs = json.Get("audit_report_flush_ms").Int()
 	config.AuditReportQueueMax = json.Get("audit_report_queue_max").Int()
+	config.AuditReportSignRef = json.Get("audit_report_sign_ref").String()
 	// P1-6：TTFT 上报节点名（缺省空 = 走 Envoy 属性 node.id，R2-03/G-3 双通道）。
 	config.NodeName = json.Get("node_name").String()
 	// P1-6 M2.5：TTFT 上报/拉取周期（§6.4；缺省与收口在下方默认段统一处理）。
