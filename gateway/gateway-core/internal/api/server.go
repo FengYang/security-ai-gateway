@@ -168,6 +168,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /ratelimits/rollback", s.withAuth(s.handleRateLimitRollback))
 	s.mux.HandleFunc("POST /tools/policy", s.withAuth(s.handleToolPolicy))
 	s.mux.HandleFunc("GET /tools/policy", s.withAuth(s.handleGetToolPolicy))
+	// T-3 联邦目录治理（D-4/§6.1）：后端注册 CRUD——变更即重签目录（版本单调）+ mcp_server_changed 审计
+	s.mux.HandleFunc("GET /tools/servers", s.withAuth(s.handleListServers))
+	s.mux.HandleFunc("POST /tools/servers", s.withAuth(s.handleUpsertServer))
+	s.mux.HandleFunc("GET /tools/servers/{id}", s.withAuth(s.handleGetServer))
+	s.mux.HandleFunc("DELETE /tools/servers/{id}", s.withAuth(s.handleDeleteServer))
 	s.mux.HandleFunc("GET /metrics", s.withAuth(s.handleMetrics))
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 }

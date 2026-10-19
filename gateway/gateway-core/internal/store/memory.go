@@ -3,8 +3,10 @@ package store
 
 import (
 	"errors"
+	"sort"
 	"sync"
 
+	"security-ai-gateway/gateway/gateway-core/internal/mcpsrv"
 	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
 	"security-ai-gateway/gateway/gateway-core/internal/route"
 	"security-ai-gateway/gateway/mcpsec"
@@ -36,6 +38,15 @@ type Store interface {
 	SaveRBACPolicy(p *mcpsec.RBACPolicy)
 	// GetRBACPolicy 返回当前授权策略。
 	GetRBACPolicy() *mcpsec.RBACPolicy
+	// T-3 联邦目录治理：MCP 后端注册域（gateway-core /tools/servers*）。
+	// SaveMCPServer 保存/更新后端注册条目（按 id upsert）。
+	SaveMCPServer(sv *mcpsrv.Server)
+	// GetMCPServer 按 id 查询（不存在返回 nil）。
+	GetMCPServer(id string) *mcpsrv.Server
+	// ListMCPServers 列出全部后端注册（id 字典序，确定性输出）。
+	ListMCPServers() []*mcpsrv.Server
+	// DeleteMCPServer 摘除注册；存在返回 true。
+	DeleteMCPServer(id string) bool
 }
 
 // ErrDup 处方已存在。
@@ -50,11 +61,16 @@ type Memory struct {
 	rateLimitTable *ratelimit.Table
 	toolCatalog    *mcpsec.ToolCatalog
 	rbacPolicy     *mcpsec.RBACPolicy
+	mcpServers     map[string]*mcpsrv.Server // T-3：后端注册域
 }
 
 // NewMemory 构造内存存储。
 func NewMemory() *Memory {
-	return &Memory{byID: make(map[string]*route.RoutePrescription), byT: make(map[string][]string)}
+	return &Memory{
+		byID:       make(map[string]*route.RoutePrescription),
+		byT:        make(map[string][]string),
+		mcpServers: make(map[string]*mcpsrv.Server),
+	}
 }
 
 // Save 实现 Store。同 ID 重复保存返回 ErrDup。
@@ -163,4 +179,41 @@ func (m *Memory) GetRBACPolicy() *mcpsec.RBACPolicy {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.rbacPolicy
+}
+
+// SaveMCPServer 实现 Store。
+func (m *Memory) SaveMCPServer(sv *mcpsrv.Server) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mcpServers[sv.ID] = sv
+}
+
+// GetMCPServer 实现 Store。
+func (m *Memory) GetMCPServer(id string) *mcpsrv.Server {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.mcpServers[id]
+}
+
+// ListMCPServers 实现 Store。
+func (m *Memory) ListMCPServers() []*mcpsrv.Server {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*mcpsrv.Server, 0, len(m.mcpServers))
+	for _, sv := range m.mcpServers {
+		out = append(out, sv)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// DeleteMCPServer 实现 Store。
+func (m *Memory) DeleteMCPServer(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.mcpServers[id]; !ok {
+		return false
+	}
+	delete(m.mcpServers, id)
+	return true
 }

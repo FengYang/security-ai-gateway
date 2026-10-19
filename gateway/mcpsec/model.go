@@ -57,6 +57,9 @@ type TableTool struct {
 	Schema            map[string]*FieldConstraint `json:"schema,omitempty"`
 	Required          []string                    `json:"required,omitempty"`
 	ResponseSensitive []string                    `json:"response_sensitive,omitempty"` // 响应脱敏字段名（Step3）
+	// T-3 目录模型扩展（变更要求，C-MCP-1/C-MCP-3 同步；P2-1 §6.2）：
+	Server    string `json:"server,omitempty"`    // 后端注册 id（gateway-core /tools/servers；空 = 未登记来源）
+	Namespace string `json:"namespace,omitempty"` // 命名空间（缺省由控制面以 server 前缀命名空间化补全）
 }
 
 // ToolTrack 返回工具的有效分轨：空值 ⇒ secure（fail-closed）。
@@ -68,12 +71,32 @@ func (t TableTool) ToolTrack() string {
 	return t.Track
 }
 
+// QualifiedName 工具限定名：Namespace 非空 ⇒ "namespace/name"，否则裸名。
+// T-3：命名空间缺省以注册域 server 前缀补全；同名冲突裁决按限定名去重
+// （U-5 默认：前缀命名空间 + 校验拒绝冲突）。
+func (t TableTool) QualifiedName() string {
+	if t.Namespace == "" {
+		return t.Name
+	}
+	return t.Namespace + "/" + t.Name
+}
+
+// CatalogServer 目录内后端摘要（T-3 变更要求：id/baseUrl 摘要/track/prefix；**不含凭据**
+// ——baseUrl 已在控制面规范化，禁 userinfo/query/fragment）。Track 空值视同 secure（同工具口径）。
+type CatalogServer struct {
+	ID      string `json:"id"`
+	BaseURL string `json:"base_url,omitempty"`
+	Track   string `json:"track,omitempty"`
+	Prefix  string `json:"prefix,omitempty"`
+}
+
 // ToolCatalog 工具目录（gateway-core 事实源，签名后经 GET /tools/policy 下发）。
 type ToolCatalog struct {
-	Version   int         `json:"version"`
-	UpdatedAt int64       `json:"updated_at"`
-	Tools     []TableTool `json:"tools"`
-	Signature []byte      `json:"signature,omitempty"` // HMAC over canonical
+	Version   int             `json:"version"`
+	UpdatedAt int64           `json:"updated_at"`
+	Tools     []TableTool     `json:"tools"`
+	Servers   []CatalogServer `json:"servers"`             // T-3：后端摘要（进签名域；非 omitempty 保持 JSON 往返 canonical 稳定）
+	Signature []byte          `json:"signature,omitempty"` // HMAC over canonical
 }
 
 // PolicyBinding 一条放行规则的附加约束（nil/空 = 仅放行无附加限制）。
@@ -104,8 +127,10 @@ func NewSigner(key []byte) (*Signer, error) {
 }
 
 // CanonicalBytes 生成不含签名的规范字节，供签发/验签（两侧共用同一实现，天然一致）。
+// T-3：Servers 摘要并入签名域（重签生效，版本单调）；Servers 与 Tools 同口径**非
+// omitempty**——JSON 往返后空切片不退化（[]≠null），canonical 稳定。
 func (c *ToolCatalog) CanonicalBytes() ([]byte, error) {
-	return canonicalBytes(c.Version, c.UpdatedAt, c.Tools)
+	return canonicalBytes(c.Version, c.UpdatedAt, c.Tools, c.Servers)
 }
 
 // Sign 对目录签名并写入 Signature。
@@ -130,10 +155,18 @@ func (s *Signer) ValidCatalog(c *ToolCatalog) bool {
 	return verify(s.key, canon, c.Signature)
 }
 
-// validTracks 校验全部工具的分轨合法：空值合法（＝缺省 secure）；非空必须 ∈ {public,secure}。
+// validTracks 校验分轨合法性：空值合法（＝缺省 secure）；非空必须 ∈ {public,secure}。
+// T-3：同时覆盖工具条目与 servers[] 摘要（两处同口径）。
 func validTracks(c *ToolCatalog) bool {
 	for i := range c.Tools {
 		switch c.Tools[i].Track {
+		case "", TrackPublic, TrackSecure:
+		default:
+			return false
+		}
+	}
+	for i := range c.Servers {
+		switch c.Servers[i].Track {
 		case "", TrackPublic, TrackSecure:
 		default:
 			return false
@@ -182,9 +215,9 @@ func verify(key, data, sig []byte) bool {
 	return subtle.ConstantTimeCompare(sig, sign(key, data)) == 1
 }
 
-// NewToolCatalog 构造空目录。
+// NewToolCatalog 构造空目录（空切片而非 nil：canonical 确定性，T-3 servers[] 同口径）。
 func NewToolCatalog(version int, nowUnix int64) *ToolCatalog {
-	return &ToolCatalog{Version: version, UpdatedAt: nowUnix, Tools: []TableTool{}}
+	return &ToolCatalog{Version: version, UpdatedAt: nowUnix, Tools: []TableTool{}, Servers: []CatalogServer{}}
 }
 
 // NewRBACPolicy 构造空策略（默认 deny：无规则即拒绝）。

@@ -32,6 +32,9 @@ const (
 	// 防「静默改判 → 工具跨轨迁移」。action 取值不受 audit-verify "core" schema 约束
 	// （schema 仅固定字段序），故新增不破链、旧链哈希逐字节不变。
 	ActionMCPTrackChanged = "mcp_track_changed"
+	// ActionMCPServerChanged T-3：联邦后端注册变更（新增/摘除/逐字段更新；VersionFrom/To
+	// 对应目录重签版本区间）。action 取值同样不受 audit-verify "core" schema 约束，新增不破链。
+	ActionMCPServerChanged = "mcp_server_changed"
 	// ActionTTFTReset P1-6 M3.6：TTFT 统计重置（运维；§6.2）。action 取值同 MCP-变更口径，
 	// 不受 audit-verify "core" schema 约束（schema 仅固定字段序），新增不破链。
 	ActionTTFTReset = "route_ttft_reset"

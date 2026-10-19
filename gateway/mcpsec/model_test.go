@@ -26,9 +26,11 @@ func TestNewSignerRejectsShortKey(t *testing.T) {
 func TestToolCatalogCanonicalStable(t *testing.T) {
 	c1 := NewToolCatalog(3, 1000)
 	c1.Tools = []TableTool{
-		{Name: "db_query", CatalogOwner: "tenant-a", Schema: map[string]*FieldConstraint{"table": {Type: "string", Whitelist: []string{"u", "o"}}}},
+		{Name: "db_query", CatalogOwner: "tenant-a", Server: "s1", Namespace: "fin", Schema: map[string]*FieldConstraint{"table": {Type: "string", Whitelist: []string{"u", "o"}}}},
 	}
-	c2 := &ToolCatalog{Version: c1.Version, UpdatedAt: c1.UpdatedAt, Tools: append([]TableTool{}, c1.Tools...)}
+	c1.Servers = []CatalogServer{{ID: "s1", BaseURL: "http://s1:8080", Track: TrackPublic, Prefix: "fin"}}
+	c2 := &ToolCatalog{Version: c1.Version, UpdatedAt: c1.UpdatedAt,
+		Tools: append([]TableTool{}, c1.Tools...), Servers: append([]CatalogServer{}, c1.Servers...)}
 	b1, err := c1.CanonicalBytes()
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +41,15 @@ func TestToolCatalogCanonicalStable(t *testing.T) {
 	}
 	if !bytes.Equal(b1, b2) {
 		t.Fatalf("canonical 不稳定: %s != %s", b1, b2)
+	}
+	// T-3：servers[] 摘要须在签名域内——改动摘要即 canonical 变化。
+	c2.Servers[0].Prefix = "ops"
+	b3, err := c2.CanonicalBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(b1, b3) {
+		t.Fatal("servers[] 摘要改动未反映到 canonical（未进签名域）")
 	}
 }
 
@@ -128,5 +139,43 @@ func TestValidCatalogRejectsInvalidTrack(t *testing.T) {
 		if !s.ValidCatalog(ok) {
 			t.Fatalf("合法 Track=%q 应通过校验", tr)
 		}
+	}
+}
+
+// TestCatalogServersSignedAndTamper T-3：servers[] 摘要进签名域——篡改即验签失败；
+// 非法 summary track 即便签名有效亦拒（同工具口径）。
+func TestCatalogServersSignedAndTamper(t *testing.T) {
+	s := testSigner(t)
+	c := NewToolCatalog(2, 1000)
+	c.Tools = []TableTool{{Name: "q", CatalogOwner: "o", Server: "s1", Namespace: "fin"}}
+	c.Servers = []CatalogServer{{ID: "s1", BaseURL: "http://s1:8080", Track: TrackPublic, Prefix: "fin"}}
+	if err := s.SignCatalog(c); err != nil {
+		t.Fatal(err)
+	}
+	if !s.ValidCatalog(c) {
+		t.Fatal("含 servers[] 的目录应验签通过")
+	}
+	c.Servers[0].Prefix = "ops" // 篡改摘要
+	if s.ValidCatalog(c) {
+		t.Fatal("篡改 servers[] 摘要应验签失败")
+	}
+
+	bad := NewToolCatalog(1, 1000)
+	bad.Servers = []CatalogServer{{ID: "s1", Track: "internal"}}
+	if err := s.SignCatalog(bad); err != nil {
+		t.Fatal(err)
+	}
+	if s.ValidCatalog(bad) {
+		t.Fatal("非法 servers[].track 应被 ValidCatalog 拒绝（即便签名有效）")
+	}
+}
+
+// TestTableToolQualifiedName T-3：限定名口径（命名空间化后同名不同空间不串扰）。
+func TestTableToolQualifiedName(t *testing.T) {
+	if got := (TableTool{Name: "q"}).QualifiedName(); got != "q" {
+		t.Fatalf("无命名空间应为裸名，got %q", got)
+	}
+	if got := (TableTool{Name: "q", Namespace: "fin"}).QualifiedName(); got != "fin/q" {
+		t.Fatalf("命名空间化应为 fin/q，got %q", got)
 	}
 }

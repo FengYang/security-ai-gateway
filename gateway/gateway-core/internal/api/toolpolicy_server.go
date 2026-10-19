@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"security-ai-gateway/gateway/gateway-core/internal/mcpsrv"
 	"security-ai-gateway/gateway/gateway-core/internal/policyaudit"
 	"security-ai-gateway/gateway/mcpsec"
 )
@@ -46,6 +47,13 @@ func (s *Server) handleToolPolicy(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_request", "catalog 数据非法")
 			return
 		}
+		// T-3：目录 × 注册域联动（fail-closed）——未注册后端引用拒绝、namespace 缺省补全、
+		// 同名冲突拒绝（U-5 默认）；servers[] 摘要为注册域派生值，不采信客户端提交。
+		if status, code, msg := s.checkCatalogTools(&c); status != 0 {
+			writeError(w, status, code, msg)
+			return
+		}
+		c.Servers = mcpsrv.Summaries(s.store.ListMCPServers())
 		// T-6：敏感度（Track）变更须独立留痕（防静默改判 → 工具跨轨迁移，§4.6.2）。
 		// 重签落库前先按**有效轨**（ToolTrack()：空值视同 secure）算出跨轨迁移记录。
 		prev := s.store.GetToolCatalog()
@@ -115,23 +123,24 @@ type trackChange struct {
 
 // diffTrackChanges 比较新旧目录的**有效轨**（ToolTrack()：空值视同 secure），
 // 返回同一工具发生跨轨迁移的记录。新增/删除工具不算 Track 变更（不在此列）。
+// 键＝限定名（T-3：命名空间化后同名不同空间不串扰）。
 func diffTrackChanges(prev, next *mcpsec.ToolCatalog) []trackChange {
 	if prev == nil || next == nil {
 		return nil
 	}
 	old := make(map[string]string, len(prev.Tools))
 	for i := range prev.Tools {
-		old[prev.Tools[i].Name] = prev.Tools[i].ToolTrack()
+		old[prev.Tools[i].QualifiedName()] = prev.Tools[i].ToolTrack()
 	}
 	var out []trackChange
 	for i := range next.Tools {
 		t := next.Tools[i]
-		was, ok := old[t.Name]
+		was, ok := old[t.QualifiedName()]
 		if !ok {
 			continue // 新增工具：非 Track 变更
 		}
 		if now := t.ToolTrack(); now != was {
-			out = append(out, trackChange{Tool: t.Name, From: was, To: now})
+			out = append(out, trackChange{Tool: t.QualifiedName(), From: was, To: now})
 		}
 	}
 	return out
