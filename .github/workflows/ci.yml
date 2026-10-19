@@ -72,10 +72,14 @@ jobs:
         run: pwsh -NoProfile -File scripts/check-higress-plugin-versions.ps1
 
       # 6. wasm 插件构建（Go 1.25 原生 wasm；国密库 gmsm 要求 1.25+）
+      #    注：本 job 为 Linux 原生 go，GOOS/GOARCH 生效。若在 WSL 下调 Windows go.exe 则**不传递** env
+      #    ⇒ 静默产出 Windows PE（T-4 集群窗口实测），故由 6c 断言产物真身。
       - name: build wasm plugin
         run: |
           GOOS=wasip1 GOARCH=wasm go build -mod=mod -buildmode=c-shared \
             -o gateway/wasm/otpmask-plugin/main.wasm ./gateway/wasm/otpmask-plugin
+          GOOS=wasip1 GOARCH=wasm go build -mod=mod -buildmode=c-shared \
+            -o gateway/wasm/mcp-acl-plugin/main.wasm ./gateway/wasm/mcp-acl-plugin
 
       # 6b. wasm-guard 门禁（§9.1「Wasm 内无密码运算」/ R-11；①a/①b/② 三断言）
       #     2026-10-19 接入：此前仅手工执行；曾因工作区 vendor/ 导致 go list 静默失败
@@ -83,11 +87,21 @@ jobs:
       - name: wasm-guard
         run: make wasm-guard
 
+      # 6c. wasm 产物真身断言（magic == \0asm）：防「GOOS/GOARCH 未生效 → 静默产出 PE(DLL)
+      #     → Envoy 判 invalid → 零强制直通上游」假绿（T-4 集群窗口缺口，见 Makefile）。
+      - name: wasm artifact guard
+        run: make wasm-artifact-guard
+
       # 7. 脚本语法（纯静态：bash -n + 全部 ps1 解析）
       - name: Linux scripts syntax
         run: |
           bash -n scripts/setup-env.sh
           pwsh -NoProfile -Command "Get-ChildItem scripts/*.ps1 | ForEach-Object { \$null = [System.Management.Automation.Language.Parser]::ParseFile(\$_.FullName, [ref]\$null, [ref]\$e); if (\$e) { throw \$e[0] } }; Write-Host 'ps1 parse OK'"
+
+      # 7b. 明文凭据门禁（口令仅经环境变量注入，严禁入库；T-4 窗口发现 68 件硬编码口令）。
+      #     既有债务登记于 scripts/secrets-baseline.txt；仅 **新增** 命中失败（值级兜底见脚本 docstring）。
+      - name: secrets-guard
+        run: python scripts/check-secrets.py
 
       # 8. gofmt 增量门禁（仅校验本次变更的 .go 文件；防新代码格式漂移）
       #    全仓历史仍存在漂移，故不做全量校验；待全量清零后可放宽。

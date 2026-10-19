@@ -102,6 +102,38 @@ wasm-guard:
 	if [ -n "$$out" ]; then echo "FAIL: protocol/go 链入密码包——"; echo "$$out"; exit 1; fi; \
 	echo "PASS: protocol/go 零密码"
 
+# wasm-artifact-guard —— wasm 产物**真身**断言（T-4 集群窗口缺口：假绿第二形态）。
+#   机制：`GOOS=wasip1 GOARCH=wasm` 在「WSL 调 Windows go.exe」下**不传递环境变量**
+#   （实测 `GOOS=wasip1 GOARCH=wasm go.exe env GOOS GOARCH` → `windows amd64`）⇒ 产物实为
+#   Windows PE(DLL)（magic `4D 5A`），Envoy 判 `fetched Wasm binary ... is invalid`；而旧流程
+#   **只看退出码** ⇒ 静默假绿（首轮上集群的 9,522,460 B 产物即此）。
+#   本目标对产物做 magic 断言（wasm = `\0asm` = 0061736d）；仅校验**已存在**的产物
+#   （缺产物 SKIP，便于单目标构建），全部缺失则失败（防门禁空跑）。
+WASM_ARTIFACTS ?= gateway/wasm/otpmask-plugin/main.wasm gateway/wasm/mcp-acl-plugin/main.wasm
+
+.PHONY: wasm-artifact-guard
+wasm-artifact-guard:
+	@n=0; \
+	for f in $(WASM_ARTIFACTS); do \
+	  if [ ! -f "$$f" ]; then echo "SKIP: $$f（无产物）"; continue; fi; \
+	  magic=$$(head -c 4 "$$f" | od -An -tx1 | tr -d ' \n'); \
+	  if [ "$$magic" != "0061736d" ]; then \
+	    echo "FAIL: $$f 非 wasm 产物（magic=$$magic，期望 0061736d）"; \
+	    echo "      —— 检查 GOOS/GOARCH 是否生效：WSL 调 Windows go.exe 时不传递，须用 Linux 原生 go 或显式 env"; \
+	    exit 1; \
+	  fi; \
+	  echo "PASS: $$f magic=0061736d(wasm) size=$$(wc -c < "$$f")"; \
+	  n=$$((n+1)); \
+	done; \
+	if [ "$$n" -eq 0 ]; then echo "FAIL: 无 wasm 产物可校验（防门禁空跑）"; exit 1; fi
+
+# secrets-guard —— 明文凭据门禁（口令仅经环境变量注入，严禁入库；T-4 窗口发现 68 件）。
+#   三类规则见 scripts/check-secrets.py；既有债务登记于 scripts/secrets-baseline.txt，仅新命中失败。
+.PHONY: secrets-guard
+secrets-guard:
+	@if command -v python3 >/dev/null 2>&1; then P=python3; else P=python; fi; \
+	"$$P" scripts/check-secrets.py
+
 # ---- P2-1 T-4：mcp-acl 插件（网关侧工具级 ACL）----
 MCP_ACL_PKG = ./gateway/wasm/mcp-acl-plugin/...
 MCP_ACL_MAIN_PKG = ./gateway/wasm/mcp-acl-plugin
@@ -113,9 +145,11 @@ mcp-acl-test:
 	$(GO) test -mod=mod -count=1 -cover -timeout 120s $(MCP_ACL_POLICYCACHE_PKG) $(MCP_ACL_PKG)
 
 # mcp-acl-build —— 编译插件 wasm（wasip1 reactor；产物供 OCI/HTTP 分发）
+#   构建后自动断言产物 magic（`\0asm`）：封堵「GOOS/GOARCH 未生效 → 静默产出 PE」假绿（T-4 集群窗口）。
 .PHONY: mcp-acl-build
 mcp-acl-build:
 	GOOS=wasip1 GOARCH=wasm $(GO) build -mod=mod -buildmode=c-shared -o gateway/wasm/mcp-acl-plugin/main.wasm $(MCP_ACL_MAIN_PKG)
+	@$(MAKE) --no-print-directory wasm-artifact-guard WASM_ARTIFACTS=gateway/wasm/mcp-acl-plugin/main.wasm
 
 # ---- P0-1 多模型智能路由：测试/基准/竞态/E2E ----
 ROUTE_ENGINE_PKG = ./gateway/wasm/otpmask-plugin/routeengine/
