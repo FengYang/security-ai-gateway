@@ -7,7 +7,7 @@ k3s_remote.py —— K3S 远程执行助手（本地 WSL → 远程 K3S 节点�
   回传输出。目标脚本无需自行处理 SSH / 口令。
 
 凭据（严禁硬编码）：
-  SSH_HOST      可选，默认 root@192.168.31.168
+  SSH_HOST      可选，默认 root@192.168.31.248（2026-10-19 环境换址；DHCP 再变时用本变量覆盖）
   SSH_PASSWORD  必填（远程登录口令）；未设置即明确报错退出。
 
 命令行用法：
@@ -25,7 +25,7 @@ import os
 import sys
 import time
 
-DEFAULT_HOST = "root@192.168.31.168"
+DEFAULT_HOST = "root@192.168.31.248"
 REMOTE_WORKDIR = "/tmp/k3s-remote-run"
 
 
