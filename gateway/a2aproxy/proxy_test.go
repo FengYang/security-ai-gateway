@@ -22,12 +22,13 @@ import (
 // testGovernance is the allow-all policy engine used to exercise the data
 // plane. It records every observation for assertions.
 type testGovernance struct {
-	mu         sync.Mutex
-	events     []AuditEvent
-	taskEvents []TaskEvent
-	deny       map[string]bool // "tenant|agent|skill" denied by ACL
-	denyAuth   bool
-	retry      int // >0 => throttle every call
+	mu            sync.Mutex
+	events        []AuditEvent
+	taskEvents    []TaskEvent
+	contentEvents []ContentActionEvent
+	deny          map[string]bool // "tenant|agent|skill" denied by ACL
+	denyAuth      bool
+	retry         int // >0 => throttle every call
 }
 
 func newTestGovernance() *testGovernance {
@@ -68,6 +69,12 @@ func (g *testGovernance) ObserveTask(_ context.Context, ev TaskEvent) {
 	g.taskEvents = append(g.taskEvents, ev)
 }
 
+func (g *testGovernance) ObserveContent(_ context.Context, ev ContentActionEvent) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.contentEvents = append(g.contentEvents, ev)
+}
+
 func (g *testGovernance) recorded() []AuditEvent {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -85,6 +92,15 @@ func (g *testGovernance) recordedTaskEvents() []TaskEvent {
 	return out
 }
 
+// recordedContentEvents 返回已观测的内容安全审计事件（T-4）。
+func (g *testGovernance) recordedContentEvents() []ContentActionEvent {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]ContentActionEvent, len(g.contentEvents))
+	copy(out, g.contentEvents)
+	return out
+}
+
 // --- harness ---------------------------------------------------------------
 
 type harness struct {
@@ -92,6 +108,7 @@ type harness struct {
 	agentSrv  *httptest.Server
 	gov       *testGovernance
 	snapshots *SnapshotStore
+	proxy     *Proxy // T-4：用于注入 ContentSafety
 	tenant    string
 	agent     string
 }
@@ -153,7 +170,7 @@ func newHarness(t *testing.T) *harness {
 	proxySrv := httptest.NewServer(proxy.Handler())
 	t.Cleanup(proxySrv.Close)
 
-	return &harness{proxySrv: proxySrv, agentSrv: agentSrv, gov: gov, snapshots: snapshots, tenant: tenant, agent: agent}
+	return &harness{proxySrv: proxySrv, agentSrv: agentSrv, gov: gov, snapshots: snapshots, proxy: proxy, tenant: tenant, agent: agent}
 }
 
 // invoke sends a data-plane request through the proxy.

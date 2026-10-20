@@ -17,11 +17,12 @@ import (
 
 // Proxy is the A2A data plane. It is safe for concurrent use.
 type Proxy struct {
-	cfg        Config
-	snapshots  *SnapshotStore
-	governance Governance
-	transport  *http.Transport
-	client     *http.Client
+	cfg           Config
+	snapshots     *SnapshotStore
+	governance    Governance
+	contentSafety ContentSafety // T-4：内容检查层（L3）；nil → 不介入（可信域 MVP 可选）
+	transport     *http.Transport
+	client        *http.Client
 }
 
 // New builds the proxy. governance may be nil, in which case the fail-closed
@@ -70,6 +71,14 @@ func (p *Proxy) Close() {
 	if p.transport != nil {
 		p.transport.CloseIdleConnections()
 	}
+}
+
+// SetContentSafety wires the L3 content-safety checker (T-4). A nil checker
+// means the data plane does not perform content inspection (trusted-domain
+// MVP default); content safety is engaged only when an implementation is
+// provided (e.g. a bridge to the output-guard service).
+func (p *Proxy) SetContentSafety(cs ContentSafety) {
+	p.contentSafety = cs
 }
 
 // route is the resolved invoke target.
@@ -196,6 +205,18 @@ func (p *Proxy) handleInvoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// T-4 内容安全检查：请求侧（用户输入）。必须在**转发之前**完成——
+	// 命中 deny 时原文不出网关；检查器异常则 fail-open（放行）并审计 result=error。
+	if decision, contErr := p.checkRequestContent(ctx, rt, principal, meta); contErr != nil {
+		p.observeContentAction(ctx, requestID, rt, principal, meta, ContentActionEvent{
+			Action: "error", Result: "error", ErrorCode: strconv.Itoa(a2a.CodeInternalError),
+		})
+	} else if decision.Action == ContentActionDeny {
+		p.observeContentAction(ctx, requestID, rt, principal, meta, decision.toEvent("deny", "blocked"))
+		p.writeRPC(w, meta.Envelope.ID, a2a.NewRPCError(a2a.CodeContentBlocked, a2a.ReasonContentBlocked))
+		return
+	}
+
 	// Backend forwarding with the SSRF-guarded client.
 	if err := CheckBackendURL(agentRec.BackendURL, p.cfg.DevAllowLoopback); err != nil {
 		p.writeRPC(w, meta.Envelope.ID, a2a.NewRPCError(a2a.CodeInternalError, internalReason))
@@ -249,6 +270,28 @@ func (p *Proxy) forward(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	}
 
 	respMeta := ExtractResponseMeta(raw)
+
+	// T-4 内容安全检查：响应侧（模型输出）。在写响应前完成：
+	// deny 直接阻断；redact 改写 raw 后照常下发；检查器失败 fail-open（放行）并审计。
+	if p.contentSafety != nil {
+		var decision ContentCheckDecision
+		csRaw, decision, contErr := p.checkResponseContent(ctx, rt, principal, meta, raw)
+		switch {
+		case contErr != nil:
+			// 检查器异常：MVP 放行，不计为内容命中；审计 result=error 供观测。
+			p.observeContentAction(ctx, requestID, rt, principal, meta, ContentActionEvent{
+				Action: "error", Result: "error", ErrorCode: strconv.Itoa(a2a.CodeInternalError),
+			})
+		case decision.Action == ContentActionDeny:
+			p.observeContentAction(ctx, requestID, rt, principal, meta, decision.toEvent("deny", "blocked"))
+			p.writeRPC(w, meta.Envelope.ID, a2a.NewRPCError(a2a.CodeContentBlocked, a2a.ReasonContentBlocked))
+			return
+		case decision.Action == ContentActionRedact && len(csRaw) > 0:
+			p.observeContentAction(ctx, requestID, rt, principal, meta, decision.toEvent("redact", "redacted"))
+			raw = csRaw
+		}
+	}
+
 	a2a.SetVersionHeader(w)
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", responseContentType(r.Header.Get("Content-Type")))
@@ -299,6 +342,106 @@ func (p *Proxy) observeTaskEvent(ctx context.Context, requestID string, rt route
 	if p.governance != nil {
 		p.governance.ObserveTask(ctx, ev)
 	}
+}
+
+// contentCheckContext 抽取内容检查所需的公共上下文（tenant/agent/skill/method）。
+//
+// tenant 口径与 observeTaskEvent 一致：路由租户优先，回落到 principal 租户。
+func contentCheckContext(rt route, principal *Principal, meta *a2a.RequestMeta) (tenant, skill, method string) {
+	tenant, _ = a2a.ResolveRouteTenant(principal.Tenant, rt.tenant)
+	if tenant == "" {
+		tenant = principal.Tenant
+	}
+	return tenant, meta.Skill.Name, meta.Envelope.Method
+}
+
+// checkParts 对一段 JSON 正文抽取 parts 并交给内容检查层。
+//
+// 不可解析或不含 parts 时不介入（放行）：内容安全层不阻断它读不懂的协议结构。
+func (p *Proxy) checkParts(ctx context.Context, tenant, agent, skill, method string, isResponse bool, body []byte) (ContentCheckDecision, error) {
+	parts, err := extractParts(body)
+	if err != nil || len(parts) == 0 {
+		return ContentCheckDecision{Action: ContentActionAllow}, nil
+	}
+	return p.contentSafety.Check(ctx, ContentCheckRequest{
+		Tenant:     tenant,
+		Agent:      agent,
+		Skill:      skill,
+		Method:     method,
+		IsResponse: isResponse,
+		Parts:      parts,
+	})
+}
+
+// checkRequestContent 在**转发之前**检查用户输入（SendMessage 的 message.parts）。
+//
+// 请求侧只认 deny（阻断请求，原文不出网关）；redact 对输入无语义，按放行处理。
+// 非 SendMessage 方法（如 GetTask）无用户输入正文，不检查。
+func (p *Proxy) checkRequestContent(ctx context.Context, rt route, principal *Principal, meta *a2a.RequestMeta) (ContentCheckDecision, error) {
+	if p.contentSafety == nil || meta.Envelope.Method != a2a.MethodSendMessage {
+		return ContentCheckDecision{Action: ContentActionAllow}, nil
+	}
+	tenant, skill, method := contentCheckContext(rt, principal, meta)
+	d, err := p.checkParts(ctx, tenant, rt.agent, skill, method, false, meta.Envelope.Raw)
+	if err != nil {
+		return ContentCheckDecision{Action: ContentActionAllow}, err
+	}
+	if d.Action != ContentActionDeny {
+		return ContentCheckDecision{Action: ContentActionAllow}, nil
+	}
+	return d, nil
+}
+
+// checkResponseContent 在**写回响应之前**检查模型输出（result/artifact 各级 parts）。
+//
+// 返回 (可能的改写结果 raw, 综合决策, 错误)：
+//   - deny：原 raw 返回，由调用方阻断；
+//   - redact：返回改写后的 raw；若改写失败则**升级为 deny**（不得原文下发生命中的正文）；
+//   - allow/其余：原 raw 返回。
+func (p *Proxy) checkResponseContent(ctx context.Context, rt route, principal *Principal, meta *a2a.RequestMeta, raw []byte) ([]byte, ContentCheckDecision, error) {
+	tenant, skill, method := contentCheckContext(rt, principal, meta)
+	d, err := p.checkParts(ctx, tenant, rt.agent, skill, method, true, raw)
+	if err != nil {
+		return raw, ContentCheckDecision{Action: ContentActionAllow}, err
+	}
+	switch d.Action {
+	case ContentActionDeny:
+		return raw, d, nil
+	case ContentActionRedact:
+		if redacted := redactParts(raw); len(redacted) > 0 {
+			return redacted, d, nil
+		}
+		// 改写失败 → fail-closed：升级为 deny，避免把命中的正文原文下发。
+		return raw, ContentCheckDecision{
+			Action: ContentActionDeny,
+			Tier:   d.Tier,
+			Reason: d.Reason + ";redact_failed",
+		}, nil
+	}
+	return raw, d, nil
+}
+
+// observeContentAction 发送 a2a_content_action 审计事件（元数据级，不落正文）。
+func (p *Proxy) observeContentAction(ctx context.Context, requestID string, rt route, principal *Principal, meta *a2a.RequestMeta, ev ContentActionEvent) {
+	tenant, _ := a2a.ResolveRouteTenant(principal.Tenant, rt.tenant)
+	if tenant == "" {
+		tenant = principal.Tenant
+	}
+	ev.EventID = newTaskEventID()
+	ev.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
+	ev.RequestID = requestID
+	ev.Tenant = tenant
+	ev.Agent = rt.agent
+	ev.Skill = meta.Skill.Name
+	ev.Method = meta.Envelope.Method
+	if p.governance != nil {
+		p.governance.ObserveContent(ctx, ev)
+	}
+}
+
+// toEvent 由检查决策构造审计事件（action/result 由调用方按 deny/redact 填）。
+func (d ContentCheckDecision) toEvent(action, result string) ContentActionEvent {
+	return ContentActionEvent{Tier: d.Tier, Action: action, Result: result}
 }
 
 // handleDiscovery serves the registered card at the well-known path.

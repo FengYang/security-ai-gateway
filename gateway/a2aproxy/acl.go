@@ -290,6 +290,8 @@ type StaticGovernance struct {
 	Observer func(ctx context.Context, ev AuditEvent)
 	// TaskObserver receives normalized A2A Task audit events (T-3b). Nil → dropped.
 	TaskObserver TaskObserver
+	// ContentObserver receives A2A content-safety action events (T-4; a2a_content_action). Nil → dropped.
+	ContentObserver func(ctx context.Context, ev ContentActionEvent)
 }
 
 // Authorize implements Governance.
@@ -330,6 +332,14 @@ func (g *StaticGovernance) ObserveTask(ctx context.Context, ev TaskEvent) {
 		return
 	}
 	g.TaskObserver(ctx, ev)
+}
+
+// ObserveContent implements Governance (T-4).
+func (g *StaticGovernance) ObserveContent(ctx context.Context, ev ContentActionEvent) {
+	if g.ContentObserver == nil {
+		return
+	}
+	g.ContentObserver(ctx, ev)
 }
 
 // Authenticate implements Governance.

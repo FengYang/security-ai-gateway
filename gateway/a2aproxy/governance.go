@@ -43,6 +43,8 @@ type Governance interface {
 	Observe(ctx context.Context, ev AuditEvent)
 	// ObserveTask records a normalized A2A Task audit event (T-3b; §2.6 schema).
 	ObserveTask(ctx context.Context, ev TaskEvent)
+	// ObserveContent records an A2A content-safety action (T-4; a2a_content_action, metadata-level).
+	ObserveContent(ctx context.Context, ev ContentActionEvent)
 }
 
 // AuditEvent is the metadata-only governance observation (R-2). It never
@@ -89,6 +91,9 @@ func (DenyAllGovernance) Observe(context.Context, AuditEvent) {}
 
 // ObserveTask drops Task events (no sink in the default configuration).
 func (DenyAllGovernance) ObserveTask(context.Context, TaskEvent) {}
+
+// ObserveContent drops content-safety events (no sink in the default configuration).
+func (DenyAllGovernance) ObserveContent(context.Context, ContentActionEvent) {}
 
 // AuthenticatedReason is the stable data.reason for a denied call.
 const AuthenticatedReason = "unauthenticated"

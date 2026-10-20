@@ -41,8 +41,12 @@ const (
 	CodeExtendedCardNotConfigured    = -32007
 	CodeExtensionSupportRequired     = -32008
 	CodeVersionNotSupported          = -32009
-	CodeUnauthenticated              = -31401
-	CodeUnauthorized                 = -31403
+	// CodeContentBlocked 是**网关扩展码**（P2-2 T-4），非 a2a-go 规范常量：
+	// 规范错误码集无「策略性内容阻断」语义，复用既有码会丢失内容归因；取 -32000..-32099
+	// 服务端错误区中紧邻 -32009 的下一可用值以降低未来冲突风险。详见设计 doc §6.4。
+	CodeContentBlocked  = -32010
+	CodeUnauthenticated = -31401
+	CodeUnauthorized    = -31403
 )
 
 // Stable audit/error reasons used by the frozen contract.
@@ -57,6 +61,7 @@ const (
 	ReasonExtendedCardNotConfigured    = "extended_card_not_configured"
 	ReasonExtensionSupportRequired     = "extension_support_required"
 	ReasonVersionNotSupported          = "version_not_supported"
+	ReasonContentBlocked               = "content_blocked"
 	ReasonInvalidVersion               = "invalid_version"
 	ReasonSkillConflict                = "skill_conflict"
 	ReasonInvalidSkill                 = "invalid_skill"
@@ -144,6 +149,8 @@ func rpcMessage(code int) string {
 		return "Extension support required"
 	case CodeVersionNotSupported:
 		return "Version not supported"
+	case CodeContentBlocked:
+		return "Content blocked by policy"
 	case CodeUnauthenticated:
 		return "Unauthenticated"
 	case CodeUnauthorized:
