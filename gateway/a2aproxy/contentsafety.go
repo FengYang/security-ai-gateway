@@ -98,12 +98,27 @@ func walkParts(v any, out *[]Part) {
 }
 
 // parsePart 将一个 Part JSON 对象归一化为 Part（失败返回 ok=false）。
+//
+// kind 缺失时的**兜底推断**（T-7 验收发现）：A2A v1.0 以 `kind` 作为判别字段，但实测
+// 载荷（含本仓测试夹具与 testagent 回显的 history）存在不带 `kind` 的 Part。若仅按
+// `kind` 严格判别，这类 Part 会被静默丢弃——对内容检查而言是**漏检**（安全相关）。
+// 因此 kind 缺失时按 `text`/`file`/`data` 字段存在性推断；三者皆无则仍丢弃。
 func parsePart(v any) (Part, bool) {
 	m, ok := v.(map[string]any)
 	if !ok {
 		return Part{}, false
 	}
 	kind, _ := m["kind"].(string)
+	if kind == "" {
+		switch {
+		case hasKey(m, "text"):
+			kind = string(PartKindText)
+		case hasKey(m, "file"):
+			kind = string(PartKindFile)
+		case hasKey(m, "data"):
+			kind = string(PartKindData)
+		}
+	}
 	switch PartKind(kind) {
 	case PartKindText:
 		text, _ := m["text"].(string)
@@ -130,6 +145,12 @@ func parsePart(v any) (Part, bool) {
 	default:
 		return Part{}, false
 	}
+}
+
+// hasKey 判断 map 中是否存在该键（值可为 null，仍视为存在）。
+func hasKey(m map[string]any, k string) bool {
+	_, ok := m[k]
+	return ok
 }
 
 // ContentAction 是内容检查的动作枚举。

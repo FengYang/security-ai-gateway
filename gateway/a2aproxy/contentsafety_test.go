@@ -88,6 +88,33 @@ func TestExtractPartsNoParts(t *testing.T) {
 	}
 }
 
+// TestExtractPartsInfersMissingKind 回归：Part 缺 `kind` 时必须按字段存在性推断，
+// 不得静默丢弃（T-7 验收发现——否则内容检查对无 kind 载荷漏检）。
+func TestExtractPartsInfersMissingKind(t *testing.T) {
+	raw := []byte(`{"result":{"task":{"history":[{"parts":[{"text":"no-kind-part"}]}],
+		"artifacts":[{"parts":[{"file":{"name":"a.bin"}},{"data":{"k":1}}]}]}}}`)
+	parts, err := extractParts(raw)
+	if err != nil {
+		t.Fatalf("extractParts: %v", err)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("parts = %d, want 3（无 kind 也应被抽取，否则漏检）: %+v", len(parts), parts)
+	}
+	got := map[string]bool{}
+	for _, p := range parts {
+		got[string(p.Kind)] = true
+	}
+	for _, want := range []string{string(PartKindText), string(PartKindFile), string(PartKindData)} {
+		if !got[want] {
+			t.Errorf("未按字段推断出 %s: %+v", want, got)
+		}
+	}
+	// 无任何特征字段的 Part 仍应丢弃（避免把空对象当正文）。
+	if p, err := extractParts([]byte(`{"result":{"parts":[{"foo":1}]}}`)); err != nil || len(p) != 0 {
+		t.Errorf("无特征字段应丢弃: %+v err=%v", p, err)
+	}
+}
+
 // --- 脱敏改写 --------------------------------------------------------------
 
 func TestRedactParts(t *testing.T) {
