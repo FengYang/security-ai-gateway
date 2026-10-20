@@ -16,7 +16,7 @@ import (
 	"security-ai-gateway/gateway/tee-infer-service/mcpguard"
 )
 
-func testSigner(t *testing.T) *mcpsec.Signer {
+func testSigner(t testing.TB) *mcpsec.Signer {
 	t.Helper()
 	s, err := mcpsec.NewSigner(bytes.Repeat([]byte{0x5A}, 32))
 	if err != nil {
@@ -26,7 +26,7 @@ func testSigner(t *testing.T) *mcpsec.Signer {
 }
 
 // readyDeps 构造"已就绪"的 Deps：目录含 secure(授权)/public/secure(未授权) 三工具。
-func readyDeps(t *testing.T, tenant string) Deps {
+func readyDeps(t testing.TB, tenant string) Deps {
 	t.Helper()
 	key := bytes.Repeat([]byte{0x5A}, 32)
 	sig := testSigner(t)
