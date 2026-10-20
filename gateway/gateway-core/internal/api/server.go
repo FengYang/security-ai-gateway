@@ -49,6 +49,10 @@ type Server struct {
 	aclSigner *a2aproxy.ACLSigner
 	aclMu     sync.Mutex
 	aclHist   []*a2aproxy.ACLTable // ACL 历史版本（含当前），用于按 version 回滚
+	// P2-2 T-3a：A2A 复合限流表（独立策略域，R-6）。
+	rlSigner *a2aproxy.RateLimitSigner
+	rlMu     sync.Mutex
+	rlHist   []*a2aproxy.RateLimitTable // 限流历史版本（含当前），用于按 version 回滚
 }
 
 // New 构造 API Server。routerTable 为启动时注入的已签名默认路由表（可为空表）；
@@ -245,6 +249,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /a2a-acls", s.withAuth(s.handlePutACLs))
 	s.mux.HandleFunc("GET /a2a-acls/history", s.withAuth(s.handleACLHistory))
 	s.mux.HandleFunc("POST /a2a-acls/rollback", s.withAuth(s.handleACLRollback))
+	// P2-2 T-3a：A2A 复合限流表（独立策略域，R-6）——与 /a2a-acls 同构：
+	// GET 下发（拉路径）、PUT 策略源（校验+防回滚+签名）、history 变更审计、rollback 按版本回滚。
+	s.mux.HandleFunc("GET /a2a-ratelimits", s.withAuth(s.handleGetRateLimitsA2A))
+	s.mux.HandleFunc("PUT /a2a-ratelimits", s.withAuth(s.handlePutRateLimitsA2A))
+	s.mux.HandleFunc("GET /a2a-ratelimits/history", s.withAuth(s.handleRateLimitHistoryA2A))
+	s.mux.HandleFunc("POST /a2a-ratelimits/rollback", s.withAuth(s.handleRateLimitRollbackA2A))
 	s.mux.HandleFunc("POST /tools/policy", s.withAuth(s.handleToolPolicy))
 	s.mux.HandleFunc("GET /tools/policy", s.withAuth(s.handleGetToolPolicy))
 	// T-3 联邦目录治理（D-4/§6.1）：后端注册 CRUD——变更即重签目录（版本单调）+ mcp_server_changed 审计

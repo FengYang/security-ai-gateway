@@ -73,6 +73,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("构造 ACL 签名器失败: %v", err)
 	}
+	// P2-2 T-3a：A2A 复合限流表签名器——与 ACL 表共用同一密钥族（K_rx）、
+	// 同一分发通道，但限流是**独立策略域**（R-6）：独立端点前缀、独立表对象、独立签名对象。
+	a2arlsigner, err := a2aproxy.NewRateLimitSigner(key)
+	if err != nil {
+		log.Fatalf("构造 A2A 限流表签名器失败: %v", err)
+	}
 	st := store.NewMemory()
 	rt := defaultRouteTable(signer)
 	rlt := defaultRateLimitTable(rsigner)
@@ -80,6 +86,7 @@ func main() {
 	teeQuota := api.NewHTTPTeeQuotaApplier(os.Getenv("OTP_CORE_TEE_URL"), os.Getenv("OTP_CORE_TEE_ADMIN_TOKEN"))
 	srv := api.New(signer, msigner, rsigner, teeQuota, st, authToken, rt, rlt)
 	srv.SetACLSigner(aclsigner)
+	srv.SetRateLimitSigner(a2arlsigner)
 	// 策略变更审计（判据 7）：OTP_CORE_AUDIT_FILE 非空 → WORM 持久化（文件损坏即拒绝启动，fail-closed）
 	auditFile := os.Getenv("OTP_CORE_AUDIT_FILE")
 	if err := srv.SetPolicyAuditFile(auditFile); err != nil {
