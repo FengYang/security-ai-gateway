@@ -30,6 +30,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// T-5：tracing（复用 P1-2 栈；TRACING_ENABLED != "true" 时 NoOp，零开销）。
+	if err := a2aproxy.InitTracing(); err != nil {
+		log.Printf("警告: tracing 初始化失败（降级为不开销上报）: %v", err)
+	}
+	defer a2aproxy.ShutdownTracing()
+
 	// Snapshot source: file (dev) or control-plane HTTP endpoint.
 	if cfg.SnapshotFile != "" {
 		snap, err := a2aproxy.LoadFile(cfg.SnapshotFile)
@@ -58,9 +64,30 @@ func main() {
 	}
 	defer proxy.Close()
 
+	// T-5：运维面 /metrics 与数据面路由分离挂载。
+	// 若配置了 MetricsAddr 则独立监听（推荐：仅内网可达），否则与数据面共用端口。
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", proxy.MetricsHandler())
+	mux.Handle("/", proxy.Handler())
+
+	handler := http.Handler(mux)
+	if cfg.MetricsAddr != "" && cfg.MetricsAddr != cfg.ListenAddr {
+		metricsSrv := &http.Server{
+			Addr:              cfg.MetricsAddr,
+			Handler:           proxy.MetricsHandler(),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("metrics 服务退出: %v", err)
+			}
+		}()
+		log.Printf("a2aproxy metrics 监听: addr=%s", cfg.MetricsAddr)
+	}
+
 	httpSrv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           proxy.Handler(),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       cfg.BackendTimeout + 5*time.Second,
 		WriteTimeout:      cfg.BackendTimeout + 5*time.Second,

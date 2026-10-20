@@ -144,6 +144,18 @@ cryptop cryptop_key_rotations_total conditional
 cryptop cryptop_key_destroy_total conditional
 cryptop cryptop_dualread_total conditional
 
+# ---- P2-2 A2A (source=a2a data plane / core control plane; §6.5) ----
+# Control plane (gateway-core /metrics): gauges are always rendered even when empty.
+core a2a_agent_registry_size required
+core a2a_registry_revision required
+core a2a_signature_failures_total conditional
+# Data plane (a2aproxy /metrics): lazy counters/histogram — first time series appears
+# only after the corresponding observation occurs, hence conditional.
+a2a a2a_tasks_total conditional
+a2a a2a_task_duration_seconds conditional
+a2a a2a_authz_denies_total conditional
+a2a a2a_rate_limit_decisions_total conditional
+
 # ---- P0-3 Token billing (gateway-admin-service; opt-in via BILLING_ENABLED=true) ----
 # All conditional: the whole billing subsystem is an opt-in switch. When disabled
 # (default) the registry is empty and /metrics output is unchanged (R-1/M10),

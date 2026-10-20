@@ -30,6 +30,9 @@ const (
 type Config struct {
 	// ListenAddr is the proxy listen address.
 	ListenAddr string
+	// MetricsAddr 是运维面 /metrics 的独立监听地址（T-5）。
+	// 为空或与 ListenAddr 相同 → /metrics 挂在主端口；建议内网场景显式分离。
+	MetricsAddr string
 	// PublicMode selects host or path discovery (F-3).
 	PublicMode PublicMode
 	// GatewayPublicBase is the path-mode gateway base, e.g.

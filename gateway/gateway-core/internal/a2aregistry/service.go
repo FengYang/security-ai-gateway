@@ -45,6 +45,8 @@ type Registry struct {
 	store *Store
 	audit *policyaudit.Chain
 	cfg   Config
+	// metrics 是注册中心控制面观测指标（T-5；§6.5）。始终非 nil。
+	metrics *Metrics
 	// degraded=true 表示存储不可用（DB 打开失败）→ 所有写/读返回 503 registry_unavailable。
 	degraded bool
 }
@@ -67,9 +69,9 @@ func New(cfg Config, audit *policyaudit.Chain) (*Registry, error) {
 			return nil, err // 致命：拒绝启动
 		}
 		// 降级：存储不可用（DB 打不开/磁盘故障）→ 控制面返回 503，其余功能不受影响。
-		return &Registry{store: NewUnavailable(), audit: audit, cfg: cfg, degraded: true}, nil
+		return &Registry{store: NewUnavailable(), audit: audit, cfg: cfg, metrics: newMetrics(), degraded: true}, nil
 	}
-	return &Registry{store: st, audit: audit, cfg: cfg}, nil
+	return &Registry{store: st, audit: audit, cfg: cfg, metrics: newMetrics()}, nil
 }
 
 // Close 关闭存储。
@@ -119,23 +121,23 @@ type SignatureInfo struct {
 // AgentDetail 是 agent 详情响应体（§3.2 AgentRecord schema）。
 // backend_url 仅 admin 可见；签名状态由签名结果元数据体现。
 type AgentDetail struct {
-	Name             string         `json:"name"`
-	ProviderID       string         `json:"provider_id"`
-	Revision         int            `json:"revision"`
-	RegistryRevision int            `json:"registry_revision"`
-	AgentVersion     string         `json:"agent_version"`
-	ContentHash      string         `json:"content_hash"`
-	RawHash          string         `json:"raw_hash"`
-	Signature        SignatureInfo  `json:"signature"`
-	PublicURL        string         `json:"public_url"`
-	DiscoveryURL     string         `json:"discovery_url"`
-	BackendURL       string         `json:"backend_url,omitempty"`
-	Skills           []SkillSummary `json:"skills"`
-	Status           string         `json:"status"`
-	Source           string         `json:"source"`
+	Name             string            `json:"name"`
+	ProviderID       string            `json:"provider_id"`
+	Revision         int               `json:"revision"`
+	RegistryRevision int               `json:"registry_revision"`
+	AgentVersion     string            `json:"agent_version"`
+	ContentHash      string            `json:"content_hash"`
+	RawHash          string            `json:"raw_hash"`
+	Signature        SignatureInfo     `json:"signature"`
+	PublicURL        string            `json:"public_url"`
+	DiscoveryURL     string            `json:"discovery_url"`
+	BackendURL       string            `json:"backend_url,omitempty"`
+	Skills           []SkillSummary    `json:"skills"`
+	Status           string            `json:"status"`
+	Source           string            `json:"source"`
 	Labels           map[string]string `json:"labels,omitempty"`
-	CreatedAt        string         `json:"created_at"`
-	UpdatedAt        string         `json:"updated_at"`
+	CreatedAt        string            `json:"created_at"`
+	UpdatedAt        string            `json:"updated_at"`
 }
 
 // SkillSummary 是响应中的 skill 摘要。
@@ -573,6 +575,8 @@ func (r *Registry) Verify(ctx context.Context, authn Authn, actor, reqID, traceI
 	reason := "ok"
 	if !verified {
 		reason = "signature_invalid"
+		// T-5：a2a_signature_failures_total{reason}
+		r.metrics.ObserveSignatureFailure(reason)
 	}
 	r.writeAudit(tx, auditCtx{
 		Action: "a2a.agent.verify", Agent: name, Provider: cur.ProviderID,
@@ -585,6 +589,8 @@ func (r *Registry) Verify(ctx context.Context, authn Authn, actor, reqID, traceI
 	}
 	r.flushAudit()
 	if !verified {
+		// T-5：a2a_signature_failures_total{reason}
+		r.metrics.ObserveSignatureFailure(SigFailSignatureInvalid)
 		return http.StatusUnprocessableEntity, errValidation(codeSignatureInvalid, "重验失败：签名不可信或已失效")
 	}
 	return http.StatusOK, nil
@@ -721,6 +727,8 @@ func (r *Registry) RevokeKey(ctx context.Context, authn Authn, actor, reqID, tra
 		reason := "ok"
 		if !verified {
 			reason = "key_revoked"
+			// T-5：a2a_signature_failures_total{reason}
+			r.metrics.ObserveSignatureFailure(reason)
 		}
 		r.writeAudit(tx, auditCtx{
 			Action: "a2a.agent.verify", Agent: rec.Name, Provider: provider,
@@ -732,7 +740,7 @@ func (r *Registry) RevokeKey(ctx context.Context, authn Authn, actor, reqID, tra
 	r.writeAudit(tx, auditCtx{
 		Action: "a2a.key.revoke", Provider: provider, Kid: kid, Alg: k.Alg,
 		ContentHash: keyFingerprint(k.PublicJWK),
-		Actor: actor, ActorTenant: authn.Tenant, Target: tenant,
+		Actor:       actor, ActorTenant: authn.Tenant, Target: tenant,
 		ReqID: reqID, TraceID: traceID, Result: "ok", Change: "removed",
 	})
 	if err := r.store.Commit(tx); err != nil {
@@ -783,7 +791,7 @@ func (r *Registry) DeleteKey(authn Authn, actor, reqID, traceID, provider, kid s
 	r.writeAudit(tx, auditCtx{
 		Action: "a2a.key.delete", Provider: provider, Kid: kid, Alg: k.Alg,
 		ContentHash: keyFingerprint(k.PublicJWK),
-		Actor: actor, ActorTenant: authn.Tenant, Target: tenant,
+		Actor:       actor, ActorTenant: authn.Tenant, Target: tenant,
 		ReqID: reqID, TraceID: traceID, Result: "ok", Change: "removed",
 	})
 	if err := r.store.Commit(tx); err != nil {

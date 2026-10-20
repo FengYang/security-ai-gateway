@@ -63,10 +63,10 @@ type RateLimitRule struct {
 // The table is the control-plane source of truth and is distributed to the
 // data plane like the ACL table (same pull channel, separate domain).
 type RateLimitTable struct {
-	Version   int              `json:"version"`
-	IssuedAt  string           `json:"issued_at"`
+	Version   int             `json:"version"`
+	IssuedAt  string          `json:"issued_at"`
 	Rules     []RateLimitRule `json:"rules"`
-	Signature []byte           `json:"signature,omitempty"`
+	Signature []byte          `json:"signature,omitempty"`
 }
 
 // NewRateLimitTable constructs an empty table.
@@ -78,8 +78,8 @@ func NewRateLimitTable(version int, now time.Time) *RateLimitTable {
 // used for signing and verification.
 func (t *RateLimitTable) CanonicalBytes() ([]byte, error) {
 	payload := struct {
-		Version  int              `json:"version"`
-		IssuedAt string           `json:"issued_at"`
+		Version  int             `json:"version"`
+		IssuedAt string          `json:"issued_at"`
 		Rules    []RateLimitRule `json:"rules"`
 	}{t.Version, t.IssuedAt, t.Rules}
 	return json.Marshal(payload)
@@ -176,11 +176,16 @@ func rlWindowOf(r *RateLimitRule) time.Duration {
 // The engine is safe for concurrent use: the table is swapped atomically and
 // readers never mutate it.
 type RateLimitEngine struct {
-	mu      sync.RWMutex
-	table   *RateLimitTable
-	exact   map[string]*RateLimitRule // key = rlKeyHex(tenant,agent,skill), skill != "*"
+	mu       sync.RWMutex
+	table    *RateLimitTable
+	exact    map[string]*RateLimitRule // key = rlKeyHex(tenant,agent,skill), skill != "*"
 	wildcard map[string]*RateLimitRule // skill == "*"
-	counter rlCounter
+	counter  rlCounter
+
+	// T-5：最近一次决策命中的键范围（a2a_rate_limit_decisions_total.scope）。
+	// 独立互斥锁，避免观测写入与表替换/查表互相串行。
+	scopeMu   sync.Mutex
+	lastScope string
 }
 
 // NewRateLimitEngine constructs an engine with an empty (no-limit) table,
@@ -296,6 +301,7 @@ func (e *RateLimitEngine) lookupLocked(tenant, agent, skill string) *RateLimitRu
 func (e *RateLimitEngine) Allow(tenant, agent, skill string) (int, error) {
 	if tenant == "" || agent == "" {
 		// Cannot scope without tenant/agent: pass through (no limit).
+		e.setScope(RateLimitScopeNone)
 		return 0, nil
 	}
 	e.mu.RLock()
@@ -305,7 +311,13 @@ func (e *RateLimitEngine) Allow(tenant, agent, skill string) (int, error) {
 
 	if rule == nil {
 		// 缺省不限流：无规则命中即放行。
+		e.setScope(RateLimitScopeNone)
 		return 0, nil
+	}
+	if rule.Skill == WildcardSkill {
+		e.setScope(RateLimitScopeWildcard)
+	} else {
+		e.setScope(RateLimitScopeExact)
 	}
 
 	// Count under the matched rule's key (exact or wildcard granularity).
@@ -315,6 +327,25 @@ func (e *RateLimitEngine) Allow(tenant, agent, skill string) (int, error) {
 		return 0, nil
 	}
 	return retryAfter, nil
+}
+
+// setScope 记录本次决策命中的键范围（T-5；观测用途，失败无副作用）。
+func (e *RateLimitEngine) setScope(scope string) {
+	e.scopeMu.Lock()
+	e.lastScope = scope
+	e.scopeMu.Unlock()
+}
+
+// LastRateLimitScope implements RateLimitScopeObserver (T-5)：返回最近一次 Allow
+// 命中的键范围（精确键 / 通配回退 / 无规则）。并发下为「最近一次」语义，仅用于观测归因，
+// 不参与任何协议判定。
+func (e *RateLimitEngine) LastRateLimitScope() string {
+	e.scopeMu.Lock()
+	defer e.scopeMu.Unlock()
+	if e.lastScope == "" {
+		return RateLimitScopeUnknown
+	}
+	return e.lastScope
 }
 
 // SortRateLimitRules sorts rules deterministically (tenant, agent, skill)

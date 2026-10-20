@@ -235,4 +235,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	s.metrics.render(w)
 	// P1-6 M3.8：TTFT 环形刻盘（抓取时实时计算；不经 coreMetrics 存储）
 	s.renderTTFTGauges(w)
+	// P2-2 T-5：A2A 注册中心控制面指标（§6.5；未挂载/null 则零输出）
+	if reg := s.a2aReg; reg != nil {
+		reg.RenderMetrics(w)
+	}
 }

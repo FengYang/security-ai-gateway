@@ -318,6 +318,18 @@ func (g *StaticGovernance) RateLimit(_ context.Context, tenant, agent, skill str
 	return g.Limiter.Allow(tenant, agent, skill)
 }
 
+// LastRateLimitScope implements RateLimitScopeObserver (T-5)：透传限流器上报的键范围。
+// Limiter 未接线 → RateLimitScopeNone；已接线但不支持上报 → RateLimitScopeUnknown。
+func (g *StaticGovernance) LastRateLimitScope() string {
+	if g.Limiter == nil {
+		return RateLimitScopeNone
+	}
+	if obs, ok := g.Limiter.(RateLimitScopeObserver); ok {
+		return obs.LastRateLimitScope()
+	}
+	return RateLimitScopeUnknown
+}
+
 // Observe implements Governance.
 func (g *StaticGovernance) Observe(ctx context.Context, ev AuditEvent) {
 	if g.Observer == nil {

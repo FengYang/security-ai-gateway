@@ -21,6 +21,7 @@ type Proxy struct {
 	snapshots     *SnapshotStore
 	governance    Governance
 	contentSafety ContentSafety // T-4：内容检查层（L3）；nil → 不介入（可信域 MVP 可选）
+	metrics       *A2AMetrics   // T-5：§6.5 数据面指标；始终非 nil
 	transport     *http.Transport
 	client        *http.Client
 }
@@ -43,6 +44,7 @@ func New(cfg Config, snapshots *SnapshotStore, governance Governance) (*Proxy, e
 		cfg:        cfg,
 		snapshots:  snapshots,
 		governance: governance,
+		metrics:    NewA2AMetrics(),
 		transport:  transport,
 		client: &http.Client{
 			Transport:     transport,
@@ -52,15 +54,36 @@ func New(cfg Config, snapshots *SnapshotStore, governance Governance) (*Proxy, e
 	}, nil
 }
 
+// Metrics 返回数据面指标集合（T-5；§6.5）。始终非 nil。
+func (p *Proxy) Metrics() *A2AMetrics {
+	return p.metrics
+}
+
+// MetricsHandler 暴露数据面 /metrics（Prometheus 文本格式；内网使用，勿公网暴露）。
+//
+// 与 Handler() 分离挂载理由：/metrics 属运维面，可由调用方按内网策略自行决定是否挂载
+// 与是否加鉴权，避免把观测面强加给数据面路由（与 Governance.Observer 的 caller-supplied
+// 模式对称）。
+func (p *Proxy) MetricsHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		p.metrics.Render(w)
+	})
+}
+
 // Handler returns the HTTP handler with mode-specific routes.
 func (p *Proxy) Handler() http.Handler {
 	mux := http.NewServeMux()
 	if p.cfg.PublicMode == PublicModeHost {
-		mux.HandleFunc("POST /a2a", p.handleInvoke)
-		mux.HandleFunc("GET /.well-known/agent-card.json", p.handleDiscovery)
+		mux.HandleFunc("POST /a2a", p.withTracingSpan(spanInvoke, p.handleInvoke))
+		mux.HandleFunc("GET /.well-known/agent-card.json", p.withTracingSpan(spanDiscovery, p.handleDiscovery))
 	} else {
-		mux.HandleFunc("POST /a2a/{tenant}/{agent}", p.handleInvoke)
-		mux.HandleFunc("GET /a2a/{tenant}/{agent}/.well-known/agent-card.json", p.handleDiscovery)
+		mux.HandleFunc("POST /a2a/{tenant}/{agent}", p.withTracingSpan(spanInvoke, p.handleInvoke))
+		mux.HandleFunc("GET /a2a/{tenant}/{agent}/.well-known/agent-card.json", p.withTracingSpan(spanDiscovery, p.handleDiscovery))
 	}
 	mux.HandleFunc("GET /healthz", p.handleHealth)
 	return mux
@@ -185,10 +208,14 @@ func (p *Proxy) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	// ACL (allow-only, exact > wildcard > default deny; T-3 engine).
 	if err := p.governance.Authorize(ctx, principal, effectiveTenant, rt.agent, meta.Skill.Name); err != nil {
 		rpc := a2a.NewRPCError(a2a.CodeUnauthorized, a2a.ReasonUnknownSkill)
-		if reason := aclReasonOf(err); reason != "" {
-			rpc = a2a.NewRPCError(a2a.CodeUnauthorized, reason)
+		reason := a2a.ReasonUnknownSkill
+		if r := aclReasonOf(err); r != "" {
+			rpc = a2a.NewRPCError(a2a.CodeUnauthorized, r)
+			reason = r
 		}
 		p.observeDenied(ctx, requestID, rt, principal, meta.Skill.Name, rpc)
+		// T-5：a2a_authz_denies_total{agent,reason}（reason 与 audit/错误 data.reason 同源）。
+		p.metrics.ObserveAuthzDeny(rt.agent, reason)
 		p.writeRPC(w, meta.Envelope.ID, rpc)
 		return
 	}
@@ -196,14 +223,19 @@ func (p *Proxy) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	// Rate limit (tenant|agent|skill; 429 + Retry-After).
 	if retryAfter, err := p.governance.RateLimit(ctx, effectiveTenant, rt.agent, meta.Skill.Name); err != nil {
 		p.observeDenied(ctx, requestID, rt, principal, meta.Skill.Name, a2a.NewRPCError(a2a.CodeInternalError, internalReason))
+		p.metrics.ObserveRateLimit(p.rateLimitScope(), "error")
 		p.writeRPC(w, meta.Envelope.ID, a2a.NewRPCError(a2a.CodeInternalError, internalReason))
 		return
 	} else if retryAfter > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		p.observeThrottled(ctx, requestID, rt, principal, meta)
+		// T-5：a2a_rate_limit_decisions_total{scope,decision=throttled}
+		p.metrics.ObserveRateLimit(p.rateLimitScope(), "throttled")
 		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
+	// T-5：a2a_rate_limit_decisions_total{scope,decision=allow}
+	p.metrics.ObserveRateLimit(p.rateLimitScope(), "allow")
 
 	// T-4 内容安全检查：请求侧（用户输入）。必须在**转发之前**完成——
 	// 命中 deny 时原文不出网关；检查器异常则 fail-open（放行）并审计 result=error。
@@ -240,6 +272,8 @@ func (p *Proxy) forward(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		backendReq.Header.Set("Content-Type", ct)
 	}
+	// T-5：traceparent 注入后端请求 → 任务上下文跨服务贯通（G-6）。
+	injectTraceContext(ctx, backendReq.Header)
 	// F-2 §2.4: strip the governance skill header by default; only inject the
 	// verified value when explicitly configured.
 	backendReq.Header.Del(a2a.HeaderSkill)
@@ -322,9 +356,10 @@ func (p *Proxy) observeTaskEvent(ctx context.Context, requestID string, rt route
 		tenant = principal.Tenant
 	}
 	state := NormalizeTaskState(respMeta.State)
+	now := time.Now().UTC()
 	ev := TaskEvent{
 		EventID:     newTaskEventID(),
-		Timestamp:   time.Now().UTC().Format(time.RFC3339Nano),
+		Timestamp:   now.Format(time.RFC3339Nano),
 		RequestID:   requestID,
 		Tenant:      tenant,
 		Agent:       rt.agent,
@@ -339,9 +374,30 @@ func (p *Proxy) observeTaskEvent(ctx context.Context, requestID string, rt route
 		Producer:    string(TaskProducerGateway),
 		DedupKey:    TaskEventDedupKey(tenant, rt.agent, respMeta.TaskID, state),
 	}
+
+	// T-5 观测：a2a_tasks_total{tenant,agent,skill,state} 递增。
+	p.metrics.ObserveTaskState(tenant, rt.agent, meta.Skill.Name, state)
+	// T-5 观测：耗时跟踪（起点＝首次观测该 task_id；终态且起点已知才落样本，
+	// 并回填 audit 的 duration_ms —— F-6 D-F6-5/SM-9/SM-10「不伪造起点」）。
+	p.metrics.TrackTaskStart(tenant, rt.agent, respMeta.TaskID, now)
+	if isTerminalState(state) {
+		if durationMs, ok := p.metrics.ObserveTerminalTask(tenant, rt.agent, respMeta.TaskID, now); ok {
+			ev.DurationMs = durationMs
+		}
+	}
+
 	if p.governance != nil {
 		p.governance.ObserveTask(ctx, ev)
 	}
+}
+
+// rateLimitScope 取限流器上报的键范围（T-5）。Governance 未实现 RateLimitScopeObserver
+// 时按 unknown 计——观测归因降级，不影响判定。
+func (p *Proxy) rateLimitScope() string {
+	if obs, ok := p.governance.(RateLimitScopeObserver); ok {
+		return obs.LastRateLimitScope()
+	}
+	return RateLimitScopeUnknown
 }
 
 // contentCheckContext 抽取内容检查所需的公共上下文（tenant/agent/skill/method）。
