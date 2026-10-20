@@ -1,0 +1,163 @@
+// Package testagent provides a small, runnable A2A v1.0 agent for local
+// development and S-A2A-1 lifecycle tests.
+//
+// It deliberately lives outside the production registry path: the card is
+// signed with an ephemeral Ed25519 key and the executor is in-memory only.
+// Use the returned PinnedKeys with the gateway's verifier; do not ship this
+// package as a production agent.
+package testagent
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"iter"
+	"net/http"
+	"strings"
+
+	protocol "security-ai-gateway/gateway/a2a"
+
+	sdk "github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acrypto"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
+)
+
+// Config controls the local test agent.
+type Config struct {
+	// PublicURL is the gateway-form interface URL, e.g.
+	// http://127.0.0.1:9001/a2a.
+	PublicURL string
+	// Tenant is optional and is copied into supportedInterfaces[0].tenant.
+	Tenant string
+	// Name is optional; defaults to "A2A Test Agent".
+	Name string
+}
+
+// Agent owns the signed card and HTTP handler.
+type Agent struct {
+	card    *sdk.AgentCard
+	handler http.Handler
+	key     protocol.PinnedKey
+}
+
+// New builds a signed v1.0 card and a JSON-RPC handler.
+func New(cfg Config) (*Agent, error) {
+	if strings.TrimSpace(cfg.PublicURL) == "" {
+		return nil, errors.New("testagent: PublicURL is required")
+	}
+	if cfg.Name == "" {
+		cfg.Name = "A2A Test Agent"
+	}
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("testagent: generate key: %w", err)
+	}
+	const kid = "testagent-ed25519-1"
+	card := &sdk.AgentCard{
+		Name:        cfg.Name,
+		Description: "local A2A v1.0 test agent",
+		Version:     "1.0.0",
+		SupportedInterfaces: []*sdk.AgentInterface{{
+			URL:             cfg.PublicURL,
+			ProtocolBinding: sdk.TransportProtocolJSONRPC,
+			ProtocolVersion: sdk.Version,
+			Tenant:          cfg.Tenant,
+		}},
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+		Skills: []sdk.AgentSkill{{
+			ID:          "hello_world",
+			Name:        "Hello World",
+			Description: "returns a completed task",
+			Tags:        []string{},
+		}},
+	}
+	raw, err := json.Marshal(card)
+	if err != nil {
+		return nil, fmt.Errorf("testagent: marshal card: %w", err)
+	}
+	signer, err := a2acrypto.NewSigner(a2acrypto.SignerConfig{
+		PrivateKey: priv,
+		KeyID:      kid,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("testagent: signer: %w", err)
+	}
+	sig, err := signer.Sign(context.Background(), raw)
+	if err != nil {
+		return nil, fmt.Errorf("testagent: sign card: %w", err)
+	}
+	card.Signatures = []sdk.AgentCardSignature{*sig}
+	if cardErr := protocol.ValidateAgentCard(card, protocol.CardValidationOptions{
+		Tenant:    cfg.Tenant,
+		PublicURL: cfg.PublicURL,
+	}); cardErr != nil {
+		return nil, fmt.Errorf("testagent: card validation: %w", cardErr)
+	}
+
+	requestHandler := a2asrv.NewHandler(executor{})
+	mux := http.NewServeMux()
+	mux.Handle("/a2a", a2asrv.NewJSONRPCHandler(requestHandler))
+	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(card))
+
+	return &Agent{
+		card:    card,
+		handler: mux,
+		key: protocol.PinnedKey{
+			Kid:       kid,
+			Alg:       "EdDSA",
+			PublicKey: pub,
+		},
+	}, nil
+}
+
+// Handler returns the HTTP handler for the agent endpoint and card discovery.
+func (a *Agent) Handler() http.Handler { return a.handler }
+
+// Card returns the signed card served at the well-known path.
+func (a *Agent) Card() *sdk.AgentCard { return a.card }
+
+// PinnedKeys returns the verifier-side key for this ephemeral agent.
+func (a *Agent) PinnedKeys() []protocol.PinnedKey {
+	return []protocol.PinnedKey{a.key}
+}
+
+type executor struct{}
+
+func (executor) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[sdk.Event, error] {
+	return func(yield func(sdk.Event, error) bool) {
+		if ec.StoredTask == nil {
+			if !yield(sdk.NewSubmittedTask(ec, ec.Message), nil) {
+				return
+			}
+		}
+		if !yield(sdk.NewStatusUpdateEvent(ec, sdk.TaskStateWorking, nil), nil) {
+			return
+		}
+		state := finalState(ec)
+		if !yield(sdk.NewStatusUpdateEvent(ec, state, nil), nil) {
+			return
+		}
+	}
+}
+
+func (executor) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[sdk.Event, error] {
+	return func(yield func(sdk.Event, error) bool) {
+		yield(sdk.NewStatusUpdateEvent(ec, sdk.TaskStateCanceled, nil), nil)
+	}
+}
+
+func finalState(ec *a2asrv.ExecutorContext) sdk.TaskState {
+	if ec.Message != nil {
+		if raw, ok := ec.Message.Metadata["ga.test.final_state"].(string); ok {
+			switch sdk.TaskState(raw) {
+			case sdk.TaskStateInputRequired, sdk.TaskStateAuthRequired, sdk.TaskStateFailed, sdk.TaskStateRejected:
+				return sdk.TaskState(raw)
+			}
+		}
+	}
+	return sdk.TaskStateCompleted
+}

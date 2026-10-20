@@ -3,6 +3,7 @@ module security-ai-gateway
 go 1.26.0
 
 require (
+	github.com/a2aproject/a2a-go/v2 v2.6.0
 	github.com/emmansun/gmsm v0.44.1
 	github.com/google/go-tdx-guest v0.3.1
 	github.com/higress-group/proxy-wasm-go-sdk v0.0.0-20260525073613-662ed045bf0b
