@@ -27,6 +27,7 @@
   python scripts/check-secrets.py                  # 全量扫描（含基线判定）
   python scripts/check-secrets.py --no-baseline    # 忽略基线（审计用，当前应有历史命中）
   python scripts/check-secrets.py --update-baseline # 依据当前命中重建基线（需人工复核后提交）
+  python scripts/check-secrets.py --only env-secret  # 只启用指定规则（逗号分隔；用于文档库等噪声场景）
 """
 from __future__ import annotations
 
@@ -164,21 +165,23 @@ def load_baseline(path: Path) -> set[tuple[str, str, str]]:
     return out
 
 
-def scan(root: Path, files: list[str], secrets: list[str]):
+def scan(root: Path, files: list[str], secrets: list[str], only: set[str] | None = None):
     """返回 findings: list[(path, line, rule, value)]"""
     findings = []
+    active = [r for r in RULES if not only or r[0] in only]
+    use_env = not only or "env-secret" in only
     for rel in files:
         text = readable(root, rel)
         if text is None:
             continue
         for lineno, line in enumerate(text.splitlines(), 1):
-            for name, rx in RULES:
+            for name, rx in active:
                 for m in rx.finditer(line):
                     val = m.group("val")
                     if PLACEHOLDER.match(val):
                         continue
                     findings.append((rel.replace("\\", "/"), lineno, name, val))
-        if secrets:
+        if secrets and use_env:
             for v in secrets:
                 if v in text:
                     findings.append((rel.replace("\\", "/"), 0, "env-secret", v))
@@ -188,12 +191,25 @@ def scan(root: Path, files: list[str], secrets: list[str]):
 def main(argv: list[str]) -> int:
     use_baseline = "--no-baseline" not in argv
     update = "--update-baseline" in argv
+    only: set[str] | None = None
+    for i, a in enumerate(argv):
+        val = None
+        if a.startswith("--only="):
+            val = a.split("=", 1)[1]
+        elif a == "--only" and i + 1 < len(argv):
+            val = argv[i + 1]
+        if val:
+            only = {x.strip() for x in val.split(",") if x.strip()}
+    known_rules = {r[0] for r in RULES} | {"env-secret"}
+    if only and not only <= known_rules:
+        print(f"FAIL: --only 含未知规则：{sorted(only - known_rules)}（可用：{sorted(known_rules)}）")
+        return 2
     root = repo_root()
     baseline_path = root / BASELINE_REL
 
     files = tracked_files(root)
     secrets = env_secrets()
-    findings = scan(root, files, secrets)
+    findings = scan(root, files, secrets, only)
 
     if update:
         lines = [
@@ -222,6 +238,8 @@ def main(argv: list[str]) -> int:
         if secrets
         else "；规则③未启用（未设 SSH_PASSWORD/SECRETS_GUARD_VALUES）"
     )
+    if only:
+        extra += f"；规则过滤 --only {','.join(sorted(only))}"
 
     if new:
         scope_txt = "检出**新增**明文凭据" if use_baseline else "检出明文凭据（--no-baseline）"
