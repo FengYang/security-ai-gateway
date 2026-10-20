@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"security-ai-gateway/gateway/gateway-core/internal/a2aregistry"
 	"security-ai-gateway/gateway/gateway-core/internal/policyaudit"
 	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
 	"security-ai-gateway/gateway/gateway-core/internal/route"
@@ -41,6 +42,8 @@ type Server struct {
 	// P1-6 M3.6：reset 水位（epoch）——(tenant|model) → 最近 reset 秒；上报 reported_at 早于水位丢弃。
 	ttftResetMu sync.Mutex
 	ttftResetAt map[string]int64
+	// P2-2 T-2：A2A 注册中心控制面（nil = 未启用；启用后挂载 /v1/a2a/* 与 /internal/a2a/snapshot）。
+	a2aReg *a2aregistry.Registry
 }
 
 // New 构造 API Server。routerTable 为启动时注入的已签名默认路由表（可为空表）；
@@ -84,8 +87,38 @@ func (s *Server) SetPolicyAuditFile(path string) error {
 	return nil
 }
 
+// SetA2ARegistry 挂载 A2A 注册中心控制面（P2-2 T-2；冻结 §5.3）。
+//
+// 路由（注册到同一 mux，与既有控制面共用监听端口）：
+//
+//	POST/GET   /v1/a2a/agents
+//	GET/PUT/DELETE /v1/a2a/agents/{name}
+//	POST       /v1/a2a/agents/{name}/verify
+//	POST/GET   /v1/a2a/providers/{provider}/keys
+//	POST       /v1/a2a/providers/{provider}/keys/{kid}/revoke
+//	DELETE     /v1/a2a/providers/{provider}/keys/{kid}
+//	GET        /internal/a2a/snapshot
+//
+// ⚠️ 认证**不走**本包的 withAuth：A2A 控制面有独立的认证模型（JWT tenant/role，
+// 生产；静态 token 仅 DevMode），由 a2aregistry 内部实现（冻结 §5.4），
+// 租户一律取自 JWT 授权结果，body/path 不得覆盖。
+func (s *Server) SetA2ARegistry(reg *a2aregistry.Registry) {
+	if reg == nil {
+		return
+	}
+	s.a2aReg = reg
+	reg.Mount(s.mux)
+}
+
+// A2ARegistry 返回已挂载的 A2A 注册中心（nil = 未启用）。
+func (s *Server) A2ARegistry() *a2aregistry.Registry { return s.a2aReg }
+
 // ClosePolicyAudit 关闭审计链文件（进程退出时调用）。
 func (s *Server) ClosePolicyAudit() error { return s.audit.Close() }
+
+// PolicyAuditChain 返回策略变更审计链（供 A2A 注册中心复用同一条链，
+// 保证两类变更事件处于同一哈希链，冻结 §5.7「异步上报既有审计链」）。
+func (s *Server) PolicyAuditChain() *policyaudit.Chain { return s.audit }
 
 // recordHistory 记录策略表历史版本（保留最近 policyHistoryLimit 版）。
 func (s *Server) recordHistory(t *ratelimit.Table) {
@@ -175,6 +208,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /tools/servers/{id}", s.withAuth(s.handleDeleteServer))
 	s.mux.HandleFunc("GET /metrics", s.withAuth(s.handleMetrics))
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	// P2-2 T-2：冻结 §5.3 的健康端点名为 /healthz；与既有 /health 同一处理器（免鉴权）。
+	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 }
 
 // issueReq 签发请求体。
@@ -280,8 +315,20 @@ func (s *Server) handleListByTenant(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHealth 健康检查。
+// P2-2 T-2：增补 A2A 注册中心就绪字段（a2a_registry_ready/revision/db，冻结 §5.3）。
+// 未启用注册中心时 ready=false、db="disabled"。
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	out := map[string]any{"status": "ok"}
+	if s.a2aReg != nil {
+		for k, v := range s.a2aReg.Health() {
+			out[k] = v
+		}
+	} else {
+		out["a2a_registry_ready"] = false
+		out["a2a_registry_revision"] = 0
+		out["a2a_registry_db"] = "disabled"
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // withAuth 内网静态 token 鉴权。

@@ -65,6 +65,27 @@ type Event struct {
 	// 注：写入端打标随服务 profile 接线落地（B4）；本批先建分派机制。
 	HashAlg  string `json:"hash_alg,omitempty"`
 	PrevHash string `json:"prev_hash"`
+
+	// ---- A2A 注册中心扩展元数据（证据字段，**不进 hash()**）----
+	//
+	// 冻结清单 §5.7 要求 A2A 审计事件携带 actor_tenant/target_tenant/agent/provider/
+	// old_revision/new_revision/content_hash/reason/trace_id 等元数据级字段。
+	// core schema 的哈希字段序是跨包硬约束（audit-verify "core" schema 逐字段一致，
+	// 见包注释），**不得增删 hash() 覆盖的字段**；故这些扩展字段一律作为
+	// "证据字段"挂在 Event 上（同 HashAlg 口径）——不进 hash、随事件落 WORM、
+	// 由 audit-verify 按 JSON key 自行读取。
+	//
+	// ⚠️ 空值一律 omitempty：未使用该扩展的既有事件（限流/路由/MCP）序列化结果
+	// 逐字节不变，旧链哈希恒定。
+	ActorTenant  string `json:"actor_tenant,omitempty"`
+	TargetTenant string `json:"target_tenant,omitempty"`
+	Agent        string `json:"agent,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	OldRevision  int    `json:"old_revision,omitempty"`
+	NewRevision  int    `json:"new_revision,omitempty"`
+	ContentHash  string `json:"content_hash,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	TraceID      string `json:"trace_id,omitempty"`
 }
 
 // ---- 算法分派（P0-4 §5.2.2）：与进程 profile 解耦（intl 进程亦须能复算 sm 事件）----

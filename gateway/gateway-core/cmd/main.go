@@ -7,11 +7,14 @@ package main
 
 import (
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"security-ai-gateway/gateway/gateway-core/internal/a2aregistry"
 	"security-ai-gateway/gateway/gateway-core/internal/api"
 	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
 	"security-ai-gateway/gateway/gateway-core/internal/route"
@@ -86,8 +89,18 @@ func main() {
 	}
 	defer api.ShutdownTracing()
 
-	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d 限流版本=%d TEE配额下发=%v 变更审计=%s",
-		addr, authToken != "", rt.Version, rlt.Version, teeQuota != nil, auditState)
+	// P2-2 T-2：A2A 注册中心控制面。
+	// 启用条件：A2A_REGISTRY_DB 非空（显式开启，避免未配置时凭空建库）。
+	// ⚠️ 认证口径（冻结 §5.4）：生产仅接受 JWT（A2A_JWT_SECRET）；静态 token
+	//    仅在 A2A_DEV_MODE=true 时降级为 platform_admin；**生产只配静态 token
+	//    而无 JWT 密钥 → 拒绝启动**（否则控制面将无人能通过租户级鉴权）。
+	a2aStatus, err := setupA2ARegistry(srv)
+	if err != nil {
+		log.Fatalf("初始化 A2A 注册中心失败: %v", err)
+	}
+
+	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d 限流版本=%d TEE配额下发=%v 变更审计=%s A2A注册中心=%s",
+		addr, authToken != "", rt.Version, rlt.Version, teeQuota != nil, auditState, a2aStatus)
 	// 控制面无流式响应，全量超时；body 上限防资源耗尽（T-1 评审项）
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -100,6 +113,80 @@ func main() {
 	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatalf("HTTP 服务退出: %v", err)
 	}
+}
+
+// setupA2ARegistry 按环境变量装配并挂载 A2A 注册中心控制面（冻结 §3.3/§5.4/§5.9）。
+// 返回启动日志用的状态描述（"未启用" 或 "已启用"）。
+//
+// 环境变量：
+//
+//	A2A_REGISTRY_DB        SQLite 路径（非空即启用）；默认 /var/lib/gateway-core/a2a-registry.db
+//	A2A_PUBLIC_MODE        host|path（默认 path）
+//	A2A_TENANT_DOMAINS     host 模式的 tenant→域名映射，逗号分隔（tenant=domain）
+//	A2A_GATEWAY_PUBLIC_BASE path 模式的网关公网基址（如 https://gateway.example.com）
+//	A2A_JWT_SECRET         控制面 JWT（HS256）签名密钥
+//	A2A_STATIC_TOKEN       静态 token（仅 A2A_DEV_MODE=true 生效）
+//	A2A_SNAPSHOT_TOKEN     快照分发内部 token（/internal/a2a/snapshot）
+//	A2A_DEV_MODE           true 时允许静态 token 降级；生产不得为 true
+//	A2A_JKU_ALLOWLIST      jku 白名单（逗号分隔 https URL；仅校验，不抓取）
+func setupA2ARegistry(srv *api.Server) (string, error) {
+	dsn := strings.TrimSpace(os.Getenv("A2A_REGISTRY_DB"))
+	if dsn == "" {
+		return "未启用", nil // 未启用
+	}
+	devMode := os.Getenv("A2A_DEV_MODE") == "true"
+	jwtSecret := os.Getenv("A2A_JWT_SECRET")
+	staticToken := os.Getenv("A2A_STATIC_TOKEN")
+	if !devMode && jwtSecret == "" {
+		// 生产仅静态 token（或无凭据）→ 拒绝启动（冻结 §5.4）。
+		return "", fmt.Errorf("生产模式必须配置 A2A_JWT_SECRET（静态 token 仅在 A2A_DEV_MODE=true 时可用）")
+	}
+	cfg := a2aregistry.Config{
+		DSN:            dsn,
+		PublicMode:     os.Getenv("A2A_PUBLIC_MODE"),
+		GatewayBase:    os.Getenv("A2A_GATEWAY_PUBLIC_BASE"),
+		TenantDomains:  parseTenantDomains(os.Getenv("A2A_TENANT_DOMAINS")),
+		JWTSecret:      jwtSecret,
+		StaticToken:    staticToken,
+		SnapshotToken:  os.Getenv("A2A_SNAPSHOT_TOKEN"),
+		DevMode:        devMode,
+		JKUAllowlist:   splitCSV(os.Getenv("A2A_JKU_ALLOWLIST")),
+	}
+	reg, err := a2aregistry.New(cfg, srv.PolicyAuditChain())
+	if err != nil {
+		// 致命（库 schema 新于代码）→ 拒绝启动。
+		return "", err
+	}
+	srv.SetA2ARegistry(reg)
+	return "已启用", nil
+}
+
+// parseTenantDomains 解析 "tenant=domain,tenant2=domain2" 形式的映射。
+func parseTenantDomains(raw string) map[string]string {
+	out := map[string]string{}
+	for _, part := range splitCSV(raw) {
+		k, v, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" || v == "" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// splitCSV 按逗号切分并去空白。
+func splitCSV(raw string) []string {
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // defaultRouteTable 构造并签发默认路由表（MVP 从固定配置；后续改环境变量/DB 动态加载）。
