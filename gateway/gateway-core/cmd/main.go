@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"security-ai-gateway/gateway/a2aproxy"
 	"security-ai-gateway/gateway/gateway-core/internal/a2aregistry"
 	"security-ai-gateway/gateway/gateway-core/internal/api"
 	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
@@ -66,12 +67,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("构造限流签名器失败: %v", err)
 	}
+	// P2-2 T-3：A2A ACL 表签名器——与限流/路由表共用同一密钥族（K_rx），
+	// 但 ACL 是**独立策略域**（R-6）：独立端点前缀、独立表对象、独立签名对象。
+	aclsigner, err := a2aproxy.NewACLSigner(key)
+	if err != nil {
+		log.Fatalf("构造 ACL 签名器失败: %v", err)
+	}
 	st := store.NewMemory()
 	rt := defaultRouteTable(signer)
 	rlt := defaultRateLimitTable(rsigner)
 	// TEE 侧配额下发器（S3）：OTP_CORE_TEE_URL 为空 = nil（预算/TPM 不下发，仅在响应 Note 中说明）
 	teeQuota := api.NewHTTPTeeQuotaApplier(os.Getenv("OTP_CORE_TEE_URL"), os.Getenv("OTP_CORE_TEE_ADMIN_TOKEN"))
 	srv := api.New(signer, msigner, rsigner, teeQuota, st, authToken, rt, rlt)
+	srv.SetACLSigner(aclsigner)
 	// 策略变更审计（判据 7）：OTP_CORE_AUDIT_FILE 非空 → WORM 持久化（文件损坏即拒绝启动，fail-closed）
 	auditFile := os.Getenv("OTP_CORE_AUDIT_FILE")
 	if err := srv.SetPolicyAuditFile(auditFile); err != nil {

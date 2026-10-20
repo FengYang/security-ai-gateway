@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"security-ai-gateway/gateway/a2aproxy"
 	"security-ai-gateway/gateway/gateway-core/internal/a2aregistry"
 	"security-ai-gateway/gateway/gateway-core/internal/policyaudit"
 	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
@@ -44,6 +45,10 @@ type Server struct {
 	ttftResetAt map[string]int64
 	// P2-2 T-2：A2A 注册中心控制面（nil = 未启用；启用后挂载 /v1/a2a/* 与 /internal/a2a/snapshot）。
 	a2aReg *a2aregistry.Registry
+	// P2-2 T-3：A2A ACL 策略表（独立策略域，R-6）。
+	aclSigner *a2aproxy.ACLSigner
+	aclMu     sync.Mutex
+	aclHist   []*a2aproxy.ACLTable // ACL 历史版本（含当前），用于按 version 回滚
 }
 
 // New 构造 API Server。routerTable 为启动时注入的已签名默认路由表（可为空表）；
@@ -84,6 +89,41 @@ func (s *Server) SetPolicyAuditFile(path string) error {
 		return err
 	}
 	s.audit = chain
+	return nil
+}
+
+// SetACLSigner 注入 A2A ACL 表签名器（P2-2 T-3）。
+//
+// 与限流表**同一 K_rx 密钥**、同一分发通道，但 ACL 是**独立策略域**（R-6）：
+// 独立端点前缀（/a2a-acls）、独立表对象、独立签名对象。
+//
+// nil（未注入）时 ACL 端点仍可读，但 PUT/rollback 一律拒绝（无签名器不得签表）。
+func (s *Server) SetACLSigner(signer *a2aproxy.ACLSigner) {
+	s.aclSigner = signer
+}
+
+// recordACLHistory 记录 ACL 历史版本（用于按 version 回滚）。
+func (s *Server) recordACLHistory(t *a2aproxy.ACLTable) {
+	if t == nil {
+		return
+	}
+	s.aclMu.Lock()
+	defer s.aclMu.Unlock()
+	s.aclHist = append(s.aclHist, t)
+	if len(s.aclHist) > aclHistoryLimit {
+		s.aclHist = s.aclHist[len(s.aclHist)-aclHistoryLimit:]
+	}
+}
+
+// findACLHistory 按 version 查 ACL 历史版本。
+func (s *Server) findACLHistory(version int) *a2aproxy.ACLTable {
+	s.aclMu.Lock()
+	defer s.aclMu.Unlock()
+	for _, t := range s.aclHist {
+		if t.Version == version {
+			return t
+		}
+	}
 	return nil
 }
 
@@ -199,6 +239,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /ratelimits", s.withAuth(s.handlePutRateLimits))
 	s.mux.HandleFunc("GET /ratelimits/history", s.withAuth(s.handleRateLimitHistory))
 	s.mux.HandleFunc("POST /ratelimits/rollback", s.withAuth(s.handleRateLimitRollback))
+	// P2-2 T-3：A2A ACL 策略表（独立策略域，R-6）——与 /ratelimits 同构：
+	// GET 下发（拉路径）、PUT 策略源（校验+防回滚+签名）、history 变更审计、rollback 按版本回滚。
+	s.mux.HandleFunc("GET /a2a-acls", s.withAuth(s.handleGetACLs))
+	s.mux.HandleFunc("PUT /a2a-acls", s.withAuth(s.handlePutACLs))
+	s.mux.HandleFunc("GET /a2a-acls/history", s.withAuth(s.handleACLHistory))
+	s.mux.HandleFunc("POST /a2a-acls/rollback", s.withAuth(s.handleACLRollback))
 	s.mux.HandleFunc("POST /tools/policy", s.withAuth(s.handleToolPolicy))
 	s.mux.HandleFunc("GET /tools/policy", s.withAuth(s.handleGetToolPolicy))
 	// T-3 联邦目录治理（D-4/§6.1）：后端注册 CRUD——变更即重签目录（版本单调）+ mcp_server_changed 审计

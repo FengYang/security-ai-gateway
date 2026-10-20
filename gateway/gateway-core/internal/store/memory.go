@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 
+	"security-ai-gateway/gateway/a2aproxy"
 	"security-ai-gateway/gateway/gateway-core/internal/mcpsrv"
 	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
 	"security-ai-gateway/gateway/gateway-core/internal/route"
@@ -30,6 +31,10 @@ type Store interface {
 	SaveRateLimitTable(t *ratelimit.Table)
 	// GetRateLimitTable 返回当前限流/预算表。
 	GetRateLimitTable() *ratelimit.Table
+	// SaveACLTable 保存签名后的 A2A ACL 表（P2-2 T-3；独立策略域，R-6）。
+	SaveACLTable(t *a2aproxy.ACLTable)
+	// GetACLTable 返回当前 A2A ACL 表。
+	GetACLTable() *a2aproxy.ACLTable
 	// SaveToolCatalog 保存签名后的工具目录。
 	SaveToolCatalog(c *mcpsec.ToolCatalog)
 	// GetToolCatalog 返回当前工具目录。
@@ -59,6 +64,7 @@ type Memory struct {
 	byT            map[string][]string // tenant → prescriptionID 列表
 	routeTable     *route.RouteTable
 	rateLimitTable *ratelimit.Table
+	aclTable       *a2aproxy.ACLTable // P2-2 T-3：A2A ACL 策略表
 	toolCatalog    *mcpsec.ToolCatalog
 	rbacPolicy     *mcpsec.RBACPolicy
 	mcpServers     map[string]*mcpsrv.Server // T-3：后端注册域
@@ -151,6 +157,20 @@ func (m *Memory) GetRateLimitTable() *ratelimit.Table {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.rateLimitTable
+}
+
+// SaveACLTable 实现 Store。
+func (m *Memory) SaveACLTable(t *a2aproxy.ACLTable) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.aclTable = t
+}
+
+// GetACLTable 实现 Store。
+func (m *Memory) GetACLTable() *a2aproxy.ACLTable {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.aclTable
 }
 
 // SaveToolCatalog 实现 Store。
