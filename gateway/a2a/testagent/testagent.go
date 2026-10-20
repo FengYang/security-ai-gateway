@@ -98,7 +98,7 @@ func New(cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("testagent: card validation: %w", cardErr)
 	}
 
-	requestHandler := a2asrv.NewHandler(executor{})
+	requestHandler := a2asrv.NewHandler(executor{}, a2asrv.WithCallInterceptors(authInterceptor{}))
 	mux := http.NewServeMux()
 	mux.Handle("/a2a", a2asrv.NewJSONRPCHandler(requestHandler))
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(card))
@@ -112,6 +112,25 @@ func New(cfg Config) (*Agent, error) {
 			PublicKey: pub,
 		},
 	}, nil
+}
+
+// authInterceptor marks every call as authenticated. The testagent is a
+// fixture: the gateway terminates A2A governance authentication and the
+// agent backend observes the gateway-verified caller. Without this the
+// in-memory task store refuses ListTasks (-31401).
+type authInterceptor struct{}
+
+func (authInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, _ *a2asrv.Request) (context.Context, any, error) {
+	if callCtx.User == nil {
+		callCtx.User = &a2asrv.User{}
+	}
+	callCtx.User.Name = "gateway"
+	callCtx.User.Authenticated = true
+	return ctx, nil, nil
+}
+
+func (authInterceptor) After(ctx context.Context, _ *a2asrv.CallContext, _ *a2asrv.Response) error {
+	return nil
 }
 
 // Handler returns the HTTP handler for the agent endpoint and card discovery.
