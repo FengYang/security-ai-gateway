@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"security-ai-gateway/gateway/a2a"
 )
@@ -261,6 +262,43 @@ func (p *Proxy) forward(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		errorCode = strconv.Itoa(respMeta.ErrorCode)
 	}
 	p.observeResult(ctx, requestID, rt, principal, meta, respMeta.State, result, errorCode, http.StatusOK)
+	// T-3b：观测到任务状态 → 归一化并发送 Task 审计事件（不阻断协议；写失败进 outbox）。
+	p.observeTaskEvent(ctx, requestID, rt, principal, meta, respMeta, result, errorCode)
+}
+
+// observeTaskEvent 在数据面观测到任务状态时构造并发送归一化 Task 审计事件。
+//
+// 仅记观测到的状态、不合成；事件不含任何正文（R-2）。观测/发送失败不得影响
+// 正常响应（与治理拒绝类审计不同，Task 审计失败进 outbox，不 fail-closed 请求）。
+func (p *Proxy) observeTaskEvent(ctx context.Context, requestID string, rt route, principal *Principal, meta *a2a.RequestMeta, respMeta ResponseMeta, result, errorCode string) {
+	if respMeta.State == "" {
+		return
+	}
+	tenant, _ := a2a.ResolveRouteTenant(principal.Tenant, rt.tenant)
+	if tenant == "" {
+		tenant = principal.Tenant
+	}
+	state := NormalizeTaskState(respMeta.State)
+	ev := TaskEvent{
+		EventID:     newTaskEventID(),
+		Timestamp:   time.Now().UTC().Format(time.RFC3339Nano),
+		RequestID:   requestID,
+		Tenant:      tenant,
+		Agent:       rt.agent,
+		Skill:       meta.Skill.Name,
+		SkillSource: string(meta.Skill.Source),
+		TaskID:      respMeta.TaskID,
+		ContextID:   respMeta.ContextID,
+		State:       state,
+		Result:      result,
+		ErrorCode:   errorCode,
+		A2AVersion:  meta.Version,
+		Producer:    string(TaskProducerGateway),
+		DedupKey:    TaskEventDedupKey(tenant, rt.agent, respMeta.TaskID, state),
+	}
+	if p.governance != nil {
+		p.governance.ObserveTask(ctx, ev)
+	}
 }
 
 // handleDiscovery serves the registered card at the well-known path.

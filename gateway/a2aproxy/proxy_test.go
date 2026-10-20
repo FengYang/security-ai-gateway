@@ -22,11 +22,12 @@ import (
 // testGovernance is the allow-all policy engine used to exercise the data
 // plane. It records every observation for assertions.
 type testGovernance struct {
-	mu       sync.Mutex
-	events   []AuditEvent
-	deny     map[string]bool // "tenant|agent|skill" denied by ACL
-	denyAuth bool
-	retry    int // >0 => throttle every call
+	mu         sync.Mutex
+	events     []AuditEvent
+	taskEvents []TaskEvent
+	deny       map[string]bool // "tenant|agent|skill" denied by ACL
+	denyAuth   bool
+	retry      int // >0 => throttle every call
 }
 
 func newTestGovernance() *testGovernance {
@@ -61,11 +62,26 @@ func (g *testGovernance) Observe(_ context.Context, ev AuditEvent) {
 	g.events = append(g.events, ev)
 }
 
+func (g *testGovernance) ObserveTask(_ context.Context, ev TaskEvent) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.taskEvents = append(g.taskEvents, ev)
+}
+
 func (g *testGovernance) recorded() []AuditEvent {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	out := make([]AuditEvent, len(g.events))
 	copy(out, g.events)
+	return out
+}
+
+// recordedTaskEvents 返回已观测的 Task 审计事件（T-3b）。
+func (g *testGovernance) recordedTaskEvents() []TaskEvent {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]TaskEvent, len(g.taskEvents))
+	copy(out, g.taskEvents)
 	return out
 }
 

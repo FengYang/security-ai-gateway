@@ -41,6 +41,8 @@ type Governance interface {
 	RateLimit(ctx context.Context, tenant, agent, skill string) (retryAfter int, err error)
 	// Observe records a metadata-only audit event (never message content).
 	Observe(ctx context.Context, ev AuditEvent)
+	// ObserveTask records a normalized A2A Task audit event (T-3b; §2.6 schema).
+	ObserveTask(ctx context.Context, ev TaskEvent)
 }
 
 // AuditEvent is the metadata-only governance observation (R-2). It never
@@ -84,6 +86,9 @@ func (DenyAllGovernance) RateLimit(context.Context, string, string, string) (int
 
 // Observe drops events (there is no sink in the default configuration).
 func (DenyAllGovernance) Observe(context.Context, AuditEvent) {}
+
+// ObserveTask drops Task events (no sink in the default configuration).
+func (DenyAllGovernance) ObserveTask(context.Context, TaskEvent) {}
 
 // AuthenticatedReason is the stable data.reason for a denied call.
 const AuthenticatedReason = "unauthenticated"

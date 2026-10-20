@@ -288,6 +288,8 @@ type StaticGovernance struct {
 	Limiter Limiter
 	// Observer receives metadata-only audit events. Nil → dropped.
 	Observer func(ctx context.Context, ev AuditEvent)
+	// TaskObserver receives normalized A2A Task audit events (T-3b). Nil → dropped.
+	TaskObserver TaskObserver
 }
 
 // Authorize implements Governance.
@@ -320,6 +322,14 @@ func (g *StaticGovernance) Observe(ctx context.Context, ev AuditEvent) {
 		return
 	}
 	g.Observer(ctx, ev)
+}
+
+// ObserveTask implements Governance (T-3b).
+func (g *StaticGovernance) ObserveTask(ctx context.Context, ev TaskEvent) {
+	if g.TaskObserver == nil {
+		return
+	}
+	g.TaskObserver(ctx, ev)
 }
 
 // Authenticate implements Governance.
