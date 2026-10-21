@@ -15,10 +15,18 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"security-ai-gateway/gateway/a2a"
+	"security-ai-gateway/gateway/a2a/testagent"
 )
 
 // errCheckerDown 模拟内容检查器不可用（VA-404）。
@@ -251,6 +259,264 @@ func TestAccVA601MetricsVisible(t *testing.T) {
 		}
 	}
 	t.Logf("VA-601 证据（节选）：\n%s", out)
+}
+
+// --- L-B 层补齐取证（原标「待环境」的本机可自动化项）---
+//
+// 说明：F-8 §9.2 原将下列项标为 L-B「待环境」。复核后确认其**不依赖外网/集群**，
+// 可在代码库内自动化取证（仅真实具名客户端 C1/C2 与集群版本快照仍属环境依赖）。
+// 编号沿用 F-8 的 VA-*，不改判据。
+
+// TestAccVA103CancelTaskCancelable：VA-103 真实取消（可取消态夹具）。
+//
+// 夹具来源：testagent executor 支持 `ga.test.final_state` 元数据把任务停在
+// **非终态**（input-required），从而构造出真正可取消的任务（此前仅取证了
+// 「终态任务取消被拒 -32002」，未取证成功取消路径）。
+func TestAccVA103CancelTaskCancelable(t *testing.T) {
+	h := newHarness(t)
+	send := `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"m-cancel","role":"ROLE_USER","parts":[{"text":"need input"}],"metadata":{"ga.test.final_state":"TASK_STATE_INPUT_REQUIRED"}}}}`
+	_, raw := h.invoke(t, "SendMessage", send, nil)
+	env := decodeEnvelope(t, raw)
+	if env.Error != nil {
+		t.Fatalf("构造可取消态任务失败: %+v", env.Error)
+	}
+	if got := taskState(t, env.Result); got != "TASK_STATE_INPUT_REQUIRED" {
+		t.Fatalf("前置状态应为非终态 input-required，实际: %s", got)
+	}
+	taskID := taskIDOf(t, env.Result)
+
+	_, rawCancel := h.invoke(t, "CancelTask", `{"jsonrpc":"2.0","id":2,"method":"CancelTask","params":{"id":`+quote(taskID)+`}}`, nil)
+	cenv := decodeEnvelope(t, rawCancel)
+	if cenv.Error != nil {
+		t.Fatalf("VA-103 取消应成功，实际: %+v", cenv.Error)
+	}
+	if got := taskState(t, cenv.Result); got != "TASK_STATE_CANCELED" {
+		t.Fatalf("取消后状态 = %s，want canceled", got)
+	}
+	t.Logf("VA-103 证据：task=%s 前置=input-required → 取消后=canceled", taskID)
+}
+
+// TestAccVA206HostModeRouting：VA-206 host 模式发现与调用（含未登记 host 的负向取证）。
+//
+// host 模式判定只依赖 `Host` 头与 TenantDomains 映射，**不依赖真实 DNS**，
+// 故本机可取证（此前误判为需环境）。
+func TestAccVA206HostModeRouting(t *testing.T) {
+	const (
+		tenant = "tenant-a"
+		agent  = "test-agent"
+		domain = "a2a.test"
+	)
+	h := newHarness(t)
+	snapshots := NewSnapshotStore()
+	card := h.agentCardRaw(t)
+	if err := snapshots.ForceReplace(&Snapshot{
+		RegistryRevision: 1,
+		GeneratedAt:      time.Now().UTC(),
+		Agents: []SnapshotAgent{{
+			Tenant: tenant, Name: agent, Revision: 1, Card: card,
+			PublicURL: "https://" + agent + "." + domain + "/a2a", BackendURL: h.agentSrv.URL + "/a2a",
+			Skills:          []SnapshotSkill{{ID: "hello_world", Name: "Hello World"}},
+			SignatureStatus: "valid",
+		}},
+	}); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	proxy, err := New(Config{
+		PublicMode:       PublicModeHost,
+		TenantDomains:    map[string]string{tenant: domain},
+		DevAllowLoopback: true,
+	}, snapshots, newTestGovernance())
+	if err != nil {
+		t.Fatalf("proxy: %v", err)
+	}
+	t.Cleanup(proxy.Close)
+	srv := httptest.NewServer(proxy.Handler())
+	t.Cleanup(srv.Close)
+
+	// 正向：已登记 host（{agent}.{tenant_domain}）→ 调用可达。
+	body := `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"m-host","role":"ROLE_USER","parts":[{"text":"hi"}]}}}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/a2a", strings.NewReader(body))
+	req.Host = agent + "." + domain
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(a2a.HeaderVersion, a2a.SupportedVersion)
+	req.Header.Set("X-Test-Tenant", tenant)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	raw := readBody(t, resp)
+	_ = resp.Body.Close()
+	env := decodeEnvelope(t, raw)
+	if env.Error != nil {
+		t.Fatalf("host 模式调用失败: %+v (%s)", env.Error, raw)
+	}
+
+	// 负向：未登记 host（子域不在 TenantDomains 映射内）→ 404，不得落到任何租户。
+	req2, _ := http.NewRequest(http.MethodPost, srv.URL+"/a2a", strings.NewReader(body))
+	req2.Host = "evil.example.com"
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set(a2a.HeaderVersion, a2a.SupportedVersion)
+	req2.Header.Set("X-Test-Tenant", tenant)
+	resp2, err := srv.Client().Do(req2)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("未登记 host 应 404，实际 %d", resp2.StatusCode)
+	}
+	t.Logf("VA-206 证据：已登记 host 调用成功（state=%s）；未登记 host → 404", taskState(t, env.Result))
+}
+
+// TestAccVA506ErrorCodeMatrix：VA-506 错误码逐项（与 VA-501..504 合起来覆盖全部网关侧码）。
+func TestAccVA506ErrorCodeMatrix(t *testing.T) {
+	cases := []struct {
+		name    string
+		method  string
+		body    string
+		headers map[string]string
+		setup   func(h *harness)
+		want    int
+	}{
+		{"VA-506 畸形 JSON → -32700", "SendMessage", `{"jsonrpc":"2.0"`, nil, nil, a2a.CodeParseError},
+		{"VA-506 未知方法 → -32601", "NoSuchMethod", `{"jsonrpc":"2.0","id":1,"method":"NoSuchMethod","params":{}}`, nil, nil, a2a.CodeMethodNotFound},
+		{"VA-506 流式方法 → -32004", "SendStreamingMessage", `{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":{"message":{"messageId":"m-1","role":"ROLE_USER","parts":[{"text":"hi"}]}}}`, nil, nil, a2a.CodeUnsupportedOperation},
+		{"VA-506 未知任务 → -32001", "GetTask", `{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"t-absent"}}`, nil, nil, a2a.CodeTaskNotFound},
+		{"VA-506 未授权 skill → -31403", "SendMessage", `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"m-1","role":"ROLE_USER","parts":[{"text":"hi"}]}}}`,
+			map[string]string{a2a.HeaderSkill: "hello_world"},
+			func(h *harness) { h.gov.deny["tenant-a|test-agent|hello_world"] = true }, a2a.CodeUnauthorized},
+		{"VA-506 未认证 → -31401", "SendMessage", `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"m-1","role":"ROLE_USER","parts":[{"text":"hi"}]}}}`,
+			nil, func(h *harness) { h.gov.denyAuth = true }, a2a.CodeUnauthenticated},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			if c.setup != nil {
+				c.setup(h)
+			}
+			_, raw := h.invoke(t, c.method, c.body, c.headers)
+			env := decodeEnvelope(t, raw)
+			if env.Error == nil {
+				t.Fatalf("期望错误码 %d，实际成功: %s", c.want, raw)
+			}
+			if env.Error.Code != c.want {
+				t.Fatalf("错误码 = %d, want %d (body=%s)", env.Error.Code, c.want, raw)
+			}
+			t.Logf("%s 证据：code=%d reason=%s", c.name, env.Error.Code, env.errorReason())
+		})
+	}
+}
+
+// TestAccVA603TracePropagation：VA-603 trace 贯通（入站继承 + 后端注入）。
+//
+// 用内存 exporter 的 TracerProvider 替代 OTLP 上报链路取证：**span 是否产出、
+// 是否继承入站 traceparent、是否注入后端请求头**三项均不依赖 Collector，
+// 故本机可取证（此前误判为必须真实 Collector）。
+func TestAccVA603TracePropagation(t *testing.T) {
+	// --- 安装测试用 tracing 运行态（同包内直接替换，不为测试改动生产 API）---
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()), sdktrace.WithSyncer(exp))
+	a2aTracing.mu.Lock()
+	prevEnabled, prevTracer, prevProvider := a2aTracing.enabled, a2aTracing.tracer, a2aTracing.provider
+	a2aTracing.enabled = true
+	a2aTracing.tracer = tp.Tracer(a2aTracingServiceName)
+	a2aTracing.provider = nil // 由本用例自行关闭，避免污染全局 ShutdownTracing
+	a2aTracing.mu.Unlock()
+	t.Cleanup(func() {
+		a2aTracing.mu.Lock()
+		a2aTracing.enabled, a2aTracing.tracer, a2aTracing.provider = prevEnabled, prevTracer, prevProvider
+		a2aTracing.mu.Unlock()
+		_ = tp.Shutdown(context.Background())
+	})
+
+	prevProp := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { otel.SetTextMapPropagator(prevProp) })
+
+	// --- 后端：真实 testagent + 头捕获（取证「注入后端」）---
+	const (
+		tenant = "tenant-a"
+		agent  = "test-agent"
+	)
+	gwBase := "http://gateway.test"
+	publicURL := gwBase + "/a2a/" + tenant + "/" + agent
+	ag, err := testagent.New(testagent.Config{PublicURL: publicURL, Tenant: tenant, Name: "Test Agent"})
+	if err != nil {
+		t.Fatalf("testagent: %v", err)
+	}
+	var gotTraceparent string
+	agentSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTraceparent = r.Header.Get("traceparent")
+		ag.Handler().ServeHTTP(w, r)
+	}))
+	t.Cleanup(agentSrv.Close)
+
+	cardRaw, err := json.Marshal(ag.Card())
+	if err != nil {
+		t.Fatalf("marshal card: %v", err)
+	}
+	snapshots := NewSnapshotStore()
+	if err := snapshots.ForceReplace(&Snapshot{
+		RegistryRevision: 1,
+		GeneratedAt:      time.Now().UTC(),
+		Agents: []SnapshotAgent{{
+			Tenant: tenant, Name: agent, Revision: 1, Card: cardRaw,
+			PublicURL: publicURL, BackendURL: agentSrv.URL + "/a2a",
+			Skills:          []SnapshotSkill{{ID: "hello_world", Name: "Hello World"}},
+			SignatureStatus: "valid",
+		}},
+	}); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	proxy, err := New(Config{PublicMode: PublicModePath, GatewayPublicBase: gwBase, DevAllowLoopback: true}, snapshots, newTestGovernance())
+	if err != nil {
+		t.Fatalf("proxy: %v", err)
+	}
+	t.Cleanup(proxy.Close)
+	srv := httptest.NewServer(proxy.Handler()) // Handler() 在 tracing 已启用状态下包装 span
+	t.Cleanup(srv.Close)
+
+	// --- 入站携带上游 traceparent（取证「继承」）---
+	upstreamCtx, upstreamSpan := tp.Tracer("upstream").Start(context.Background(), "upstream")
+	wantTraceID := upstreamSpan.SpanContext().TraceID().String()
+	upstreamSpan.End()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/a2a/"+tenant+"/"+agent,
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"m-trace","role":"ROLE_USER","parts":[{"text":"hi"}]}}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(a2a.HeaderVersion, a2a.SupportedVersion)
+	req.Header.Set("X-Test-Tenant", tenant)
+	otel.GetTextMapPropagator().Inject(upstreamCtx, propagation.HeaderCarrier(req.Header))
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	raw := readBody(t, resp)
+	_ = resp.Body.Close()
+
+	// 取证①：span 产出且名为 a2a.invoke
+	spans := exp.GetSpans()
+	var invoke tracetest.SpanStub
+	for _, s := range spans {
+		if s.Name == spanInvoke {
+			invoke = s
+		}
+	}
+	if invoke.Name == "" {
+		t.Fatalf("未产出 %s span（spans=%d raw=%s）", spanInvoke, len(spans), raw)
+	}
+	// 取证②：继承入站 trace id
+	if invoke.SpanContext.TraceID().String() != wantTraceID {
+		t.Fatalf("span trace_id = %s, want 入站 %s（未继承 traceparent）", invoke.SpanContext.TraceID(), wantTraceID)
+	}
+	// 取证③：注入后端请求头
+	if gotTraceparent == "" {
+		t.Fatal("后端未收到 traceparent（未注入后端请求）")
+	}
+	if !strings.Contains(gotTraceparent, wantTraceID) {
+		t.Fatalf("后端 traceparent = %q，未携带入站 trace_id %s", gotTraceparent, wantTraceID)
+	}
+	t.Logf("VA-603 证据：span=%s trace_id=%s（与入站一致）；后端收到 traceparent=%s", invoke.Name, wantTraceID, gotTraceparent)
 }
 
 // --- 渗透（PEN-xx）---

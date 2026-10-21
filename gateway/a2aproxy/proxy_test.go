@@ -173,6 +173,22 @@ func newHarness(t *testing.T) *harness {
 	return &harness{proxySrv: proxySrv, agentSrv: agentSrv, gov: gov, snapshots: snapshots, proxy: proxy, tenant: tenant, agent: agent}
 }
 
+// agentCardRaw 返回 harness 已注册 agent 的签名卡片字节。
+//
+// 供 host 模式等变体用例复用：从快照取回卡片，避免重复构造 testagent 与快照。
+func (h *harness) agentCardRaw(t *testing.T) []byte {
+	t.Helper()
+	snap := h.snapshots.Current()
+	if snap == nil {
+		t.Fatal("快照缺失")
+	}
+	rec, ok := snap.Lookup(h.tenant, h.agent)
+	if !ok {
+		t.Fatalf("快照未包含 %s/%s", h.tenant, h.agent)
+	}
+	return rec.Card
+}
+
 // invoke sends a data-plane request through the proxy.
 func (h *harness) invoke(t *testing.T, method, body string, headers map[string]string) (*http.Response, []byte) {
 	t.Helper()

@@ -3,6 +3,8 @@ package a2a
 import (
 	"bytes"
 	"testing"
+
+	sdk "github.com/a2aproject/a2a-go/v2/a2a"
 )
 
 func TestDecodeAndValidateAgentCard(t *testing.T) {
@@ -79,6 +81,29 @@ func TestValidateAgentCardRejectsMultipleInterfaces(t *testing.T) {
 	second := *card.SupportedInterfaces[0]
 	card.SupportedInterfaces = append(card.SupportedInterfaces, &second)
 	assertCardReason(t, ValidateAgentCard(card, CardValidationOptions{}), ReasonUnsupportedBinding)
+}
+
+// TestValidateAgentCardRejectsRequiredExtension：VA-505（`required` 扩展拒绝）取证。
+//
+// 冻结口径（§2.4 / 规范 M-? 扩展）：客户端必须理解并遵守的扩展（`required=true`）在 MVP
+// 一律拒绝，理由 reason=unsupported_required_extension；**runtime 无 -32008 产出点**
+// （-32008 属注册期拒绝的语义码），故在卡片校验层取证。
+func TestValidateAgentCardRejectsRequiredExtension(t *testing.T) {
+	card := testCard()
+	card.Capabilities.Extensions = []sdk.AgentExtension{
+		{URI: "https://ext.example/optional", Required: false},
+		{URI: "https://ext.example/mandatory", Required: true},
+	}
+	assertCardReason(t, ValidateAgentCard(card, CardValidationOptions{}), ReasonUnsupportedRequiredExtension)
+}
+
+// TestValidateAgentAllowsOptionalExtension：非 required 扩展不阻断注册（防过度拒绝）。
+func TestValidateAgentAllowsOptionalExtension(t *testing.T) {
+	card := testCard()
+	card.Capabilities.Extensions = []sdk.AgentExtension{{URI: "https://ext.example/optional", Required: false}}
+	if err := ValidateAgentCard(card, CardValidationOptions{}); err != nil {
+		t.Fatalf("非 required 扩展应放行，实际 reason=%q (%s)", err.Reason, err.Message)
+	}
 }
 
 func TestNormalizeHTTPURL(t *testing.T) {

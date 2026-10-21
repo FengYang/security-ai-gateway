@@ -100,6 +100,108 @@ func TestRegisterRejectsUntrustedSignature(t *testing.T) {
 	}
 }
 
+// TestRegisterRejectsJKUNotAllowlisted：VA-205（jku 非白名单拒绝路径）取证。
+//
+// 冻结 §4.1：jku **不作为信任来源**，仅与租户白名单比对；非白名单 jku 即便密钥本身
+// 可信（pinned kid 一致、签名有效）也必须拒绝（code=jku_not_allowed / 422）。
+// 反向用例（白名单内 jku 放行）一并取证，避免「一律拒绝」式的过度收紧。
+func TestRegisterRejectsJKUNotAllowlisted(t *testing.T) {
+	const publicURL = "https://gateway.example.com/a2a/tenant-a/research-agent"
+
+	// 1) 非白名单 jku → 拒绝
+	reg := newTestRegistry(t)
+	signer := newTestSigner(t, "ed-1")
+	importKey(t, reg, "tenant-a", "team-research", signer)
+	card := signer.signedCardWithJKU(t, publicURL, "tenant-a", "research-agent", "https://evil.example/jwks.json")
+	_, status, err := reg.Register(context.Background(), adminAuth("tenant-a"), "alice", "req-1",
+		"trace-1", RegisterRequest{
+			Name: "research-agent", ProviderID: "team-research", Card: card,
+			BackendURL: "http://agent.team-research.svc.cluster.local:8080",
+		}, "")
+	if err == nil {
+		t.Fatal("非白名单 jku 应被拒绝")
+	}
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", status)
+	}
+	var re *regError
+	if !errors.As(err, &re) || re.Code != codeJKUNotAllowed {
+		t.Fatalf("错误码 = %v, want %s", err, codeJKUNotAllowed)
+	}
+
+	// 2) 白名单内 jku → 放行（证明拒绝来自 allowlist 判定而非「有 jku 即拒」）
+	reg2 := newTestRegistryWithCfg(t, Config{
+		DSN:          "file:" + t.TempDir() + "/registry.db",
+		PublicMode:   PublicModePath,
+		GatewayBase:  "https://gateway.example.com",
+		JWTSecret:    "test-secret",
+		DevMode:      true,
+		JKUAllowlist: []string{"https://trusted.example/jwks.json"},
+	})
+	signer2 := newTestSigner(t, "ed-2")
+	importKey(t, reg2, "tenant-a", "team-research", signer2)
+	card2 := signer2.signedCardWithJKU(t, publicURL, "tenant-a", "research-agent", "https://trusted.example/jwks.json")
+	_, _, err = reg2.Register(context.Background(), adminAuth("tenant-a"), "alice", "req-1",
+		"trace-1", RegisterRequest{
+			Name: "research-agent", ProviderID: "team-research", Card: card2,
+			BackendURL: "http://agent.team-research.svc.cluster.local:8080",
+		}, "")
+	if err != nil {
+		t.Fatalf("白名单内 jku 应放行，实际: %v", err)
+	}
+}
+
+// TestRegisterRejectsRequiredExtensionVA505：VA-505（required 扩展拒绝）验收单列取证。
+//
+// 冻结口径：MVP 不支持任何扩展，卡上 `capabilities.extensions[].required=true`
+// 必须在注册期拒绝，reason=unsupported_required_extension（runtime -32008 的注册期等价语义）。
+func TestRegisterRejectsRequiredExtensionVA505(t *testing.T) {
+	reg := newTestRegistry(t)
+	signer := newTestSigner(t, "ed-1")
+	importKey(t, reg, "tenant-a", "team-research", signer)
+
+	publicURL := "https://gateway.example.com/a2a/tenant-a/research-agent"
+	raw := buildCard(publicURL, "tenant-a", "research-agent")
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("解析卡片失败: %v", err)
+	}
+	caps, ok := m["capabilities"].(map[string]any)
+	if !ok {
+		t.Fatalf("卡片缺少 capabilities: %v", m)
+	}
+	caps["extensions"] = []any{map[string]any{
+		"uri":      "https://ext.example/mandatory",
+		"required": true,
+	}}
+	signedRaw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("序列化卡片失败: %v", err)
+	}
+	sig := signer.signCard(t, signedRaw)
+	m["signatures"] = []any{map[string]any{"protected": sig.Protected, "signature": sig.Signature}}
+	card, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("序列化签名卡片失败: %v", err)
+	}
+
+	_, status, err := reg.Register(context.Background(), adminAuth("tenant-a"), "alice", "req-1",
+		"trace-1", RegisterRequest{
+			Name: "research-agent", ProviderID: "team-research", Card: card,
+			BackendURL: "http://agent.team-research.svc.cluster.local:8080",
+		}, "")
+	if err == nil {
+		t.Fatal("required 扩展应被拒绝")
+	}
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", status)
+	}
+	var re *regError
+	if !errors.As(err, &re) || re.Code != "unsupported_required_extension" {
+		t.Fatalf("错误码 = %v, want unsupported_required_extension", err)
+	}
+}
+
 // TestRegisterRejectsTamperedCard 篡改卡内容 → 验签失败（422 signature_invalid）。
 func TestRegisterRejectsTamperedCard(t *testing.T) {
 	reg := newTestRegistry(t)

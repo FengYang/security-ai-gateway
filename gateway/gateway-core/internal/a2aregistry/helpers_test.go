@@ -130,6 +130,41 @@ func (s *testSigner) signedCardWithVersion(t *testing.T, publicURL, tenant, name
 	return out
 }
 
+// signedCardWithJKU 构造带 jku 声明的签名卡片（VA-205：jku 非白名单拒绝路径取证）。
+//
+// jku 仅做 allowlist 校验、不作为信任来源（冻结 §4.1）：签名密钥仍是 pinned 公钥，
+// 但 protected 头带上非白名单 jku 时注册必须被拒。
+func (s *testSigner) signedCardWithJKU(t *testing.T, publicURL, tenant, name, jku string) []byte {
+	t.Helper()
+	raw := buildCard(publicURL, tenant, name)
+	signer, err := a2acrypto.NewSigner(a2acrypto.SignerConfig{
+		PrivateKey: s.priv,
+		KeyID:      s.kid,
+		Algorithm:  "EdDSA",
+		JWKSURL:    jku,
+	})
+	if err != nil {
+		t.Fatalf("构造带 jku 的签名器失败: %v", err)
+	}
+	sig, err := signer.Sign(context.Background(), json.RawMessage(raw))
+	if err != nil {
+		t.Fatalf("签名卡片失败: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("解析卡片失败: %v", err)
+	}
+	m["signatures"] = []any{map[string]any{
+		"protected": sig.Protected,
+		"signature": sig.Signature,
+	}}
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("序列化签名卡片失败: %v", err)
+	}
+	return out
+}
+
 // newTestRegistry 构造带临时 SQLite 的 Registry（path 模式）。
 //
 // 默认注入内存审计链：治理拒绝事件须**同步落链**，无链时按 fail-closed 返回 503
@@ -153,6 +188,19 @@ func newTestRegistryWithToken(t *testing.T) *Registry {
 		StaticToken: "dev-token",
 		DevMode:     true,
 	}, nil)
+	if err != nil {
+		t.Fatalf("构造 Registry 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close() })
+	return reg
+}
+
+// newTestRegistryWithCfg 按给定配置构造 Registry（VA-205：需要 JKUAllowlist 的用例）。
+//
+// 审计链默认注入内存链：拒绝路径须**同步落链**，无链时按 fail-closed 返回 503（冻结 §5.7）。
+func newTestRegistryWithCfg(t *testing.T, cfg Config) *Registry {
+	t.Helper()
+	reg, err := New(cfg, &policyaudit.Chain{})
 	if err != nil {
 		t.Fatalf("构造 Registry 失败: %v", err)
 	}
