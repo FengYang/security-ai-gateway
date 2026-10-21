@@ -3,7 +3,10 @@ package a2aproxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
+	"time"
 )
 
 // httpRecGet 发起一次 GET 到给定 handler。
@@ -12,6 +15,44 @@ func httpRecGet(t *testing.T, h http.Handler, path string) *httptest.ResponseRec
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 	return rec
+}
+
+// TestRealOTLPCollectorExport 真实 OTLP Collector 端到端导出（VA-603 L-B 取证）。
+//
+// 默认跳过（CI 无 Collector）；显式设置以下环境变量后运行：
+//
+//	A2A_OTLP_TEST_ENDPOINT=127.0.0.1:14317  Collector OTLP/gRPC 端点
+//	A2A_OTLP_TEST_OUT=<file>                Collector file exporter 输出文件
+//
+// 判据：经数据面一次 SendMessage 后，Collector 落盘的 span 中出现 a2a.invoke。
+func TestRealOTLPCollectorExport(t *testing.T) {
+	endpoint := os.Getenv("A2A_OTLP_TEST_ENDPOINT")
+	outFile := os.Getenv("A2A_OTLP_TEST_OUT")
+	if endpoint == "" || outFile == "" {
+		t.Skip("未设置 A2A_OTLP_TEST_ENDPOINT/A2A_OTLP_TEST_OUT，跳过真实 Collector 用例")
+	}
+	t.Setenv("TRACING_ENABLED", "true")
+	t.Setenv("TRACING_OTLP_ENDPOINT", endpoint)
+	t.Setenv("TRACING_TLS_INSECURE", "true")
+	if err := InitTracing(); err != nil {
+		t.Fatalf("InitTracing: %v", err)
+	}
+	h := newHarness(t)
+	_, _ = h.invoke(t, "SendMessage", `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"m-otlp","role":"ROLE_USER","parts":[{"text":"hello otlp"}]}}}`, nil)
+	ShutdownTracing() // flush
+
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		raw, err := os.ReadFile(outFile)
+		if err == nil && strings.Contains(string(raw), "a2a.invoke") {
+			t.Logf("VA-603 真实 Collector 证据：span a2a.invoke 已导出到 %s（数据面响应 %s）", outFile, raw)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Collector 未在截止时间内导出 a2a.invoke（out=%s）", outFile)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // T-5②：tracing 默认关闭时的行为等价性（零开销、零行为变化，C-4/C-8）。
