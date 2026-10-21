@@ -266,12 +266,12 @@ func TestStaticGovernanceNoACLFailsClosed(t *testing.T) {
 func TestStaticGovernanceNoPrincipalFailsClosed(t *testing.T) {
 	g := &StaticGovernance{}
 	req := httptest.NewRequest(http.MethodPost, "/a2a/x", nil)
-	if _, err := g.Authenticate(req); err == nil {
+	if _, err := g.Authenticate(context.Background(), req); err == nil {
 		t.Fatal("无 principal 解析器必须认证失败")
 	}
 	// 解析器返回 nil → 同样失败。
 	g2 := &StaticGovernance{ResolvePrincipal: func(r *http.Request) *Principal { return nil }}
-	if _, err := g2.Authenticate(req); err == nil {
+	if _, err := g2.Authenticate(context.Background(), req); err == nil {
 		t.Fatal("nil principal 必须认证失败")
 	}
 }

@@ -59,6 +59,24 @@ type Config struct {
 	// MaxIdleConns bounds the backend connection pool.
 	MaxIdleConns int
 
+	// ACLFile is a signed ACL table JSON file (T-3 wiring). Empty keeps the
+	// data plane fail-closed.
+	ACLFile string
+	// ACLSigningKey is the hex-encoded HMAC key for ACLFile (>=32 bytes).
+	ACLSigningKey string
+	// RateLimitFile is a signed A2A rate-limit table JSON file (T-3a
+	// wiring). Empty disables limiting (default no-limit contract).
+	RateLimitFile string
+	// RateLimitSigningKey is the hex-encoded HMAC key for RateLimitFile.
+	RateLimitSigningKey string
+	// AuthTokens is a static bearer-token map, format:
+	// "token=tenant:subject:role1|role2,...". Production should replace it
+	// with the auth-service/JWT resolver; empty denies every call.
+	AuthTokens string
+	// AuditSinkFile receives metadata-only audit events as JSON lines
+	// (T-1/T-3b/T-4 wiring). Empty drops events.
+	AuditSinkFile string
+
 	// ForwardSkillHeader mirrors the verified skill to the backend with
 	// X-GA-A2A-Skill-Source: gateway (F-2 §2.4). Default false = strip.
 	ForwardSkillHeader bool
@@ -99,6 +117,12 @@ func (c *Config) Validate() error {
 	if c.MaxIdleConns <= 0 {
 		c.MaxIdleConns = DefaultMaxIdleConns
 	}
+	if c.ACLFile != "" && c.ACLSigningKey == "" {
+		return fmt.Errorf("a2aproxy: ACL 文件已配置但缺少 A2A_ACL_SIGNING_KEY")
+	}
+	if c.RateLimitFile != "" && c.RateLimitSigningKey == "" {
+		return fmt.Errorf("a2aproxy: 限流文件已配置但缺少 A2A_RATE_LIMIT_SIGNING_KEY")
+	}
 	return nil
 }
 
@@ -107,15 +131,21 @@ func (c *Config) Validate() error {
 // feed the snapshot store themselves.
 func ConfigFromEnv() (*Config, error) {
 	cfg := &Config{
-		ListenAddr:         envOr("A2A_PROXY_ADDR", DefaultListenAddr),
-		PublicMode:         PublicMode(envOr("A2A_PUBLIC_MODE", string(PublicModePath))),
-		GatewayPublicBase:  os.Getenv("A2A_GATEWAY_PUBLIC_BASE"),
-		TenantDomains:      parseTenantDomains(os.Getenv("A2A_TENANT_DOMAINS")),
-		SnapshotFile:       os.Getenv("A2A_REGISTRY_SNAPSHOT_FILE"),
-		SnapshotURL:        os.Getenv("A2A_REGISTRY_SNAPSHOT_URL"),
-		SnapshotToken:      os.Getenv("A2A_REGISTRY_SNAPSHOT_TOKEN"),
-		ForwardSkillHeader: os.Getenv("A2A_FORWARD_SKILL_HEADER") == "true",
-		DevAllowLoopback:   os.Getenv("A2A_DEV_ALLOW_LOOPBACK_BACKEND") == "true",
+		ListenAddr:          envOr("A2A_PROXY_ADDR", DefaultListenAddr),
+		PublicMode:          PublicMode(envOr("A2A_PUBLIC_MODE", string(PublicModePath))),
+		GatewayPublicBase:   os.Getenv("A2A_GATEWAY_PUBLIC_BASE"),
+		TenantDomains:       parseTenantDomains(os.Getenv("A2A_TENANT_DOMAINS")),
+		SnapshotFile:        os.Getenv("A2A_REGISTRY_SNAPSHOT_FILE"),
+		SnapshotURL:         os.Getenv("A2A_REGISTRY_SNAPSHOT_URL"),
+		SnapshotToken:       os.Getenv("A2A_REGISTRY_SNAPSHOT_TOKEN"),
+		ForwardSkillHeader:  os.Getenv("A2A_FORWARD_SKILL_HEADER") == "true",
+		DevAllowLoopback:    os.Getenv("A2A_DEV_ALLOW_LOOPBACK_BACKEND") == "true",
+		ACLFile:             os.Getenv("A2A_ACL_FILE"),
+		ACLSigningKey:       os.Getenv("A2A_ACL_SIGNING_KEY"),
+		RateLimitFile:       os.Getenv("A2A_RATE_LIMIT_FILE"),
+		RateLimitSigningKey: os.Getenv("A2A_RATE_LIMIT_SIGNING_KEY"),
+		AuthTokens:          os.Getenv("A2A_AUTH_TOKENS"),
+		AuditSinkFile:       os.Getenv("A2A_AUDIT_SINK_FILE"),
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err

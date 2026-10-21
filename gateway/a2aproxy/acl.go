@@ -355,7 +355,7 @@ func (g *StaticGovernance) ObserveContent(ctx context.Context, ev ContentActionE
 }
 
 // Authenticate implements Governance.
-func (g *StaticGovernance) Authenticate(r *http.Request) (*Principal, error) {
+func (g *StaticGovernance) Authenticate(_ context.Context, r *http.Request) (*Principal, error) {
 	if g.ResolvePrincipal == nil {
 		return nil, fmt.Errorf("a2aproxy: no principal resolver configured")
 	}

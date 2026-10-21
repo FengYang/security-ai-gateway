@@ -58,11 +58,26 @@ func main() {
 		go pollSnapshotHTTP(ctx, store, cfg.SnapshotURL, cfg.SnapshotToken, &etag, cfg.SnapshotPoll)
 	}
 
-	proxy, err := a2aproxy.New(*cfg, store, nil)
+	// T-3/T-3a/T-3b/T-4 集成接线：签名 ACL/限流表 + 静态令牌 + 审计落盘。
+	// 未配置 ACL 文件时保持 fail-closed（DenyAllGovernance），不会意外放开。
+	governance, govCloser, err := a2aproxy.NewGovernanceFromConfig(*cfg)
+	if err != nil {
+		log.Fatalf("治理配置无效（fail-closed 拒绝启动）: %v", err)
+	}
+	if govCloser != nil {
+		defer func() { _ = govCloser.Close() }()
+	}
+
+	proxy, err := a2aproxy.New(*cfg, store, governance)
 	if err != nil {
 		log.Fatalf("构造数据面失败: %v", err)
 	}
 	defer proxy.Close()
+	if governance == nil {
+		log.Printf("治理未接线：ACL 表缺失，数据面 fail-closed（所有调用拒绝）")
+	} else {
+		log.Printf("治理已接线：acl=%s ratelimit=%s audit=%s", cfg.ACLFile, cfg.RateLimitFile, cfg.AuditSinkFile)
+	}
 
 	// T-5：运维面 /metrics 与数据面路由分离挂载。
 	// 若配置了 MetricsAddr 则独立监听（推荐：仅内网可达），否则与数据面共用端口。
@@ -100,10 +115,17 @@ func main() {
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("a2aproxy 启动: addr=%s mode=%s 治理=fail-closed(未接线)", cfg.ListenAddr, cfg.PublicMode)
+	log.Printf("a2aproxy 启动: addr=%s mode=%s governance=%s", cfg.ListenAddr, cfg.PublicMode, governanceMode(governance))
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("HTTP 服务退出: %v", err)
 	}
+}
+
+func governanceMode(g a2aproxy.Governance) string {
+	if g == nil {
+		return "fail-closed"
+	}
+	return "wired"
 }
 
 func watchSnapshotFile(ctx context.Context, store *a2aproxy.SnapshotStore, path string, interval time.Duration) {
