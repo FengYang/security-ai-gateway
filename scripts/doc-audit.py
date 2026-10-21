@@ -78,6 +78,8 @@ R07_ACCEPTED_PAIRS = {
     frozenset({"管理门户-apiTokens-Secret化方案设计.md", "管理门户-apiTokens-Secret化-M2细化方案.md"}),
     # 能力本体（P1-1）↔ P2 实施任务书（P2-1；文件名为研发计划 §10 规定，分工声明见两侧头部）
     frozenset({"GA-AI网关能力补齐方案--P1--MCP协议网关.md", "GA-AI网关能力补齐方案--P2--MCP协议网关化.md"}),
+    # A2A 本体 ↔ T-6 密态轨预留设计（T-6 头部含“分工声明”，只设计不实现，不替代本体）
+    frozenset({"GA-AI网关能力补齐方案--P2--A2A协议支持.md", "GA-AI网关能力补齐方案--P2--A2A协议支持--T-6密态轨衔接设计（预留）.md"}),
 }
 
 SKIP_DIRS = {".git", "node_modules", "vendor", ".trae", "html-snapshots", "_shared", "assets"}
