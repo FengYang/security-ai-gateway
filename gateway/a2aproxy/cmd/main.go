@@ -79,10 +79,38 @@ func main() {
 		log.Printf("治理已接线：acl=%s ratelimit=%s audit=%s", cfg.ACLFile, cfg.RateLimitFile, cfg.AuditSinkFile)
 	}
 
+	// T-4：L3 内容检查接线。未配置时保持 nil（可信域 MVP 放行）；
+	// 生产部署必须显式配置 URL，并建议打开 fail-closed。
+	if cfg.ContentSafetyURL != "" {
+		cs, err := a2aproxy.NewHTTPContentSafety(
+			cfg.ContentSafetyURL, cfg.ContentSafetyToken, cfg.ContentSafetyTimeout, cfg.ContentSafetyFailClosed,
+		)
+		if err != nil {
+			log.Fatalf("内容安全接线失败（fail-closed 拒绝启动）: %v", err)
+		}
+		proxy.SetContentSafety(cs)
+		log.Printf("内容安全已接线: url=%s timeout=%s fail_closed=%v",
+			cfg.ContentSafetyURL, cfg.ContentSafetyTimeout, cfg.ContentSafetyFailClosed)
+	} else {
+		log.Printf("内容安全未接线：A2A_CONTENT_SAFETY_URL 为空，L3 放行（仅建议可信域）")
+	}
+
 	// T-5：运维面 /metrics 与数据面路由分离挂载。
 	// 若配置了 MetricsAddr 则独立监听（推荐：仅内网可达），否则与数据面共用端口。
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", proxy.MetricsHandler())
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !store.Ready() {
+			http.Error(w, "no registry snapshot", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ready"))
+	})
 	mux.Handle("/", proxy.Handler())
 
 	handler := http.Handler(mux)

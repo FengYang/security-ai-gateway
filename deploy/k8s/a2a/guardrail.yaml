@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: a2a-guardrail
+  labels:
+    app: a2a-guardrail
+    app.kubernetes.io/part-of: a2a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: a2a-guardrail
+  template:
+    metadata:
+      labels:
+        app: a2a-guardrail
+        app.kubernetes.io/part-of: a2a
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: a2a-guardrail
+          image: docker.io/security-ai-gateway/a2a-guardrail:lan-20261021
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-addr=:8087"
+            - "-policy-dir=/app/policy"
+            - "-max-bytes=1048576"
+          env:
+            - name: GUARDRAIL_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: a2a-proxy-secrets
+                  key: guardrail-token
+          ports:
+            - name: http
+              containerPort: 8087
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: a2a-guardrail
+  labels:
+    app: a2a-guardrail
+    app.kubernetes.io/part-of: a2a
+spec:
+  type: ClusterIP
+  selector:
+    app: a2a-guardrail
+  ports:
+    - name: http
+      port: 8087
+      targetPort: http

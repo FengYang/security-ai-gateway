@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: a2a-testagent
+  labels:
+    app: a2a-testagent
+    app.kubernetes.io/part-of: a2a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: a2a-testagent
+  template:
+    metadata:
+      labels:
+        app: a2a-testagent
+        app.kubernetes.io/part-of: a2a
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: a2a-testagent
+          image: docker.io/security-ai-gateway/a2a-testagent:lan-20261021
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-addr=:9001"
+            - "-public-url=http://192.168.31.73:30086/a2a/tenant-a/testagent"
+            - "-tenant=tenant-a"
+          ports:
+            - name: http
+              containerPort: 9001
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: a2a-testagent
+  labels:
+    app: a2a-testagent
+    app.kubernetes.io/part-of: a2a
+spec:
+  type: ClusterIP
+  selector:
+    app: a2a-testagent
+  ports:
+    - name: http
+      port: 9001
+      targetPort: http

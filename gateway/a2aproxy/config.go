@@ -2,6 +2,7 @@ package a2aproxy
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 )
@@ -77,6 +78,19 @@ type Config struct {
 	// (T-1/T-3b/T-4 wiring). Empty drops events.
 	AuditSinkFile string
 
+	// ContentSafetyURL is the standalone L3 guardrail endpoint
+	// (e.g. http://a2a-guardrail:8087/v1/content/check). Empty leaves the
+	// content-safety layer unwired (MVP trusted-domain passthrough).
+	ContentSafetyURL string
+	// ContentSafetyToken is the optional bearer token for ContentSafetyURL.
+	ContentSafetyToken string
+	// ContentSafetyTimeout bounds one guardrail check. Defaults to 2s.
+	ContentSafetyTimeout time.Duration
+	// ContentSafetyFailClosed converts guardrail transport/protocol errors
+	// into a deny decision. Default false preserves the frozen MVP fail-open
+	// behavior; production deployments should set it to true.
+	ContentSafetyFailClosed bool
+
 	// ForwardSkillHeader mirrors the verified skill to the backend with
 	// X-GA-A2A-Skill-Source: gateway (F-2 §2.4). Default false = strip.
 	ForwardSkillHeader bool
@@ -123,6 +137,19 @@ func (c *Config) Validate() error {
 	if c.RateLimitFile != "" && c.RateLimitSigningKey == "" {
 		return fmt.Errorf("a2aproxy: 限流文件已配置但缺少 A2A_RATE_LIMIT_SIGNING_KEY")
 	}
+	if c.ContentSafetyTimeout <= 0 {
+		c.ContentSafetyTimeout = DefaultContentSafetyTimeout
+	}
+	if c.ContentSafetyURL == "" {
+		if c.ContentSafetyToken != "" || c.ContentSafetyFailClosed {
+			return fmt.Errorf("a2aproxy: 内容安全 token/fail-closed 已配置但缺少 A2A_CONTENT_SAFETY_URL")
+		}
+	} else {
+		u, err := url.Parse(c.ContentSafetyURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("a2aproxy: A2A_CONTENT_SAFETY_URL 非法: %q", c.ContentSafetyURL)
+		}
+	}
 	return nil
 }
 
@@ -130,22 +157,34 @@ func (c *Config) Validate() error {
 // It is the deployment entry point; tests construct Config directly and may
 // feed the snapshot store themselves.
 func ConfigFromEnv() (*Config, error) {
+	contentSafetyTimeout := DefaultContentSafetyTimeout
+	if raw := os.Getenv("A2A_CONTENT_SAFETY_TIMEOUT"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("a2aproxy: A2A_CONTENT_SAFETY_TIMEOUT 非法: %w", err)
+		}
+		contentSafetyTimeout = d
+	}
 	cfg := &Config{
-		ListenAddr:          envOr("A2A_PROXY_ADDR", DefaultListenAddr),
-		PublicMode:          PublicMode(envOr("A2A_PUBLIC_MODE", string(PublicModePath))),
-		GatewayPublicBase:   os.Getenv("A2A_GATEWAY_PUBLIC_BASE"),
-		TenantDomains:       parseTenantDomains(os.Getenv("A2A_TENANT_DOMAINS")),
-		SnapshotFile:        os.Getenv("A2A_REGISTRY_SNAPSHOT_FILE"),
-		SnapshotURL:         os.Getenv("A2A_REGISTRY_SNAPSHOT_URL"),
-		SnapshotToken:       os.Getenv("A2A_REGISTRY_SNAPSHOT_TOKEN"),
-		ForwardSkillHeader:  os.Getenv("A2A_FORWARD_SKILL_HEADER") == "true",
-		DevAllowLoopback:    os.Getenv("A2A_DEV_ALLOW_LOOPBACK_BACKEND") == "true",
-		ACLFile:             os.Getenv("A2A_ACL_FILE"),
-		ACLSigningKey:       os.Getenv("A2A_ACL_SIGNING_KEY"),
-		RateLimitFile:       os.Getenv("A2A_RATE_LIMIT_FILE"),
-		RateLimitSigningKey: os.Getenv("A2A_RATE_LIMIT_SIGNING_KEY"),
-		AuthTokens:          os.Getenv("A2A_AUTH_TOKENS"),
-		AuditSinkFile:       os.Getenv("A2A_AUDIT_SINK_FILE"),
+		ListenAddr:              envOr("A2A_PROXY_ADDR", DefaultListenAddr),
+		PublicMode:              PublicMode(envOr("A2A_PUBLIC_MODE", string(PublicModePath))),
+		GatewayPublicBase:       os.Getenv("A2A_GATEWAY_PUBLIC_BASE"),
+		TenantDomains:           parseTenantDomains(os.Getenv("A2A_TENANT_DOMAINS")),
+		SnapshotFile:            os.Getenv("A2A_REGISTRY_SNAPSHOT_FILE"),
+		SnapshotURL:             os.Getenv("A2A_REGISTRY_SNAPSHOT_URL"),
+		SnapshotToken:           os.Getenv("A2A_REGISTRY_SNAPSHOT_TOKEN"),
+		ForwardSkillHeader:      os.Getenv("A2A_FORWARD_SKILL_HEADER") == "true",
+		DevAllowLoopback:        os.Getenv("A2A_DEV_ALLOW_LOOPBACK_BACKEND") == "true",
+		ACLFile:                 os.Getenv("A2A_ACL_FILE"),
+		ACLSigningKey:           os.Getenv("A2A_ACL_SIGNING_KEY"),
+		RateLimitFile:           os.Getenv("A2A_RATE_LIMIT_FILE"),
+		RateLimitSigningKey:     os.Getenv("A2A_RATE_LIMIT_SIGNING_KEY"),
+		AuthTokens:              os.Getenv("A2A_AUTH_TOKENS"),
+		AuditSinkFile:           os.Getenv("A2A_AUDIT_SINK_FILE"),
+		ContentSafetyURL:        os.Getenv("A2A_CONTENT_SAFETY_URL"),
+		ContentSafetyToken:      os.Getenv("A2A_CONTENT_SAFETY_TOKEN"),
+		ContentSafetyTimeout:    contentSafetyTimeout,
+		ContentSafetyFailClosed: os.Getenv("A2A_CONTENT_SAFETY_FAIL_CLOSED") == "true",
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
