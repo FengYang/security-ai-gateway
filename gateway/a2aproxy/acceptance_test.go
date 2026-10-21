@@ -25,9 +25,27 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	sdk "github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aclient"
+
 	"security-ai-gateway/gateway/a2a"
 	"security-ai-gateway/gateway/a2a/testagent"
 )
+
+// tenantHeaderTransport 给 SDK 客户端请求补开发态租户头（VA-104 取证用）。
+type tenantHeaderTransport struct {
+	base   http.RoundTripper
+	tenant string
+}
+
+func (t *tenantHeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.Header.Set("X-Test-Tenant", t.tenant)
+	if t.base == nil {
+		return http.DefaultTransport.RoundTrip(clone)
+	}
+	return t.base.RoundTrip(clone)
+}
 
 // errCheckerDown 模拟内容检查器不可用（VA-404）。
 var errCheckerDown = errors.New("classifier down")
@@ -102,6 +120,55 @@ func TestAccVA105BackendURLNotLeaked(t *testing.T) {
 		}
 	}
 	t.Logf("VA-105 证据：响应体不含后端地址（%s）", backend)
+}
+
+// TestAccVA104SDKClientConnectivity：VA-104 真实具名客户端 C1 连通性取证。
+//
+// 使用 `a2a-go` v2.6.0 的 `a2aclient`（与生产同 SDK）经代理发起
+// `SendMessage`/`GetTask`，证明 SDK 客户端 wire 兼容；独立 JSON-RPC 脚本 C2
+// 由同文件其它用例覆盖。
+func TestAccVA104SDKClientConnectivity(t *testing.T) {
+	h := newHarness(t)
+	rawCard := h.agentCardRaw(t)
+	var card sdk.AgentCard
+	if err := json.Unmarshal(rawCard, &card); err != nil {
+		t.Fatalf("decode card: %v", err)
+	}
+	if len(card.SupportedInterfaces) != 1 || card.SupportedInterfaces[0] == nil {
+		t.Fatalf("card interface 非法: %+v", card.SupportedInterfaces)
+	}
+	card.SupportedInterfaces[0].URL = h.proxySrv.URL + "/a2a/" + h.tenant + "/" + h.agent
+
+	hc := h.proxySrv.Client()
+	hc.Transport = &tenantHeaderTransport{base: hc.Transport, tenant: h.tenant}
+	client, err := a2aclient.NewFromCard(context.Background(), &card, a2aclient.WithJSONRPCTransport(hc))
+	if err != nil {
+		t.Fatalf("a2aclient.NewFromCard: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Destroy() })
+
+	ctx := context.Background()
+	result, err := client.SendMessage(ctx, &sdk.SendMessageRequest{
+		Message: sdk.NewMessage(sdk.MessageRoleUser, sdk.NewTextPart("hello from sdk")),
+	})
+	if err != nil {
+		t.Fatalf("SDK SendMessage: %v", err)
+	}
+	task, ok := result.(*sdk.Task)
+	if !ok {
+		t.Fatalf("SendMessage 结果 = %T，期望 *a2a.Task", result)
+	}
+	if task.ID == "" || task.Status.State != sdk.TaskStateCompleted {
+		t.Fatalf("task = %+v", task)
+	}
+	got, err := client.GetTask(ctx, &sdk.GetTaskRequest{ID: task.ID})
+	if err != nil {
+		t.Fatalf("SDK GetTask: %v", err)
+	}
+	if got.ID != task.ID {
+		t.Fatalf("GetTask id = %q, want %q", got.ID, task.ID)
+	}
+	t.Logf("VA-104 证据：a2aclient(a2a-go v2.6.0) 经代理 SendMessage→Task %s state=%s；GetTask 可查", task.ID, task.Status.State)
 }
 
 // --- V-3 治理（VA-3xx）---

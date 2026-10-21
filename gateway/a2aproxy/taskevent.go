@@ -59,28 +59,28 @@ type TaskEvent struct {
 
 // taskStateMap 线上 TASK_STATE_* → 归一化枚举。
 var taskStateMap = map[string]string{
-	"TASK_STATE_SUBMITTED":     "submitted",
-	"TASK_STATE_WORKING":       "working",
+	"TASK_STATE_SUBMITTED":      "submitted",
+	"TASK_STATE_WORKING":        "working",
 	"TASK_STATE_INPUT_REQUIRED": "input-required",
-	"TASK_STATE_AUTH_REQUIRED": "auth-required",
-	"TASK_STATE_COMPLETED":     "completed",
-	"TASK_STATE_FAILED":        "failed",
-	"TASK_STATE_CANCELED":      "canceled",
-	"TASK_STATE_REJECTED":      "rejected",
-	"TASK_STATE_UNSPECIFIED":   "unspecified",
+	"TASK_STATE_AUTH_REQUIRED":  "auth-required",
+	"TASK_STATE_COMPLETED":      "completed",
+	"TASK_STATE_FAILED":         "failed",
+	"TASK_STATE_CANCELED":       "canceled",
+	"TASK_STATE_REJECTED":       "rejected",
+	"TASK_STATE_UNSPECIFIED":    "unspecified",
 }
 
 // taskStateRank 用于乱序判定（数值越大越靠后；终态同级）。
 var taskStateRank = map[string]int{
-	"unspecified":      0,
-	"submitted":        1,
-	"working":          2,
-	"input-required":   3,
-	"auth-required":    4,
-	"completed":        5,
-	"failed":           5,
-	"canceled":         5,
-	"rejected":         5,
+	"unspecified":    0,
+	"submitted":      1,
+	"working":        2,
+	"input-required": 3,
+	"auth-required":  4,
+	"completed":      5,
+	"failed":         5,
+	"canceled":       5,
+	"rejected":       5,
 }
 
 // NormalizeTaskState 将线上 TASK_STATE_* 归一化为小写短横线枚举。

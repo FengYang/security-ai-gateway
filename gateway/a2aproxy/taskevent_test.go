@@ -95,8 +95,8 @@ func TestTaskAuditStoreOutOfOrder(t *testing.T) {
 			DedupKey: TaskEventDedupKey("t", "a", "task-x", state),
 		}
 	}
-	s.Record(ev("completed"))            // 终态
-	rec, ooo := s.Record(ev("working"))  // 终态后再 working → 乱序
+	s.Record(ev("completed"))           // 终态
+	rec, ooo := s.Record(ev("working")) // 终态后再 working → 乱序
 	if !rec {
 		t.Fatal("working 应为新键、应记录")
 	}
