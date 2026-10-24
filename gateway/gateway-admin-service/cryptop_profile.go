@@ -127,13 +127,12 @@ func (s *cryptopProfileSwitcher) handle(w http.ResponseWriter, r *http.Request) 
 
 	current := s.currentProfile()
 
-	// to 枚举校验；sm-module 未接入 → not_implemented（绝不回退 sm-software 冒充，P4）。
+	// to 枚举校验：intl / sm-software / sm-module 均受理（§7.6 切换端点开闸，2026-10-24）。
+	// sm-module 切换受理后由外部滚动重启生效；实际运行时是否可用仍取决于 HSM/密码服务是否就绪
+	// （未就绪 → cryptop.New 启动拒，fail-closed，绝不回退 sm-software 冒充合规，C-3）。
 	to := cryptop.Profile(req.To)
 	switch to {
-	case cryptop.ProfileIntl, cryptop.ProfileSMSW:
-	case cryptop.ProfileSMModule:
-		writeProfileErr(w, http.StatusNotImplemented, "not_implemented", "sm-module 未接入")
-		return
+	case cryptop.ProfileIntl, cryptop.ProfileSMSW, cryptop.ProfileSMModule:
 	default:
 		writeProfileErr(w, http.StatusBadRequest, "bad_request",
 			fmt.Sprintf("未知目标 profile %q", req.To))

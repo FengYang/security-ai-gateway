@@ -155,17 +155,39 @@ func TestCryptopProfileSwitchValidation(t *testing.T) {
 	}
 }
 
-func TestCryptopProfileSwitchSMModule(t *testing.T) {
+func TestCryptopProfileSwitchSMModuleAccepted(t *testing.T) {
+	// §7.6 切换端点开闸：sm-module 切换受理（沿用 restart 语义 + sidecar 一致性校验 + 显式 mask_prg）。
 	sidecar := newMockSidecar(t, "intl", "hmac-sha256", 0)
 	defer sidecar.Close()
 	sw := newCryptopProfileSwitcher(newAuditTestChain(t, false), sidecar.URL)
+	sw.currentProfile = func() cryptop.Profile { return cryptop.ProfileIntl }
 	srv := newProfileSwitchServer(t, sw)
 
 	req := baseReq()
 	req.To = "sm-module"
+	req.MaskPRG = "sm4" // intl→sm-module 须显式指定合法 mask_prg（R-14/R-21）
 	code, got := doProfileSwitch(t, srv.URL, roleAdmin, req)
-	if code != http.StatusNotImplemented || got.Error == nil || got.Error.Code != "not_implemented" {
-		t.Fatalf("期望 501 not_implemented，实际 %d %+v", code, got)
+	if code != http.StatusOK || !got.OK {
+		t.Fatalf("期望 200 ok（sm-module 切换开闸），实际 %d %+v", code, got)
+	}
+	if got.Applied != "sm-module" || got.Mode != "restart" {
+		t.Fatalf("响应字段不符：%+v", got)
+	}
+}
+
+func TestCryptopProfileSwitchSMModuleRequiresExplicitPRG(t *testing.T) {
+	// intl→sm-module 未显式指定 mask_prg，当前 hmac-sha256 对 sm 非法 → 400（强制 bridge/sm4 先行，§7.6）。
+	sidecar := newMockSidecar(t, "intl", "hmac-sha256", 0)
+	defer sidecar.Close()
+	sw := newCryptopProfileSwitcher(newAuditTestChain(t, false), sidecar.URL)
+	sw.currentProfile = func() cryptop.Profile { return cryptop.ProfileIntl }
+	srv := newProfileSwitchServer(t, sw)
+
+	req := baseReq()
+	req.To = "sm-module" // 不带 MaskPRG
+	code, got := doProfileSwitch(t, srv.URL, roleAdmin, req)
+	if code != http.StatusBadRequest || got.Error == nil || got.Error.Code != "bad_request" {
+		t.Fatalf("期望 400 bad_request（须显式指定 mask_prg），实际 %d %+v", code, got)
 	}
 }
 
