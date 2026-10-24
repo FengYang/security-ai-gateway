@@ -36,25 +36,26 @@ import (
 	"github.com/miekg/pkcs11"
 )
 
-// p11KnownMechanisms 厂商 profile 常量表（B-6.1-2）：CKM 值 → 机制名。
-//
-// 当前登记：softhsm 实测档（空——无 SM 机制）；generic 档（空——待 S3-a
-// 选型后按厂商接口文档登记）。rand 不依赖 mechanism list（C_GenerateRandom
-// 为 PKCS#11 通用函数），由探测逻辑恒置。
-var p11KnownMechanisms = map[uint]string{}
+// 厂商机制 profile（B-6.1-2）由 mechprofile.go 承载：CKM → 机制名翻译表
+// 来自 module_mechanism_profile 配置的 JSON 文件（每厂商一份，按厂商 SDK
+// 文档登记；PKCS#11 v3.0 无 SM 机制标准 CKM 值，禁止臆测）。未配置 profile
+// 时仅 rand 恒登记（C_GenerateRandom 为 PKCS#11 通用函数，不依赖
+// mechanism list）。
 
 // PKCS11Backend PKCS#11 后端（M4-1）。
 type PKCS11Backend struct {
-	mu         sync.Mutex
-	cfg        *Config
-	ctx        *pkcs11.Ctx
-	slotIndex  int // module_slot 语义：GetSlotList 下标（见包注释）
-	caps       Capabilities
-	pool       *SessionPool
-	loginSH    pkcs11.SessionHandle // Init 登录会话（token 级登录态载体）
-	hasLogin   bool
-	closed     bool
-	randHealth RandHealthStatus // R-S3-12 随机数启动自检状态（零值=未检）
+	mu            sync.Mutex
+	cfg           *Config
+	ctx           *pkcs11.Ctx
+	slotIndex     int // module_slot 语义：GetSlotList 下标（见包注释）
+	caps          Capabilities
+	pool          *SessionPool
+	loginSH       pkcs11.SessionHandle // Init 登录会话（token 级登录态载体）
+	hasLogin      bool
+	closed        bool
+	randHealth    RandHealthStatus // R-S3-12 随机数启动自检状态（零值=未检）
+	mech          *MechTable       // B-6.1-2 机制翻译表（profile 驱动；空表=仅 rand）
+	mechProfileID string           // profile 溯源（Capabilities.Profile）
 }
 
 // newPKCS11Backend 构造并初始化 PKCS#11 后端（NewBackend 的生产入口）。
@@ -131,6 +132,19 @@ func (b *PKCS11Backend) Init(cfg *Config) error {
 	pinBytes := []byte(pin)
 	zeroBytes(pinBytes)
 
+	// B-6.1-2：厂商机制 profile 加载（fail-closed；Validate 已预校验，此处
+	// 转为运行表）。空 = 仅 rand 恒登记（SoftHSM 等无 SM 机制环境的缺省态）。
+	if cfg.MechanismProfile != "" {
+		p, err := LoadMechProfile(cfg.MechanismProfile)
+		if err != nil {
+			return err
+		}
+		b.mech = p.Table()
+		b.mechProfileID = p.ProfileID
+	} else {
+		b.mech = EmptyMechTable()
+	}
+
 	// 能力探测（B-6.1-6/R-S3-11）：只登记探测命中的机制。
 	caps, raw, err := b.probeCapabilities(slotID, tok)
 	if err != nil {
@@ -182,7 +196,7 @@ func (b *PKCS11Backend) probeCapabilities(slotID uint, tok pkcs11.TokenInfo) (Ca
 	names = append(names, MechRand) // C_GenerateRandom 不依赖 mechanism list
 	for _, m := range mechs {
 		raw = append(raw, m.Mechanism)
-		if name, ok := p11KnownMechanisms[m.Mechanism]; ok {
+		if name, ok := b.mech.NameByCKM(m.Mechanism); ok {
 			names = append(names, name)
 		}
 	}
@@ -192,6 +206,7 @@ func (b *PKCS11Backend) probeCapabilities(slotID uint, tok pkcs11.TokenInfo) (Ca
 		Vendor:     strings.TrimSpace(tok.ManufacturerID),
 		Model:      strings.TrimSpace(tok.Model),
 		Mechanisms: names,
+		Profile:    b.mechProfileID,
 	}, raw, nil
 }
 

@@ -38,6 +38,7 @@ const (
 	EnvSwitchBackCooldown    = "MODULE_SWITCH_BACK_COOLDOWN"
 	EnvTimeoutMS             = "MODULE_TIMEOUT_MS"
 	EnvRequiredMechanisms    = "MODULE_REQUIRED_MECHANISMS"
+	EnvMechProfile           = "MODULE_MECHANISM_PROFILE"
 	EnvDegradeAck            = "MODULE_DEGRADE_ACK"
 )
 
@@ -94,6 +95,7 @@ type Config struct {
 	TimeoutMS int // module_timeout_ms（按访问形态分别配置，R2-07）
 
 	RequiredMechanisms []string // module_required_mechanisms（R-S3-11）
+	MechanismProfile   string   // module_mechanism_profile（B-6.1-2 厂商机制 profile JSON 路径；空 = 仅 rand 恒登记）
 	DegradeAck         bool     // module_degrade_ack（degrade 模式显式确认，R-S3-3）
 }
 
@@ -191,6 +193,9 @@ func LoadConfig() *Config {
 			cfg.RequiredMechanisms = mechs
 		}
 	}
+	if v := os.Getenv(EnvMechProfile); v != "" {
+		cfg.MechanismProfile = strings.TrimSpace(v)
+	}
 	cfg.DegradeAck = os.Getenv(EnvDegradeAck) == "true"
 	return cfg
 }
@@ -198,8 +203,8 @@ func LoadConfig() *Config {
 // Validate 配置校验（§6.4 校验规则；返回首个违规的明确错误）。
 //
 // 覆盖：R-S3-1（sdf/pkcs11 库路径必填且存在）、R-S3-2（口令引用名必填）、
-// R-S3-7（failover 备模块配置）、R-S3-11（机制名合法）、R-S3-3（degrade 显式确认）、
-// 以及数值域校验。mock 后端跳过厂商项校验（功能验证档）。
+// R-S3-7（failover 备模块配置）、R-S3-11（机制名合法 + 厂商 profile 可加载）、
+// R-S3-3（degrade 显式确认）、以及数值域校验。mock 后端跳过厂商项校验（功能验证档）。
 func (c *Config) Validate() error {
 	if c == nil {
 		return fmt.Errorf("config: nil")
@@ -211,6 +216,13 @@ func (c *Config) Validate() error {
 	for _, m := range c.RequiredMechanisms {
 		if !IsKnownMechanism(m) {
 			return fmt.Errorf("module_required_mechanisms 含未知机制 %q", m)
+		}
+	}
+	// 厂商机制 profile（B-6.1-2）：配置了路径就必须加载并通过校验（fail-closed，
+	// 在 Init 接触设备前拒绝；SM 机制 CKM 值禁止臆测，见 mechprofile.go）。
+	if c.MechanismProfile != "" {
+		if _, err := LoadMechProfile(c.MechanismProfile); err != nil {
+			return err
 		}
 	}
 	// 数值域。

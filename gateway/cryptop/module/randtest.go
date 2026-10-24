@@ -75,6 +75,8 @@ type RandCheckReport struct {
 	Passed  bool
 	// Detail 失败摘要（失败项名与 P-value），通过时为空。
 	Detail string
+	// Attempts 实际尝试次数（quick 档重试机制；1 = 一次通过）。
+	Attempts int
 }
 
 // String 人类可读摘要（日志/留档）。
@@ -88,6 +90,9 @@ func (r *RandCheckReport) String() string {
 	}
 	s := fmt.Sprintf("rand-self-check profile=%s bits=%d alpha=%g verdict=%s",
 		r.Profile, r.Bits, r.Alpha, verdict)
+	if r.Attempts > 1 {
+		s += fmt.Sprintf(" attempts=%d", r.Attempts)
+	}
 	for _, it := range r.Items {
 		mark := "pass"
 		if !it.Pass {
@@ -117,8 +122,62 @@ func RunRandSelfCheck(reader io.Reader, profile RandCheckProfile) (*RandCheckRep
 	}
 }
 
-// runQuickRandCheck 20000 bit 三项检测（GB/T 32915-2016 方法 + GM/T 0078-2020 规模）。
+// randQuickCheckAttempts quick 档最大尝试次数（1 次首检 + 2 次复检）。
+//
+// 依据（2026-10-24 实测，.248 SoftHSM）：单样本统计检测有固有误拒率——
+// 每项 α=0.01，三项合计约 2.5%（实测 200 次误拒 5 次：mono=2/poker=2/
+// runs=1，与统计预期吻合，熵源无异常）。若启动门禁只检一次，健康模块
+// 每次进程启动有约 2.5% 概率被误拒而无法启动（可用性缺陷）。
+// 对策（行业惯例，SP 800-90B 连续检测的重复确认思想）：首检失败后重新
+// 采样复检，仅当连续 randQuickCheckAttempts 次均不通过才判失败——坏熵源
+// 每次必败（fail-closed 不放松），健康熵源误拒率降至约 (0.025)^3 ≈ 1.6e-5。
+const randQuickCheckAttempts = 3
+
+// randPowerOnAttempts power-on 档最大尝试次数（1 次首检 + 2 次复检）。
+//
+// 依据：库 PowerOnDetect 判据为每项 ≥ Threshold(20)=19 组通过（组内
+// α=0.01）+ Q 值分布均匀性（AlphaT=0.0001）。按二项分布，健康熵源每项
+// P(≤18/20)≈1.7%，15 项合计误拒率约 20%（2026-10-24 实测复现：重叠子
+// 序列检测 18/20）。该档用于 S3-a 到货验收/密评留档，误拒会把合格设备
+// 判废，故同样采用复检对策；坏熵源每次必败，fail-closed 不放松。
+const randPowerOnAttempts = 3
+
+// runQuickRandCheck 20000 bit 三项检测（GB/T 32915-2016 方法 + GM/T 0078-2020
+// 规模），带误拒率对策重试（见 randQuickCheckAttempts）。
 func runQuickRandCheck(reader io.Reader) (*RandCheckReport, error) {
+	var last *RandCheckReport
+	var firstDetail string
+	attempted := 0
+	for attempt := 1; attempt <= randQuickCheckAttempts; attempt++ {
+		rep, err := runQuickRandCheckOnce(reader)
+		if err != nil {
+			if attempt > 1 {
+				break // 复检取样失败（如有限 reader 耗尽）：首检结论即最终结论
+			}
+			return nil, err // 首检取样失败：过程错误（非结论失败）
+		}
+		attempted = attempt
+		rep.Attempts = attempt
+		if rep.Passed {
+			return rep, nil
+		}
+		if attempt == 1 {
+			firstDetail = rep.Detail
+		}
+		last = rep
+	}
+	// 首检失败且复检无法救回：fail-closed。
+	if attempted < randQuickCheckAttempts {
+		last.Detail = fmt.Sprintf("复检取样失败（reader 耗尽），以首检失败结论为准: %s", last.Detail)
+	} else {
+		last.Detail = fmt.Sprintf("连续 %d 次尝试均未通过（首次: %s；末次: %s）",
+			attempted, firstDetail, last.Detail)
+	}
+	return last, nil
+}
+
+// runQuickRandCheckOnce 单次 20000 bit 三项检测。
+func runQuickRandCheckOnce(reader io.Reader) (*RandCheckReport, error) {
 	buf := make([]byte, randQuickCheckBits/8)
 	if _, err := io.ReadFull(reader, buf); err != nil {
 		return nil, fmt.Errorf("module: 随机数自检样本读取失败（需 %d 字节）: %w", len(buf), err)
@@ -159,7 +218,40 @@ func randItem(name string, p float64) RandCheckItem {
 }
 
 // runPowerOnRandCheck GM/T 0062-2018 E 类上电检测（委托 randomness/detect，
-// v1.6.0 实现 15 项 × 20 组 × 10^6 bit + 组通过率 + 分布均匀性双重判定）。
+// v1.6.0 实现 15 项 × 20 组 × 10^6 bit + 组通过率 ≥19/20 + 分布均匀性双重
+// 判定），带误拒率对策重试（见 randPowerOnAttempts）。
+func runPowerOnRandCheck(reader io.Reader) (*RandCheckReport, error) {
+	var last *RandCheckReport
+	var firstDetail string
+	attempted := 0
+	for attempt := 1; attempt <= randPowerOnAttempts; attempt++ {
+		rep, err := runPowerOnRandCheckOnce(reader)
+		if err != nil {
+			if attempt > 1 {
+				break // 复检取样失败：首检结论即最终结论
+			}
+			return nil, err
+		}
+		attempted = attempt
+		rep.Attempts = attempt
+		if rep.Passed {
+			return rep, nil
+		}
+		if attempt == 1 {
+			firstDetail = rep.Detail
+		}
+		last = rep
+	}
+	if attempted < randPowerOnAttempts {
+		last.Detail = fmt.Sprintf("复检取样失败（reader 耗尽），以首检失败结论为准: %s", last.Detail)
+	} else {
+		last.Detail = fmt.Sprintf("连续 %d 次尝试均未通过（首次: %s；末次: %s）",
+			attempted, firstDetail, last.Detail)
+	}
+	return last, nil
+}
+
+// runPowerOnRandCheckOnce 单次上电检测。
 //
 // 注意库的错误语义：组通过率/均匀性不达标与 io 读取失败都经 (bool, error)
 // 返回，前者 error 消息形如"检测项 n/20"（结论失败，含明细），后者为
@@ -168,7 +260,7 @@ func randItem(name string, p float64) RandCheckItem {
 //
 // 明细留档：该档只给失败摘要；逐项完整明细由 S3-a 厂商到货验收时用库的
 // rddetector 工具产出报告（登记于已知限制）。
-func runPowerOnRandCheck(reader io.Reader) (*RandCheckReport, error) {
+func runPowerOnRandCheckOnce(reader io.Reader) (*RandCheckReport, error) {
 	ok, err := detect.PowerOnDetect(reader)
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {

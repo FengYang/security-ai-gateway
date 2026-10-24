@@ -9,10 +9,11 @@ import (
 	"testing"
 )
 
-// detSeq2500 SHA-256 计数器模式生成确定性 2500 字节（20000 bit）伪随机样本。
-// 确定性保证测试可复现；分布均匀性足以通过三项启动检测。
-func detSeq2500(seed string) []byte {
-	buf := make([]byte, 2500)
+// detSeq SHA-256 计数器模式生成确定性 n 字节伪随机样本。确定性保证测试
+// 可复现；分布均匀性足以通过三项启动检测（n=2500）与上电检测全量档
+// （n=2500000，种子经实测挑选，见 TestRunRandSelfCheckPowerOnRetryThenPass）。
+func detSeq(n int, seed string) []byte {
+	buf := make([]byte, n)
 	var ctr uint64
 	h := sha256.New()
 	for off := 0; off < len(buf); off += 32 {
@@ -28,7 +29,7 @@ func detSeq2500(seed string) []byte {
 }
 
 func TestRunRandSelfCheckQuickPass(t *testing.T) {
-	rep, err := RunRandSelfCheck(bytes.NewReader(detSeq2500("p2-3-rand-quick-pass")), RandCheckQuick)
+	rep, err := RunRandSelfCheck(bytes.NewReader(detSeq(2500, "p2-3-rand-quick-pass")), RandCheckQuick)
 	if err != nil {
 		t.Fatalf("RunRandSelfCheck 过程失败: %v", err)
 	}
@@ -160,3 +161,65 @@ func TestRandHealthStatusInt(t *testing.T) {
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+// TestRunRandSelfCheckQuickRetryThenPass 误拒率对策：首检失败（全零序列
+// 三项必败）后重新采样复检通过——整体判 PASS 且 Attempts=2。
+// 依据：单样本 α=0.01 三项合计误拒率约 2.5%（.248 SoftHSM 实测 200 次
+// 误拒 5 次），启动门禁不重试会把健康模块误拒下线（可用性缺陷）。
+func TestRunRandSelfCheckQuickRetryThenPass(t *testing.T) {
+	bad := make([]byte, 2500) // 全零：三项必败
+	good := detSeq(2500, "p2-3-rand-quick-retry")
+	rep, err := RunRandSelfCheck(io.MultiReader(bytes.NewReader(bad), bytes.NewReader(good)), RandCheckQuick)
+	if err != nil {
+		t.Fatalf("RunRandSelfCheck 过程失败: %v", err)
+	}
+	if !rep.Passed {
+		t.Fatalf("复检应通过: %s", rep)
+	}
+	if rep.Attempts != 2 {
+		t.Fatalf("Attempts=%d want 2（首检失败 + 复检通过）", rep.Attempts)
+	}
+	if rep.Detail != "" {
+		t.Fatalf("通过时 Detail 应为空，实际 %q", rep.Detail)
+	}
+}
+
+// TestRunRandSelfCheckQuickPersistentFail fail-closed 不放松：持续坏熵源
+// （全零序列）连续 3 次必败，整体判 FAIL 且 Detail 含连续失败摘要。
+func TestRunRandSelfCheckQuickPersistentFail(t *testing.T) {
+	bad := make([]byte, 2500*randQuickCheckAttempts)
+	rep, err := RunRandSelfCheck(bytes.NewReader(bad), RandCheckQuick)
+	if err != nil {
+		t.Fatalf("RunRandSelfCheck 过程失败: %v", err)
+	}
+	if rep.Passed {
+		t.Fatalf("持续坏熵源应判失败: %s", rep)
+	}
+	if rep.Attempts != randQuickCheckAttempts {
+		t.Fatalf("Attempts=%d want %d", rep.Attempts, randQuickCheckAttempts)
+	}
+	if !strings.Contains(rep.Detail, "连续 3 次") {
+		t.Fatalf("Detail 应含连续失败摘要，实际 %q", rep.Detail)
+	}
+}
+
+// TestRunRandSelfCheckPowerOnRetryThenPass power-on 档误拒率对策：
+// 首检失败（全零必败）后复检通过——整体 PASS 且 Attempts=2。
+// 依据：库判据每项 ≥19/20 组 × 15 项，健康熵源误拒率约 20%
+// （.248 SoftHSM 实测复现：重叠子序列检测 18/20）；验收流程
+// 不含复跑会把合格设备判废。
+func TestRunRandSelfCheckPowerOnRetryThenPass(t *testing.T) {
+	const n = 20 * 1000000 / 8
+	bad := bytes.Repeat([]byte{0x00}, n)
+	good := detSeq(n, "p2-3-rand-poweron-retry")
+	rep, err := RunRandSelfCheck(io.MultiReader(bytes.NewReader(bad), bytes.NewReader(good)), RandCheckPowerOn)
+	if err != nil {
+		t.Fatalf("RunRandSelfCheck 过程失败: %v", err)
+	}
+	if !rep.Passed {
+		t.Fatalf("复检应通过: %s", rep)
+	}
+	if rep.Attempts != 2 {
+		t.Fatalf("Attempts=%d want 2（首检失败 + 复检通过）", rep.Attempts)
+	}
+}

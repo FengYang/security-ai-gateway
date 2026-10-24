@@ -1,0 +1,98 @@
+{
+  "profile_id": "softhsm-generic",
+  "vendor": "softhsm",
+  "interface": "pkcs11",
+  "description": "SoftHSMv2 功能验证档（非合规）：仅登记 PKCS#11 v3.0 标准 CKM 机制，用于适配层运算路径功能验证（M4-4 起）。不含任何 SM 机制——SoftHSM 2.6 实测无 SM 机制（2026-10-24，pkcs11-tool -M 具名列表 72 行无 SM）。禁止用于生产合规声明；SM 运算路径必须使用厂商 profile。",
+  "mechanisms": [
+    {
+      "name": "aes-gcm",
+      "ckm": "0x00001087",
+      "sm": false,
+      "min_key_bits": 128,
+      "max_key_bits": 256,
+      "source": "standard-header:pkcs11t.h CKM_AES_GCM",
+      "note": "Seal/Open 运算路径功能验证"
+    },
+    {
+      "name": "aes-cbc",
+      "ckm": "0x00001082",
+      "sm": false,
+      "min_key_bits": 128,
+      "max_key_bits": 256,
+      "source": "standard-header:pkcs11t.h CKM_AES_CBC",
+      "note": "备用（POC v3/v4 已验证 CKM_AES_CBC 可用）"
+    },
+    {
+      "name": "aes-key-wrap",
+      "ckm": "0x00002109",
+      "sm": false,
+      "min_key_bits": 128,
+      "max_key_bits": 256,
+      "source": "standard-header:pkcs11t.h CKM_AES_KEY_WRAP",
+      "note": "WrapKey/UnwrapKey 功能验证（与 D-20 备份 KEK 路径同构）"
+    },
+    {
+      "name": "aes-key-gen",
+      "ckm": "0x00001080",
+      "sm": false,
+      "min_key_bits": 128,
+      "max_key_bits": 256,
+      "source": "standard-header:pkcs11t.h CKM_AES_KEY_GEN",
+      "note": "GenerateKey 功能验证"
+    },
+    {
+      "name": "sha256",
+      "ckm": "0x00000250",
+      "sm": false,
+      "min_key_bits": 0,
+      "max_key_bits": 0,
+      "source": "standard-header:pkcs11t.h CKM_SHA256",
+      "note": "Hash 运算路径功能验证"
+    },
+    {
+      "name": "sha256-hmac",
+      "ckm": "0x00000251",
+      "sm": false,
+      "min_key_bits": 128,
+      "max_key_bits": 256,
+      "source": "standard-header:pkcs11t.h CKM_SHA256_HMAC",
+      "note": "HMAC 运算路径功能验证"
+    },
+    {
+      "name": "sha256-kdf",
+      "ckm": "0x00000393",
+      "sm": false,
+      "min_key_bits": 0,
+      "max_key_bits": 0,
+      "source": "standard-header:pkcs11t.h CKM_SHA256_KEY_DERIVATION",
+      "note": "KDF 运算路径功能验证（SM3-KDF 为厂商机制）"
+    },
+    {
+      "name": "ec-key-pair-gen",
+      "ckm": "0x00001040",
+      "sm": false,
+      "min_key_bits": 256,
+      "max_key_bits": 521,
+      "source": "standard-header:pkcs11t.h CKM_EC_KEY_PAIR_GEN",
+      "note": "GenerateKeyPair 运算路径功能验证"
+    },
+    {
+      "name": "ecdsa",
+      "ckm": "0x00001041",
+      "sm": false,
+      "min_key_bits": 256,
+      "max_key_bits": 521,
+      "source": "standard-header:pkcs11t.h CKM_ECDSA",
+      "note": "Sign/Verify 运算路径功能验证"
+    },
+    {
+      "name": "ecdh1-derive",
+      "ckm": "0x00001050",
+      "sm": false,
+      "min_key_bits": 256,
+      "max_key_bits": 521,
+      "source": "standard-header:pkcs11t.h CKM_ECDH1_DERIVE",
+      "note": "ECDH 运算路径功能验证"
+    }
+  ]
+}

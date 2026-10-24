@@ -1,0 +1,63 @@
+{
+  "profile_id": "template-vendor-sm",
+  "vendor": "<厂商名，如 vendor-x>",
+  "interface": "pkcs11",
+  "description": "厂商 SM 机制 profile 模板（填写件）。CKM 值一律留空（null）——PKCS#11 v3.0 标准未定义 SM 机制的 CKM 常量（SM 支持属厂商扩展，如 IBM 用 0x8005xxxx 私有段），必须按厂商 SDK 文档逐项填写；未填写时加载必失败（fail-closed，禁止臆测标准值）。填写示范：\"ckm\": \"0x80050001\", \"source\": \"vendor-doc:X-HSM-SDK-v3.2 §5.1\"。",
+  "instructions": "1) 每厂商复制本文件为 <vendor>-pkcs11.json；2) 按厂商 SDK 文档填写 mechanisms[].ckm（0x 前缀十六进制）与 source（必须含 vendor）；3) 通过 module_mechanism_profile 配置启用；4) 到货验收时按 S3-a 选型基线 §7 核对。",
+  "mechanisms": [
+    {
+      "name": "sm4-gcm",
+      "ckm": null,
+      "sm": true,
+      "min_key_bits": 128,
+      "max_key_bits": 256,
+      "source": "",
+      "note": "必须支持 GCM（S3-a MUST-2）"
+    },
+    {
+      "name": "sm3",
+      "ckm": null,
+      "sm": true,
+      "min_key_bits": 0,
+      "max_key_bits": 0,
+      "source": "",
+      "note": "哈希"
+    },
+    {
+      "name": "hmac-sm3",
+      "ckm": null,
+      "sm": true,
+      "min_key_bits": 128,
+      "max_key_bits": 256,
+      "source": "",
+      "note": "HMAC-SM3"
+    },
+    {
+      "name": "sm2-sign",
+      "ckm": null,
+      "sm": true,
+      "min_key_bits": 256,
+      "max_key_bits": 256,
+      "source": "",
+      "note": "含 uid 参数（GM2-06）"
+    },
+    {
+      "name": "sm2-ecdh",
+      "ckm": null,
+      "sm": true,
+      "min_key_bits": 256,
+      "max_key_bits": 256,
+      "source": "",
+      "note": "SDF 侧为 SDF_GenerateAgreementDataWithECC 系"
+    },
+    {
+      "name": "sm4-key-wrap",
+      "ckm": null,
+      "sm": true,
+      "min_key_bits": 128,
+      "max_key_bits": 256,
+      "source": "",
+      "note": "备份 KEK 用途（D-20；S3-a MUST-4 一票否决项：须可信包装/厂商克隆）"
+    }
+  ]
+}

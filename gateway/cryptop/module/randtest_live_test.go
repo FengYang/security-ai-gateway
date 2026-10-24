@@ -7,8 +7,6 @@
 package cryptopmodule
 
 import (
-	"bytes"
-	"io"
 	"testing"
 )
 
@@ -101,6 +99,10 @@ func TestPKCS11LiveRandSelfCheckPowerOn(t *testing.T) {
 
 // TestPKCS11LiveRandSelfCheckBackendReport M4-2：直接执行 quick 档并核对
 // 报告要素（R-S3-12 留档：样本量/显著水平/逐项 P/结论）。
+//
+// 取样走流式 liveRandReader（不预缓冲单样本）——与生产 Init 路径一致，
+// 使误拒率对策重试能够重新采样（M4-3 修正：预缓冲单样本时复检只能
+// 吃到 EOF，重试形同虚设）。
 func TestPKCS11LiveRandSelfCheckBackendReport(t *testing.T) {
 	cfg := p11LiveConfig(t, []string{MechRand})
 	backend, err := NewBackend(cfg)
@@ -110,11 +112,7 @@ func TestPKCS11LiveRandSelfCheckBackendReport(t *testing.T) {
 	defer func() { _ = backend.Close() }()
 	pb := backend.(*PKCS11Backend)
 
-	buf := make([]byte, randQuickCheckBits/8)
-	if _, err := io.ReadFull(&liveRandReader{b: pb}, buf); err != nil {
-		t.Fatalf("取样 %d 字节: %v", len(buf), err)
-	}
-	rep, err := RunRandSelfCheck(bytes.NewReader(buf), RandCheckQuick)
+	rep, err := RunRandSelfCheck(&liveRandReader{b: pb}, RandCheckQuick)
 	if err != nil {
 		t.Fatalf("quick 自检: %v", err)
 	}

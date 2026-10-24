@@ -54,10 +54,34 @@ const (
 	MechRand    = "rand"     // 模块 CSPRNG（GM2-03）
 )
 
+// 功能验证档机制名（非国密；M4-3 新增）。
+//
+// 用途：M4-4 起在 SoftHSM 等**无 SM 机制**的环境做运算路径功能验证
+// （S3-a 选型基线 §5.1 明确"aes-* 如支持，仅功能验证档登记，**不得映射成
+// SM 名冒充合规**"）。约束由 mechprofile.go 校验规则强制：SM 机制只能来自
+// 厂商 profile 且 source 标注 vendor 文档；standard-header 不构成 SM 登记
+// 依据。生产合规路径只用上组 SM 机制名（DefaultRequiredMechanisms）。
+const (
+	MechAESGCM      = "aes-gcm"         // AES-GCM（Seal/Open 功能验证）
+	MechAESCBC      = "aes-cbc"         // AES-CBC（备用；POC v3/v4 已验证）
+	MechAESKeyWrap  = "aes-key-wrap"    // AES-KEY-WRAP（Wrap/Unwrap 功能验证；与 D-20 备份 KEK 路径同构）
+	MechAESKeyGen   = "aes-key-gen"     // AES 密钥生成（GenerateKey 功能验证）
+	MechSHA256      = "sha256"          // SHA-256（Hash 功能验证）
+	MechSHA256HMAC  = "sha256-hmac"     // HMAC-SHA256（HMAC 功能验证）
+	MechSHA256KDF   = "sha256-kdf"      // SHA256-KDF（KDF 功能验证；SM3-KDF 为厂商机制）
+	MechECKeyGen    = "ec-key-pair-gen" // EC 密钥对生成（GenerateKeyPair 功能验证）
+	MechECDSA       = "ecdsa"           // ECDSA（Sign/Verify 功能验证）
+	MechECDH1Derive = "ecdh1-derive"    // ECDH1_DERIVE（ECDH 功能验证）
+)
+
 // knownMechanisms 机制名全集（配置解析与能力校验用）。
 var knownMechanisms = map[string]bool{
 	MechSM4GCM: true, MechSM3: true, MechHMACSM3: true,
 	MechSM2Sign: true, MechSM2ECDH: true, MechRand: true,
+	// 功能验证档（非国密；见上方常量组注释）。
+	MechAESGCM: true, MechAESCBC: true, MechAESKeyWrap: true, MechAESKeyGen: true,
+	MechSHA256: true, MechSHA256HMAC: true, MechSHA256KDF: true,
+	MechECKeyGen: true, MechECDSA: true, MechECDH1Derive: true,
 }
 
 // IsKnownMechanism 机制名是否在全集内。
@@ -132,7 +156,8 @@ type Capabilities struct {
 	Backend    string   // sdf|pkcs11|mock
 	Vendor     string   // 厂商（mock = "mock"）
 	Model      string   // 型号（mock = "in-memory"）
-	Mechanisms []string // 支持的机制名（有序）
+	Mechanisms []string // 支持的机制名（有序；仅探测命中项）
+	Profile    string   // 机制 profile_id（B-6.1-2 溯源；空 = 未配置 profile）
 }
 
 // HasMechanism 是否支持某机制。

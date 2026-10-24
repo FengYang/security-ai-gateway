@@ -16,6 +16,7 @@ package cryptopmodule
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -41,6 +42,16 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// profilePath 随源码发布的 profile 文件（go test 工作目录即包目录）。
+func profilePath(t *testing.T, name string) string {
+	t.Helper()
+	p := filepath.Join("profiles", name)
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("profile 文件缺失: %s: %v", p, err)
+	}
+	return p
 }
 
 // TestPKCS11LiveLifecycleRand M4-1 主链路：Init→Capabilities→Rand→会话池→
@@ -132,4 +143,69 @@ func TestPKCS11LiveLiteralPINRejected(t *testing.T) {
 		t.Fatal("PinRef 字面值应被拒绝（R-S3-2）")
 	}
 	t.Logf("R-S3-2 如实触发: %v", err)
+}
+
+// TestPKCS11LiveMechProfileFunctional M4-3/B-6.1-2：generic profile 登记的
+// 标准机制（SoftHSM 实测有）→ Init 成功，Capabilities 只含探测命中项，
+// Profile 字段溯源 profile_id。
+func TestPKCS11LiveMechProfileFunctional(t *testing.T) {
+	cfg := p11LiveConfig(t, []string{MechRand, MechAESGCM, MechAESKeyWrap, MechSHA256})
+	cfg.MechanismProfile = profilePath(t, "softhsm-generic.json")
+	backend, err := NewBackend(cfg)
+	if err != nil {
+		t.Fatalf("NewBackend(pkcs11, generic profile): %v", err)
+	}
+	defer func() { _ = backend.Close() }()
+
+	caps := backend.Capabilities()
+	if caps.Profile != "softhsm-generic" {
+		t.Fatalf("caps.Profile=%q want softhsm-generic（B-6.1-2 溯源）", caps.Profile)
+	}
+	for _, m := range []string{MechRand, MechAESGCM, MechAESKeyWrap, MechSHA256} {
+		if !caps.HasMechanism(m) {
+			t.Fatalf("caps 应含 %s，实得 %v", m, caps.Mechanisms)
+		}
+	}
+	// 功能验证档不得冒充合规档：任何 SM 机制都不得出现。
+	for _, m := range []string{MechSM4GCM, MechSM3, MechHMACSM3, MechSM2Sign, MechSM2ECDH} {
+		if caps.HasMechanism(m) {
+			t.Fatalf("generic profile 不得登记 SM 机制 %q（不得冒充合规），实得 %v", m, caps.Mechanisms)
+		}
+	}
+	t.Logf("generic profile 探测命中: mechanisms=%v", caps.Mechanisms)
+}
+
+// TestPKCS11LiveGenericProfileNoSM R-S3-11：即使配置了 generic profile，
+// 缺省六 SM 机制仍必须启动拒（证明功能验证档不冒充合规档）。
+func TestPKCS11LiveGenericProfileNoSM(t *testing.T) {
+	cfg := p11LiveConfig(t, DefaultRequiredMechanisms())
+	cfg.MechanismProfile = profilePath(t, "softhsm-generic.json")
+	backend, err := NewBackend(cfg)
+	if err == nil {
+		_ = backend.Close()
+		t.Fatal("generic profile 无 SM 机制，缺省六机制应启动拒（R-S3-11）")
+	}
+	if !errors.Is(err, ErrMechanismMissing) {
+		t.Fatalf("应返回 ErrMechanismMissing，实得: %v", err)
+	}
+	t.Logf("generic profile + SM 缺省六机制 fail-closed 如实触发: %v", err)
+}
+
+// TestPKCS11LiveMechProfileTemplateRejected B-6.1-2：厂商模板（CKM 未填）
+// 必须在 Init 期 fail-closed，且错误信息指明待填机制。
+func TestPKCS11LiveMechProfileTemplateRejected(t *testing.T) {
+	cfg := p11LiveConfig(t, []string{MechRand})
+	cfg.MechanismProfile = profilePath(t, "template-vendor-sm.json")
+	backend, err := NewBackend(cfg)
+	if err == nil {
+		_ = backend.Close()
+		t.Fatal("厂商模板（CKM 未填）应启动拒（fail-closed，禁止臆测标准值）")
+	}
+	msg := err.Error()
+	for _, want := range []string{"sm4-gcm", "CKM"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("错误信息应含 %q，实得: %s", want, msg)
+		}
+	}
+	t.Logf("厂商模板 fail-closed 如实触发: %v", err)
 }
