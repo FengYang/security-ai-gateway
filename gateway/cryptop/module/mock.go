@@ -173,6 +173,9 @@ func (m *MockBackend) PoolStats() PoolStats {
 	return pool.Stats()
 }
 
+// SlotLabel 槽位标签（M5：mock 恒 "mock"——软件后端无硬件槽位，如实标注）。
+func (m *MockBackend) SlotLabel() string { return "mock" }
+
 func (m *MockBackend) Close() error {
 	m.mu.Lock()
 	pool := m.pool

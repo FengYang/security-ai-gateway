@@ -109,6 +109,11 @@ type FailoverManager struct {
 	switchedAt        time.Time
 	healthyStreak     int // 主恢复后连续健康计数（回切判定）
 
+	// failoverCounts 切换计数（key = from|to|reason，累计值）。
+	// 与 MetricsSink.RecordFailover 并行累加：sink 供外部注入（测试/审计），
+	// 内部计数供 M5 指标层轮询快照（未注入 sink 的生产路径亦有计数，不丢事件）。
+	failoverCounts map[string]int64
+
 	started bool
 	stop    chan struct{}
 	done    chan struct{}
@@ -137,6 +142,7 @@ func NewFailoverManager(primary, backup ModuleBackend, cfg FailoverConfig, sink 
 		state:          StateNormal,
 		activePeer:     PeerPrimary,
 		prevActivePeer: PeerPrimary,
+		failoverCounts: map[string]int64{},
 	}
 }
 
@@ -272,6 +278,7 @@ func (m *FailoverManager) recordSwitch(from, to Peer, reason string) {
 		return
 	}
 	m.sink.RecordFailover(string(from), string(to), reason)
+	m.failoverCounts[string(from)+"|"+string(to)+"|"+reason]++
 	m.prevActivePeer = to
 }
 
@@ -307,6 +314,61 @@ func (m *FailoverManager) PeerHealth(peer Peer) HealthLevel {
 		return m.backupLevel
 	}
 	return m.primaryLevel
+}
+
+// FailoverSnapshot 指标 / 只读端点用状态快照（M5：`cryptop_module_health` /
+// `cryptop_module_failover_total` 与 R2-10 只读端点的数据源）。
+type FailoverSnapshot struct {
+	State          FailoverState
+	ActivePeer     Peer
+	PrimaryLevel   HealthLevel
+	BackupLevel    HealthLevel
+	HasBackup      bool
+	BreakerPrimary bool
+	BreakerBackup  bool
+	// PrimarySlot/BackupSlot 各 peer 槽位标签（后端不支持 SlotLabel 时 "unknown"；
+	// cryptop_module_health 的 slot 标签值）。
+	PrimarySlot string
+	BackupSlot  string
+	// FailoverCounts 切换计数（key = from|to|reason，累计值；空 map = 无切换）。
+	FailoverCounts map[string]int64
+}
+
+// Degraded 是否处于降级态（state==StateDegraded）。
+func (s FailoverSnapshot) Degraded() bool { return s.State == StateDegraded }
+
+// Snapshot 返回当前状态一致快照（持 RLock 拷贝，指标层可无锁消费）。
+func (m *FailoverManager) Snapshot() FailoverSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	counts := make(map[string]int64, len(m.failoverCounts))
+	for k, v := range m.failoverCounts {
+		counts[k] = v
+	}
+	return FailoverSnapshot{
+		State:          m.state,
+		ActivePeer:     m.activePeer,
+		PrimaryLevel:   m.primaryLevel,
+		BackupLevel:    m.backupLevel,
+		HasBackup:      m.backup != nil,
+		BreakerPrimary: m.breakerPrimary,
+		BreakerBackup:  m.breakerBackup,
+		PrimarySlot:    backendSlotLabel(m.primary),
+		BackupSlot:     backendSlotLabel(m.backup),
+		FailoverCounts: counts,
+	}
+}
+
+// backendSlotLabel 取后端槽位标签（nil / 不支持时 "unknown"）。
+// 锁序说明：Snapshot 持 m.mu(R) 调用；SlotLabel 实现只取后端自身的短临界区，
+// 与 Probe 持 m.mu(W) 调 backend.Health() 的既有锁序（m.mu → 后端锁）一致，无反向序。
+func backendSlotLabel(b ModuleBackend) string {
+	if sl, ok := b.(interface{ SlotLabel() string }); ok {
+		if s := sl.SlotLabel(); s != "" {
+			return s
+		}
+	}
+	return "unknown"
 }
 
 // ReportOpError 上报一次运算失败（熔断：达阈值即强制该 peer Down）。

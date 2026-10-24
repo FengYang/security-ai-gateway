@@ -43,6 +43,7 @@ package cryptopmodule
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -97,6 +98,14 @@ func (b *PKCS11Backend) Init(cfg *Config) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.cfg = cfg
+
+	// 幂等保护（R-S3-1）：NewBackend 已 Init（C_Initialize），且其调用方
+	// newModuleProvider / buildModuleProvider 的 failover 分支会二次调用 Init ——
+	// 已加载且未关闭则直接返回，避免 CKR_CRYPTOKI_ALREADY_INITIALIZED（软 HSM
+	// 实测 0x191）导致 sm-module 后端启动拒（生产全链路既有事实）。
+	if b.ctx != nil && !b.closed {
+		return nil
+	}
 
 	// R-S3-2：口令仅经引用名解析（file:/env: 载体；字面值拒绝）。
 	pin, err := resolveModulePIN(cfg.PinRef)
@@ -256,6 +265,26 @@ func (b *PKCS11Backend) ReleaseSession(s Session) error {
 		return fmt.Errorf("%w: 后端未初始化", ErrModuleUnavailable)
 	}
 	return pool.Release(s)
+}
+
+// PoolStats 会话池状态快照（M5：`cryptop_module_sessions_active` 数据源；
+// 持锁取池指针、锁外取Stats，与 AcquireSession 同构避免锁序耦合）。
+func (b *PKCS11Backend) PoolStats() PoolStats {
+	b.mu.Lock()
+	pool := b.pool
+	b.mu.Unlock()
+	if pool == nil {
+		return PoolStats{}
+	}
+	return pool.Stats()
+}
+
+// SlotLabel 槽位标签（M5：`cryptop_module_*` 指标的 slot 标签值；
+// 取 slotIndex 十进制串——module_slot 语义为 GetSlotList 下标，见包注释）。
+func (b *PKCS11Backend) SlotLabel() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strconv.Itoa(b.slotIndex)
 }
 
 // Health 分级健康探针（GM2-08；M4-1 简化为模块级 C_GetTokenInfo 探活，

@@ -57,6 +57,21 @@ func (fb *FailoverBackend) Health() HealthLevel {
 	return fb.fm.primary.Health()
 }
 
+// Snapshot 透传管理器状态快照（M5：指标层经可选接口获取，无主备装配时不存在）。
+func (fb *FailoverBackend) Snapshot() FailoverSnapshot {
+	return fb.fm.Snapshot()
+}
+
+// SlotLabel 透传 active 后端槽位标签（M5：指标 slot 标签；fail-closed 或后端
+// 不支持时 "unknown"）。
+func (fb *FailoverBackend) SlotLabel() string {
+	b, _, err := fb.fm.Active()
+	if err != nil || b == nil {
+		return "unknown"
+	}
+	return backendSlotLabel(b)
+}
+
 // Close 停止探针并关闭主/备后端。
 func (fb *FailoverBackend) Close() error {
 	fb.fm.Stop()

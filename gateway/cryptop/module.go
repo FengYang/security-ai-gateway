@@ -15,15 +15,52 @@ package cryptop
 
 import (
 	"fmt"
+	"sync"
+	"time"
 
 	cryptopmodule "security-ai-gateway/gateway/cryptop/module"
 )
+
+// ModuleOpObserver 模块运算观测器（M5：`cryptop_module_latency_seconds` 数据源）。
+//
+// 由上层（cryptopsvc）在装配期注入；nil = 不观测（默认）。避免 import 环：
+// module 包不依赖 metrics 实现，观测接口由消费方定义并实现。
+type ModuleOpObserver interface {
+	// ObserveModuleOp 记录一次模块运算耗时（秒）。
+	ObserveModuleOp(op string, sec float64)
+}
+
+// ModuleOpObserverSetter Provider 可选能力：注入模块运算观测器（M5）。
+// 装配期（NewServer）经类型断言设置；未设置时全部方法零开销跳过计时。
+type ModuleOpObserverSetter interface {
+	SetOpObserver(obs ModuleOpObserver)
+}
 
 // moduleProvider sm-module 档实现（20 方法 → ModuleBackend）。
 type moduleProvider struct {
 	backend cryptopmodule.ModuleBackend
 	cfg     *cryptopmodule.Config
 	keystream *smProvider // Keystream 软件路径例外（§6.2/U-S3-2）
+
+	obsMu sync.RWMutex            // 保护 obs（装配期注入一次，持锁读取防 data race）
+	obs   ModuleOpObserver        // nil = 不观测（默认）
+}
+
+// SetOpObserver 注入模块运算观测器（M5；nil 清除）。
+func (p *moduleProvider) SetOpObserver(obs ModuleOpObserver) {
+	p.obsMu.Lock()
+	p.obs = obs
+	p.obsMu.Unlock()
+}
+
+// observeOp 记录一次模块运算耗时（无观测者时零开销；defer 调用）。
+func (p *moduleProvider) observeOp(op string, start time.Time) {
+	p.obsMu.RLock()
+	obs := p.obs
+	p.obsMu.RUnlock()
+	if obs != nil {
+		obs.ObserveModuleOp(op, time.Since(start).Seconds())
+	}
 }
 
 // newModuleProvider 以指定后端构造 sm-module Provider（内部）。
@@ -144,18 +181,22 @@ func (p *moduleProvider) ComplianceNote() string {
 }
 
 func (p *moduleProvider) Rand(n int) ([]byte, error) {
+	defer p.observeOp("rand", time.Now())
 	return p.backend.Rand(n)
 }
 
 func (p *moduleProvider) Seal(key, nonce, plaintext, aad []byte) ([]byte, error) {
+	defer p.observeOp("seal", time.Now())
 	return p.backend.Seal(cryptopmodule.KeyRef(key), nonce, plaintext, aad)
 }
 
 func (p *moduleProvider) Open(key, nonce, ciphertext, aad []byte) ([]byte, error) {
+	defer p.observeOp("open", time.Now())
 	return p.backend.Open(cryptopmodule.KeyRef(key), nonce, ciphertext, aad)
 }
 
 func (p *moduleProvider) SealWithNonce(key, plaintext, aad []byte) ([]byte, []byte, error) {
+	defer p.observeOp("seal_with_nonce", time.Now())
 	nonce, err := p.backend.Rand(smNonceSize)
 	if err != nil {
 		return nil, nil, err
@@ -168,6 +209,7 @@ func (p *moduleProvider) SealWithNonce(key, plaintext, aad []byte) ([]byte, []by
 }
 
 func (p *moduleProvider) Hash(data []byte) []byte {
+	defer p.observeOp("hash", time.Now())
 	sum, err := p.backend.Hash(data)
 	if err != nil {
 		// Hash 无错误返回路径（接口约束）；后端异常时 panic 好过返回错误哈希
@@ -178,6 +220,7 @@ func (p *moduleProvider) Hash(data []byte) []byte {
 }
 
 func (p *moduleProvider) HMAC(key, data []byte) []byte {
+	defer p.observeOp("hmac", time.Now())
 	mac, err := p.backend.HMAC(cryptopmodule.KeyRef(key), data)
 	if err != nil {
 		panic(fmt.Sprintf("cryptop: sm-module HMAC 失败: %v", err))
@@ -186,6 +229,7 @@ func (p *moduleProvider) HMAC(key, data []byte) []byte {
 }
 
 func (p *moduleProvider) KDF(secret, salt, info []byte, outLen int) ([]byte, error) {
+	defer p.observeOp("kdf", time.Now())
 	return p.backend.KDF(cryptopmodule.KeyRef(secret), salt, info, outLen, "")
 }
 
@@ -197,6 +241,7 @@ func (p *moduleProvider) Keystream(key, domain []byte, counter uint64, n int) ([
 }
 
 func (p *moduleProvider) GenerateECDHKeyPair() ([]byte, []byte, error) {
+	defer p.observeOp("generate_key_pair_ecdh", time.Now())
 	ref, pub, err := p.backend.GenerateKeyPair(cryptopmodule.UsageECDH)
 	if err != nil {
 		return nil, nil, err
@@ -205,10 +250,12 @@ func (p *moduleProvider) GenerateECDHKeyPair() ([]byte, []byte, error) {
 }
 
 func (p *moduleProvider) ECDH(priv, peerPub []byte) ([]byte, error) {
+	defer p.observeOp("ecdh", time.Now())
 	return p.backend.ECDH(cryptopmodule.KeyRef(priv), peerPub)
 }
 
 func (p *moduleProvider) GenerateSignKeyPair() ([]byte, []byte, error) {
+	defer p.observeOp("generate_key_pair_sign", time.Now())
 	ref, pub, err := p.backend.GenerateKeyPair(cryptopmodule.UsageSign)
 	if err != nil {
 		return nil, nil, err
@@ -225,20 +272,25 @@ func (p *moduleProvider) sm2UID() string {
 }
 
 func (p *moduleProvider) Sign(priv, msg []byte) ([]byte, error) {
+	defer p.observeOp("sign", time.Now())
 	return p.backend.Sign(cryptopmodule.KeyRef(priv), msg, p.sm2UID())
 }
 
 func (p *moduleProvider) Verify(pub, msg, sig []byte) error {
+	defer p.observeOp("verify", time.Now())
 	return p.backend.Verify(pub, msg, sig, p.sm2UID())
 }
 
 func (p *moduleProvider) WrapKey(kek, dek []byte) ([]byte, error) {
+	defer p.observeOp("wrap_key", time.Now())
 	return p.backend.WrapKey(cryptopmodule.KeyRef(kek), dek)
 }
 
 func (p *moduleProvider) UnwrapKey(kek, wrapped []byte) ([]byte, error) {
+	defer p.observeOp("unwrap_key", time.Now())
 	return p.backend.UnwrapKey(cryptopmodule.KeyRef(kek), wrapped)
 }
 
 // 编译期契约保证。
 var _ Provider = (*moduleProvider)(nil)
+var _ ModuleOpObserverSetter = (*moduleProvider)(nil)

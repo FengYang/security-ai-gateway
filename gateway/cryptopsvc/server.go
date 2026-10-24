@@ -115,8 +115,14 @@ func NewServer(p cryptop.Provider, cfg Config) (*Server, error) {
 	var store keystore.KeyStore
 	if mbp, ok := p.(cryptop.ModuleBackendProvider); ok {
 		store = keystore.NewModuleStore(mbp.ModuleBackend(), m)
+		// S3 模块指标接线（M5）：绑定后端（rand_health/health/sessions 轮询源）
+		// + 注入 op 观测器（latency 直方图）。非 sm-module 档不绑定，不发射。
+		m.bindModule(mbp.ModuleBackend())
 	} else {
 		store = keystore.NewMemStore(p, m)
+	}
+	if setter, ok := p.(cryptop.ModuleOpObserverSetter); ok {
+		setter.SetOpObserver(m)
 	}
 	s := &Server{
 		p:    p,

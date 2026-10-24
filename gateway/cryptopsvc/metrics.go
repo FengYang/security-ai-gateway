@@ -30,6 +30,7 @@ import (
 	"sync"
 
 	"security-ai-gateway/gateway/cryptop"
+	cryptopmodule "security-ai-gateway/gateway/cryptop/module"
 	"security-ai-gateway/gateway/cryptop/keystore"
 )
 
@@ -50,6 +51,9 @@ type metrics struct {
 	// profiles #9 多序列（key=profile；R-28 2026-10-12 由单值扩展）。
 	// 每个被 setProfileInfo 登记过的 profile 一条序列；active=true 为真实生效档位。
 	profiles map[string]profileReg
+
+	// mod S3 模块指标（M5；仅 sm-module 档绑定后端后发射，见 metrics_module.go）。
+	mod *moduleMetrics
 }
 
 // profileReg #9 单条序列的登记内容（R-S3-3：档位声明与生效状态分离表达）。
@@ -69,6 +73,7 @@ func newMetrics() *metrics {
 		destroys:  map[string]int64{},
 		compat:    map[string]int64{},
 		profiles:  map[string]profileReg{},
+		mod:       newModuleMetrics(),
 	}
 }
 
@@ -146,6 +151,17 @@ func (m *metrics) setCompatMode(feature string, on bool) {
 	m.mu.Unlock()
 }
 
+// ObserveModuleOp 实现 cryptop.ModuleOpObserver（M5）：模块运算耗时 → mod 直方图
+// （cryptop_module_latency_seconds；由 moduleProvider 装配期注入后逐调用上报）。
+func (m *metrics) ObserveModuleOp(op string, sec float64) {
+	m.mod.ObserveModuleOp(op, sec)
+}
+
+// bindModule 绑定 S3 模块后端（M5；NewServer 装配期，仅 sm-module 档）。
+func (m *metrics) bindModule(b cryptopmodule.ModuleBackend) {
+	m.mod.bindModule(b)
+}
+
 // setProfileInfo #9 生产语句：NewServer（R-28 多序列化，2026-10-12）。
 //
 // 语义：登记并**激活** p 的 profile 序列；其余已登记序列一律降为 active=false——
@@ -216,6 +232,8 @@ func (m *metrics) render(w io.Writer) {
 	}
 	writeCounterInt(w, "cryptop_mask_stream_values_total", "/v1/mask/stream 累计下发掩码元素数（容量观测）", m.maskVals)
 	writeGaugeMap(w, "cryptop_compat_mode", "兼容/桥接模式开启标志（feature=mask_bridge；1=on/0=off）", m.compat, []string{"feature"})
+	// S3 模块指标段（M5；锁序 m.mu → mod.mu，见 metrics_module.go 文件头）。
+	m.mod.renderModule(w)
 }
 
 // ---- 渲染辅助（自足，零外部依赖）----

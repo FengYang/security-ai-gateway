@@ -151,6 +151,19 @@ func (h HealthLevel) String() string {
 	}
 }
 
+// Float64 指标值（附录 B `cryptop_module_health`：1=ok / 0.5=degraded / 0=down）。
+// 未知级别按 0（down）处理——宁可误报不可用，不虚报健康（C-3 同构原则）。
+func (h HealthLevel) Float64() float64 {
+	switch h {
+	case HealthOK:
+		return 1
+	case HealthDegraded:
+		return 0.5
+	default:
+		return 0
+	}
+}
+
 // Capabilities 模块能力快照（B-6.1-6；写入 /v1/capabilities 与 metrics 标签）。
 type Capabilities struct {
 	Backend    string   // sdf|pkcs11|mock

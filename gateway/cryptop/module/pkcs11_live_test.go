@@ -816,3 +816,80 @@ func goECDSARawPub(pub *ecdsa.PublicKey) []byte {
 	pub.Y.FillBytes(out[1+byteLen:])
 	return out
 }
+
+// TestPKCS11LiveObservability M5-e 真机观测访问器验证：PoolStats / RandHealth /
+// SlotLabel 在真实 SoftHSM 后端返回合理值；并通过 FailoverManager 确认快照能
+// 透传真实槽位标签与健康级（cryptop_module_* 指标数据源的真机口径）。
+func TestPKCS11LiveObservability(t *testing.T) {
+	cfg := p11LiveConfig(t, []string{MechRand})
+	backend, err := NewBackend(cfg)
+	if err != nil {
+		t.Fatalf("NewBackend(pkcs11): %v", err)
+	}
+	defer func() { _ = backend.Close() }()
+
+	// PoolStats / RandHealth / SlotLabel 是可选观测方法，未纳入 ModuleBackend
+	// 接口（指标层经类型断言消费）；此处断言为真实 *PKCS11Backend 以读取真机值。
+	pb, ok := backend.(*PKCS11Backend)
+	if !ok {
+		t.Fatalf("NewBackend 返回 %T，want *PKCS11Backend", backend)
+	}
+
+	// PoolStats：真实会话池（MaxSessions=4），Max 应 > 0。
+	// 注：会话池为惰性创建（Acquire 时才开会话），NewBackend 后未做运算时
+	// InUse/Idle 可能为 0，合法不变量为 InUse+Idle <= Max。
+	st := pb.PoolStats()
+	if st.Max <= 0 {
+		t.Fatalf("PoolStats.Max=%d want >0（真实会话池应已初始化）", st.Max)
+	}
+	if st.InUse < 0 || st.Idle < 0 || st.InUse+st.Idle > st.Max {
+		t.Fatalf("PoolStats 计数不自洽（InUse+Idle<=Max）: %+v", st)
+	}
+	t.Logf("PoolStats: max=%d inUse=%d idle=%d", st.Max, st.InUse, st.Idle)
+
+	// RandHealth：Init 已跑 RandCheckQuick 自检，应为 Passed(1)。
+	hs := pb.RandHealth()
+	if hs != RandHealthPassed {
+		t.Fatalf("RandHealth=%v want Passed（Init 自检应已通过）", hs)
+	}
+	if hs.Int() != 1 {
+		t.Fatalf("RandHealth.Int()=%d want 1", hs.Int())
+	}
+	t.Logf("RandHealth: status=%v int=%d", hs, hs.Int())
+
+	// SlotLabel：SoftHSM 单 token，slotIndex=0 → "0"。
+	if got := pb.SlotLabel(); got != "0" {
+		t.Fatalf("SlotLabel=%q want \"0\"", got)
+	}
+	t.Logf("SlotLabel=%q", pb.SlotLabel())
+
+	// Health：真实 token 探活应为 OK（接口方法，经 backend 调用）。
+	if lvl := backend.Health(); lvl != HealthOK {
+		t.Fatalf("Health=%v want OK", lvl)
+	}
+
+	// FailoverManager.Snapshot 透传真实槽位标签 + 主级健康。
+	backup := NewMockBackend()
+	fm := NewFailoverManager(backend, backup, FailoverConfig{
+		Mode:            FailoverFailover,
+		HealthFailCount: 3,
+	}, noopSink{})
+	fm.Probe() // 同步探测一次：读真实主 + mock 备
+	snap := fm.Snapshot()
+	if snap.PrimaryLevel != HealthOK {
+		t.Fatalf("Snapshot.PrimaryLevel=%v want OK（真实后端探活）", snap.PrimaryLevel)
+	}
+	if snap.ActivePeer != PeerPrimary {
+		t.Fatalf("Snapshot.ActivePeer=%v want primary（正常态主用）", snap.ActivePeer)
+	}
+	if !snap.HasBackup {
+		t.Fatal("Snapshot.HasBackup=false want true")
+	}
+	// FailoverBackend 经 active peer 委托 SlotLabel → 真实主 "0"。
+	fb := NewFailoverBackend(fm)
+	if got := fb.SlotLabel(); got != "0" {
+		t.Fatalf("FailoverBackend.SlotLabel=%q want \"0\"（透传真实槽位）", got)
+	}
+	t.Logf("Snapshot: state=%s active=%s primaryLevel=%s backupLevel=%s",
+		snap.State, snap.ActivePeer, snap.PrimaryLevel, snap.BackupLevel)
+}

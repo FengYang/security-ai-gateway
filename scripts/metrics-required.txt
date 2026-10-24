@@ -143,6 +143,17 @@ cryptop cryptop_key_refs conditional
 cryptop cryptop_key_rotations_total conditional
 cryptop cryptop_key_destroy_total conditional
 cryptop cryptop_dualread_total conditional
+# ---- cryptop module 观测指标（P1-5 M5；附录 B 登记表条目）----
+# 发射前提：仅 sm-module 档 + 真实模块后端（pkcs11/sdf）发射；intl/sm-software 档与
+# mock 后端不发射任何 cryptop_module_* 序列（如实，不冒充合规）。
+# 门禁口径：health / rand_health 为合规 sm-module 部署下必现（附录 B 标记 required）；
+# failover / sessions / latency 为情景出现（主备装配 / 会话池 / 调用计时），登记
+# conditional 避免跨档位或 mock 路径误 FAIL。
+cryptop cryptop_module_health required
+cryptop cryptop_module_rand_health required
+cryptop cryptop_module_failover_total conditional
+cryptop cryptop_module_sessions_active conditional
+cryptop cryptop_module_latency_seconds conditional
 
 # ---- P2-2 A2A (source=a2a data plane / core control plane; §6.5) ----
 # Control plane (gateway-core /metrics): gauges are always rendered even when empty.
