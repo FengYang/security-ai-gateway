@@ -16,10 +16,15 @@ package cryptopmodule
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -611,4 +616,203 @@ func goKDFHMAC(key, salt, info []byte, outLen int) []byte {
 		out = append(out, m.Sum(nil)...)
 	}
 	return out[:outLen]
+}
+
+// TestPKCS11LiveAsymmetricOps M4-4c 真机：Hash/GenerateKeyPair/Sign/Verify/
+// ECDH/RotateKey 全链路 + 与 Go 标准库（crypto/ecdsa、crypto/ecdh、
+// crypto/sha256）双向交叉验证。
+//
+// 判据强度（双向）：
+//   - 模块私钥签名 → Go 库验签通过（证明模块产出的签名对模块公钥有效）；
+//   - Go 库私钥签名 → 模块验签通过（证明模块 Verify 链路正确，非自签自验）；
+//   - 模块协商私钥 + Go 协商公钥 ⟺ Go 协商私钥 + 模块公钥，两路共享秘密
+//     逐字节一致（证明模块 ECDH 派生与私钥/公钥对应关系正确）；
+//   - 用途最小权限：sign 密钥不能协商、ecdh 密钥不能签名（真机证明）。
+func TestPKCS11LiveAsymmetricOps(t *testing.T) {
+	cfg := p11LiveConfig(t, []string{MechRand, MechECKeyGen, MechECDSA, MechECDH1Derive, MechSHA256})
+	cfg.MechanismProfile = profilePath(t, "softhsm-generic.json")
+	backend, err := NewBackend(cfg)
+	if err != nil {
+		t.Fatalf("NewBackend(pkcs11, generic profile): %v", err)
+	}
+	defer func() { _ = backend.Close() }()
+
+	msg := []byte("M4-4c 非对称运算真机交叉验证消息")
+	digest := sha256.Sum256(msg)
+
+	// ---- Hash + Go 交叉 ----
+	sum, err := backend.Hash(msg)
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
+	if string(sum) != string(digest[:]) {
+		t.Fatal("Hash 输出与 Go crypto/sha256 不一致")
+	}
+
+	// 清理台账（幂等销毁）。
+	var cleanup []KeyRef
+	destroy := func(r KeyRef) {
+		if err := backend.DestroyKey(r); err != nil {
+			t.Logf("清理 DestroyKey 失败（仅告警）: %v", err)
+		}
+	}
+	defer func() {
+		for _, r := range cleanup {
+			destroy(r)
+		}
+	}()
+
+	// ---- GenerateKeyPair(签名用途) ----
+	signRef, signPub, err := backend.GenerateKeyPair(UsageSign)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair(sign): %v", err)
+	}
+	cleanup = append(cleanup, signRef)
+	if len(signPub) != ecPointLen || signPub[0] != 0x04 {
+		t.Fatalf("公钥应为 65B 非压缩点: len=%d head=0x%x", len(signPub), signPub[0])
+	}
+	goSignPub := goECDSAPub(t, signPub)
+
+	// ---- Sign → Go 验签（模块产签名，Go 库验）----
+	sig, err := backend.Sign(signRef, msg, "")
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if !ecdsa.VerifyASN1(goSignPub, digest[:], sig) {
+		t.Fatal("模块签名未通过 Go crypto/ecdsa 验签")
+	}
+	// uid 非空（ECDSA 档忽略，SM2 档才消费）——行为不因 uid 改变。
+	sigUID, err := backend.Sign(signRef, msg, "1234567812345678")
+	if err != nil {
+		t.Fatalf("Sign(uid): %v", err)
+	}
+	if !ecdsa.VerifyASN1(goSignPub, digest[:], sigUID) {
+		t.Fatal("带 uid 的模块签名未通过 Go 验签")
+	}
+
+	// ---- 模块往返 Verify + 篡改拒 ----
+	if err := backend.Verify(signPub, msg, sig, ""); err != nil {
+		t.Fatalf("Verify(模块往返): %v", err)
+	}
+	badSig := append([]byte(nil), sig...)
+	badSig[len(badSig)-1] ^= 0x01
+	if err := backend.Verify(signPub, msg, badSig, ""); err == nil {
+		t.Fatal("篡改签名的 Verify 应失败")
+	} else {
+		t.Logf("篡改签名拒绝: %v", err)
+	}
+
+	// ---- Go 签名 → 模块验签（独立密钥对，非自签自验）----
+	goKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa.GenerateKey: %v", err)
+	}
+	goSig, err := ecdsa.SignASN1(rand.Reader, goKey, digest[:])
+	if err != nil {
+		t.Fatalf("ecdsa.SignASN1: %v", err)
+	}
+	if err := backend.Verify(goECDSARawPub(&goKey.PublicKey), msg, goSig, ""); err != nil {
+		t.Fatalf("模块验签 Go 侧签名失败: %v", err)
+	}
+
+	// ---- GenerateKeyPair(协商用途) + ECDH 双向交叉 ----
+	ecdhRef, ecdhPub, err := backend.GenerateKeyPair(UsageECDH)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair(ecdh): %v", err)
+	}
+	cleanup = append(cleanup, ecdhRef)
+	goECDHKey, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdh.GenerateKey: %v", err)
+	}
+	// 模块私钥 + Go 公钥。
+	modSecret, err := backend.ECDH(ecdhRef, goECDHKey.PublicKey().Bytes())
+	if err != nil {
+		t.Fatalf("ECDH(模块私钥, Go 公钥): %v", err)
+	}
+	if len(modSecret) != ecSharedSecretLen {
+		t.Fatalf("共享秘密长度 %d != %d", len(modSecret), ecSharedSecretLen)
+	}
+	// Go 私钥 + 模块公钥。
+	goPeerPub, err := ecdh.P256().NewPublicKey(ecdhPub)
+	if err != nil {
+		t.Fatalf("ecdh.NewPublicKey(模块公钥): %v", err)
+	}
+	goSecret, err := goECDHKey.ECDH(goPeerPub)
+	if err != nil {
+		t.Fatalf("Go ECDH: %v", err)
+	}
+	if string(modSecret) != string(goSecret) {
+		t.Fatal("两路 ECDH 共享秘密不一致（模块派生或密钥对应关系错误）")
+	}
+
+	// ---- 用途最小权限（真机证明）----
+	if _, err := backend.ECDH(signRef, goECDHKey.PublicKey().Bytes()); err == nil {
+		t.Fatal("sign 密钥做 ECDH 应被模块拒绝（CKA_DERIVE=false）")
+	} else {
+		t.Logf("sign 密钥 ECDH 拒绝: %v", err)
+	}
+	if _, err := backend.Sign(ecdhRef, msg, ""); err == nil {
+		t.Fatal("ecdh 密钥做 Sign 应被模块拒绝（CKA_SIGN=false）")
+	} else {
+		t.Logf("ecdh 密钥 Sign 拒绝: %v", err)
+	}
+
+	// ---- RotateKey ----
+	// 非对称轮换：新句柄可用，旧句柄按规约**不销毁**（仍可签名）。
+	newSignRef, err := backend.RotateKey(signRef, "ec-sign")
+	if err != nil {
+		t.Fatalf("RotateKey(ec-sign): %v", err)
+	}
+	cleanup = append(cleanup, newSignRef)
+	if string(newSignRef) == string(signRef) {
+		t.Fatal("轮换后句柄应不同")
+	}
+	if _, err := backend.Sign(newSignRef, msg, ""); err != nil {
+		t.Fatalf("轮换后新句柄签名失败: %v", err)
+	}
+	if _, err := backend.Sign(signRef, msg, ""); err != nil {
+		t.Fatalf("旧句柄应仍可用（规约：调用方策略归档，模块不销毁）: %v", err)
+	}
+	// 对称轮换。
+	symRef, err := backend.GenerateKey("aes-256", "")
+	if err != nil {
+		t.Fatalf("GenerateKey(aes-256): %v", err)
+	}
+	cleanup = append(cleanup, symRef)
+	newSymRef, err := backend.RotateKey(symRef, "aes-256")
+	if err != nil {
+		t.Fatalf("RotateKey(aes-256): %v", err)
+	}
+	cleanup = append(cleanup, newSymRef)
+	// SM 档轮换：fail-closed 拒绝（不映射到 EC 冒充合规，C-3）。
+	if _, err := backend.RotateKey(signRef, "sm2-sign"); !errors.Is(err, ErrNotImplemented) {
+		t.Fatalf("RotateKey(sm2-sign) 应 ErrNotImplemented: %v", err)
+	}
+
+	t.Logf("M4-4c 真机链路 PASS: hash(+Go) → genpair → sign(Go验) → verify(往返+篡改拒+Go签名) → ecdh(双向一致) → 用途最小权限 → rotate(新旧均可用+SM拒)")
+}
+
+// goECDSAPub 原始非压缩点 → *ecdsa.PublicKey（P-256）。
+func goECDSAPub(t *testing.T, raw []byte) *ecdsa.PublicKey {
+	t.Helper()
+	byteLen := 32
+	if len(raw) != 1+2*byteLen || raw[0] != 0x04 {
+		t.Fatalf("公钥点非法: len=%d", len(raw))
+	}
+	return &ecdsa.PublicKey{
+		Curve: elliptic.P256(),
+		X:     new(big.Int).SetBytes(raw[1 : 1+byteLen]),
+		Y:     new(big.Int).SetBytes(raw[1+byteLen:]),
+	}
+}
+
+// goECDSARawPub *ecdsa.PublicKey → 原始非压缩点字节（0x04||X||Y）。
+func goECDSARawPub(pub *ecdsa.PublicKey) []byte {
+	byteLen := 32
+	out := make([]byte, 1+2*byteLen)
+	out[0] = 0x04
+	pub.X.FillBytes(out[1 : 1+byteLen])
+	pub.Y.FillBytes(out[1+byteLen:])
+	return out
 }

@@ -64,9 +64,8 @@ func NewMockBackend() *MockBackend {
 // NewBackend 按配置构造后端（生产入口）。
 //
 // 当前可用：mock（功能验证）、pkcs11（cgo 绑定，须 -tags pkcs11 构建；
-// 生命周期/Rand/密钥对象管理/对称运算已实现——M4-4a：GenerateKey/ImportKey/
-// DestroyKey，M4-4b：Seal/Open/HMAC/WrapKey/UnwrapKey/KDF；其余密码运算
-// 方法随 M4-4c 接入，未实现即 fail-closed）。
+// 生命周期/Rand/十六项密码运算已全部接入——M4-4a 密钥对象管理、M4-4b
+// 对称运算、M4-4c 非对称运算；SM 档 CKM 值随 S3-a 厂商 profile 登记）。
 // sdf 的厂商 cgo 绑定随 S3-a 采购 SDK 后接入——未接入前返回明确错误
 // （fail-closed 启动拒），**绝不静默回退 mock/软件**冒充合规（C-3/P4）。
 func NewBackend(cfg *Config) (ModuleBackend, error) {

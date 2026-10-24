@@ -9,18 +9,24 @@
 // M4-1 范围（首个可提交切片）：
 //   - 生命周期：Init（库加载/初始化/槽位/登录/能力探测/会话池）、Capabilities、
 //     AcquireSession/ReleaseSession、Health、Close；
-//   - Rand（C_GenerateRandom，模块 CSPRNG；GM/T 0050 启动自检 R-S3-12 留 M4-2）；
-//   - 其余密码运算方法返回 ErrNotImplemented——fail-closed（C-3），
-//     待厂商机制映射逐步接入，**绝不回退软件实现冒充合规**。
+//   - Rand（C_GenerateRandom，模块 CSPRNG；启动自检 R-S3-12 见 M4-2）。
 //
 // 接入进度（子任务编号）：
+//   - M4-1（4da2ebd）：生命周期 + Rand；
 //   - M4-2（ee11d99）：随机数质量启动自检 R-S3-12（randtest.go）；
 //   - M4-3（c83a9c3）：厂商机制 profile 常量表与解析框架（mechprofile.go）；
 //   - M4-4a：GenerateKey/ImportKey/DestroyKey + KeyRef 编解码
 //     （pkcs11key.go / keyref.go）；
 //   - M4-4b：Seal/Open/HMAC/WrapKey/UnwrapKey/KDF（pkcs11sym.go）；
-//   - 其余运算（Hash/Sign/Verify/GenerateKeyPair/ECDH/RotateKey）仍
-//     fail-closed，随 M4-4c 接入。
+//   - M4-4c：Hash/Sign/Verify/GenerateKeyPair/ECDH/RotateKey
+//     （pkcs11asym.go）——十六项密码运算全部接入，无 fail-closed 占位。
+//
+// 机制 profile（B-6.1-2）：PKCS#11 v3.0 未定义 SM 机制的 CKM 标准值（SM 支持
+// 属厂商扩展），机制名→CKM 映射按厂商 profile 常量表登记；softhsm 档经
+// 2026-10-24 实测（pkcs11-tool -M，SoftHSM v2.6）：token 无任何 SM 机制。
+// 厂商 HSM 接入时按厂商文档扩充本表。
+// Capabilities 只登记**探测命中**的机制，未命中即缺（R-S3-11 启动拒），
+// 禁止把 AES 等非国密机制映射成 SM 机制名冒充合规。
 //
 // 机制 profile（B-6.1-2）：PKCS#11 v3.0 未定义 SM 机制的 CKM 标准值（SM 支持
 // 属厂商扩展），机制名→CKM 映射按厂商 profile 常量表登记；softhsm 档经
@@ -388,42 +394,12 @@ func (r *p11RandReader) Read(p []byte) (int, error) {
 	return copy(p, out), nil
 }
 
-// ---- 未实现方法（随 M4-4b/M4-4c 逐步接入；fail-closed）----
-
-func (b *PKCS11Backend) Hash(data []byte) ([]byte, error) {
-	return nil, p11NotImplemented("Hash")
-}
-
-func (b *PKCS11Backend) Sign(privRef KeyRef, msg []byte, uid string) ([]byte, error) {
-	return nil, p11NotImplemented("Sign")
-}
-
-func (b *PKCS11Backend) Verify(pub, msg, sig []byte, uid string) error {
-	return p11NotImplemented("Verify")
-}
-
-func (b *PKCS11Backend) GenerateKeyPair(usage string) (KeyRef, []byte, error) {
-	return nil, nil, p11NotImplemented("GenerateKeyPair")
-}
-
-func (b *PKCS11Backend) ECDH(privRef KeyRef, peerPub []byte) ([]byte, error) {
-	return nil, p11NotImplemented("ECDH")
-}
-
-func (b *PKCS11Backend) RotateKey(oldRef KeyRef, spec string) (KeyRef, error) {
-	return nil, p11NotImplemented("RotateKey")
-}
-
-// 已实现并迁出的方法：
+// 已实现并迁出的方法（十六项密码运算全部接入）：
 //   - M4-4a：GenerateKey/ImportKey/DestroyKey + KeyRef 编解码
 //     （pkcs11key.go / keyref.go）；
-//   - M4-4b：Seal/Open/HMAC/WrapKey/UnwrapKey/KDF（pkcs11sym.go）。
-
-// p11NotImplemented 未实现方法的统一 fail-closed 错误（随 M4-4b/M4-4c 逐步消除）。
-func p11NotImplemented(method string) error {
-	return fmt.Errorf("%w: PKCS11Backend.%s 尚未实现（M4-4 厂商机制映射；fail-closed，绝不回退软件实现）",
-		ErrNotImplemented, method)
-}
+//   - M4-4b：Seal/Open/HMAC/WrapKey/UnwrapKey/KDF（pkcs11sym.go）；
+//   - M4-4c：Hash/Sign/Verify/GenerateKeyPair/ECDH/RotateKey
+//     （pkcs11asym.go）。
 
 // zeroBytes 零化字节切片（口令本地副本；R-S3-2 尽力为零化，
 // 绑定层 string 形参副本的限制见 Init 注释）。
