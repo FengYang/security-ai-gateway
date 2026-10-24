@@ -112,12 +112,17 @@ func TestSessionPoolQueueExhausted(t *testing.T) {
 }
 
 func TestSessionPoolConcurrentAcquireRelease(t *testing.T) {
+	// 并发度须 ≤ max+queue（4+16=20）：有界队列满时 fail-fast（ErrSessionExhausted）
+	// 是产品语义（B-6.1-7/module_session_queue_size），超出容量的并发请求被拒
+	// 属正确行为而非缺陷。历史上以 32 goroutine 运行会在高负载下偶发
+	// "排队超限"假失败（goroutine 启动时间集中时 waiters 冲顶），2026-10-24 修正。
+	const workers = 16
 	p, _ := newTestPool(t, 4, 16)
 	defer p.Close()
 
 	var wg sync.WaitGroup
-	errs := make(chan error, 64)
-	for i := 0; i < 32; i++ {
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

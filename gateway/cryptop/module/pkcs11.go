@@ -45,15 +45,16 @@ var p11KnownMechanisms = map[uint]string{}
 
 // PKCS11Backend PKCS#11 后端（M4-1）。
 type PKCS11Backend struct {
-	mu        sync.Mutex
-	cfg       *Config
-	ctx       *pkcs11.Ctx
-	slotIndex int // module_slot 语义：GetSlotList 下标（见包注释）
-	caps      Capabilities
-	pool      *SessionPool
-	loginSH   pkcs11.SessionHandle // Init 登录会话（token 级登录态载体）
-	hasLogin  bool
-	closed    bool
+	mu         sync.Mutex
+	cfg        *Config
+	ctx        *pkcs11.Ctx
+	slotIndex  int // module_slot 语义：GetSlotList 下标（见包注释）
+	caps       Capabilities
+	pool       *SessionPool
+	loginSH    pkcs11.SessionHandle // Init 登录会话（token 级登录态载体）
+	hasLogin   bool
+	closed     bool
+	randHealth RandHealthStatus // R-S3-12 随机数启动自检状态（零值=未检）
 }
 
 // newPKCS11Backend 构造并初始化 PKCS#11 后端（NewBackend 的生产入口）。
@@ -159,6 +160,13 @@ func (b *PKCS11Backend) Init(cfg *Config) error {
 		return err
 	}
 	b.pool = pool
+
+	// R-S3-12（GM2-03）：随机数质量启动自检（quick 档 20000bit 三项）。
+	// 失败即启动拒（与 R-S3-11 同权）；power-on 全量档仅用于 S3-a 到货验收/
+	// 密评留档（randtest.go），不在启动路径。
+	if _, err := b.runRandSelfCheckLocked(RandCheckQuick); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -262,13 +270,25 @@ func (b *PKCS11Backend) Close() error {
 	return nil
 }
 
-// ---- 对称运算（M4-1：仅 Rand；其余 M4-2）----
+// ---- 对称运算（M4-1：Rand；其余 M4-2 厂商机制映射）----
 
-// Rand 模块 CSPRNG 随机数（GM2-03；GM/T 0050 启动自检 R-S3-12 留 M4-2）。
+// Rand 模块 CSPRNG 随机数（GM2-03）。
+//
+// R-S3-12：首次输出前确保随机数质量启动自检已通过（Init 已检；直接构造
+// 等绕过 Init 的路径在此惰性补检）；自检失败 fail-closed——不把不合格
+// 随机数送出上层。
 func (b *PKCS11Backend) Rand(n int) ([]byte, error) {
 	if n <= 0 {
 		return nil, fmt.Errorf("pkcs11: Rand(n=%d) 须 > 0", n)
 	}
+	if err := b.ensureRandHealthy(); err != nil {
+		return nil, err
+	}
+	return b.randRaw(n)
+}
+
+// randRaw 不经自检守卫的 C_GenerateRandom（会话走池；对外输出路径）。
+func (b *PKCS11Backend) randRaw(n int) ([]byte, error) {
 	s, err := b.AcquireSession()
 	if err != nil {
 		return nil, err
@@ -279,6 +299,67 @@ func (b *PKCS11Backend) Rand(n int) ([]byte, error) {
 		return nil, fmt.Errorf("%w: C_GenerateRandom(%d): %v", ErrModuleUnavailable, n, err)
 	}
 	return out, nil
+}
+
+// ensureRandHealthy 随机数启动自检守卫（R-S3-12）：未检则补检，已失败则拒输出。
+func (b *PKCS11Backend) ensureRandHealthy() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed || b.ctx == nil {
+		return fmt.Errorf("%w: 后端未初始化或已关闭", ErrModuleUnavailable)
+	}
+	if b.randHealth == RandHealthPassed {
+		return nil
+	}
+	if b.randHealth == RandHealthFailed {
+		return fmt.Errorf("%w: 启动自检已判定失败，拒绝输出随机数", ErrRandSelfCheckFailed)
+	}
+	_, err := b.runRandSelfCheckLocked(RandCheckQuick)
+	return err
+}
+
+// runRandSelfCheckLocked 执行随机数启动自检并更新健康态（调用方持 b.mu）。
+//
+// 防重入：不经过 AcquireSession（其内部会再取 b.mu），取样 reader 直接用
+// 登录会话 loginSH（token 级登录态对所有会话生效，C_GenerateRandom 合法）。
+func (b *PKCS11Backend) runRandSelfCheckLocked(profile RandCheckProfile) (*RandCheckReport, error) {
+	if b.closed || b.ctx == nil {
+		return nil, fmt.Errorf("%w: 后端未初始化或已关闭", ErrModuleUnavailable)
+	}
+	rep, err := RunRandSelfCheck(&p11RandReader{b: b}, profile)
+	if err != nil {
+		b.randHealth = RandHealthFailed
+		return nil, fmt.Errorf("%w: 自检执行失败: %v", ErrRandSelfCheckFailed, err)
+	}
+	if rep.Passed {
+		b.randHealth = RandHealthPassed
+	} else {
+		b.randHealth = RandHealthFailed
+	}
+	return rep, nil
+}
+
+// RandHealth 随机数自检健康态（附录 B 指标 cryptop_module_rand_health：
+// 1=通过 / 0=失败 / -1=尚未自检；M5 装配期接入 metrics）。
+func (b *PKCS11Backend) RandHealth() RandHealthStatus {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.randHealth
+}
+
+// p11RandReader io.Reader 适配：从模块 C_GenerateRandom 流式取随机数
+// （自检取样源；与 runRandSelfCheckLocked 同锁域，直接用 loginSH）。
+type p11RandReader struct{ b *PKCS11Backend }
+
+func (r *p11RandReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	out, err := r.b.ctx.GenerateRandom(r.b.loginSH, len(p))
+	if err != nil {
+		return 0, fmt.Errorf("%w: C_GenerateRandom(%d): %v", ErrModuleUnavailable, len(p), err)
+	}
+	return copy(p, out), nil
 }
 
 // ---- 未实现方法（M4-2 厂商机制映射；fail-closed）----
