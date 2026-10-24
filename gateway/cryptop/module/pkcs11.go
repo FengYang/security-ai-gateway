@@ -10,10 +10,16 @@
 //   - 生命周期：Init（库加载/初始化/槽位/登录/能力探测/会话池）、Capabilities、
 //     AcquireSession/ReleaseSession、Health、Close；
 //   - Rand（C_GenerateRandom，模块 CSPRNG；GM/T 0050 启动自检 R-S3-12 留 M4-2）；
-//   - 其余密码运算方法（Seal/Open/Hash/HMAC/KDF/Sign/Verify/GenerateKeyPair/ECDH/
-//     WrapKey/UnwrapKey/ImportKey/GenerateKey/DestroyKey/RotateKey）返回
-//     ErrNotImplemented——fail-closed（C-3），待 M4-2 厂商机制映射，**绝不回退
-//     软件实现冒充合规**。
+//   - 其余密码运算方法返回 ErrNotImplemented——fail-closed（C-3），
+//     待厂商机制映射逐步接入，**绝不回退软件实现冒充合规**。
+//
+// 接入进度（子任务编号）：
+//   - M4-2（ee11d99）：随机数质量启动自检 R-S3-12（randtest.go）；
+//   - M4-3（c83a9c3）：厂商机制 profile 常量表与解析框架（mechprofile.go）；
+//   - M4-4a：GenerateKey/ImportKey/DestroyKey + KeyRef 编解码
+//     （pkcs11key.go / keyref.go）；其余运算（Seal/Open/Hash/HMAC/KDF/
+//     Sign/Verify/GenerateKeyPair/ECDH/WrapKey/UnwrapKey/RotateKey）仍
+//     fail-closed，随 M4-4b/M4-4c 接入。
 //
 // 机制 profile（B-6.1-2）：PKCS#11 v3.0 未定义 SM 机制的 CKM 标准值（SM 支持
 // 属厂商扩展），机制名→CKM 映射按厂商 profile 常量表登记；softhsm 档经
@@ -155,10 +161,14 @@ func (b *PKCS11Backend) Init(cfg *Config) error {
 	}
 	b.caps = caps
 
-	// 会话池（B-6.1-7）：factory 开 serial 会话（token 登录态对所有会话生效）。
+	// 会话池（B-6.1-7）：factory 开 serial **读写**会话（token 登录态对
+	// 所有会话生效）。CKF_RW_SESSION 必需：密钥对象管理（C_GenerateKey/
+	// C_CreateObject/C_DestroyObject）与 Seal/Sign 等写路径在只读会话上
+	// 返回 CKR_SESSION_READ_ONLY（M4-4a 真机实测 0xB5）；只读操作
+	// （Rand/Hash/Verify）在 RW 会话上同样合法，无副作用。
 	pool, err := NewSessionPool(cfg.MaxSessions, cfg.SessionQueueSize,
 		func() (Session, error) {
-			sh, err := b.ctx.OpenSession(slotID, pkcs11.CKF_SERIAL_SESSION)
+			sh, err := b.ctx.OpenSession(slotID, pkcs11.CKF_SERIAL_SESSION|pkcs11.CKF_RW_SESSION)
 			if err != nil {
 				return 0, fmt.Errorf("%w: C_OpenSession: %v", ErrModuleUnavailable, err)
 			}
@@ -423,25 +433,16 @@ func (b *PKCS11Backend) UnwrapKey(kekRef KeyRef, wrapped []byte) ([]byte, error)
 	return nil, p11NotImplemented("UnwrapKey")
 }
 
-func (b *PKCS11Backend) ImportKey(spec string, key []byte, alias string) (KeyRef, error) {
-	return nil, p11NotImplemented("ImportKey")
-}
-
-func (b *PKCS11Backend) GenerateKey(spec, alias string) (KeyRef, error) {
-	return nil, p11NotImplemented("GenerateKey")
-}
-
-func (b *PKCS11Backend) DestroyKey(keyRef KeyRef) error {
-	return p11NotImplemented("DestroyKey")
-}
-
 func (b *PKCS11Backend) RotateKey(oldRef KeyRef, spec string) (KeyRef, error) {
 	return nil, p11NotImplemented("RotateKey")
 }
 
-// p11NotImplemented M4-2 未实现方法的统一 fail-closed 错误。
+// 已实现并迁出的方法（M4-4a）：GenerateKey / ImportKey / DestroyKey
+// 及 KeyRef 编解码见 pkcs11key.go / keyref.go。
+
+// p11NotImplemented 未实现方法的统一 fail-closed 错误（随 M4-4b/M4-4c 逐步消除）。
 func p11NotImplemented(method string) error {
-	return fmt.Errorf("%w: PKCS11Backend.%s 尚未实现（M4-2 厂商机制映射；fail-closed，绝不回退软件实现）",
+	return fmt.Errorf("%w: PKCS11Backend.%s 尚未实现（M4-4 厂商机制映射；fail-closed，绝不回退软件实现）",
 		ErrNotImplemented, method)
 }
 

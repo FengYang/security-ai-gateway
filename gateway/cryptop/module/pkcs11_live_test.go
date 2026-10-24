@@ -17,8 +17,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/miekg/pkcs11"
 )
 
 func p11LiveConfig(t *testing.T, required []string) *Config {
@@ -208,4 +212,177 @@ func TestPKCS11LiveMechProfileTemplateRejected(t *testing.T) {
 		}
 	}
 	t.Logf("厂商模板 fail-closed 如实触发: %v", err)
+}
+
+// TestPKCS11LiveKeyObjects M4-4a 真机：GenerateKey/ImportKey/DestroyKey
+// 全链路 + KeyRef 归属校验 + 对象属性回读（C_FindObjects 按 label 检索，
+// C_GetAttributeValue 回读 CKA_TOKEN/CKA_CLASS/CKA_VALUE_LEN；敏感对象
+// 读 CKA_VALUE 必须被拒，证明"默认不可读出"）。
+//
+// alias 带纳秒时间戳：token 对象持久化（CKA_TOKEN=true），唯一 alias 避免
+// 与既往运行残留互撞（FindObjects 按 label 精确匹配）。
+func TestPKCS11LiveKeyObjects(t *testing.T) {
+	cfg := p11LiveConfig(t, []string{MechRand, MechAESKeyGen})
+	cfg.MechanismProfile = profilePath(t, "softhsm-generic.json")
+	backend, err := NewBackend(cfg)
+	if err != nil {
+		t.Fatalf("NewBackend(pkcs11, generic profile): %v", err)
+	}
+	defer func() { _ = backend.Close() }()
+	pb, ok := backend.(*PKCS11Backend)
+	if !ok {
+		t.Fatalf("后端类型=%T want *PKCS11Backend", backend)
+	}
+
+	alias := "m44a-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	label := pb.keyLabel(alias)
+
+	// ---- GenerateKey（C_GenerateKey）----
+	ref, err := backend.GenerateKey("aes-256", alias)
+	if err != nil {
+		t.Fatalf("GenerateKey(aes-256): %v", err)
+	}
+	if !strings.HasPrefix(string(ref), "pk11:v1:") {
+		t.Fatalf("KeyRef 前缀异常: %q", ref)
+	}
+	t.Logf("GenerateKey → ref=%s label=%q", ref, label)
+
+	// ---- 属性回读：对象应持久化于 token 且为 SECRET_KEY/AES-256 ----
+	obj := findObjectByLabel(t, pb, label)
+	if obj == 0 {
+		t.Fatal("按 label 未找到生成的对象（CKA_TOKEN 持久化失败？）")
+	}
+	assertAttrBool(t, pb, obj, pkcs11.CKA_TOKEN, true)
+	assertAttrBool(t, pb, obj, pkcs11.CKA_PRIVATE, true)
+	assertAttrBool(t, pb, obj, pkcs11.CKA_SENSITIVE, true)
+	assertAttrBool(t, pb, obj, pkcs11.CKA_EXTRACTABLE, false)
+	assertAttrUintLE(t, pb, obj, pkcs11.CKA_VALUE_LEN, 32)
+	assertAttrUintLE(t, pb, obj, pkcs11.CKA_CLASS, uint(pkcs11.CKO_SECRET_KEY))
+	assertAttrUintLE(t, pb, obj, pkcs11.CKA_KEY_TYPE, uint(pkcs11.CKK_AES))
+	// 敏感对象读 CKA_VALUE 必须被拒（CKR_ATTRIBUTE_SENSITIVE）——"默认
+	// 不可读出"的真机证明（R-S3-4）。
+	assertAttrSensitiveRejected(t, pb, obj)
+
+	// ---- ImportKey（C_CreateObject）+ 长度校验 ----
+	if _, err := backend.ImportKey("aes-128", make([]byte, 16), alias+"-imp"); err != nil {
+		t.Fatalf("ImportKey(aes-128, 16B): %v", err)
+	}
+	if _, err := backend.ImportKey("aes-128", make([]byte, 15), alias+"-bad"); err == nil {
+		t.Fatal("ImportKey 长度不符应拒绝")
+	}
+	if _, err := backend.ImportKey("sm4-128", make([]byte, 16), alias+"-sm"); !errors.Is(err, ErrNotImplemented) {
+		t.Fatalf("ImportKey(sm4-128) 应 ErrNotImplemented（SM 档待 S3-a），实得: %v", err)
+	}
+
+	// ---- DestroyKey + 幂等 ----
+	if err := backend.DestroyKey(ref); err != nil {
+		t.Fatalf("DestroyKey: %v", err)
+	}
+	if obj := findObjectByLabel(t, pb, label); obj != 0 {
+		t.Fatal("DestroyKey 后对象仍存在（C_DestroyObject 未生效）")
+	}
+	if err := backend.DestroyKey(ref); err != nil {
+		t.Fatalf("DestroyKey 重复删除应幂等成功，实得: %v", err)
+	}
+
+	// ---- KeyRef 归属校验：mock ref / 跨分区误用即拒 ----
+	if err := backend.DestroyKey(KeyRef("mock:whatever")); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("mock ref 应 ErrKeyNotFound，实得: %v", err)
+	}
+
+	// 清理导入的对象（幂等销毁，失败仅告警不掩蔽主断言）。
+	impRef, err := backend.ImportKey("aes-128", make([]byte, 16), alias+"-imp2")
+	if err != nil {
+		t.Logf("清理用 ImportKey 失败（仅告警）: %v", err)
+	} else {
+		if err := backend.DestroyKey(impRef); err != nil {
+			t.Logf("清理 DestroyKey 失败（仅告警）: %v", err)
+		}
+	}
+	t.Logf("M4-4a 真机链路 PASS: generate→属性回读→敏感读拒→import→destroy→幂等→归属校验")
+}
+
+// findObjectByLabel C_FindObjects 按 CKA_LABEL 精确检索（返回首个句柄；
+// 无匹配返回 0）。会话走 Acquire/Release。
+func findObjectByLabel(t *testing.T, pb *PKCS11Backend, label string) uint {
+	t.Helper()
+	s, err := pb.AcquireSession()
+	if err != nil {
+		t.Fatalf("AcquireSession: %v", err)
+	}
+	defer func() { _ = pb.ReleaseSession(s) }()
+	tmpl := []*pkcs11.Attribute{pkcs11.NewAttribute(pkcs11.CKA_LABEL, label)}
+	if err := pb.ctx.FindObjectsInit(pkcs11.SessionHandle(s), tmpl); err != nil {
+		t.Fatalf("C_FindObjectsInit: %v", err)
+	}
+	objs, _, err := pb.ctx.FindObjects(pkcs11.SessionHandle(s), 8)
+	if err != nil {
+		_ = pb.ctx.FindObjectsFinal(pkcs11.SessionHandle(s))
+		t.Fatalf("C_FindObjects: %v", err)
+	}
+	if err := pb.ctx.FindObjectsFinal(pkcs11.SessionHandle(s)); err != nil {
+		t.Fatalf("C_FindObjectsFinal: %v", err)
+	}
+	if len(objs) == 0 {
+		return 0
+	}
+	return uint(objs[0])
+}
+
+// getAttr C_GetAttributeValue 回读单属性（请求列表仅含类型，回读填 Value）。
+func getAttr(t *testing.T, pb *PKCS11Backend, obj uint, attrType uint) []byte {
+	t.Helper()
+	s, err := pb.AcquireSession()
+	if err != nil {
+		t.Fatalf("AcquireSession: %v", err)
+	}
+	defer func() { _ = pb.ReleaseSession(s) }()
+	tmpl := []*pkcs11.Attribute{{Type: attrType}}
+	out, err := pb.ctx.GetAttributeValue(pkcs11.SessionHandle(s), pkcs11.ObjectHandle(obj), tmpl)
+	if err != nil {
+		t.Fatalf("C_GetAttributeValue(0x%x): %v", attrType, err)
+	}
+	if len(out) == 0 {
+		t.Fatalf("C_GetAttributeValue(0x%x) 返回空", attrType)
+	}
+	return out[0].Value
+}
+
+func assertAttrBool(t *testing.T, pb *PKCS11Backend, obj uint, attrType uint, want bool) {
+	t.Helper()
+	v := getAttr(t, pb, obj, attrType)
+	got := len(v) == 1 && v[0] == 1
+	if got != want {
+		t.Fatalf("CKA 0x%x: got %v want %v (raw %v)", attrType, got, want, v)
+	}
+}
+
+// assertAttrUintLE 回读 uint 属性（C 内存布局；小端平台取首字节低 8 位，
+// x86_64/arm64 Linux 均小端；精确宽度解析留给厂商库直连验证）。
+func assertAttrUintLE(t *testing.T, pb *PKCS11Backend, obj uint, attrType uint, want uint) {
+	t.Helper()
+	v := getAttr(t, pb, obj, attrType)
+	if len(v) == 0 || uint(v[0]) != want&0xff {
+		t.Fatalf("CKA 0x%x 低字节: got %v want %d (raw %v)", attrType, v, want&0xff, v)
+	}
+}
+
+// assertAttrSensitiveRejected 敏感对象的 CKA_VALUE 回读必须被拒
+// （CKR_ATTRIBUTE_SENSITIVE；R-S3-4 不可读出的真机证明）。
+func assertAttrSensitiveRejected(t *testing.T, pb *PKCS11Backend, obj uint) {
+	t.Helper()
+	s, err := pb.AcquireSession()
+	if err != nil {
+		t.Fatalf("AcquireSession: %v", err)
+	}
+	defer func() { _ = pb.ReleaseSession(s) }()
+	tmpl := []*pkcs11.Attribute{{Type: pkcs11.CKA_VALUE}}
+	if _, err := pb.ctx.GetAttributeValue(pkcs11.SessionHandle(s), pkcs11.ObjectHandle(obj), tmpl); err == nil {
+		t.Fatal("敏感对象回读 CKA_VALUE 应被拒（CKA_SENSITIVE=true；R-S3-4）")
+	} else {
+		var p11err pkcs11.Error
+		if !errors.As(err, &p11err) || p11err != pkcs11.Error(pkcs11.CKR_ATTRIBUTE_SENSITIVE) {
+			t.Fatalf("应返回 CKR_ATTRIBUTE_SENSITIVE，实得: %v", err)
+		}
+	}
 }
