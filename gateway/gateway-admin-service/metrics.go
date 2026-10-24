@@ -36,12 +36,13 @@ type adminMetrics struct {
 	auditWriteFails int64
 	profileSwitch   map[string]int64 // #12：key = from|to（P0-4 §4.3.10）
 	dualRead        map[string]int64 // 跨源：artifact（audit/billing）
+	partitionOps    map[string]int64 // 分区编排：key = op|result（P2-3 T-4）
 }
 
 var metrics = newAdminMetrics()
 
 func newAdminMetrics() *adminMetrics {
-	return &adminMetrics{broker: map[string]int64{}, profileSwitch: map[string]int64{}, dualRead: map[string]int64{}}
+	return &adminMetrics{broker: map[string]int64{}, profileSwitch: map[string]int64{}, dualRead: map[string]int64{}, partitionOps: map[string]int64{}}
 }
 
 func (m *adminMetrics) request() {
@@ -101,6 +102,13 @@ func (m *adminMetrics) incDualRead(artifact string) {
 	m.mu.Unlock()
 }
 
+// incPartitionOp 记录一次分区编排操作结果（P2-3 T-4；op ∈ {update,delete}，result=ok）。
+func (m *adminMetrics) incPartitionOp(op, result string) {
+	m.mu.Lock()
+	m.partitionOps[op+"|"+result]++
+	m.mu.Unlock()
+}
+
 func (m *adminMetrics) render(w io.Writer) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -150,6 +158,21 @@ func (m *adminMetrics) render(w io.Writer) {
 		sort.Strings(drKeys)
 		for _, k := range drKeys {
 			fmt.Fprintf(w, "cryptop_dualread_total{artifact=%q} %d\n", k, m.dualRead[k])
+		}
+	}
+
+	// 分区编排：gateway_admin_partition_ops_total{op,result}（P2-3 T-4）
+	if len(m.partitionOps) > 0 {
+		fmt.Fprintf(w, "# HELP gateway_admin_partition_ops_total 租户分区编排操作计数（P2-3 T-4）\n# TYPE gateway_admin_partition_ops_total counter\n")
+		poKeys := make([]string, 0, len(m.partitionOps))
+		for k := range m.partitionOps {
+			poKeys = append(poKeys, k)
+		}
+		sort.Strings(poKeys)
+		for _, k := range poKeys {
+			parts := strings.SplitN(k, "|", 2)
+			fmt.Fprintf(w, "gateway_admin_partition_ops_total{op=%q,result=%q} %d\n",
+				parts[0], parts[1], m.partitionOps[k])
 		}
 	}
 }

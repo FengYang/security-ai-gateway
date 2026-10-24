@@ -397,6 +397,13 @@ func main() {
 	}
 	adminMux.HandleFunc(cryptopProfileSwitchPath, authMiddleware(cfg, cryptopSwitcher.handle))
 
+	// P2-3 T-4：租户分区编排端点（§6.3）。Wave A：协作者以接口注入，单测 mock 覆盖；
+	// 生产 MemberRegistry/KeyRefStore/DesiredPublisher 后续由 T-1 组协调器（GroupConfig/
+	// 密钥目录/etcd）接入。当前以空注册表 + 静态 KeyRef + 内存 desired 兜底，端点可用、
+	// RBAC/审计/幂等/配额/D-11/删除守卫均已落地，不接真实 HSM、不宣称 S3-b/生产合规。
+	partitionH := newPartitionHandler(auditChain, newPartitionStore(), nil, nil, nil)
+	adminMux.HandleFunc(cryptopPartitionPath, authMiddleware(cfg, partitionH.handle))
+
 	if bh != nil {
 		if bs.brokerListen == cfg.listen {
 			log.Fatalf("配置错误：broker 监听 %s 与管理面监听相同（A-2 要求端口分离）", bs.brokerListen)

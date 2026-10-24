@@ -51,6 +51,8 @@ const (
 	auditActionBillVerify   = "bill_verify"
 	// P0-4 §4.3.10：密码 profile/mask_prg 切换（B5-c）。
 	auditActionCryptopProfileSwitch = "cryptop.profile.switch"
+	// P2-3 T-4：租户分区开通/更新/回收（§6.3；仅记 tenant/partition/action/配额摘要，不含密钥材料）。
+	auditActionCryptopPartition = "cryptop.partition.changed"
 	// P1-4 租户自助门户动作（附录 D 审计动作清单）。
 	auditActionTenantRegister = "tenant_register"
 	auditActionTenantLogin    = "tenant_login"

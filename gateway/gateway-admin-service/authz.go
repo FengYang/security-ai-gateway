@@ -157,6 +157,13 @@ var (
 	// sec_admin，§6.2 矩阵 sec 域 write 的实义锚点；高敏，step-up）。
 	epCryptopProfile = endpointRule{domSec, actWrite, []string{roleSecAdmin}, mfaStepUpFreshness}
 
+	// /v1/adminext/cryptop/partition POST（sec:write；T-4 租户分区编排，高敏，step-up）。
+	epCryptopPartitionWrite = endpointRule{domSec, actWrite, []string{roleSecAdmin}, mfaStepUpFreshness}
+
+	// /v1/adminext/cryptop/partition GET（sec:read；分区与配额清单，auditor 可读，§6.3）。
+	epCryptopPartitionRead = endpointRule{domSec, actRead,
+		[]string{roleSystemAdmin, roleSecAdmin, roleAuditAdmin, roleAuditor}, 0}
+
 	// /v1/adminext/mfa/*（sec:write；各管理角色本人第二因素，第一因素已过）。
 	epMFA = endpointRule{domSec, actWrite,
 		[]string{roleSystemAdmin, roleSecAdmin, roleAuditAdmin}, 0}
