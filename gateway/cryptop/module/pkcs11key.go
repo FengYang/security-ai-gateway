@@ -24,6 +24,7 @@ package cryptopmodule
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/miekg/pkcs11"
 )
@@ -32,26 +33,54 @@ import (
 type symSpec struct {
 	mech  string // 机制名（MechTable 查 CKM；如 "aes-key-gen"）
 	bytes int    // CKA_VALUE_LEN / 导入密钥长度（字节）
+	usage string // 对象用途（属性开关维度）：usageEnc/mac/kek/dek
+}
+
+// 密钥对象用途（CKA_* 布尔属性组的最小权限划分）。
+const (
+	usageEnc = "enc" // Seal/Open（CKA_ENCRYPT/DECRYPT）
+	usageMac = "mac" // HMAC（CKA_SIGN/VERIFY）
+	usageKek = "kek" // WrapKey/UnwrapKey（CKA_WRAP/UNWRAP）
+	usageDek = "dek" // KDF 父密钥（CKA_DERIVE）
+)
+
+// IsKnownUsage 用途名是否合法。
+func IsKnownUsage(u string) bool {
+	switch u {
+	case usageEnc, usageMac, usageKek, usageDek:
+		return true
+	}
+	return false
 }
 
 // parseSymSpec 解析对称密钥 spec（GenerateKey/ImportKey 的 spec 形参）。
+// 格式：<密钥规格>[-<用途>]，密钥规格 ∈ {"", "aes", "aes-128", "aes-256"}，
+// 用途 ∈ {enc, mac, kek, dek}（缺省 enc）。
 //
 // M4-4a 档（功能验证）：aes-* —— SoftHSM 等无 SM 机制环境的运算路径验证
 // （softhsm-generic.json 登记的标准机制）。SM 档（sm4-*）随 S3-a 厂商
 // profile 启用：届时按厂商文档登记 sm4-key-gen 等机制名后，本函数增加
 // 对应分支——**当前明确拒绝**而非把 SM spec 悄悄映射到 AES 冒充合规。
 func parseSymSpec(spec string) (symSpec, error) {
-	switch spec {
+	base, usage := spec, usageEnc
+	// 尾缀用途识别（-enc/-mac/-kek/-dek）；"aes-256" 的 "-256" 不在用途
+	// 集合，不会误切。
+	if i := strings.LastIndex(spec, "-"); i > 0 && IsKnownUsage(spec[i+1:]) {
+		base, usage = spec[:i], spec[i+1:]
+	}
+	var sp symSpec
+	switch base {
 	case "", "aes", "aes-128":
-		return symSpec{mech: MechAESKeyGen, bytes: 16}, nil
+		sp = symSpec{mech: MechAESKeyGen, bytes: 16, usage: usage}
 	case "aes-256":
-		return symSpec{mech: MechAESKeyGen, bytes: 32}, nil
+		sp = symSpec{mech: MechAESKeyGen, bytes: 32, usage: usage}
 	case "sm4", "sm4-128", "sm4-256":
 		return symSpec{}, fmt.Errorf("%w: spec=%q 为国密档，SM 机制 CKM 值待 S3-a 厂商 profile 登记（当前不映射到 AES 冒充合规，C-3）",
 			ErrNotImplemented, spec)
 	default:
-		return symSpec{}, fmt.Errorf("module: 未知对称密钥 spec=%q（可用: aes-128/aes-256）", spec)
+		return symSpec{}, fmt.Errorf("module: 未知对称密钥 spec=%q（可用: aes-128/aes-256，可带用途尾缀 -enc/-mac/-kek/-dek）", spec)
 	}
+	return sp, nil
 }
 
 // keyPrefix / partition nil-safe 配置访问器（未初始化后端 b.cfg == nil 时
@@ -106,19 +135,43 @@ func (b *PKCS11Backend) lookupMechCKM(name string) (uint, error) {
 // valueLen <= 0 表示省略 CKA_VALUE_LEN（导入路径必须省略：该属性在
 // C_CreateObject 上是只读的，M4-4a 真机实测 CKR_ATTRIBUTE_READ_ONLY 0x10；
 // 长度由 CKA_VALUE 字节数自然决定）。
-// keyType 为 CKK_*（AES 档硬编码 CKK_AES；SM 档随厂商 profile 的 CKK 扩展
-// 值另行确定——S3-a 选型项）。
-func secretKeyTemplate(label string, valueLen int, extractable bool) []*pkcs11.Attribute {
+// usage 控制用途布尔属性组（最小权限：enc→ENCRYPT/DECRYPT，mac→SIGN/VERIFY，
+// kek→WRAP/UNWRAP，dek→DERIVE；其余不开放的属性不设=库默认 false）与
+// **密钥类型**：AES 机制（GCM/KEY-WRAP）要求 CKK_AES；HMAC 机制
+// （CKM_SHA256_HMAC，mac 与 dek 用途共用）要求 CKK_GENERIC_SECRET——
+// M4-4b 真机实测 CKK_AES 配 HMAC 返回 CKR_KEY_TYPE_INCONSISTENT(0x63)。
+// keyType 为 CKK_*（SM 档随厂商 profile 的 CKK 扩展值另行确定——S3-a 选型项）。
+func secretKeyTemplate(label string, valueLen int, extractable bool, usage string) []*pkcs11.Attribute {
+	keyType := uint(pkcs11.CKK_AES)
+	if usage == usageMac || usage == usageDek {
+		keyType = pkcs11.CKK_GENERIC_SECRET
+	}
 	attrs := []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_SECRET_KEY),
-		pkcs11.NewAttribute(pkcs11.CKA_KEY_TYPE, pkcs11.CKK_AES),
+		pkcs11.NewAttribute(pkcs11.CKA_KEY_TYPE, keyType),
 		pkcs11.NewAttribute(pkcs11.CKA_TOKEN, true),
 		pkcs11.NewAttribute(pkcs11.CKA_PRIVATE, true),
 		pkcs11.NewAttribute(pkcs11.CKA_LABEL, label),
-		pkcs11.NewAttribute(pkcs11.CKA_ENCRYPT, true),
-		pkcs11.NewAttribute(pkcs11.CKA_DECRYPT, true),
 		pkcs11.NewAttribute(pkcs11.CKA_SENSITIVE, true),
 		pkcs11.NewAttribute(pkcs11.CKA_EXTRACTABLE, extractable),
+	}
+	switch usage {
+	case usageEnc:
+		attrs = append(attrs,
+			pkcs11.NewAttribute(pkcs11.CKA_ENCRYPT, true),
+			pkcs11.NewAttribute(pkcs11.CKA_DECRYPT, true))
+	case usageMac:
+		attrs = append(attrs,
+			pkcs11.NewAttribute(pkcs11.CKA_SIGN, true),
+			pkcs11.NewAttribute(pkcs11.CKA_VERIFY, true))
+	case usageKek:
+		attrs = append(attrs,
+			pkcs11.NewAttribute(pkcs11.CKA_WRAP, true),
+			pkcs11.NewAttribute(pkcs11.CKA_UNWRAP, true))
+	case usageDek:
+		attrs = append(attrs, pkcs11.NewAttribute(pkcs11.CKA_DERIVE, true))
+	default:
+		// 未知用途：不设任何用途属性（fail-closed，对象不可用于任何运算）。
 	}
 	if valueLen > 0 {
 		attrs = append(attrs, pkcs11.NewAttribute(pkcs11.CKA_VALUE_LEN, valueLen))
@@ -149,7 +202,7 @@ func (b *PKCS11Backend) GenerateKey(spec, alias string) (KeyRef, error) {
 	}
 	defer func() { _ = b.ReleaseSession(s) }()
 
-	tmpl := secretKeyTemplate(label, sp.bytes, false)
+	tmpl := secretKeyTemplate(label, sp.bytes, false, sp.usage)
 	mech := &pkcs11.Mechanism{Mechanism: ckm}
 	oh, err := b.ctx.GenerateKey(pkcs11.SessionHandle(s), []*pkcs11.Mechanism{mech}, tmpl)
 	if err != nil {
@@ -184,7 +237,7 @@ func (b *PKCS11Backend) ImportKey(spec string, key []byte, alias string) (KeyRef
 	}
 	defer func() { _ = b.ReleaseSession(s) }()
 
-	tmpl := append(secretKeyTemplate(label, 0, false), // valueLen=0：导入路径省略 CKA_VALUE_LEN（只读属性）
+	tmpl := append(secretKeyTemplate(label, 0, false, sp.usage), // valueLen=0：导入路径省略 CKA_VALUE_LEN（只读属性）
 		pkcs11.NewAttribute(pkcs11.CKA_VALUE, key))
 	oh, err := b.ctx.CreateObject(pkcs11.SessionHandle(s), tmpl)
 	if err != nil {

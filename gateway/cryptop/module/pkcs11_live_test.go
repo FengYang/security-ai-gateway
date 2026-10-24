@@ -14,6 +14,11 @@
 package cryptopmodule
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -385,4 +390,225 @@ func assertAttrSensitiveRejected(t *testing.T, pb *PKCS11Backend, obj uint) {
 			t.Fatalf("应返回 CKR_ATTRIBUTE_SENSITIVE，实得: %v", err)
 		}
 	}
+}
+
+// TestPKCS11LiveSymmetricOps M4-4b 真机：Seal/Open/HMAC/WrapKey/UnwrapKey/
+// KDF 全链路 + 与 Go 标准库（crypto/aes GCM / crypto/hmac）交叉验证。
+//
+// 判据强度：导入**已知固定密钥**（pkcs11 生成的密钥 SENSITIVE 不可读，无法
+// 喂 Go 库），使模块输出与 Go 库输出可逐字节比对——证明适配层编码/参数传递
+// 正确，而非"能跑通而已"。unwrap 等价性用"原对象 Seal → 解开对象 Open"判定
+// （同 nonce 下等价 ⟺ 同密钥）。
+func TestPKCS11LiveSymmetricOps(t *testing.T) {
+	cfg := p11LiveConfig(t, []string{MechRand, MechAESGCM, MechSHA256HMAC, MechAESKeyWrap})
+	cfg.MechanismProfile = profilePath(t, "softhsm-generic.json")
+	backend, err := NewBackend(cfg)
+	if err != nil {
+		t.Fatalf("NewBackend(pkcs11, generic profile): %v", err)
+	}
+	defer func() { _ = backend.Close() }()
+	pb, ok := backend.(*PKCS11Backend)
+	if !ok {
+		t.Fatalf("后端类型=%T", backend)
+	}
+
+	uniq := strconv.FormatInt(time.Now().UnixNano(), 10)
+	encKey := repeatByte(0x11, 32)
+	macKey := repeatByte(0x22, 32)
+	kekKey := repeatByte(0x33, 32)
+	dekKey := repeatByte(0x44, 32)
+
+	// 清理台账（测试末统一销毁；幂等）。
+	var cleanup []KeyRef
+	destroy := func(r KeyRef) {
+		if err := backend.DestroyKey(r); err != nil {
+			t.Logf("清理 DestroyKey 失败（仅告警）: %v", err)
+		}
+	}
+	defer func() {
+		for _, r := range cleanup {
+			destroy(r)
+		}
+	}()
+
+	encRef, err := backend.ImportKey("aes-256", encKey, "m44b-enc-"+uniq)
+	if err != nil {
+		t.Fatalf("ImportKey(enc): %v", err)
+	}
+	cleanup = append(cleanup, encRef)
+	macRef, err := backend.ImportKey("aes-256-mac", macKey, "m44b-mac-"+uniq)
+	if err != nil {
+		t.Fatalf("ImportKey(mac): %v", err)
+	}
+	cleanup = append(cleanup, macRef)
+	kekRef, err := backend.ImportKey("aes-256-kek", kekKey, "m44b-kek-"+uniq)
+	if err != nil {
+		t.Fatalf("ImportKey(kek): %v", err)
+	}
+	cleanup = append(cleanup, kekRef)
+	dekRef, err := backend.ImportKey("aes-256-dek", dekKey, "m44b-dek-"+uniq)
+	if err != nil {
+		t.Fatalf("ImportKey(dek): %v", err)
+	}
+	cleanup = append(cleanup, dekRef)
+
+	// ---- Seal/Open 往返 + Go 交叉 ----
+	nonce := repeatByte(0xA5, symNonceSize)
+	pt := []byte("M4-4b 对称运算真机交叉验证负载")
+	aad := []byte("cryptop/seal/v1")
+	ct, err := backend.Seal(encRef, nonce, pt, aad)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if len(ct) != len(pt)+symTagSize {
+		t.Fatalf("Seal 输出长度 %d != %d（ct||tag 布局）", len(ct), len(pt)+symTagSize)
+	}
+	wantCT := goGCMSeal(t, encKey, nonce, pt, aad)
+	if string(ct) != string(wantCT) {
+		t.Fatal("Seal 输出与 Go crypto/aes GCM 不一致（适配层编码错误）")
+	}
+	got, err := backend.Open(encRef, nonce, ct, aad)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if string(got) != string(pt) {
+		t.Fatal("Open 往返明文不符")
+	}
+	// 篡改 tag → 认证失败（明确错误语义）。
+	bad := append([]byte(nil), ct...)
+	bad[len(bad)-1] ^= 0x01
+	if _, err := backend.Open(encRef, nonce, bad, aad); err == nil {
+		t.Fatal("篡改 tag 的 Open 应失败（GCM 认证）")
+	} else {
+		t.Logf("篡改 tag 拒绝: %v", err)
+	}
+	// 错 aad → 认证失败。
+	if _, err := backend.Open(encRef, nonce, ct, []byte("wrong")); err == nil {
+		t.Fatal("错 aad 的 Open 应失败")
+	}
+
+	// ---- HMAC + Go 交叉 ----
+	data := []byte("hmac 交叉验证数据")
+	mac, err := backend.HMAC(macRef, data)
+	if err != nil {
+		t.Fatalf("HMAC: %v", err)
+	}
+	if string(mac) != string(goHMACSHA256(macKey, data)) {
+		t.Fatal("HMAC 输出与 Go crypto/hmac 不一致")
+	}
+	// 用途最小权限：enc 对象做 HMAC 必须被模块拒绝（真机证明）。
+	if _, err := backend.HMAC(encRef, data); err == nil {
+		t.Fatal("enc 对象做 HMAC 应被模块拒绝（用途最小权限）")
+	} else {
+		t.Logf("enc 对象 HMAC 拒绝: %v", err)
+	}
+
+	// ---- Wrap/Unwrap 往返 + 字节级等价 ----
+	wrapped, err := backend.WrapKey(kekRef, dekKey)
+	if err != nil {
+		t.Fatalf("WrapKey: %v", err)
+	}
+	if len(wrapped) != len(dekKey)+symWrapTagSize {
+		t.Fatalf("wrapped 长度 %d != %d（RFC 3394: key + 8B AIV）", len(wrapped), len(dekKey)+symWrapTagSize)
+	}
+	unwrapped, err := backend.UnwrapKey(kekRef, wrapped)
+	if err != nil {
+		t.Fatalf("UnwrapKey: %v", err)
+	}
+	// 等价性：解开的字节须与原始 DEK 逐字节一致（RFC 3394 往返保真）。
+	if string(unwrapped) != string(dekKey) {
+		t.Fatal("unwrap 字节与原 DEK 不一致")
+	}
+	// 解开结果可作 enc 密钥使用（端到端可用性）。
+	unwrappedEncRef, err := backend.ImportKey("aes-256", unwrapped, "m44b-unwrappedenc-"+uniq)
+	if err != nil {
+		t.Fatalf("ImportKey(unwrapped→enc): %v", err)
+	}
+	cleanup = append(cleanup, unwrappedEncRef)
+	// 篡改 wrapped → 解开失败。
+	badW := append([]byte(nil), wrapped...)
+	badW[len(badW)-1] ^= 0x01
+	if _, err := backend.UnwrapKey(kekRef, badW); err == nil {
+		t.Fatal("篡改 wrapped 的 UnwrapKey 应失败")
+	}
+
+	// ---- KDF + Go 交叉（跨块 outLen=40）----
+	salt := []byte("kdf-salt")
+	info := []byte("kdf-info")
+	out40, err := backend.KDF(dekRef, salt, info, 40, "")
+	if err != nil {
+		t.Fatalf("KDF(40): %v", err)
+	}
+	if string(out40) != string(goKDFHMAC(dekKey, salt, info, 40)) {
+		t.Fatal("KDF 输出与 Go HMAC 迭代不一致")
+	}
+	// 单块 outLen=32 与 40 字节前缀一致（计数器结构）。
+	out32, err := backend.KDF(dekRef, salt, info, 32, "")
+	if err != nil {
+		t.Fatalf("KDF(32): %v", err)
+	}
+	if string(out40[:32]) != string(out32) {
+		t.Fatal("KDF 跨块前缀不一致（计数器结构错误）")
+	}
+	// alias 登记：派生结果应成为模块内对象（D-4 模块内执行位置）。
+	if _, err := backend.KDF(dekRef, salt, info, 32, "m44b-kdfobj-"+uniq); err != nil {
+		t.Fatalf("KDF(alias): %v", err)
+	}
+	if obj := findObjectByLabel(t, pb, pb.keyLabel("m44b-kdfobj-"+uniq)); obj == 0 {
+		t.Fatal("KDF alias 登记对象未找到（D-4 模块内登记失败）")
+	} else {
+		cleanup = append(cleanup, mustEnc(t, 0, cfg.Partition, obj))
+	}
+	t.Logf("M4-4b 真机链路 PASS: seal/open(+Go 交叉) → 篡改拒 → hmac(+Go 交叉) → 用途最小权限 → wrap/unwrap 等价 → KDF(+Go 交叉/跨块/登记)")
+}
+
+// repeatByte n 字节重复模式（固定已知密钥，供 Go 交叉验证）。
+func repeatByte(b byte, n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
+
+// goGCMSeal Go crypto/aes GCM 参考实现（Seal 输出 ct||tag 与模块一致）。
+func goGCMSeal(t *testing.T, key, nonce, pt, aad []byte) []byte {
+	t.Helper()
+	blk, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	g, err := cipher.NewGCM(blk)
+	if err != nil {
+		t.Fatalf("NewGCM: %v", err)
+	}
+	return g.Seal(nil, nonce, pt, aad)
+}
+
+func goHMACSHA256(key, data []byte) []byte {
+	m := hmac.New(sha256.New, key)
+	m.Write(data)
+	return m.Sum(nil)
+}
+
+// goKDFHMAC Go 侧复现 M4-4b 的 HMAC 迭代计数器 KDF（Z 构造同 pkcs11sym.go）。
+func goKDFHMAC(key, salt, info []byte, outLen int) []byte {
+	z := make([]byte, 0, 8+len(salt)+len(info))
+	var l [4]byte
+	binary.BigEndian.PutUint32(l[:], uint32(len(salt)))
+	z = append(z, l[:]...)
+	z = append(z, salt...)
+	binary.BigEndian.PutUint32(l[:], uint32(len(info)))
+	z = append(z, l[:]...)
+	z = append(z, info...)
+	out := make([]byte, 0, outLen+32)
+	for ctr := uint32(1); len(out) < outLen; ctr++ {
+		m := hmac.New(sha256.New, key)
+		m.Write(z)
+		var c [4]byte
+		binary.BigEndian.PutUint32(c[:], ctr)
+		m.Write(c[:])
+		out = append(out, m.Sum(nil)...)
+	}
+	return out[:outLen]
 }

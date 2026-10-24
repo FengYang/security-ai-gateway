@@ -17,9 +17,10 @@
 //   - M4-2（ee11d99）：随机数质量启动自检 R-S3-12（randtest.go）；
 //   - M4-3（c83a9c3）：厂商机制 profile 常量表与解析框架（mechprofile.go）；
 //   - M4-4a：GenerateKey/ImportKey/DestroyKey + KeyRef 编解码
-//     （pkcs11key.go / keyref.go）；其余运算（Seal/Open/Hash/HMAC/KDF/
-//     Sign/Verify/GenerateKeyPair/ECDH/WrapKey/UnwrapKey/RotateKey）仍
-//     fail-closed，随 M4-4b/M4-4c 接入。
+//     （pkcs11key.go / keyref.go）；
+//   - M4-4b：Seal/Open/HMAC/WrapKey/UnwrapKey/KDF（pkcs11sym.go）；
+//   - 其余运算（Hash/Sign/Verify/GenerateKeyPair/ECDH/RotateKey）仍
+//     fail-closed，随 M4-4c 接入。
 //
 // 机制 profile（B-6.1-2）：PKCS#11 v3.0 未定义 SM 机制的 CKM 标准值（SM 支持
 // 属厂商扩展），机制名→CKM 映射按厂商 profile 常量表登记；softhsm 档经
@@ -387,26 +388,10 @@ func (r *p11RandReader) Read(p []byte) (int, error) {
 	return copy(p, out), nil
 }
 
-// ---- 未实现方法（M4-2 厂商机制映射；fail-closed）----
-
-func (b *PKCS11Backend) Seal(keyRef KeyRef, nonce, plaintext, aad []byte) ([]byte, error) {
-	return nil, p11NotImplemented("Seal")
-}
-
-func (b *PKCS11Backend) Open(keyRef KeyRef, nonce, ciphertext, aad []byte) ([]byte, error) {
-	return nil, p11NotImplemented("Open")
-}
+// ---- 未实现方法（随 M4-4b/M4-4c 逐步接入；fail-closed）----
 
 func (b *PKCS11Backend) Hash(data []byte) ([]byte, error) {
 	return nil, p11NotImplemented("Hash")
-}
-
-func (b *PKCS11Backend) HMAC(keyRef KeyRef, data []byte) ([]byte, error) {
-	return nil, p11NotImplemented("HMAC")
-}
-
-func (b *PKCS11Backend) KDF(parentRef KeyRef, salt, info []byte, outLen int, alias string) ([]byte, error) {
-	return nil, p11NotImplemented("KDF")
 }
 
 func (b *PKCS11Backend) Sign(privRef KeyRef, msg []byte, uid string) ([]byte, error) {
@@ -425,20 +410,14 @@ func (b *PKCS11Backend) ECDH(privRef KeyRef, peerPub []byte) ([]byte, error) {
 	return nil, p11NotImplemented("ECDH")
 }
 
-func (b *PKCS11Backend) WrapKey(kekRef KeyRef, dek []byte) ([]byte, error) {
-	return nil, p11NotImplemented("WrapKey")
-}
-
-func (b *PKCS11Backend) UnwrapKey(kekRef KeyRef, wrapped []byte) ([]byte, error) {
-	return nil, p11NotImplemented("UnwrapKey")
-}
-
 func (b *PKCS11Backend) RotateKey(oldRef KeyRef, spec string) (KeyRef, error) {
 	return nil, p11NotImplemented("RotateKey")
 }
 
-// 已实现并迁出的方法（M4-4a）：GenerateKey / ImportKey / DestroyKey
-// 及 KeyRef 编解码见 pkcs11key.go / keyref.go。
+// 已实现并迁出的方法：
+//   - M4-4a：GenerateKey/ImportKey/DestroyKey + KeyRef 编解码
+//     （pkcs11key.go / keyref.go）；
+//   - M4-4b：Seal/Open/HMAC/WrapKey/UnwrapKey/KDF（pkcs11sym.go）。
 
 // p11NotImplemented 未实现方法的统一 fail-closed 错误（随 M4-4b/M4-4c 逐步消除）。
 func p11NotImplemented(method string) error {
