@@ -18,10 +18,10 @@ type gmetrics struct {
 	ops map[string]int64
 
 	// 最近一次采样值（gauge）。
-	leaderEpoch      uint64
-	membersTotal     int
-	membersHealthy   int
-	leaderHeld       bool
+	leaderEpoch    uint64
+	membersTotal   int
+	membersHealthy int
+	leaderHeld     bool
 }
 
 func newGmetrics() *gmetrics {

@@ -46,7 +46,7 @@ var ErrNotLeader = errors.New("group: 当前非组主或租约已失效（生命
 // poc.EtcdControlStore 时，新增一个 EtcdCoordinatorStore 适配器实现本 ControlStore
 // 接口（把 ctx 注入、把 etcd 错误映射到 group 错误码），不改动本协调器逻辑。
 type Coordinator struct {
-	mu        sync.RWMutex
+	mu             sync.RWMutex
 	store          ControlStore
 	self           string
 	bootID         string
@@ -97,7 +97,7 @@ func (c *Coordinator) Start() {
 	c.running = true
 	c.mu.Unlock()
 
-	c.acquireLocked(true)
+	_, _ = c.acquireLocked(true, nil)
 
 	c.wg.Add(1)
 	go func() {
@@ -174,7 +174,10 @@ func (c *Coordinator) Epoch() uint64 {
 }
 
 // acquireLocked 尝试抢占/接管租约；首次调用（first）时允许 bootstrap。
-func (c *Coordinator) acquireLocked(first bool) {
+//
+// promo 非空即表示本次为**跨 DC 人工 promotion**（D-8：跨 DC 只能人工 promotion，
+// 且必须携带双签审批）；同 DC 接管与 bootstrap 传 nil。
+func (c *Coordinator) acquireLocked(first bool, promo *testkit.Promotion) (testkit.LeaseStatus, error) {
 	st := c.store.GetOwnerState()
 	req := testkit.OwnerAcquireRequest{
 		Member:                 c.self,
@@ -185,6 +188,7 @@ func (c *Coordinator) acquireLocked(first bool) {
 		AllowBootstrap:         first && c.bootstrap,
 		AllowAutoIntraDC:       c.autoIntra,
 		BootstrapOwner:         c.bootstrapOwner,
+		Promotion:              promo,
 		TTL:                    c.TTL,
 	}
 	ls, err := c.store.AcquireOwner(req)
@@ -193,11 +197,12 @@ func (c *Coordinator) acquireLocked(first bool) {
 		c.epoch = st.Epoch
 		c.lease = nil
 		c.notify(false)
-		return
+		return testkit.LeaseStatus{}, err
 	}
 	c.epoch = ls.Epoch
 	c.lease = &ls
 	c.notify(true)
+	return ls, nil
 }
 
 // renewOrReacquire 续租；续租失败（租约被夺/过期）则按规则再抢占。
@@ -205,14 +210,14 @@ func (c *Coordinator) renewOrReacquire() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.lease == nil || c.lease.Holder != c.self {
-		c.acquireLocked(false)
+		_, _ = c.acquireLocked(false, nil)
 		return
 	}
 	if err := c.store.RenewOwner(c.self, c.bootID, c.lease.Epoch, c.TTL); err != nil {
 		// 续租失败：租约可能已被他人抢占或过期，释放本地引用后重新竞争。
 		c.lease = nil
 		c.notify(false)
-		c.acquireLocked(false)
+		_, _ = c.acquireLocked(false, nil)
 		return
 	}
 	// 续租成功：刷新本地过期时间（内存实现的 ExpiresAt 已更新，这里同步镜像）。

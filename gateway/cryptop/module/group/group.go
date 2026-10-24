@@ -32,12 +32,12 @@ type ControlStore interface {
 
 // Member 组内成员运行时视图（封装一个已初始化的 ModuleBackend）。
 type Member struct {
-	ID         string
-	Partition  string
-	DC         string
+	ID          string
+	Partition   string
+	DC          string
 	MaxSessions int
-	Weight     int
-	Backend    module.ModuleBackend
+	Weight      int
+	Backend     module.ModuleBackend
 }
 
 // ModuleGroup 把多个成员后端组合为一个逻辑 ModuleBackend（组合模式），实现 T-1 Wave A
@@ -53,7 +53,7 @@ type ModuleGroup struct {
 	mu      sync.RWMutex
 	cfg     testkit.GroupConfig
 	members map[string]*Member
-	order   []string // 稳定顺序（会话打包 / 确定性选择）
+	order   []string          // 稳定顺序（会话打包 / 确定性选择）
 	partOf  map[string]string // memberID → partition
 	partMem map[string][]string
 

@@ -22,10 +22,10 @@ func testGroupConfig() testkit.GroupConfig {
 		Partitions: []testkit.PartitionConfig{
 			{Tenant: "tenant-a", Partition: "tenant-a", Members: []string{"dc1-hsm-a", "dc2-hsm-a"}, QuotaSessions: 24},
 		},
-		Leader:        testkit.LeaderConfig{Store: "memory", BootstrapOwner: "dc1-hsm-a", LeaseTTLMS: 30000},
-		Control:       testkit.ControlConfig{Store: "memory", DirectoryMACKeyRef: "secret://dir-mac", DirectoryCacheTTLMS: 15000, DirectoryCacheMaxStale: 30000, DirectoryWriter: "lease"},
-		Policy:        testkit.PolicyConfig{Affinity: "none", DcOrder: []string{"dc1", "dc2"}},
-		Failover:      testkit.FailoverConfig{Mode: "failover", AutoFailoverIntraDC: true, StartupMinHealthyPerPartition: 1, AutoSwitchBack: false},
+		Leader:         testkit.LeaderConfig{Store: "memory", BootstrapOwner: "dc1-hsm-a", LeaseTTLMS: 30000},
+		Control:        testkit.ControlConfig{Store: "memory", DirectoryMACKeyRef: "secret://dir-mac", DirectoryCacheTTLMS: 15000, DirectoryCacheMaxStale: 30000, DirectoryWriter: "lease"},
+		Policy:         testkit.PolicyConfig{Affinity: "none", DcOrder: []string{"dc1", "dc2"}},
+		Failover:       testkit.FailoverConfig{Mode: "failover", AutoFailoverIntraDC: true, StartupMinHealthyPerPartition: 1, AutoSwitchBack: false},
 		BootstrapOwner: "dc1-hsm-a",
 	}
 }
