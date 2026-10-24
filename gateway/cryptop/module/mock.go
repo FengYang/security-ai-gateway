@@ -63,9 +63,10 @@ func NewMockBackend() *MockBackend {
 
 // NewBackend 按配置构造后端（生产入口）。
 //
-// 当前可用：mock（功能验证）。sdf/pkcs11 的厂商 cgo 绑定随 S3-a 采购 SDK 后
-// 接入——未接入前返回明确错误（fail-closed 启动拒），**绝不静默回退 mock/软件**
-// 冒充合规（C-3/P4）。
+// 当前可用：mock（功能验证）、pkcs11（M4-1：cgo 绑定，须 -tags pkcs11 构建；
+// 生命周期与 Rand 已实现，密码运算方法 M4-2 起逐步接入，未实现即 fail-closed）。
+// sdf 的厂商 cgo 绑定随 S3-a 采购 SDK 后接入——未接入前返回明确错误
+// （fail-closed 启动拒），**绝不静默回退 mock/软件**冒充合规（C-3/P4）。
 func NewBackend(cfg *Config) (ModuleBackend, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("module: nil config")
@@ -76,9 +77,11 @@ func NewBackend(cfg *Config) (ModuleBackend, error) {
 	switch cfg.Backend {
 	case BackendMock:
 		return NewMockBackend(), nil
-	case BackendSDF, BackendPKCS11:
-		return nil, fmt.Errorf("%w: backend=%s 的厂商 SDK 绑定未随源码提供（S3-a 采购到位后接入 sdf.go/pkcs11.go；当前 fail-closed 启动拒）",
-			ErrNotImplemented, cfg.Backend)
+	case BackendPKCS11:
+		return newPKCS11Backend(cfg)
+	case BackendSDF:
+		return nil, fmt.Errorf("%w: backend=sdf 的厂商 SDK 绑定未随源码提供（S3-a 采购到位后接入 sdf.go；当前 fail-closed 启动拒）",
+			ErrNotImplemented)
 	default:
 		return nil, fmt.Errorf("module: 未知 backend=%q", cfg.Backend)
 	}

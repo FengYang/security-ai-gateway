@@ -3,11 +3,11 @@ module security-ai-gateway
 go 1.26.0
 
 require (
-	github.com/a2aproject/a2a-go/v2 v2.6.0
 	github.com/emmansun/gmsm v0.44.1
 	github.com/google/go-tdx-guest v0.3.1
 	github.com/higress-group/proxy-wasm-go-sdk v0.0.0-20260525073613-662ed045bf0b
 	github.com/higress-group/wasm-go v1.1.2
+	github.com/miekg/pkcs11 v1.1.1
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/redis/go-redis/v9 v9.23.0
@@ -18,7 +18,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0
 	golang.org/x/crypto v0.55.0
 	google.golang.org/grpc v1.83.2
-	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.60.1
 )
 
@@ -39,8 +38,6 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
-	github.com/stretchr/testify v1.12.1 // indirect
-	github.com/tetratelabs/wazero v1.7.2 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/resp v0.1.1 // indirect
@@ -52,8 +49,6 @@ require (
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	go.uber.org/atomic v1.12.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect

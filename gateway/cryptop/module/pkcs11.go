@@ -1,0 +1,358 @@
+//go:build pkcs11
+
+// pkcs11.go —— PKCS#11（Cryptoki）后端绑定（P1-5 §7.4，M4-1）。
+//
+// 定位：ModuleBackend 的 PKCS#11 实现，把统一语义映射到 C_* 调用。生产路径的
+// 密码运算仍在模块内执行，本文件只做接口调用/编码转换/会话与健康编排
+// （B-6.1-8），不自研密码（C-4）。
+//
+// M4-1 范围（首个可提交切片）：
+//   - 生命周期：Init（库加载/初始化/槽位/登录/能力探测/会话池）、Capabilities、
+//     AcquireSession/ReleaseSession、Health、Close；
+//   - Rand（C_GenerateRandom，模块 CSPRNG；GM/T 0050 启动自检 R-S3-12 留 M4-2）；
+//   - 其余密码运算方法（Seal/Open/Hash/HMAC/KDF/Sign/Verify/GenerateKeyPair/ECDH/
+//     WrapKey/UnwrapKey/ImportKey/GenerateKey/DestroyKey/RotateKey）返回
+//     ErrNotImplemented——fail-closed（C-3），待 M4-2 厂商机制映射，**绝不回退
+//     软件实现冒充合规**。
+//
+// 机制 profile（B-6.1-2）：PKCS#11 v3.0 未定义 SM 机制的 CKM 标准值（SM 支持
+// 属厂商扩展），机制名→CKM 映射按厂商 profile 常量表登记；softhsm 档经
+// 2026-10-24 实测（pkcs11-tool -M，SoftHSM v2.6）：token 无任何 SM 机制，
+// 仅 AES-GCM 与 CKM_AES_KEY_WRAP。厂商 HSM 接入时按厂商文档扩充本表。
+// Capabilities 只登记**探测命中**的机制，未命中即缺（R-S3-11 启动拒），
+// 禁止把 AES 等非国密机制映射成 SM 机制名冒充合规。
+//
+// 槽位语义（实现期裁决）：module_slot = GetSlotList(tokenPresent=true) 的
+// **下标**（0 = 第一个带 token 的槽位），不用厂商派生的 64 位 slot ID 配置
+// （token 重建后 ID 会变）。
+package cryptopmodule
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/miekg/pkcs11"
+)
+
+// p11KnownMechanisms 厂商 profile 常量表（B-6.1-2）：CKM 值 → 机制名。
+//
+// 当前登记：softhsm 实测档（空——无 SM 机制）；generic 档（空——待 S3-a
+// 选型后按厂商接口文档登记）。rand 不依赖 mechanism list（C_GenerateRandom
+// 为 PKCS#11 通用函数），由探测逻辑恒置。
+var p11KnownMechanisms = map[uint]string{}
+
+// PKCS11Backend PKCS#11 后端（M4-1）。
+type PKCS11Backend struct {
+	mu        sync.Mutex
+	cfg       *Config
+	ctx       *pkcs11.Ctx
+	slotIndex int // module_slot 语义：GetSlotList 下标（见包注释）
+	caps      Capabilities
+	pool      *SessionPool
+	loginSH   pkcs11.SessionHandle // Init 登录会话（token 级登录态载体）
+	hasLogin  bool
+	closed    bool
+}
+
+// newPKCS11Backend 构造并初始化 PKCS#11 后端（NewBackend 的生产入口）。
+func newPKCS11Backend(cfg *Config) (ModuleBackend, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("module: nil config")
+	}
+	b := &PKCS11Backend{cfg: cfg}
+	if err := b.Init(cfg); err != nil {
+		b.Close() // 清理半初始化状态（fail-closed）
+		return nil, err
+	}
+	return b, nil
+}
+
+// ---- 生命周期 ----
+
+// Init 加载厂商库并完成启动校验（R-S3-1/R-S3-2/R-S3-11；失败即启动拒，C-3）。
+func (b *PKCS11Backend) Init(cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("pkcs11: nil config")
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.cfg = cfg
+
+	// R-S3-2：口令仅经引用名解析（file:/env: 载体；字面值拒绝）。
+	pin, err := resolveModulePIN(cfg.PinRef)
+	if err != nil {
+		return err
+	}
+
+	// R-S3-1：库可加载。
+	b.ctx = pkcs11.New(cfg.LibPath)
+	if b.ctx == nil {
+		return fmt.Errorf("%w: pkcs11.New(%s) 失败（R-S3-1）", ErrModuleUnavailable, cfg.LibPath)
+	}
+	if err := b.ctx.Initialize(); err != nil {
+		return fmt.Errorf("%w: C_Initialize(%s): %v（R-S3-1）", ErrModuleUnavailable, cfg.LibPath, err)
+	}
+
+	// 槽位（下标语义）与 token 校验。
+	slots, err := b.ctx.GetSlotList(true)
+	if err != nil {
+		return fmt.Errorf("%w: C_GetSlotList: %v", ErrModuleUnavailable, err)
+	}
+	if cfg.Slot < 0 || cfg.Slot >= len(slots) {
+		return fmt.Errorf("%w: module_slot=%d 越界（带 token 的槽位共 %d 个；语义为 GetSlotList 下标）",
+			ErrModuleUnavailable, cfg.Slot, len(slots))
+	}
+	slotID := slots[cfg.Slot]
+	tok, err := b.ctx.GetTokenInfo(slotID)
+	if err != nil {
+		return fmt.Errorf("%w: C_GetTokenInfo(slot=%d): %v", ErrModuleUnavailable, cfg.Slot, err)
+	}
+	b.slotIndex = cfg.Slot
+
+	// 登录（token 级登录态；登录后零化本地口令副本，R-S3-2）。
+	loginSH, err := b.ctx.OpenSession(slotID, pkcs11.CKF_SERIAL_SESSION)
+	if err != nil {
+		return fmt.Errorf("%w: C_OpenSession(登录): %v", ErrModuleUnavailable, err)
+	}
+	b.loginSH = loginSH
+	b.hasLogin = true
+	if err := b.ctx.Login(loginSH, pkcs11.CKU_USER, pin); err != nil {
+		return fmt.Errorf("%w: C_Login(user): %v（R-S3-2/R-S3-10）", ErrModuleUnavailable, err)
+	}
+	// R-S3-2 已知限制（M4-1 如实登记）：miekg/pkcs11 的 C_Login 形参为 string，
+	// 绑定层内部会产生不可零化的字符串副本；本处零化本地 []byte 副本，
+	// 完整零化需绑定层提供 []byte 形参或厂商直连绑定（S3-a 选型时评估）。
+	pinBytes := []byte(pin)
+	zeroBytes(pinBytes)
+
+	// 能力探测（B-6.1-6/R-S3-11）：只登记探测命中的机制。
+	caps, raw, err := b.probeCapabilities(slotID, tok)
+	if err != nil {
+		return err
+	}
+	if err := CheckCapabilities(caps, cfg.RequiredMechanisms); err != nil {
+		return fmt.Errorf("%w（模块实测机制 CKM: %v；已登记: %v）", err, raw, caps.Mechanisms)
+	}
+	b.caps = caps
+
+	// 会话池（B-6.1-7）：factory 开 serial 会话（token 登录态对所有会话生效）。
+	pool, err := NewSessionPool(cfg.MaxSessions, cfg.SessionQueueSize,
+		func() (Session, error) {
+			sh, err := b.ctx.OpenSession(slotID, pkcs11.CKF_SERIAL_SESSION)
+			if err != nil {
+				return 0, fmt.Errorf("%w: C_OpenSession: %v", ErrModuleUnavailable, err)
+			}
+			return Session(sh), nil
+		},
+		func(s Session) error {
+			if err := b.ctx.CloseSession(pkcs11.SessionHandle(s)); err != nil {
+				return fmt.Errorf("%w: C_CloseSession: %v", ErrModuleUnavailable, err)
+			}
+			return nil
+		})
+	if err != nil {
+		return err
+	}
+	b.pool = pool
+	return nil
+}
+
+// probeCapabilities 机制探测：GetMechanismList → 查厂商 profile 表 → 机制名。
+// rand 恒登记（C_GenerateRandom 通用）。返回 (能力, 原始 CKM 列表, 错误)。
+func (b *PKCS11Backend) probeCapabilities(slotID uint, tok pkcs11.TokenInfo) (Capabilities, []uint, error) {
+	mechs, err := b.ctx.GetMechanismList(slotID)
+	if err != nil {
+		return Capabilities{}, nil, fmt.Errorf("%w: C_GetMechanismList: %v", ErrModuleUnavailable, err)
+	}
+	raw := make([]uint, 0, len(mechs))
+	names := make([]string, 0, len(mechs)+1)
+	names = append(names, MechRand) // C_GenerateRandom 不依赖 mechanism list
+	for _, m := range mechs {
+		raw = append(raw, m.Mechanism)
+		if name, ok := p11KnownMechanisms[m.Mechanism]; ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return Capabilities{
+		Backend:    BackendPKCS11,
+		Vendor:     strings.TrimSpace(tok.ManufacturerID),
+		Model:      strings.TrimSpace(tok.Model),
+		Mechanisms: names,
+	}, raw, nil
+}
+
+// Capabilities 能力快照（探测值副本；R-S3-11 禁止仅靠 profile 静态宣称）。
+func (b *PKCS11Backend) Capabilities() Capabilities {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	c := b.caps
+	c.Mechanisms = append([]string(nil), b.caps.Mechanisms...)
+	return c
+}
+
+// AcquireSession 从会话池获取会话（池满排队；超限失败）。
+func (b *PKCS11Backend) AcquireSession() (Session, error) {
+	b.mu.Lock()
+	pool := b.pool
+	b.mu.Unlock()
+	if pool == nil {
+		return 0, fmt.Errorf("%w: 后端未初始化", ErrModuleUnavailable)
+	}
+	return pool.Acquire()
+}
+
+// ReleaseSession 归还会话到池。
+func (b *PKCS11Backend) ReleaseSession(s Session) error {
+	b.mu.Lock()
+	pool := b.pool
+	b.mu.Unlock()
+	if pool == nil {
+		return fmt.Errorf("%w: 后端未初始化", ErrModuleUnavailable)
+	}
+	return pool.Release(s)
+}
+
+// Health 分级健康探针（GM2-08；M4-1 简化为模块级 C_GetTokenInfo 探活，
+// 连续失败计数由 FailoverManager 承载。注：持锁执行 C 调用，探针与池操作
+// 互斥——M4-1 可接受；后续可改"持锁取快照、锁外调用"降低互斥）。
+func (b *PKCS11Backend) Health() HealthLevel {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed || b.ctx == nil {
+		return HealthDown
+	}
+	slots, err := b.ctx.GetSlotList(true)
+	if err != nil || b.slotIndex < 0 || b.slotIndex >= len(slots) {
+		return HealthDown
+	}
+	if _, err := b.ctx.GetTokenInfo(slots[b.slotIndex]); err != nil {
+		return HealthDown
+	}
+	return HealthOK
+}
+
+// Close 释放资源：登出 → 关登录会话 → 关池 → C_Finalize（幂等）。
+func (b *PKCS11Backend) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil
+	}
+	b.closed = true
+	if b.ctx == nil {
+		return nil
+	}
+	if b.hasLogin {
+		_ = b.ctx.Logout(b.loginSH)
+		_ = b.ctx.CloseSession(b.loginSH)
+		b.hasLogin = false
+	}
+	if b.pool != nil {
+		_ = b.pool.Close()
+	}
+	if err := b.ctx.Finalize(); err != nil {
+		return fmt.Errorf("%w: C_Finalize: %v", ErrModuleUnavailable, err)
+	}
+	return nil
+}
+
+// ---- 对称运算（M4-1：仅 Rand；其余 M4-2）----
+
+// Rand 模块 CSPRNG 随机数（GM2-03；GM/T 0050 启动自检 R-S3-12 留 M4-2）。
+func (b *PKCS11Backend) Rand(n int) ([]byte, error) {
+	if n <= 0 {
+		return nil, fmt.Errorf("pkcs11: Rand(n=%d) 须 > 0", n)
+	}
+	s, err := b.AcquireSession()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = b.ReleaseSession(s) }()
+	out, err := b.ctx.GenerateRandom(pkcs11.SessionHandle(s), n)
+	if err != nil {
+		return nil, fmt.Errorf("%w: C_GenerateRandom(%d): %v", ErrModuleUnavailable, n, err)
+	}
+	return out, nil
+}
+
+// ---- 未实现方法（M4-2 厂商机制映射；fail-closed）----
+
+func (b *PKCS11Backend) Seal(keyRef KeyRef, nonce, plaintext, aad []byte) ([]byte, error) {
+	return nil, p11NotImplemented("Seal")
+}
+
+func (b *PKCS11Backend) Open(keyRef KeyRef, nonce, ciphertext, aad []byte) ([]byte, error) {
+	return nil, p11NotImplemented("Open")
+}
+
+func (b *PKCS11Backend) Hash(data []byte) ([]byte, error) {
+	return nil, p11NotImplemented("Hash")
+}
+
+func (b *PKCS11Backend) HMAC(keyRef KeyRef, data []byte) ([]byte, error) {
+	return nil, p11NotImplemented("HMAC")
+}
+
+func (b *PKCS11Backend) KDF(parentRef KeyRef, salt, info []byte, outLen int, alias string) ([]byte, error) {
+	return nil, p11NotImplemented("KDF")
+}
+
+func (b *PKCS11Backend) Sign(privRef KeyRef, msg []byte, uid string) ([]byte, error) {
+	return nil, p11NotImplemented("Sign")
+}
+
+func (b *PKCS11Backend) Verify(pub, msg, sig []byte, uid string) error {
+	return p11NotImplemented("Verify")
+}
+
+func (b *PKCS11Backend) GenerateKeyPair(usage string) (KeyRef, []byte, error) {
+	return nil, nil, p11NotImplemented("GenerateKeyPair")
+}
+
+func (b *PKCS11Backend) ECDH(privRef KeyRef, peerPub []byte) ([]byte, error) {
+	return nil, p11NotImplemented("ECDH")
+}
+
+func (b *PKCS11Backend) WrapKey(kekRef KeyRef, dek []byte) ([]byte, error) {
+	return nil, p11NotImplemented("WrapKey")
+}
+
+func (b *PKCS11Backend) UnwrapKey(kekRef KeyRef, wrapped []byte) ([]byte, error) {
+	return nil, p11NotImplemented("UnwrapKey")
+}
+
+func (b *PKCS11Backend) ImportKey(spec string, key []byte, alias string) (KeyRef, error) {
+	return nil, p11NotImplemented("ImportKey")
+}
+
+func (b *PKCS11Backend) GenerateKey(spec, alias string) (KeyRef, error) {
+	return nil, p11NotImplemented("GenerateKey")
+}
+
+func (b *PKCS11Backend) DestroyKey(keyRef KeyRef) error {
+	return p11NotImplemented("DestroyKey")
+}
+
+func (b *PKCS11Backend) RotateKey(oldRef KeyRef, spec string) (KeyRef, error) {
+	return nil, p11NotImplemented("RotateKey")
+}
+
+// p11NotImplemented M4-2 未实现方法的统一 fail-closed 错误。
+func p11NotImplemented(method string) error {
+	return fmt.Errorf("%w: PKCS11Backend.%s 尚未实现（M4-2 厂商机制映射；fail-closed，绝不回退软件实现）",
+		ErrNotImplemented, method)
+}
+
+// zeroBytes 零化字节切片（口令本地副本；R-S3-2 尽力为零化，
+// 绑定层 string 形参副本的限制见 Init 注释）。
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}

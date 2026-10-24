@@ -9,8 +9,10 @@
 //     会话与健康编排（B-6.1-8），**不自研密码**；
 //   - MockBackend 为**功能验证档**（内存密钥对象 + 软件国密库委托），**不满足密评**，
 //     仅供适配层单测与联调，禁止用于生产合规声明；
-//   - 厂商绑定（sdf.go/pkcs11.go，cgo + 厂商 SDK）随 S3-a 采购到位后接入；
-//     未接入前 NewBackend 对 sdf/pkcs11 返回明确错误（fail-closed 启动拒），
+//   - 厂商绑定：pkcs11.go 已随 M4-1 接入（cgo + github.com/miekg/pkcs11，
+//     须 -tags pkcs11 构建；默认构建走 pkcs11_stub.go fail-closed 占位）；
+//     sdf.go（国密 SDF，GM/T 0018）随 S3-a 采购厂商 SDK 后接入，未接入前
+//     NewBackend 对 sdf 返回明确错误（fail-closed 启动拒），
 //     绝不静默回退软件实现冒充合规（C-3）。
 //
 // 设计依据：《GA-AI网关能力补齐方案--P1--国密S3-S4认证模块与密评.md》§6.1-§6.4
