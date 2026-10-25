@@ -326,6 +326,17 @@ func setupA2ARegistry(srv *api.Server) (string, error) {
 	return "已启用", nil
 }
 
+// ⚠️ **提交来源补记（追溯用，P2-4 T-1.7 修复批次）**：
+// 本文件中的 setupAuditExport / envTruthy / auditExportAuthState 三函数
+// （审计链导出装配，P2-4 **T-4.2**）与提交 **834ce57** 一同入库，但 834ce57 的
+// 提交信息只写了"修复启动默认表覆盖快照恢复"，**未覆盖这部分内容**——影响可追溯性。
+// 此处补记来源（不改历史、不 amend、不 rebase；仅注释说明）：
+//
+//	834ce57 的实际内容 =
+//	  ① P1-1 修复：api.New 仅在 store 无表时才写默认表（见 internal/api/defaulttable_test.go）；
+//	  ② T-4.2 审计链导出装配：本文件的 setupAuditExport / envTruthy / auditExportAuthState
+//	     （导出端点本体在 internal/api/auditexport.go 与共享包 gateway/auditexport）。
+//
 // setupAuditExport 按环境变量装配审计链导出端点（P2-4 T-4.2；**默认关闭**）。
 // 返回启动日志用的状态描述（"未启用" 或 "已启用(来源=...)"）。
 //
