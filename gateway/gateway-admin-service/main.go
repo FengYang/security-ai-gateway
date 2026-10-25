@@ -295,6 +295,10 @@ func main() {
 	// P2-4 T-2：集群注册 API（注册/列表/心跳/审批/摘除）。
 	// 存储：PG 时与租户库同库（多集群共享），SQLite 时独立文件；两者都未配置 → 不启用（默认零变化）。
 	// fail-closed：注册表打开失败即拒启动（集群状态与凭证不可静默丢失）。
+	//
+	// cstore 提升到外层作用域：T-3.1 的策略作用域校验器（tenant_scope.go）需**复用同一句柄**，
+	// 避免对同一 sqlite 文件开第二个连接（多写者与 WAL 锁风险）。
+	var cstore ClusterStore
 	if cfg.clusterStorePGDSN != "" || cfg.clusterStorePath != "" {
 		dialect := sqlutil.SQLite
 		dsn := cfg.clusterStorePath
@@ -302,10 +306,11 @@ func main() {
 			dialect = sqlutil.Postgres
 			dsn = cfg.clusterStorePGDSN
 		}
-		cstore, cerr := OpenClusterStore(dialect, dsn)
+		cs, cerr := OpenClusterStore(dialect, dsn)
 		if cerr != nil {
 			log.Fatalf("集群注册表初始化失败（fail-closed）：%v", cerr)
 		}
+		cstore = cs
 		defer cstore.Close()
 		registerClusterRoutes(adminMux, cfg, newClusterAPI(cstore, newClusterApprovalRegistry(auditChain)))
 		log.Printf("集群注册 API 已启用（dialect=%s）", dialect)
@@ -332,6 +337,11 @@ func main() {
 			binder = bih
 		}
 		tenantH = newTenantHandler(ts, cfg, binder, uh, bih, mh, auditChain)
+		// P2-4 T-3.1：策略作用域（scope{global|cluster[]}）写入校验器注入集群注册表——
+		// 复用同一句柄（不另开连接），未启用注册表时保持 nil（此时只允许 global）。
+		if cstore != nil {
+			tenantH.setScopeResolver(cstore)
+		}
 		// P2-4 T-1.3/T-1.4：安全计数器共享库（captcha 签发限流/答案存储 + 登录失败锁定）。
 		// 显式配置 SECURITY_STORE_PG_DSN 才启用；缺省进程内实现（默认行为零变化）。
 		// 开库/建表失败 → fail-closed 拒启动（多副本共享语义不可静默丢失）。
