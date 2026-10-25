@@ -86,16 +86,17 @@ func newAPITestHandler(t *testing.T, cfg *config, binder quotaBinder) (*tenantHa
 	return h, ts, fm
 }
 
-// issueTestCaptcha 生成验证码并取回明文（同包访问内部 map）。
+// issueTestCaptcha 生成验证码并取回明文（同包访问内部 map；进程内实现才有 items）。
 func issueTestCaptcha(t *testing.T, h *tenantHandler) (id, code string) {
 	t.Helper()
 	id, _, err := h.captcha.Issue("10.0.0.1")
 	if err != nil {
 		t.Fatalf("签发验证码失败: %v", err)
 	}
-	h.captcha.mu.Lock()
-	code = h.captcha.items[id].code
-	h.captcha.mu.Unlock()
+	mc := h.captcha.(*captchaStore)
+	mc.mu.Lock()
+	code = mc.items[id].code
+	mc.mu.Unlock()
 	return id, code
 }
 

@@ -38,7 +38,7 @@ type tenantHandler struct {
 	cfg        *config
 	jwtSecret  []byte // 租户会话令牌校验密钥（= cfg.jwtSecret，共享密钥，§6.1）
 	mailer     tenantMailer
-	captcha    *captchaStore
+	captcha    captchaBackend       // 验证码后端（默认进程内 *captchaStore；SECURITY_STORE_PG_DSN 配置后为共享库实现）
 	binder     quotaBinder          // nil = billing 域未启用
 	issuer     keyIssuer            // nil = Key 签发通道未配置（§6.11）
 	usage      *usageHandler        // M4：tee-infer 用量代理（复用）

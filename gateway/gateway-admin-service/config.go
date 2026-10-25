@@ -46,6 +46,10 @@ type config struct {
 	captchaTTLMin        int
 	captchaIPRatePerHour int
 
+	// 安全计数器共享库（P2-4 T-1.3/T-1.4，多副本）：captcha 签发限流/答案存储与
+	// 登录失败锁定改存共享 SQL 库；空 = 进程内（默认，行为不变）。
+	securityStorePGDSN string
+
 	// SMTP 与邮件链接（§10.3 D）
 	smtpHost      string
 	smtpPort      int
@@ -217,6 +221,10 @@ func loadTenantConfig(cfg *config) error {
 	cfg.captchaEnabled = envBool("TENANT_CAPTCHA_ENABLED", true)
 	cfg.captchaTTLMin = envInt("TENANT_CAPTCHA_TTL_MIN", defaultCaptchaTTLMin)
 	cfg.captchaIPRatePerHour = envInt("TENANT_CAPTCHA_IP_RATE_PER_HOUR", defaultCaptchaIPRatePerHour)
+
+	// C'. 安全计数器共享库（P2-4 T-1.3/T-1.4，多副本）：显式配置 DSN 才启用，
+	// 缺省进程内实现（默认行为零变化）。
+	cfg.securityStorePGDSN = strings.TrimSpace(os.Getenv("SECURITY_STORE_PG_DSN"))
 
 	// D. SMTP 与邮件链接（§10.3 D）
 	cfg.smtpHost = os.Getenv("SMTP_HOST")

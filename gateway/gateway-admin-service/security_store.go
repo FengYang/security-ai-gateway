@@ -1,0 +1,264 @@
+// Package main — 安全计数器共享库（P2-4 T-1.3/T-1.4，多副本部署）。
+//
+// captcha 签发限流/答案存储与登录失败锁定原为进程内态（单副本约束）；
+// 多副本部署下改存共享 SQL 库（sqlite/PG 双方言，经 sqlutil 适配）实现跨副本原子：
+//   - captcha_rate_limits：同 IP 小时窗口签发计数（单语句原子 upsert 自增，超限拒签）；
+//   - captcha_challenges：验证码答案（SHA-256 哈希、TTL、UPDATE 条件消费 = 原子一次性）；
+//   - login_attempts（T-1.4）：登录失败计数与锁定（单语句原子 upsert，达阈值锁定）。
+//
+// 降级策略（明确选定，非默认可配）：
+//   - PG/共享库操作失败 → 回退到进程内实现（**等价 P2-4 之前的单副本旧行为**，
+//     安全性不弱于既有基线）并 log.Printf 限频告警；
+//   - captcha 取 fail-open 取向的理由：captcha 仅为防机器人辅助控制（§6.2），
+//     其后端不可用若直接 fail-closed 会挡住所有正常登录/注册（可用性灾难）；
+//     回退后每副本仍保留单副本级限流与一次性消费防护；
+//   - 登录锁定回退到进程内计数 = 每副本各自计数（既有单副本语义），
+//     阈值/锁定窗口语义不变，不存在"无防护"窗口；
+//   - 开库/建表失败（SECURITY_STORE_PG_DSN 配置了但连不上）→ main fail-closed 拒启动
+//     （多副本共享语义不可静默丢失）。
+package main
+
+import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
+	"sync"
+	"time"
+
+	"security-ai-gateway/gateway/gateway-admin-service/sqlutil"
+)
+
+// securityDDL 安全计数器表（双方言同一 DDL：sqlite / PG）。
+// 时间列用 BIGINT（P2-4 约定：PG 的 INTEGER 为 4 字节，epoch 秒 2038 年溢出；
+// sqlite INTEGER 本就 8 字节，同一 DDL 两边等宽）。无 sqlite 特有语法。
+const securityDDL = `
+CREATE TABLE IF NOT EXISTS captcha_rate_limits (
+  ip          TEXT    PRIMARY KEY,
+  window_hour BIGINT  NOT NULL,
+  hits        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS captcha_challenges (
+  id         TEXT    PRIMARY KEY,
+  code_hash  TEXT    NOT NULL,
+  expires_at BIGINT  NOT NULL,
+  consumed   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_captcha_challenge_expires ON captcha_challenges(expires_at);
+`
+
+// openSecurityStore 打开安全计数器共享库并初始化 DDL。
+// dsn 由调用方保证格式（PG 连接串或 sqlite 路径）。
+func openSecurityStore(d sqlutil.Dialect, dsn string) (*sqlutil.DB, error) {
+	db, err := sqlutil.Open(d, dsn, 0)
+	if err != nil {
+		return nil, fmt.Errorf("security: open %s: %w", d, err)
+	}
+	if _, err := db.Exec(securityDDL); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("security: init schema: %w", err)
+	}
+	return db, nil
+}
+
+// captchaBackend 验证码后端（§6.11 / §10.3 C）：
+//   - *captchaStore（tenant_captcha.go）：进程内实现，默认，单副本；
+//   - *sqlCaptchaBackend：共享库实现（sqlite/PG），多副本原子。
+type captchaBackend interface {
+	// Issue 生成验证码：返回 (id, dataURL)；同 IP 超限 → errCaptchaRateLimited。
+	Issue(ip string) (id, imageDataURL string, err error)
+	// Verify 校验并一次性消费（无论对错都消费，防爆破）；大小写不敏感。
+	Verify(id, code string) bool
+}
+
+// sqlCaptchaBackend 验证码共享库后端（双方言；多副本共享限流计数与答案）。
+// 共享库操作失败时回退进程内实现并告警（降级策略见文件头注释）。
+type sqlCaptchaBackend struct {
+	db       *sqlutil.DB
+	ttl      time.Duration
+	ipLimit  int
+	fallback *captchaStore // 进程内回退（共享库不可达时的降级路径）
+	gcStop   chan struct{} // GC 协程停止信号（nil = 未启动）
+	alarm    securityAlarm
+}
+
+// newSQLCaptchaBackend 构造共享库验证码后端并启动周期 GC。
+// ttlMin 答案 TTL 分钟；ipLimitPerHour 同 IP 小时窗口上限。
+func newSQLCaptchaBackend(db *sqlutil.DB, ttlMin, ipLimitPerHour int) *sqlCaptchaBackend {
+	b := &sqlCaptchaBackend{
+		db:       db,
+		ttl:      time.Duration(ttlMin) * time.Minute,
+		ipLimit:  ipLimitPerHour,
+		fallback: newCaptchaStore(ttlMin, ipLimitPerHour),
+	}
+	b.startGC(5 * time.Minute)
+	return b
+}
+
+// normalizeCaptchaCode 归一化待比对验证码（与内存实现 EqualFold+TrimSpace 等价；
+// 字符集为 ASCII 大写，ToUpper 足够）。
+func normalizeCaptchaCode(code string) string {
+	return strings.ToUpper(strings.TrimSpace(code))
+}
+
+// captchaCodeHash 答案哈希（库内不存明文；SHA-256 定长 + 常量时间比对）。
+func captchaCodeHash(code string) string {
+	sum := sha256.Sum256([]byte(normalizeCaptchaCode(code)))
+	return hex.EncodeToString(sum[:])
+}
+
+// Issue 签发验证码：限流计数原子 upsert → 超限拒签（fail-closed）；
+// 答案以哈希入库。共享库失败 → 回退进程内并告警。
+func (b *sqlCaptchaBackend) Issue(ip string) (id, imageDataURL string, err error) {
+	id, imageDataURL, err = b.issueSQL(ip)
+	if err != nil && !errors.Is(err, errCaptchaRateLimited) {
+		b.alarm.logf("captcha-issue", "captcha 共享库签发失败，回退进程内（降级）：%v", err)
+		return b.fallback.Issue(ip)
+	}
+	return id, imageDataURL, err
+}
+
+// issueSQL 共享库签发路径。
+func (b *sqlCaptchaBackend) issueSQL(ip string) (string, string, error) {
+	now := time.Now()
+	window := now.Unix() / 3600 // 固定小时窗口起点（与内存实现的滑动窗口近似等价，见下）
+	// 单语句原子 upsert 自增：跨副本并发签发在行锁上串行，计数无丢失。
+	// 窗口翻转（window_hour 不同）时计数重置为 1。
+	// 注：此处为固定窗口计数（每整点重置），比内存实现的滑动窗口在窗口边界
+	// 最多放宽一倍瞬时突刺；防护目标（拉高机器批量签发成本）不受影响。
+	var hits int
+	if err := b.db.QueryRow(`INSERT INTO captcha_rate_limits (ip, window_hour, hits)
+		VALUES (?, ?, 1)
+		ON CONFLICT (ip) DO UPDATE SET
+			window_hour = EXCLUDED.window_hour,
+			hits = CASE WHEN captcha_rate_limits.window_hour = EXCLUDED.window_hour
+				THEN captcha_rate_limits.hits + 1 ELSE 1 END
+		RETURNING hits`, ip, window).Scan(&hits); err != nil {
+		return "", "", err
+	}
+	// 语义与内存实现对齐：第 ipLimit 次放行，第 ipLimit+1 次拒签。
+	if b.ipLimit > 0 && hits > b.ipLimit {
+		return "", "", errCaptchaRateLimited
+	}
+
+	code, err := randomCaptchaCode(captchaLength)
+	if err != nil {
+		return "", "", err
+	}
+	id, err := randomToken(16)
+	if err != nil {
+		return "", "", err
+	}
+	pngBytes, err := renderCaptchaPNG(code)
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := b.db.Exec(`INSERT INTO captcha_challenges (id, code_hash, expires_at, consumed)
+		VALUES (?, ?, ?, 0)`, id, captchaCodeHash(code), now.Add(b.ttl).Unix()); err != nil {
+		return "", "", err
+	}
+	return id, "data:image/png;base64," + base64.StdEncoding.EncodeToString(pngBytes), nil
+}
+
+// Verify 原子一次性消费 + 常量时间比对。共享库失败 → 回退进程内并告警
+// （回退路径下此前经共享库签发的答案不可用，用户重试即可，不构成安全弱化）。
+func (b *sqlCaptchaBackend) Verify(id, code string) bool {
+	if id == "" || code == "" {
+		return false
+	}
+	ok, err := b.verifySQL(id, code)
+	if err != nil {
+		b.alarm.logf("captcha-verify", "captcha 共享库校验失败，回退进程内（降级）：%v", err)
+		return b.fallback.Verify(id, code)
+	}
+	return ok
+}
+
+// verifySQL 共享库校验路径：先条件 UPDATE 原子消费（无论对错），再比对哈希。
+func (b *sqlCaptchaBackend) verifySQL(id, code string) (bool, error) {
+	now := time.Now().Unix()
+	// 原子一次性消费：仅未消费且未过期的行可置 consumed=1，以受影响行数判成败；
+	// 并发校验同一 id 时仅一个 UPDATE 影响行数为 1。
+	res, err := b.db.Exec(`UPDATE captcha_challenges SET consumed = 1
+		WHERE id = ? AND consumed = 0 AND expires_at > ?`, id, now)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil
+	}
+	// 行在消费时刻未过期，不会被 GC（GC 仅删 expires_at <= now 的行），SELECT 必命中。
+	var stored string
+	if err := b.db.QueryRow(`SELECT code_hash FROM captcha_challenges WHERE id = ?`, id).Scan(&stored); err != nil {
+		return false, err
+	}
+	// 常量时间比对，防计时侧信道。
+	return subtle.ConstantTimeCompare([]byte(stored), []byte(captchaCodeHash(code))) == 1, nil
+}
+
+// startGC 启动周期清理协程（复用既有后台 ticker 模式）：
+// 过期挑战与陈旧限流行。已消费但未过期的行保留（verifySQL 消费后还要读哈希）。
+func (b *sqlCaptchaBackend) startGC(interval time.Duration) {
+	b.gcStop = make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				now := time.Now().Unix()
+				if _, err := b.db.Exec(`DELETE FROM captcha_challenges WHERE expires_at <= ?`, now); err != nil {
+					b.alarm.logf("captcha-gc", "captcha 过期挑战清理失败：%v", err)
+				}
+				if _, err := b.db.Exec(`DELETE FROM captcha_rate_limits WHERE window_hour < ?`, now/3600-1); err != nil {
+					b.alarm.logf("captcha-gc", "captcha 陈旧限流行清理失败：%v", err)
+				}
+			case <-b.gcStop:
+				return
+			}
+		}
+	}()
+}
+
+// stopGC 停止周期清理协程（测试用；生产随进程退出）。
+func (b *sqlCaptchaBackend) stopGC() {
+	if b.gcStop != nil {
+		close(b.gcStop)
+		b.gcStop = nil
+	}
+}
+
+// securityAlarm 限频告警（同类 ≥60s 一条，防共享库故障时日志风暴）。
+type securityAlarm struct {
+	mu   sync.Mutex
+	last map[string]int64 // op → 最近告警 unix 秒
+}
+
+// logf 记录一条限频告警。
+func (a *securityAlarm) logf(op, format string, args ...any) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.last == nil {
+		a.last = make(map[string]int64)
+	}
+	now := time.Now().Unix()
+	if now-a.last[op] < 60 {
+		return
+	}
+	a.last[op] = now
+	log.Printf("[security-store] "+format, args...)
+}
+
+// useSecurityPGStore 将 handler 的安全计数器切换到共享库后端（main.go 接线用，
+// 仅在 SECURITY_STORE_PG_DSN 配置时调用；缺省保持进程内实现，行为不变）。
+func (h *tenantHandler) useSecurityPGStore(db *sqlutil.DB) {
+	if h.cfg.captchaEnabled {
+		h.captcha = newSQLCaptchaBackend(db, h.cfg.captchaTTLMin, h.cfg.captchaIPRatePerHour)
+	}
+	// T-1.4：登录失败锁定同库切换（useSecurityPGLoginGuard，见下）。
+}

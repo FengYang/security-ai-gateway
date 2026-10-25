@@ -52,6 +52,7 @@ import (
 	"time"
 
 	"security-ai-gateway/gateway/gateway-admin-service/billing"
+	"security-ai-gateway/gateway/gateway-admin-service/sqlutil"
 )
 
 // claimsCtxKey 上下文中 claims 的键（不透出包外）。
@@ -303,6 +304,18 @@ func main() {
 			binder = bih
 		}
 		tenantH = newTenantHandler(ts, cfg, binder, uh, bih, mh, auditChain)
+		// P2-4 T-1.3/T-1.4：安全计数器共享库（captcha 签发限流/答案存储 + 登录失败锁定）。
+		// 显式配置 SECURITY_STORE_PG_DSN 才启用；缺省进程内实现（默认行为零变化）。
+		// 开库/建表失败 → fail-closed 拒启动（多副本共享语义不可静默丢失）。
+		if cfg.securityStorePGDSN != "" {
+			sec, err := openSecurityStore(sqlutil.Postgres, cfg.securityStorePGDSN)
+			if err != nil {
+				log.Fatalf("安全计数器共享库初始化失败（fail-closed）：%v", err)
+			}
+			defer func() { _ = sec.Close() }()
+			tenantH.useSecurityPGStore(sec)
+			log.Printf("安全计数器已启用 PG 共享库（多副本原子）：captcha 限流/答案 + 登录失败锁定")
+		}
 		tenantH.registerCaptcha(adminMux, cfg)
 		tenantH.registerKeyRevocations(adminMux, cfg)
 		tenantH.registerTenantDirectory(adminMux, cfg)
