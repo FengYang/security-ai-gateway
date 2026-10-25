@@ -1599,16 +1599,25 @@ func (s *sqliteTenantStore) GetDispatchState(tenantID string) (*TenantDispatchSt
 
 // BumpDispatchVersion 同事务把 config_version+1、status='pending'（不存在则建行，config_version=1）。
 // 返回自增后的 config_version。用于「配置已存、待下发」的原子性保证（§4.3.5）。
+//
+// ⚠️ 方言差异（P2-4 真机 PG 复验发现，SQLSTATE 42702）：在 ON CONFLICT DO UPDATE 中，
+// 未限定的列名在**目标表与 excluded 伪表之间歧义**——PG 报
+// `column reference "config_version" is ambiguous`，SQLite 则容忍。
+// 故 PG 下用表名限定（tenant_dispatch_state.config_version），SQLite 保持原写法。
 func (s *sqliteTenantStore) BumpDispatchVersion(tx TenantTx, tenantID string, now int64) (int64, error) {
-	_, err := tx.tx().Exec(`INSERT INTO tenant_dispatch_state
+	bumpExpr := "config_version = config_version + 1"
+	if s.db.Dialect().IsPostgres() {
+		bumpExpr = "config_version = tenant_dispatch_state.config_version + 1"
+	}
+	_, err := tx.tx().Exec(fmt.Sprintf(`INSERT INTO tenant_dispatch_state
 		(tenant_id, config_version, status, applied_version, last_error, retry_count, updated_at)
 		VALUES (?, 1, 'pending', 0, NULL, 0, ?)
 		ON CONFLICT(tenant_id) DO UPDATE SET
-			config_version = config_version + 1,
+			%s,
 			status = 'pending',
 			last_error = NULL,
 			retry_count = 0,
-			updated_at = excluded.updated_at`,
+			updated_at = excluded.updated_at`, bumpExpr),
 		tenantID, now)
 	if err != nil {
 		return 0, fmt.Errorf("tenant: bump dispatch version: %w", err)
