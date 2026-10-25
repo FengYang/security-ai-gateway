@@ -7,14 +7,17 @@ package main
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"security-ai-gateway/gateway/a2aproxy"
+	"security-ai-gateway/gateway/auditexport"
 	"security-ai-gateway/gateway/gateway-core/internal/a2aregistry"
 	"security-ai-gateway/gateway/gateway-core/internal/api"
 	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
@@ -100,6 +103,14 @@ func main() {
 	// TEE 侧配额下发器（S3）：OTP_CORE_TEE_URL 为空 = nil（预算/TPM 不下发，仅在响应 Note 中说明）
 	teeQuota := api.NewHTTPTeeQuotaApplier(os.Getenv("OTP_CORE_TEE_URL"), os.Getenv("OTP_CORE_TEE_ADMIN_TOKEN"))
 	srv := api.New(signer, msigner, rsigner, teeQuota, st, authToken, rt, rlt)
+	// 启动日志取**生效表**（api.New 仅在 store 无表时写默认表，故此处可能是快照恢复值），
+	// 避免日志版本与实服版本不一致（P2-4 T-1.7 / QA P1-1 配套）。
+	if eff := st.GetRouteTable(); eff != nil {
+		rt = eff
+	}
+	if eff := st.GetRateLimitTable(); eff != nil {
+		rlt = eff
+	}
 	srv.SetACLSigner(aclsigner)
 	srv.SetRateLimitSigner(a2arlsigner)
 	// 策略变更审计（判据 7）：OTP_CORE_AUDIT_FILE 非空 → WORM 持久化（文件损坏即拒绝启动，fail-closed）
@@ -129,8 +140,14 @@ func main() {
 		log.Fatalf("初始化 A2A 注册中心失败: %v", err)
 	}
 
-	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d 限流版本=%d TEE配额下发=%v 变更审计=%s A2A注册中心=%s 存储快照=%s",
-		addr, authToken != "", rt.Version, rlt.Version, teeQuota != nil, auditState, a2aStatus, snapState)
+	// P2-4 T-4.2：审计链导出端点（默认关闭）。
+	auditExportStatus, err := setupAuditExport(srv)
+	if err != nil {
+		log.Fatalf("初始化审计链导出端点失败（fail-closed 拒绝启动）: %v", err)
+	}
+
+	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d 限流版本=%d TEE配额下发=%v 变更审计=%s A2A注册中心=%s 存储快照=%s 审计导出=%s",
+		addr, authToken != "", rt.Version, rlt.Version, teeQuota != nil, auditState, a2aStatus, snapState, auditExportStatus)
 	// 控制面无流式响应，全量超时；body 上限防资源耗尽（T-1 评审项）
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -189,6 +206,71 @@ func setupA2ARegistry(srv *api.Server) (string, error) {
 	}
 	srv.SetA2ARegistry(reg)
 	return "已启用", nil
+}
+
+// setupAuditExport 按环境变量装配审计链导出端点（P2-4 T-4.2；**默认关闭**）。
+// 返回启动日志用的状态描述（"未启用" 或 "已启用(来源=...)"）。
+//
+// 环境变量：
+//
+//	GATEWAY_CORE_AUDIT_EXPORT_ENABLED  1|true|yes|on 才启用（其余 = 未启用 → 路由不注册，请求 404）
+//	GATEWAY_CORE_AUDIT_EXPORT_CIDRS    来源 IP CIDR 白名单（逗号分隔；**空 = 拒绝所有来源**，
+//	                                   启用时为空 → 拒绝启动：配置遗漏不得变成"启用即全开"）
+//	GATEWAY_CORE_AUDIT_EXPORT_TOKEN    静态 Bearer 令牌（**临时联调口径**；空 = deny-all 全部 403）
+//	GATEWAY_CORE_AUDIT_EXPORT_MAX      单次导出行数上限（可选；默认 auditexport.DefaultMaxLimit）
+//
+// ⚠️ **T-2.3 接线点**：授权实现应由 T-2.3「集群身份凭证（签发/校验/轮换/吊销）」
+// 提供（实现 auditexport.Authorizer 接口），替换下方的 TokenAuthorizer 临时口径：
+//
+//	cfg.Authorizer = clustercred.NewAuthorizer(...) // T-2.3 落地后替换
+//
+// 本任务不实现凭证本身；未注入真实实现时，TokenAuthorizer 令牌为空即 deny-all。
+func setupAuditExport(srv *api.Server) (string, error) {
+	if !envTruthy(os.Getenv("GATEWAY_CORE_AUDIT_EXPORT_ENABLED")) {
+		return "未启用", nil
+	}
+	cidrs := splitCSV(os.Getenv("GATEWAY_CORE_AUDIT_EXPORT_CIDRS"))
+	wl, err := auditexport.NewSourceWhitelist(cidrs)
+	if err != nil {
+		return "", err // CIDR 非法 → 拒绝启动（fail-closed）
+	}
+	if wl.Empty() {
+		return "", errors.New("GATEWAY_CORE_AUDIT_EXPORT_CIDRS 为空：白名单空 = 拒绝所有来源（请显式配置来源 CIDR 或关闭导出端点）")
+	}
+	maxLimit := auditexport.DefaultMaxLimit
+	if raw := strings.TrimSpace(os.Getenv("GATEWAY_CORE_AUDIT_EXPORT_MAX")); raw != "" {
+		n, perr := strconv.Atoi(raw)
+		if perr != nil || n <= 0 {
+			return "", fmt.Errorf("GATEWAY_CORE_AUDIT_EXPORT_MAX 非法: %q", raw)
+		}
+		maxLimit = n
+	}
+	cfg := auditexport.Config{
+		Enabled:   true,
+		Whitelist: wl,
+		MaxLimit:  maxLimit,
+		// 临时联调口径（T-2.3 前）：令牌为空 → deny-all。
+		Authorizer: auditexport.TokenAuthorizer{Token: os.Getenv("GATEWAY_CORE_AUDIT_EXPORT_TOKEN")},
+	}
+	srv.SetAuditExport(cfg)
+	return fmt.Sprintf("已启用（来源=%s 上限=%d 授权=%s）", strings.Join(cidrs, ","), maxLimit, auditExportAuthState(cfg)), nil
+}
+
+// auditExportAuthState 启动日志用：区分"已注入静态令牌"与"deny-all（待 T-2.3）"。
+func auditExportAuthState(cfg auditexport.Config) string {
+	if tk, ok := cfg.Authorizer.(auditexport.TokenAuthorizer); ok && tk.Token != "" {
+		return "静态令牌（临时，待 T-2.3 集群凭证替换）"
+	}
+	return "deny-all（待 T-2.3 集群凭证）"
+}
+
+// envTruthy 判定开关型环境变量是否为真（1/true/yes/on，大小写不敏感）。
+func envTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // parseTenantDomains 解析 "tenant=domain,tenant2=domain2" 形式的映射。

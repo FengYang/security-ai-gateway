@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"security-ai-gateway/gateway/a2aproxy"
+	"security-ai-gateway/gateway/auditexport"
 	"security-ai-gateway/gateway/gateway-core/internal/a2aregistry"
 	"security-ai-gateway/gateway/gateway-core/internal/policyaudit"
 	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
@@ -53,17 +54,27 @@ type Server struct {
 	rlSigner *a2aproxy.RateLimitSigner
 	rlMu     sync.Mutex
 	rlHist   []*a2aproxy.RateLimitTable // 限流历史版本（含当前），用于按 version 回滚
+	// P2-4 T-4.2：审计链导出端点配置（默认零值 = 未启用，路由不注册）。
+	// 仅 SetAuditExport 显式装配后才会注册 GET /v1/internal/audit/chain/export。
+	auditExportCfg auditexport.Config
 }
 
 // New 构造 API Server。routerTable 为启动时注入的已签名默认路由表（可为空表）；
 // rateLimitTable 为启动时注入的已签名默认限流表（可为空表，Phase 1 门禁 #7）；
 // teeQuota 为 TEE 侧配额下发器（nil = 未配置，此时预算/TPM 仅在响应 Note 中说明）。
+//
+// ⚠️ **默认表写入口径（P2-4 T-1.7 / QA P1-1 修复）**：默认表**仅当 store 中该表
+// 缺失（nil）时**才写入。原因：store 可能已由快照恢复了更高的表版本（T-1.7 重启
+// 恢复），若此处无条件写回启动默认表（v1），会：
+//  1. 把恢复出来的策略覆盖成空默认表（运行时策略丢失）；
+//  2. 覆盖值随后被再次落盘 ⇒ **快照持久化对路由/限流表彻底失效**（QA 实跑取证：
+//     恢复后路由表 v7/限流表 v5 → 启动写回后变 v1 → 磁盘快照也变 v1）。
 func New(signer *route.Signer, msigner *mcpsec.Signer, rlsigner *ratelimit.Signer, teeQuota TeeQuotaApplier,
 	st store.Store, authToken string, routerTable *route.RouteTable, rateLimitTable *ratelimit.Table) *Server {
-	if routerTable != nil {
+	if routerTable != nil && st.GetRouteTable() == nil {
 		st.SaveRouteTable(routerTable)
 	}
-	if rateLimitTable != nil {
+	if rateLimitTable != nil && st.GetRateLimitTable() == nil {
 		st.SaveRateLimitTable(rateLimitTable)
 	}
 	s := &Server{
