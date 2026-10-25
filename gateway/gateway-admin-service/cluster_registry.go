@@ -145,6 +145,8 @@ type ClusterStore interface {
 	RecomputeStatuses(ctx context.Context, now time.Time) ([]*ClusterRecord, error)
 	// SetStatus 显式设置状态（受控摘除/强制摘除路径使用）。
 	SetStatus(ctx context.Context, id string, status ClusterStatus, at time.Time) error
+	// Credentials 返回该注册表句柄上的集群身份凭证存储（共用同一数据库）。
+	Credentials() ClusterCredentialStore
 	// Close 关闭底层句柄。
 	Close() error
 }
@@ -191,7 +193,16 @@ func (s *sqlClusterStore) ensureSchema() error {
 	if _, err := s.db.Exec(ddl); err != nil {
 		return fmt.Errorf("cluster_registry: init schema: %w", err)
 	}
+	// 集群身份凭证表（T-2.3）：与注册表同库同句柄。
+	if err := ensureClusterCredentialSchema(s.db); err != nil {
+		return err
+	}
 	return nil
+}
+
+// Credentials 返回该注册表句柄上的集群身份凭证存储（共用同一数据库）。
+func (s *sqlClusterStore) Credentials() ClusterCredentialStore {
+	return NewClusterCredentialStore(s.db)
 }
 
 // clusterDDLSchemaSQLite sqlite 建表语句。
