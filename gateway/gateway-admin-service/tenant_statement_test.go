@@ -381,7 +381,7 @@ func TestGetStatement_NotFound(t *testing.T) {
 // TestStatementStore_ClosedErrors 覆盖表 ⑨ 读路径的底层错误分支（关闭库即报错）。
 func TestStatementStore_ClosedErrors(t *testing.T) {
 	store := newTestStore(t)
-	if err := ensureStatementsSchema(store.db); err != nil {
+	if err := ensureStatementsSchema(store.db.DB); err != nil {
 		t.Fatalf("未关闭库建表应成功: %v", err)
 	}
 	if err := store.Close(); err != nil {
@@ -399,7 +399,7 @@ func TestStatementStore_ClosedErrors(t *testing.T) {
 	if _, err := store.ListProvisionedTenants(); err == nil {
 		t.Error("关闭库 ListProvisionedTenants 应报错")
 	}
-	if err := ensureStatementsSchema(store.db); err == nil {
+	if err := ensureStatementsSchema(store.db.DB); err == nil {
 		t.Error("关闭库建表应报错")
 	}
 }

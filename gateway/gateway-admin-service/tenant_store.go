@@ -1,9 +1,10 @@
-// Package main — 租户自助门户存储层（SQLite）。
+// Package main — 租户自助门户存储层（SQLite / PostgreSQL 双方言）。
 //
 // 按本体 §3.5 建立 7 张表：tenants / tenant_users / mail_action_tokens /
 // api_keys / policy_overlays / model_configs / register_rate。
 // 密码 bcrypt cost=12；邮件令牌哈希存储（SHA-256 + pepper）；
-// 写事务走 BEGIN IMMEDIATE，与 billing store 同范式。
+// 写事务在 sqlite 下由进程内 writeMu 串行，在 PG 下另加 advisory xact lock
+// （跨副本等价 BEGIN IMMEDIATE 意图，P2-4 T-1）。
 //
 // M1 聚焦租户身份与会话所需表；api_keys / policy_overlays / model_configs
 // 随后续模块补 CRUD，此处仅建表占位以保证 schema 一次到位。
@@ -20,7 +21,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
-	_ "modernc.org/sqlite"
+
+	"security-ai-gateway/gateway/gateway-admin-service/sqlutil"
 )
 
 // ---------- 常量 ----------
@@ -96,6 +98,135 @@ CREATE TABLE IF NOT EXISTS register_rate (
   count        INTEGER NOT NULL DEFAULT 0,
   window_start INTEGER NOT NULL
 );
+`
+
+// tenantDDLSchemaPG 租户门户 PG DDL（与 sqlite 侧 tenantDDLSchema + 各 ensure*Schema 等价迁移，
+// P2-4 T-1.2；PG 无 sqlite 的 PRAGMA 自检/重建逻辑，新库直建目标结构）：
+//   - `INTEGER PRIMARY KEY AUTOINCREMENT` → `BIGSERIAL`（新库无回填，无需 setval）；
+//   - 时间戳等 INTEGER 列 → BIGINT（PG 的 INTEGER 为 4 字节，epoch 秒 2038 年溢出，
+//     须与 sqlite 的 8 字节 INTEGER 等宽）；
+//   - 部分唯一索引（WHERE ...）/ CHECK 约束 / ON CONFLICT 语义 PG 原生支持，逐条对齐。
+const tenantDDLSchemaPG = `
+CREATE TABLE IF NOT EXISTS tenants (
+  id         TEXT PRIMARY KEY,
+  name       TEXT   NOT NULL,
+  status     TEXT   NOT NULL DEFAULT 'active',
+  plan_id    TEXT   NOT NULL DEFAULT 'free',
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status);
+
+CREATE TABLE IF NOT EXISTS tenant_users (
+  id            BIGSERIAL PRIMARY KEY,
+  tenant_id     TEXT   NOT NULL,
+  email         TEXT   NOT NULL UNIQUE,
+  password_hash TEXT   NOT NULL,
+  status        TEXT   NOT NULL DEFAULT 'pending',
+  created_at    BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tuser_tenant ON tenant_users(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_tuser_status ON tenant_users(status);
+
+CREATE TABLE IF NOT EXISTS mail_action_tokens (
+  token_hash     TEXT   PRIMARY KEY,
+  tenant_user_id BIGINT NOT NULL,
+  action         TEXT   NOT NULL,
+  expires_at     BIGINT NOT NULL,
+  consumed_at    BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_mtoken_user ON mail_action_tokens(tenant_user_id);
+CREATE INDEX IF NOT EXISTS idx_mtoken_expires ON mail_action_tokens(expires_at);
+
+CREATE TABLE IF NOT EXISTS register_rate (
+  ip           TEXT    PRIMARY KEY,
+  count        INTEGER NOT NULL DEFAULT 0,
+  window_start BIGINT  NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+  key_id       TEXT PRIMARY KEY,
+  tenant_id    TEXT   NOT NULL,
+  name         TEXT   NOT NULL,
+  jti          TEXT   NOT NULL UNIQUE,
+  fingerprint  TEXT   NOT NULL,
+  status       TEXT   NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
+  created_by   TEXT   NOT NULL,
+  created_at   BIGINT NOT NULL,
+  last_used_at BIGINT NOT NULL DEFAULT 0,
+  revoked_at   BIGINT NOT NULL DEFAULT 0,
+  expires_at   BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_key_name ON api_keys(tenant_id, name) WHERE status='active';
+CREATE INDEX IF NOT EXISTS idx_apikey_revoked ON api_keys(revoked_at) WHERE status='revoked';
+CREATE INDEX IF NOT EXISTS idx_apikey_tenant ON api_keys(tenant_id);
+
+CREATE TABLE IF NOT EXISTS policy_overlays (
+  tenant_id        TEXT   PRIMARY KEY,
+  version          BIGINT NOT NULL DEFAULT 1,
+  whitelist        TEXT   NOT NULL DEFAULT '{"entries":[]}',
+  blacklist        TEXT   NOT NULL DEFAULT '{"entries":[]}',
+  category_actions TEXT   NOT NULL DEFAULT '{}',
+  updated_at       BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS model_configs (
+  tenant_id      TEXT   PRIMARY KEY,
+  allowed_models TEXT   NOT NULL DEFAULT '[]',
+  default_model  TEXT   NOT NULL DEFAULT '',
+  version        BIGINT NOT NULL DEFAULT 1,
+  updated_at     BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS subscription_requests (
+  request_id TEXT PRIMARY KEY,
+  tenant_id  TEXT   NOT NULL,
+  from_plan  TEXT   NOT NULL,
+  to_plan    TEXT   NOT NULL,
+  direction  TEXT   NOT NULL,
+  status     TEXT   NOT NULL DEFAULT 'pending',
+  created_by TEXT   NOT NULL,
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_subreq_tenant ON subscription_requests(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_subreq_status ON subscription_requests(status);
+
+CREATE TABLE IF NOT EXISTS tenant_provisionings (
+  tenant_id          TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+  scenario           TEXT   NOT NULL CHECK (scenario IN ('s1','s2','s3a','s3b','s4')),
+  trust_tier         TEXT   NOT NULL CHECK (trust_tier IN ('trusted','untrusted')),
+  access_mode        TEXT   NOT NULL DEFAULT 'a_segmented' CHECK (access_mode = 'a_segmented'),
+  plugin_set         TEXT   NOT NULL DEFAULT '[]',
+  segment1_enabled   INTEGER NOT NULL,
+  segment2_mode      TEXT   NOT NULL CHECK (segment2_mode IN ('none','vendor_sdk','enclave_plaintext','cross_node_mtls','ciphertext_domain')),
+  template_version   TEXT   NOT NULL,
+  provider_cred_refs TEXT   NOT NULL DEFAULT '[]',
+  provisioned_at     BIGINT NOT NULL,
+  updated_at         BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tenant_statements (
+  statement_id     TEXT PRIMARY KEY,
+  tenant_id        TEXT   NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  scenario         TEXT   NOT NULL,
+  access_mode      TEXT   NOT NULL,
+  template_version TEXT   NOT NULL,
+  content          TEXT   NOT NULL,
+  content_hash     TEXT   NOT NULL,
+  supersedes_id    TEXT REFERENCES tenant_statements(statement_id),
+  created_at       BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_statements_tenant ON tenant_statements(tenant_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS tenant_dispatch_state (
+  tenant_id       TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+  config_version  BIGINT NOT NULL DEFAULT 0,
+  status          TEXT   NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','pending','applying','applied','failed')),
+  applied_version BIGINT NOT NULL DEFAULT 0,
+  last_error      TEXT,
+  retry_count     BIGINT NOT NULL DEFAULT 0,
+  updated_at      BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_status ON tenant_dispatch_state(status);
 `
 
 // ---------- 实体 ----------
@@ -202,19 +333,21 @@ type TenantStore interface {
 type TenantTx interface {
 	Commit() error
 	Rollback() error
-	tx() *sql.Tx
+	tx() sqlutil.Querier
 }
 
-// ---------- SQLite 实现 ----------
+// ---------- SQL 实现（sqlite / postgres 双方言） ----------
 
+// sqliteTenantStore 租户存储的 SQL 实现。名称保留历史（既有测试/调用点），
+// 实际按 db.Dialect() 适配 sqlite 或 postgres。
 type sqliteTenantStore struct {
-	db      *sql.DB
-	writeMu sync.Mutex // 单写者
+	db      *sqlutil.DB
+	writeMu sync.Mutex // 进程内单写者（PG 下另有 advisory xact lock 做跨副本串行）
 	pepper  []byte     // 邮件令牌 pepper（SHA-256(pepper‖token)）
 }
 
 type sqlTenantTx struct {
-	t    *sql.Tx
+	t    *sqlutil.Tx
 	s    *sqliteTenantStore
 	done bool
 }
@@ -239,13 +372,30 @@ func (tx *sqlTenantTx) Rollback() error {
 	return err
 }
 
-func (tx *sqlTenantTx) tx() *sql.Tx { return tx.t }
+func (tx *sqlTenantTx) tx() sqlutil.Querier { return tx.t }
 
-// OpenTenantStore 打开租户存储并执行 DDL 初始化。
+// 租户写事务的跨副本互斥键（PG advisory xact lock；固定常量即可，
+// 租户库写路径本就全局串行）。
+const tenantStoreLockKey int64 = 0x54454E414E54 // "TENANT"
+
+// OpenTenantStore 打开租户存储并执行 DDL 初始化（SQLite 默认路径，签名保持兼容）。
 // dsn: 文件路径或 ":memory:"（测试用）。
 // pepper: 邮件令牌哈希加盐（§6.3）。
 func OpenTenantStore(dsn string, wal bool, pepper []byte) (TenantStore, error) {
-	db, err := sql.Open("sqlite", dsn)
+	return OpenTenantStoreWithDialect(sqlutil.SQLite, dsn, wal, pepper)
+}
+
+// OpenTenantStoreWithDialect 按方言打开租户存储。
+// postgres 时 dsn 为 PG 连接串（如 postgres://user:pass@host:5432/db?sslmode=disable）。
+func OpenTenantStoreWithDialect(d sqlutil.Dialect, dsn string, wal bool, pepper []byte) (TenantStore, error) {
+	if d.IsPostgres() {
+		return openPostgresTenantStore(dsn, pepper)
+	}
+	return openSQLiteTenantStore(dsn, wal, pepper)
+}
+
+func openSQLiteTenantStore(dsn string, wal bool, pepper []byte) (TenantStore, error) {
+	db, err := sqlutil.Open(sqlutil.SQLite, dsn, tenantStoreLockKey)
 	if err != nil {
 		return nil, fmt.Errorf("tenant: open sqlite: %w", err)
 	}
@@ -269,36 +419,66 @@ func OpenTenantStore(dsn string, wal bool, pepper []byte) (TenantStore, error) {
 		return nil, fmt.Errorf("tenant: init schema: %w", err)
 	}
 	// API Key 表（M3）：对齐 §3.5（含 M1 占位表迁移）
-	if err := ensureAPIKeysSchema(db); err != nil {
+	if err := ensureAPIKeysSchema(db.DB); err != nil {
 		db.Close()
 		return nil, err
 	}
 	// 策略 overlay / 模型配置表（M5）：对齐 §3.5 ⑤⑥（含 M1 占位表迁移）
-	if err := ensurePolicySchema(db); err != nil {
+	if err := ensurePolicySchema(db.DB); err != nil {
 		db.Close()
 		return nil, err
 	}
 	// 套餐待确认单表（M7）
-	if err := ensureSubscriptionSchema(db); err != nil {
+	if err := ensureSubscriptionSchema(db.DB); err != nil {
 		db.Close()
 		return nil, err
 	}
 	// 开通配置表（N1，§3.5 表 ⑧）
-	if err := ensureProvisioningSchema(db); err != nil {
+	if err := ensureProvisioningSchema(db.DB); err != nil {
 		db.Close()
 		return nil, err
 	}
 	// 承诺边界声明存证表（N4，§3.5 表 ⑨）
-	if err := ensureStatementsSchema(db); err != nil {
+	if err := ensureStatementsSchema(db.DB); err != nil {
 		db.Close()
 		return nil, err
 	}
 	// 下发状态机表（N5，§3.5 表 ⑩）
-	if err := ensureDispatchSchema(db); err != nil {
+	if err := ensureDispatchSchema(db.DB); err != nil {
 		db.Close()
 		return nil, err
 	}
+	// 注：安全计数器（A-full captcha / S1(7) 登录锁定）的 PG 化在 T-1.3/T-1.4 落地，
+	// 当前仍为进程内态，此处不建表。
 	return &sqliteTenantStore{db: db, pepper: append([]byte(nil), pepper...)}, nil
+}
+
+func openPostgresTenantStore(dsn string, pepper []byte) (TenantStore, error) {
+	db, err := sqlutil.Open(sqlutil.Postgres, dsn, tenantStoreLockKey)
+	if err != nil {
+		return nil, fmt.Errorf("tenant: open postgres: %w", err)
+	}
+	if _, err := db.Exec(tenantDDLSchemaPG); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("tenant: init pg schema: %w", err)
+	}
+	// 安全计数器（captcha / 登录锁定）PG 化在 T-1.3/T-1.4 落地，此处不建表。
+	return &sqliteTenantStore{db: db, pepper: append([]byte(nil), pepper...)}, nil
+}
+
+// DB 返回底层方言包装（captcha/登录锁定等安全组件共用同一连接池与写锁语义）。
+func (s *sqliteTenantStore) DB() *sqlutil.DB { return s.db }
+
+// Dialect 返回存储方言。
+func (s *sqliteTenantStore) Dialect() sqlutil.Dialect { return s.db.Dialect() }
+
+// tiebreak 同时间戳的确定性排序键：sqlite 用 rowid（插入序），PG 无 rowid，
+// 用主键 statement_id（同秒多条时仅影响并列顺序，不影响“最新一条”语义）。
+func (s *sqliteTenantStore) tiebreak() string {
+	if s.db.Dialect().IsPostgres() {
+		return "statement_id"
+	}
+	return "rowid"
 }
 
 func (s *sqliteTenantStore) Begin() (TenantTx, error) {
@@ -403,6 +583,17 @@ func (s *sqliteTenantStore) ListTenantsByStatus(status string) ([]*Tenant, error
 func (s *sqliteTenantStore) CreateUser(tx TenantTx, u *TenantUser) (int64, error) {
 	if u == nil || u.Email == "" || u.TenantID == "" {
 		return 0, errors.New("tenant: user email and tenant_id are required")
+	}
+	if s.db.Dialect().IsPostgres() {
+		// pgx 驱动不支持 LastInsertId：PG 下经 RETURNING 直取 BIGSERIAL 自增主键。
+		var id int64
+		err := tx.tx().QueryRow(`INSERT INTO tenant_users (tenant_id, email, password_hash, status, created_at)
+			VALUES (?, ?, ?, ?, ?) RETURNING id`,
+			u.TenantID, strings.ToLower(u.Email), u.PasswordHash, u.Status, u.CreatedAt).Scan(&id)
+		if err != nil {
+			return 0, fmt.Errorf("tenant: create user: %w", err)
+		}
+		return id, nil
 	}
 	res, err := tx.tx().Exec(`INSERT INTO tenant_users (tenant_id, email, password_hash, status, created_at)
 		VALUES (?, ?, ?, ?, ?)`, u.TenantID, strings.ToLower(u.Email), u.PasswordHash, u.Status, u.CreatedAt)
@@ -1145,7 +1336,7 @@ func (s *sqliteTenantStore) GetCurrentStatement(tenantID string) (*TenantStateme
 		  AND statement_id NOT IN (
 		    SELECT supersedes_id FROM tenant_statements
 		    WHERE tenant_id = ? AND supersedes_id IS NOT NULL)
-		ORDER BY created_at DESC, rowid DESC LIMIT 1`, tenantID, tenantID))
+		ORDER BY created_at DESC, `+s.tiebreak()+` DESC LIMIT 1`, tenantID, tenantID))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1171,7 +1362,7 @@ func (s *sqliteTenantStore) GetStatement(tenantID, statementID string) (*TenantS
 // ListStatementsByTenant 列出租户全部声明（最新在前；管理端历史视图）。
 func (s *sqliteTenantStore) ListStatementsByTenant(tenantID string) ([]*TenantStatement, error) {
 	rows, err := s.db.Query(`SELECT `+statementColumns+
-		` FROM tenant_statements WHERE tenant_id = ? ORDER BY created_at DESC, rowid DESC`, tenantID)
+		` FROM tenant_statements WHERE tenant_id = ? ORDER BY created_at DESC, `+s.tiebreak()+` DESC`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("tenant: list statements: %w", err)
 	}
@@ -1316,9 +1507,14 @@ func (s *sqliteTenantStore) MarkDispatchApplying(tx TenantTx, tenantID string, n
 
 // MarkDispatchApplied 置 status='applied'，applied_version 单调前进（MAX 语义，防乱序回退）。
 func (s *sqliteTenantStore) MarkDispatchApplied(tx TenantTx, tenantID string, appliedVersion, now int64) error {
+	// 标量取大：sqlite 用 MAX(a,b)，PG 的 MAX 是聚合函数，须用 GREATEST(a,b)。
+	maxExpr := "MAX(applied_version, ?)"
+	if s.db.Dialect().IsPostgres() {
+		maxExpr = "GREATEST(applied_version, ?)"
+	}
 	res, err := tx.tx().Exec(`UPDATE tenant_dispatch_state
 		SET status = 'applied',
-		    applied_version = MAX(applied_version, ?),
+		    applied_version = `+maxExpr+`,
 		    last_error = NULL,
 		    retry_count = 0,
 		    updated_at = ?
