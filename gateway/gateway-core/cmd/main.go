@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"security-ai-gateway/gateway/auditexport"
 	"security-ai-gateway/gateway/gateway-core/internal/a2aregistry"
 	"security-ai-gateway/gateway/gateway-core/internal/api"
+	"security-ai-gateway/gateway/gateway-core/internal/heartbeat"
 	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
 	"security-ai-gateway/gateway/gateway-core/internal/route"
 	"security-ai-gateway/gateway/gateway-core/internal/store"
@@ -179,8 +181,15 @@ func main() {
 		log.Fatalf("初始化审计链导出端点失败（fail-closed 拒绝启动）: %v", err)
 	}
 
-	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d 限流版本=%d TEE配额下发=%v 变更审计=%s A2A注册中心=%s 存储快照=%s 审计导出=%s",
-		addr, authToken != "", rt.Version, rlt.Version, teeQuota != nil, auditState, a2aStatus, snapState, auditExportStatus)
+	// P2-4 T-3.4：集群心跳上报（携带 applied_config_version；默认关闭）。
+	hbStatus, stopHeartbeat, err := setupHeartbeat(srv)
+	if err != nil {
+		log.Fatalf("初始化集群心跳上报失败（fail-closed 拒绝启动）: %v", err)
+	}
+	defer stopHeartbeat()
+
+	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d 限流版本=%d TEE配额下发=%v 变更审计=%s A2A注册中心=%s 存储快照=%s 审计导出=%s 心跳上报=%s",
+		addr, authToken != "", rt.Version, rlt.Version, teeQuota != nil, auditState, a2aStatus, snapState, auditExportStatus, hbStatus)
 	// 控制面无流式响应，全量超时；body 上限防资源耗尽（T-1 评审项）
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -300,6 +309,56 @@ func auditExportAuthState(cfg auditexport.Config) string {
 		return "静态令牌（临时，待 T-2.3 集群凭证替换）"
 	}
 	return "deny-all（待 T-2.3 集群凭证）"
+}
+
+// setupHeartbeat 按环境变量装配集群心跳上报（P2-4 T-3.4；**默认关闭**）。
+// 返回启动日志用的状态描述与停止函数（停止函数总是可安全调用）。
+//
+// 环境变量：
+//
+//	GATEWAY_CORE_HEARTBEAT_ENABLED  1|true|yes|on 才启用（其余 = 未启用）
+//	GATEWAY_CORE_HEARTBEAT_URL      管理面心跳端点完整 URL
+//	                                （如 http://gateway-admin-service:8080/v1/adminext/clusters/cluster-a/heartbeat）
+//	GATEWAY_CORE_CLUSTER_ID         集群 ID（凭证与集群绑定）
+//	GATEWAY_CORE_CLUSTER_CREDENTIAL 集群身份凭证（T-2.3 签发；**仅内存使用，不落盘不打印**）
+//	GATEWAY_CORE_HEARTBEAT_INTERVAL 上报周期秒数（可选；默认 heartbeat.DefaultInterval=30s）
+//
+// 上报内容：{"applied_config_version": "<插件最近上报的版本>"}；未上报时为空串
+// ⇒ 管理面标记 unknown（禁止以「未见差异」默认收敛）。
+//
+// ⚠️ **core 不做收敛判定**：期望 vs 实际的比较属管理面 sync-status（T-3.3）。
+func setupHeartbeat(srv *api.Server) (string, func(), error) {
+	noop := func() {}
+	if !envTruthy(os.Getenv("GATEWAY_CORE_HEARTBEAT_ENABLED")) {
+		return "未启用", noop, nil
+	}
+	cfg := heartbeat.Config{
+		Endpoint:   strings.TrimSpace(os.Getenv("GATEWAY_CORE_HEARTBEAT_URL")),
+		ClusterID:  strings.TrimSpace(os.Getenv("GATEWAY_CORE_CLUSTER_ID")),
+		Credential: strings.TrimSpace(os.Getenv("GATEWAY_CORE_CLUSTER_CREDENTIAL")),
+		Logger:     log.Default(),
+	}
+	if raw := strings.TrimSpace(os.Getenv("GATEWAY_CORE_HEARTBEAT_INTERVAL")); raw != "" {
+		secs, perr := strconv.Atoi(raw)
+		if perr != nil || secs <= 0 {
+			return "", noop, fmt.Errorf("GATEWAY_CORE_HEARTBEAT_INTERVAL 非法: %q", raw)
+		}
+		cfg.Interval = time.Duration(secs) * time.Second
+	}
+	rep, err := heartbeat.NewReporter(cfg)
+	if err != nil {
+		return "", noop, err // 配置不完整 → 拒绝启动（fail-closed，避免"以为在上报"）
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	// 版本取值：core 侧只如实转述缓存内容（最近一次被采纳的上报；unknown → 空串）。
+	go rep.Run(ctx, func() string {
+		rec, ok := srv.AppliedConfigVersion()
+		if !ok {
+			return "" // unknown
+		}
+		return rec.Version
+	})
+	return fmt.Sprintf("已启用（集群=%s 周期=%s）", cfg.ClusterID, rep.Interval()), cancel, nil
 }
 
 // envTruthy 判定开关型环境变量是否为真（1/true/yes/on，大小写不敏感）。

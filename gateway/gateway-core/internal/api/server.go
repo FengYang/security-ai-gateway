@@ -12,6 +12,7 @@ import (
 	"security-ai-gateway/gateway/a2aproxy"
 	"security-ai-gateway/gateway/auditexport"
 	"security-ai-gateway/gateway/gateway-core/internal/a2aregistry"
+	"security-ai-gateway/gateway/gateway-core/internal/configversion"
 	"security-ai-gateway/gateway/gateway-core/internal/policyaudit"
 	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
 	"security-ai-gateway/gateway/gateway-core/internal/route"
@@ -57,6 +58,9 @@ type Server struct {
 	// P2-4 T-4.2：审计链导出端点配置（默认零值 = 未启用，路由不注册）。
 	// 仅 SetAuditExport 显式装配后才会注册 GET /v1/internal/audit/chain/export。
 	auditExportCfg auditexport.Config
+	// P2-4 T-3.4：插件 applied 配置版本缓存（拉取头 X-Config-Version → 最近上报版本+时间）。
+	// core 侧只如实记录，不做收敛判定（期望 vs 实际属管理面 sync-status）。
+	appliedVer *configversion.Cache
 }
 
 // New 构造 API Server。routerTable 为启动时注入的已签名默认路由表（可为空表）；
@@ -84,6 +88,8 @@ func New(signer *route.Signer, msigner *mcpsec.Signer, rlsigner *ratelimit.Signe
 		ttftRing:    route.NewTTFTRing(nil),
 		ttftDedup:   route.NewTTFTDedup(),
 		ttftResetAt: make(map[string]int64),
+		// P2-4 T-3.4：applied 配置版本缓存（进程内；无版本头时不产生任何记录）。
+		appliedVer: configversion.New(),
 	}
 	if rateLimitTable != nil {
 		s.recordHistory(rateLimitTable)
@@ -277,6 +283,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	// P2-2 T-2：冻结 §5.3 的健康端点名为 /healthz；与既有 /health 同一处理器（免鉴权）。
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
+	// P2-4 T-3.4：applied 配置版本状态查询（内部端点，供心跳上报侧/运维读取）。
+	s.mux.HandleFunc("GET "+appliedVersionPath, s.withAuth(s.handleAppliedConfigVersion))
 }
 
 // issueReq 签发请求体。
@@ -345,7 +353,11 @@ func (s *Server) handleIssue(w http.ResponseWriter, r *http.Request) {
 // handleGetRoutes 返回当前默认路由表（拉路径 B 的数据源）。
 // 始终返回签名校验一致的完整表；插件侧用 Lookup(tenant,model) 本地过滤，
 // 避免"过滤后内容与签名不匹配"的失效问题。
+//
+// P2-4 T-3.4：顺带捕获插件上报的 applied 配置版本（请求头 X-Config-Version）。
+// 捕获**只写缓存、不影响本响应**：无头 = 未上报（unknown，不覆盖）；非法头 = 忽略。
 func (s *Server) handleGetRoutes(w http.ResponseWriter, r *http.Request) {
+	s.captureAppliedVersion(r)
 	tbl := s.store.GetRouteTable()
 	if tbl == nil {
 		tbl = route.NewRouteTable(0, 0)
