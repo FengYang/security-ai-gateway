@@ -11,14 +11,20 @@
   6. promtool 规则语法校验（**本机无 promtool 时明确 SKIP，绝不假装通过**）
 
 退出码语义：
-  0 = 全部检查通过（SKIP 项会在报告中显式列出）
-  1 = 存在 FAIL 项
+  0 = 全部检查通过（SKIP 项会在报告中显式列出；**宽松模式默认**）
+  1 = 存在 FAIL 项；**严格模式（--strict）下存在任一 SKIP 项亦返回 1**
   2 = 环境/输入错误（PyYAML 缺失、目录不存在、文件不可读等）
+
+模式：
+  * 默认（宽松）：SKIP 只报告不拦截，用于本地/人工核查；
+  * `--strict`：SKIP 视为失败，供 CI/流水线做**强制门禁**
+    （例如 CI 镜像已装 promtool 时，必须把规则语法校验跑通才放行）。
 
 用法：
   python3 scripts/check-central-aggregation-assets.py
   python3 scripts/check-central-aggregation-assets.py --dir deploy/monitoring/central
   python3 scripts/check-central-aggregation-assets.py --promtool /usr/local/bin/promtool -v
+  python3 scripts/check-central-aggregation-assets.py --strict        # CI 门禁模式
 """
 
 from __future__ import annotations
@@ -65,9 +71,22 @@ class Report:
     def __init__(self, verbose: bool = False) -> None:
         self.rows: list[tuple[str, str, str]] = []  # (状态, 检查项, 说明)
         self.verbose = verbose
+        # 严格模式下视为失败的 SKIP 项下标集合：仅「**确实未校验**」（如缺 promtool）
+        # 计入门禁；「该目录无此类资产（不适用）」不计入，避免 CI 被永久阻塞。
+        self.blocking_skips: set[int] = set()
 
-    def add(self, status: str, item: str, detail: str = "") -> None:
+    def add(self, status: str, item: str, detail: str = "", blocking: bool = False) -> None:
+        """登记一条检查结果。
+
+        Args:
+            status: PASS / FAIL / SKIP。
+            item: 检查项名称。
+            detail: 说明文本。
+            blocking: 仅对 SKIP 有意义——为 True 时该 SKIP 在 --strict 下视为失败。
+        """
         self.rows.append((status, item, detail))
+        if status == SKIP and blocking:
+            self.blocking_skips.add(len(self.rows) - 1)
         if status != PASS or self.verbose:
             line = "[{}] {}{}".format(status, item, (" —— " + detail) if detail else "")
             print(line)
@@ -75,9 +94,17 @@ class Report:
     def count(self, status: str) -> int:
         return sum(1 for r in self.rows if r[0] == status)
 
+    def blocking_skip_count(self) -> int:
+        return len(self.blocking_skips)
+
     @property
     def exit_code(self) -> int:
+        """宽松模式退出码：存在 FAIL 即 1（SKIP 不拦截）。"""
         return 1 if self.count(FAIL) > 0 else 0
+
+    def strict_exit_code(self) -> int:
+        """严格模式退出码：FAIL 或**任一「确实未校验」的 SKIP** 均返回 1（CI 强制门禁）。"""
+        return 1 if (self.count(FAIL) > 0 or self.blocking_skip_count() > 0) else 0
 
 
 def repo_root() -> str:
@@ -441,6 +468,7 @@ def check_promtool(directory: str, rep: Report, promtool: str) -> None:
             "promtool 规则语法: {}".format(directory),
             "本机未安装 promtool（也未通过 --promtool 指定）→ **未做规则语法校验**，"
             "待环境就绪后重跑本脚本（沿用既有 promtool 校验惯例）",
+            blocking=True,  # 严格模式下视为失败：这是「确实未校验」，不是「不适用」
         )
         return
     tmpdir = tempfile.mkdtemp(prefix="p24-promtool-")
@@ -478,6 +506,11 @@ def main(argv: list[str]) -> int:
         help="待检查目录（相对仓库根，可重复）；默认检查 {}".format(DEFAULT_DIRS),
     )
     parser.add_argument("--promtool", default="", help="promtool 可执行文件路径（可选）")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="严格模式：把 SKIP 视为失败（CI/流水线强制门禁）；默认宽松（SKIP 仅报告）",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="输出全部 PASS 明细")
     args = parser.parse_args(argv)
 
@@ -490,6 +523,7 @@ def main(argv: list[str]) -> int:
     print("P2-4 部署资产自检（T-4.4 中央聚合 / T-1.10 overlay）")
     print("仓库根: {}".format(root))
     print("检查目录: {}".format(", ".join(dirs)))
+    print("模式: {}".format("严格（--strict：SKIP 视为失败，CI 门禁）" if args.strict else "宽松（默认：SKIP 仅报告）"))
     print("=" * 78)
 
     for d in abs_dirs:
@@ -516,11 +550,28 @@ def main(argv: list[str]) -> int:
     )
     if rep.count(SKIP) > 0:
         print("以下项为 SKIP（**未校验**，不得视为通过）：")
-        for status, item, detail in rep.rows:
+        for idx, (status, item, detail) in enumerate(rep.rows):
             if status == SKIP:
-                print("  - {} —— {}".format(item, detail))
+                mark = " [严格模式视为失败]" if idx in rep.blocking_skips else ""
+                print("  - {} —— {}{}".format(item, detail, mark))
+    if args.strict:
+        print(
+            "\n[严格模式] SKIP（其中「确实未校验」项）视为失败 → 退出码 {}\n"
+            "  门禁拦截项 {} 个（另有 {} 个 SKIP 属「该目录无此类资产·不适用」，不拦截）；"
+            "共 {} 个 SKIP。".format(
+                rep.strict_exit_code(),
+                rep.blocking_skip_count(),
+                rep.count(SKIP) - rep.blocking_skip_count(),
+                rep.count(SKIP),
+            )
+        )
+    else:
+        print(
+            "\n[宽松模式] SKIP 不拦截（退出码仅由 FAIL 决定）；"
+            "需要 CI 强制门禁请加 --strict。"
+        )
     print("=" * 78)
-    return rep.exit_code
+    return rep.strict_exit_code() if args.strict else rep.exit_code
 
 
 if __name__ == "__main__":
