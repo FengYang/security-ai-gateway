@@ -33,6 +33,12 @@ func NewBillSigner(key []byte, oldKeys ...[]byte) BillSigner {
 
 // canonicalBill 账单规范序列化（签名域；金额以"分"十进制，明细按 model_key 升序）。
 // 覆盖：ID/TenantID/Kind/Period/Total/Currency/LedgerHead/AuditHead + 明细行。
+//
+// ★ cluster_id 不进签名域（P2-4 T-1.8 / R-4·A5(6)）：账单打标是**证据/维度字段**，
+// 与账本 cluster_id 同口径。签名域一旦加入 cluster_id，既有账单的 sig 全部失效
+// （§7.2/§7.6 破坏性升级）。故：给既有账单补/去标，**签名不变、验签仍通过**。
+// 若产品侧确需把集群归属纳入防篡改范围，须走破坏性升级并提供双读兼容
+// （参考 hash_alg 自述前缀的做法），不得在此处静默扩展。
 func canonicalBill(b *Bill) []byte {
 	var sb strings.Builder
 	items := append([]BillItem(nil), b.Items...)

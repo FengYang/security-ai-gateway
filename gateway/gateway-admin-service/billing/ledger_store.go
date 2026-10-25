@@ -59,9 +59,9 @@ func (s *sqliteLedgerStore) Append(tx Tx, entries []LedgerEntry) (int, LedgerHea
 
 	stmt, err := sqlTx.Prepare(`
 		INSERT OR IGNORE INTO billing_ledger
-		(tenant_id, model_key, day, tokens_in, tokens_out, requests, retry_toks,
+		(tenant_id, model_key, day, cluster_id, tokens_in, tokens_out, requests, retry_toks,
 		 std_in, std_out, source, price_ver, event_key, prev_hash, entry_hash, hash_alg, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return 0, LedgerHead{}, fmt.Errorf("billing: prepare insert: %w", err)
@@ -88,7 +88,7 @@ func (s *sqliteLedgerStore) Append(tx Tx, entries []LedgerEntry) (int, LedgerHea
 		e.EntryHash = h
 
 		res, err := stmt.Exec(
-			e.TenantID, e.ModelKey, e.Day,
+			e.TenantID, e.ModelKey, e.Day, e.ClusterID,
 			e.TokensIn, e.TokensOut, e.Requests, e.RetryToks,
 			e.StdIn, e.StdOut, e.Source, e.PriceVer,
 			e.EventKey, e.PrevHash, e.EntryHash, e.HashAlg, e.CreatedAt,
@@ -133,7 +133,7 @@ func (s *sqliteLedgerStore) headFromTx(tx Tx) (LedgerHead, error) {
 
 // Range 按条件查询账本条目。
 func (s *sqliteLedgerStore) Range(q LedgerQuery) ([]LedgerEntry, error) {
-	query := `SELECT seq, tenant_id, model_key, day, tokens_in, tokens_out, requests,
+	query := `SELECT seq, tenant_id, model_key, day, cluster_id, tokens_in, tokens_out, requests,
 		retry_toks, std_in, std_out, source, price_ver, event_key, prev_hash, entry_hash, created_at, hash_alg
 		FROM billing_ledger WHERE 1=1`
 	var args []interface{}
@@ -141,6 +141,13 @@ func (s *sqliteLedgerStore) Range(q LedgerQuery) ([]LedgerEntry, error) {
 	if q.TenantID != "" {
 		query += ` AND tenant_id = ?`
 		args = append(args, q.TenantID)
+	}
+	// 集群过滤（R-4/A5(6)）：ClusterUnset 优先，命中"仅未打标"语义。
+	if q.ClusterUnset {
+		query += ` AND cluster_id = ''`
+	} else if q.ClusterID != "" {
+		query += ` AND cluster_id = ?`
+		args = append(args, q.ClusterID)
 	}
 	if q.DayFrom != "" {
 		query += ` AND day >= ?`
@@ -165,7 +172,7 @@ func (s *sqliteLedgerStore) Range(q LedgerQuery) ([]LedgerEntry, error) {
 	var entries []LedgerEntry
 	for rows.Next() {
 		var e LedgerEntry
-		err := rows.Scan(&e.Seq, &e.TenantID, &e.ModelKey, &e.Day,
+		err := rows.Scan(&e.Seq, &e.TenantID, &e.ModelKey, &e.Day, &e.ClusterID,
 			&e.TokensIn, &e.TokensOut, &e.Requests, &e.RetryToks,
 			&e.StdIn, &e.StdOut, &e.Source, &e.PriceVer,
 			&e.EventKey, &e.PrevHash, &e.EntryHash, &e.CreatedAt, &e.HashAlg)
@@ -178,6 +185,9 @@ func (s *sqliteLedgerStore) Range(q LedgerQuery) ([]LedgerEntry, error) {
 }
 
 // Verify 全量校验哈希链完整性。返回首个断链的 seq（-1 = 完好）。
+//
+// 注：本查询**不读** cluster_id——它是证据/维度列、不入哈希域（§7.6），
+// 故打标与否不影响链校验结果（参见 TestClusterID_ChainIntegrityPreserved）。
 func (s *sqliteLedgerStore) Verify() (int64, error) {
 	rows, err := s.db.Query(`SELECT seq, prev_hash, entry_hash, tenant_id, model_key, day, tokens_in, tokens_out,
 		requests, retry_toks, std_in, std_out, source, price_ver, event_key, created_at, hash_alg

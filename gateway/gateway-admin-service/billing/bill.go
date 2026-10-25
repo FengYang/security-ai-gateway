@@ -33,6 +33,14 @@ type Bill struct {
 	LedgerHead   string     `json:"ledger_head"`
 	AuditHead    string     `json:"audit_head"`
 	GeneratedAt  int64      `json:"generated_at"`
+	// ClusterID 计费打标（R-4/A5(6)，P2-4 T-1.8）：本账单用量所属集群。
+	//
+	// 取值口径：周期内该租户账本条目**唯一**集群标签（未打标或跨集群混合 ⇒ ""）。
+	// 空串 = 单集群/未打标（既有行为不变）。混合场景请用 ClusterUsageReport 拆分对账。
+	//
+	// ★ 与账本 cluster_id 同口径：证据/维度字段，**不进账单签名域**
+	// （canonicalBill 已冻结；加入会使既有账单签名失效，§7.2/§7.6）。
+	ClusterID string `json:"cluster_id,omitempty"`
 }
 
 // BillItem 账单明细行。
@@ -60,6 +68,10 @@ type BillQuery struct {
 	From     string
 	To       string
 	Limit    int
+	// ClusterID 按集群过滤（R-4/A5(6) 计费打标）；"" = 不过滤（默认，既有调用行为不变）。
+	ClusterID string
+	// ClusterUnset true = 仅返回**未打标**账单（cluster_id = ''）；优先于 ClusterID。
+	ClusterUnset bool
 }
 
 // BillStore 账单持久化接口。

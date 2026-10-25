@@ -69,6 +69,9 @@ CREATE TABLE IF NOT EXISTS billing_ledger (
   tenant_id   TEXT    NOT NULL,
   model_key   TEXT    NOT NULL,
   day         TEXT    NOT NULL,
+  -- cluster_id：计费打标（R-4/A5(6)，P2-4 T-1.8）。空串 = 单集群/未打标（既有数据默认值）。
+  -- ★ 证据/维度列，不入哈希域（ComputeEntryHash 规范载荷已冻结，§7.6 破坏性升级）。
+  cluster_id  TEXT    NOT NULL DEFAULT '',
   tokens_in   INTEGER NOT NULL DEFAULT 0,
   tokens_out  INTEGER NOT NULL DEFAULT 0,
   requests    INTEGER NOT NULL DEFAULT 0,
@@ -85,6 +88,7 @@ CREATE TABLE IF NOT EXISTS billing_ledger (
   UNIQUE(event_key)
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_tenant_day ON billing_ledger(tenant_id, day);
+-- 按集群过滤/聚合的索引见 ensureLedgerClusterIndexes（须在 ALTER 补列之后建）
 
 -- 不可变保障：禁止 UPDATE/DELETE 绕过应用层（§7.5）
 DROP TRIGGER IF EXISTS trig_ledger_no_update;
@@ -119,6 +123,33 @@ func ensureLedgerHashAlgColumn(db *sql.DB) error {
 	_, err := db.Exec(`ALTER TABLE billing_ledger ADD COLUMN hash_alg TEXT NOT NULL DEFAULT ''`)
 	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("billing: migrate ledger hash_alg: %w", err)
+	}
+	return nil
+}
+
+// ensureLedgerClusterIDColumn 为既有库补 `cluster_id` 列（P2-4 T-1.8：R-4/A5(6) 计费打标维度）。
+// 与 hash_alg 同款幂等写法：新库由 DDL 建列 ⇒ 此处必报 "duplicate column name"（吞掉）。
+//
+// ★ 只加**列**，不改哈希域：既有条目的 entry_hash 不变 ⇒ 账本链与 Verify() 不受影响。
+func ensureLedgerClusterIDColumn(db *sql.DB) error {
+	_, err := db.Exec(`ALTER TABLE billing_ledger ADD COLUMN cluster_id TEXT NOT NULL DEFAULT ''`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("billing: migrate ledger cluster_id: %w", err)
+	}
+	// ★ 索引必须**后于**补列：老库在 ALTER 之前建该索引会报
+	// "no such column: cluster_id"，直接让 OpenSQLiteStore 失败（升级即不可用）。
+	if err := ensureLedgerClusterIndexes(db); err != nil {
+		return fmt.Errorf("billing: migrate ledger cluster_id: %w", err)
+	}
+	return nil
+}
+
+// ensureLedgerClusterIndexes 建 cluster_id 相关索引（跨集群过滤/聚合，R-4/A5(6)）。
+//
+// 特意**不放进 ddlSchema**：ddlSchema 在补列迁移之前执行，老库建索引时列还不存在。
+func ensureLedgerClusterIndexes(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_ledger_cluster_day ON billing_ledger(cluster_id, day)`); err != nil {
+		return fmt.Errorf("billing: create ledger cluster index: %w", err)
 	}
 	return nil
 }
@@ -172,6 +203,11 @@ func OpenSQLiteStore(dsn string, wal bool) (Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// 迁移：为既有库补 `cluster_id` 列（P2-4 T-1.8：R-4/A5(6) 计费打标维度）
+	if err := ensureLedgerClusterIDColumn(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	// 初始化 plans/subscriptions 表
 	if err := ensurePlanSchema(db); err != nil {
 		db.Close()
@@ -181,6 +217,11 @@ func OpenSQLiteStore(dsn string, wal bool) (Store, error) {
 	if err := ensureBillSchema(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("billing: init bill schema: %w", err)
+	}
+	// 迁移：为既有库补 bills.`cluster_id` 列（P2-4 T-1.8：R-4/A5(6) 计费打标维度）
+	if err := ensureBillClusterIDColumn(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("billing: migrate bill cluster_id: %w", err)
 	}
 	// 初始化 freezes 表
 	if err := ensureFreezeSchema(db); err != nil {

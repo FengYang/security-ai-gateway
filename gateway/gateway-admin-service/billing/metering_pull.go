@@ -133,9 +133,13 @@ type teeInferPullSource struct {
 	baseURL string
 	token   string // Admin-Token（独立计量令牌，§6.3.1）
 	client  *http.Client
+	// clusterID 计费打标（R-4/A5(6)，P2-4 T-1.8）：本拉取源所代表的集群。
+	// 空串 = 不标注（默认 ⇒ 既有单集群行为逐字节不变）。
+	clusterID string
 }
 
 // NewTEEPullSource 构造 tee-infer 拉取源。
+// 签名保持不变（主包调用点不动）；多集群打标请用 TagPullSourceCluster。
 func NewTEEPullSource(baseURL, token string, timeout time.Duration) PullSource {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -145,6 +149,25 @@ func NewTEEPullSource(baseURL, token string, timeout time.Duration) PullSource {
 		token:   token,
 		client:  &http.Client{Timeout: timeout},
 	}
+}
+
+// SetClusterID 为本拉取源标注集群打标（R-4/A5(6)）。空串 = 取消标注。
+// 多集群部署下"每集群一个拉取源"时使用；标注随窗口传入账本 cluster_id 证据列。
+func (s *teeInferPullSource) SetClusterID(clusterID string) { s.clusterID = clusterID }
+
+// TagPullSourceCluster 为拉取源标注集群打标（若该源支持）。返回是否已标注。
+//
+// 以**可选接口**探测，故不必修改 NewTEEPullSource 签名、也不影响既有调用点：
+//
+//	src := billing.NewTEEPullSource(url, token, 30*time.Second)
+//	billing.TagPullSourceCluster(src, "cluster-a")
+func TagPullSourceCluster(src PullSource, clusterID string) bool {
+	tagged, ok := src.(interface{ SetClusterID(string) })
+	if !ok {
+		return false
+	}
+	tagged.SetClusterID(clusterID)
+	return true
 }
 
 // pullUsageResp tee-infer /usage?from=&to= 的 JSON 响应。
@@ -249,10 +272,11 @@ func (s *teeInferPullSource) Pull(ctx context.Context, fromNs, toNs int64) (*Usa
 	eventKey := fmt.Sprintf("pull-%d-%d", fromSec, toSec)
 
 	return &UsageWindow{
-		FromNs:   fromNs,
-		ToNs:     toNs,
-		Tenants:  tenants,
-		Source:   "pull",
-		EventKey: eventKey,
+		FromNs:    fromNs,
+		ToNs:      toNs,
+		Tenants:   tenants,
+		Source:    "pull",
+		EventKey:  eventKey,
+		ClusterID: s.clusterID, // 计费打标透传（R-4/A5(6)；空 = 未打标）
 	}, nil
 }

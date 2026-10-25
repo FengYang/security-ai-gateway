@@ -291,6 +291,7 @@ func (s *BillingService) CloseDaily(ctx context.Context, tenant, day string) (*B
 		TenantID:     tenant,
 		Kind:         BillKindDaily,
 		Period:       day,
+		ClusterID:    s.clusterOfPeriod(tenant, day, day), // R-4/A5(6) 计费打标（证据列，不进签名域）
 		Items:        items,
 		Total:        total,
 		Currency:     tbl.Currency,
@@ -363,6 +364,7 @@ func (s *BillingService) CloseMonthly(ctx context.Context, tenant, month string)
 		TenantID:     tenant,
 		Kind:         BillKindMonthly,
 		Period:       month,
+		ClusterID:    s.clusterOfPeriod(tenant, first, last), // R-4/A5(6) 计费打标
 		Items:        items,
 		Total:        total,
 		Currency:     tbl.Currency,
@@ -381,7 +383,7 @@ func (s *BillingService) CloseMonthly(ctx context.Context, tenant, month string)
 	IncBillIssued(BillKindMonthly) // 指标 #8
 
 	// 4b. 超额单列账单（A-45：charge 套餐超标独立成单，各自一次取整 R-16）
-	if err := s.closeOverage(tenant, month, agg, tbl, tail); err != nil {
+	if err := s.closeOverage(tenant, month, bill.ClusterID, agg, tbl, tail); err != nil {
 		return nil, err
 	}
 
@@ -391,7 +393,8 @@ func (s *BillingService) CloseMonthly(ctx context.Context, tenant, month string)
 }
 
 // closeOverage 生成独立超额账单（若套餐为 charge 且存在超额）。
-func (s *BillingService) closeOverage(tenant, month string, agg *UsageAgg, tbl *PriceTable, ledgerHead string) error {
+// clusterID 与所属月账单同标（R-4/A5(6)）。
+func (s *BillingService) closeOverage(tenant, month, clusterID string, agg *UsageAgg, tbl *PriceTable, ledgerHead string) error {
 	plan, err := s.store.Plans().Resolve(tenant, s.now())
 	if err != nil {
 		return err
@@ -416,6 +419,7 @@ func (s *BillingService) closeOverage(tenant, month string, agg *UsageAgg, tbl *
 		TenantID:     tenant,
 		Kind:         BillKindOverage,
 		Period:       month,
+		ClusterID:    clusterID, // R-4/A5(6) 计费打标（与月账单同标）
 		Total:        extraTotal,
 		Currency:     tbl.Currency,
 		PriceVersion: tbl.Version,

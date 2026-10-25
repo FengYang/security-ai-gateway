@@ -81,6 +81,7 @@ func AggToEntries(win *UsageWindow) []LedgerEntry {
 				TenantID:  tenant,
 				ModelKey:  "",
 				Day:       day,
+				ClusterID: win.ClusterID, // 计费打标（证据列，不入哈希域）
 				TokensIn:  agg.TokensIn,
 				TokensOut: agg.TokensOut,
 				Requests:  agg.Requests,
@@ -113,6 +114,7 @@ func AggToEntries(win *UsageWindow) []LedgerEntry {
 				TenantID:  tenant,
 				ModelKey:  mk,
 				Day:       day,
+				ClusterID: win.ClusterID, // 计费打标（证据列，不入哈希域）
 				TokensIn:  mu.TokensIn,
 				TokensOut: mu.TokensOut,
 				Requests:  mu.Requests,
@@ -129,6 +131,7 @@ func AggToEntries(win *UsageWindow) []LedgerEntry {
 				TenantID:  tenant,
 				ModelKey:  "__retry__",
 				Day:       day,
+				ClusterID: win.ClusterID, // 计费打标（证据列，不入哈希域）
 				Requests:  0,
 				RetryToks: agg.RetryToks - totalRetry,
 				Source:    win.Source,
@@ -157,6 +160,9 @@ type PushEvent struct {
 	Result     string `json:"result"` // ok | engine_error
 	IsRetry    bool   `json:"is_retry,omitempty"`
 	TS         string `json:"ts"` // RFC3339（与审计 timestamp 同源）
+	// ClusterID 计费打标：产生该事件的集群（R-4/A5(6)，P2-4 T-1.8）。
+	// 空串 = 未上报（默认 ⇒ 既有推送行为不变）；非空则透传到账本 cluster_id 证据列。
+	ClusterID string `json:"cluster_id,omitempty"`
 }
 
 // 已知 result 取值（B-6.3-3：未知值按 ok 兜底落账，仅指标单记 `unknown_result`）。
@@ -188,8 +194,9 @@ func pushEventToWindow(ev PushEvent) *UsageWindow {
 	}
 	return &UsageWindow{
 		FromNs: t.UnixNano(), ToNs: t.UnixNano(),
-		Source:   "push",
-		EventKey: ev.EventID,
+		Source:    "push",
+		EventKey:  ev.EventID,
+		ClusterID: ev.ClusterID, // 计费打标透传（R-4/A5(6)）
 		Tenants: map[string]*TenantAgg{
 			ev.TenantID: {
 				TokensIn: in, TokensOut: out, Requests: 1, RetryToks: retry,

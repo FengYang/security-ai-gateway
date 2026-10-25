@@ -29,4 +29,11 @@ type UsageWindow struct {
 	Tenants  map[string]*TenantAgg `json:"tenants"`
 	Source   string                `json:"source"`    // pull | push
 	EventKey string                `json:"event_key"` // 幂等键
+	// ClusterID 计费打标：产生本窗口用量的集群（R-4/A5(6)，P2-4 T-1.8）。
+	// 由计量上报侧（pull 源 / push 事件）携带；AggToEntries 逐条写入账本的
+	// cluster_id **证据列**。空串 = 单集群部署或未打标（默认 ⇒ 既有行为逐字节不变）。
+	//
+	// 注：event_key 不因打标而改变（幂等键口径冻结）；部署若无法保证 event_id
+	// 全局唯一，应在上报侧用 cluster id 前缀化 event_id，而非在此处隐式改写。
+	ClusterID string `json:"cluster_id,omitempty"`
 }
