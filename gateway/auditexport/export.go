@@ -12,6 +12,21 @@
 //     来源 IP 只取 RemoteAddr，不信任 X-Forwarded-For 等可伪造头。
 //
 // 只读语义：本包只做输出与门控，不触碰任何链状态（导出不得污染 WORM 链）。
+//
+// ⚠️ **生产接线待办（已登记；本轮不做，team-lead 裁决）**：
+//
+//	生产环境接入须将 **T-2.3 集群身份凭证**抽为**可导入的公共包**（如
+//	gateway/clustercred/），并以真实实现替换 Config.Authorizer。
+//	为何本轮不做（跨二进制安全边界重构，超出 T-4.2 范围）：
+//	  - 集群身份凭证校验器当前位于 gateway-admin-service（package main），
+//	    **不可被其它二进制导入**；
+//	  - 凭证存储亦在 admin-service 库内，core/tee 进程要校验它，需一个
+//	    网络可达的验证接口（凭证位置与访问方式须同步设计）。
+//	在此之前的三层默认拒绝（fail-closed）：
+//	  1. 端点默认关闭（未启用 = 404）；
+//	  2. Authorizer 默认 deny-all；
+//	  3. 来源 IP CIDR 白名单，空 = 拒绝所有来源。
+//	TokenAuthorizer 仅为**临时联调口径**（T-4.1 聚合侧抓取用），**不得用于生产**。
 package auditexport
 
 import (
