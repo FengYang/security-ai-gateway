@@ -12,14 +12,18 @@
 // 发信限频、管理员 MFA 状态**四类组件全部具备共享后端**，统一由
 // SECURITY_STORE_PG_DSN 开关（空 = 原进程内/文件实现，默认行为零变化）。
 //
-// 降级策略（明确选定，非默认可配）：
-//   - PG/共享库操作失败 → 回退到进程内实现（**等价 P2-4 之前的单副本旧行为**，
-//     安全性不弱于既有基线）并 log.Printf 限频告警；
+// 降级策略（明确选定，非默认可配；P2-1 主理人裁决：维持 fail-open 语义不改）：
+//   - PG/共享库操作失败 → 回退到进程内实现（等价 P2-4 之前的单副本旧行为）并告警；
 //   - captcha 取 fail-open 取向的理由：captcha 仅为防机器人辅助控制（§6.2），
 //     其后端不可用若直接 fail-closed 会挡住所有正常登录/注册（可用性灾难）；
 //     回退后每副本仍保留单副本级限流与一次性消费防护；
-//   - 登录锁定回退到进程内计数 = 每副本各自计数（既有单副本语义），
-//     阈值/锁定窗口语义不变，不存在"无防护"窗口；
+//   - 登录锁定同样回退到进程内计数 —— **该降级不是"无损"**：降级期间
+//     ① 防护强度按副本数放大（有效尝试 ≈ 副本数 × LOGIN_MAX_FAIL）；
+//     ② 共享锁定态被架空（副本 A 锁定的账号在副本 B 仍可继续尝试）。
+//     维持该取向的理由：回退后不弱于 P2-4 之前的单副本基线；若改 fail-closed，
+//     共享库抖动期间所有正常用户登录被拒，属全面可用性事故。
+//     **风险与监控要求（须落部署基线）**：该告警为高等级告警，值班须按"登录锁定
+//     已降级"处理——监控告警计数、必要时临时降副本数或停用依赖登录锁定的端点。
 //   - 开库/建表失败（SECURITY_STORE_PG_DSN 配置了但连不上）→ main fail-closed 拒启动
 //     （多副本共享语义不可静默丢失）。
 package main
@@ -153,20 +157,32 @@ func (b *sqlCaptchaBackend) Issue(ip string) (id, imageDataURL string, err error
 	return id, imageDataURL, err
 }
 
-// issueSQL 共享库签发路径。
+// issueSQL 共享库签发路径。window 为固定小时窗口起点（测试可注入旧值模拟时钟漂移）。
 func (b *sqlCaptchaBackend) issueSQL(ip string) (string, string, error) {
+	return b.issueSQLAt(ip, time.Now().Unix()/3600)
+}
+
+// issueSQLAt 共享库签发路径（可指定窗口，供 P3-1 回归用例注入漂移窗口）。
+func (b *sqlCaptchaBackend) issueSQLAt(ip string, window int64) (string, string, error) {
 	now := time.Now()
-	window := now.Unix() / 3600 // 固定小时窗口起点（与内存实现的滑动窗口近似等价，见下）
 	// 单语句原子 upsert 自增：跨副本并发签发在行锁上串行，计数无丢失。
-	// 窗口翻转（window_hour 不同）时计数重置为 1。
-	// 注：此处为固定窗口计数（每整点重置），比内存实现的滑动窗口在窗口边界
-	// 最多放宽一倍瞬时突刺；防护目标（拉高机器批量签发成本）不受影响。
+	// 窗口语义（QA P3-1）：窗口**只前进不回退**——整点边界并发或副本间时钟漂移时，
+	// 带着旧窗口的迟到请求必须计入当前窗口（hits 累加），既不得把 window_hour 拉回
+	// 旧值，也不得把 hits 重置为 1（否则限流额度被放大）。
+	//   - 请求窗口 == 当前窗口 → 累加；
+	//   - 请求窗口 > 当前窗口 → 窗口前移，计数从 1 重开；
+	//   - 请求窗口 < 当前窗口（迟到/漂移）→ 窗口不动，累加。
+	// 标量取大：sqlite MAX(a,b) / PG GREATEST(a,b)（与 tenant_store.go 同款方言分支）。
+	winExpr := "MAX(captcha_rate_limits.window_hour, EXCLUDED.window_hour)"
+	if b.db.Dialect().IsPostgres() {
+		winExpr = "GREATEST(captcha_rate_limits.window_hour, EXCLUDED.window_hour)"
+	}
 	var hits int
 	if err := b.db.QueryRow(`INSERT INTO captcha_rate_limits (ip, window_hour, hits)
 		VALUES (?, ?, 1)
 		ON CONFLICT (ip) DO UPDATE SET
-			window_hour = EXCLUDED.window_hour,
-			hits = CASE WHEN captcha_rate_limits.window_hour = EXCLUDED.window_hour
+			window_hour = `+winExpr+`,
+			hits = CASE WHEN `+winExpr+` = captcha_rate_limits.window_hour
 				THEN captcha_rate_limits.hits + 1 ELSE 1 END
 		RETURNING hits`, ip, window).Scan(&hits); err != nil {
 		return "", "", err
@@ -195,8 +211,10 @@ func (b *sqlCaptchaBackend) issueSQL(ip string) (string, string, error) {
 	return id, "data:image/png;base64," + base64.StdEncoding.EncodeToString(pngBytes), nil
 }
 
-// Verify 原子一次性消费 + 常量时间比对。共享库失败 → 回退进程内并告警
-// （回退路径下此前经共享库签发的答案不可用，用户重试即可，不构成安全弱化）。
+// Verify 原子一次性消费 + 常量时间比对。共享库失败 → 回退进程内并告警。
+// 双向覆盖混合降级态（QA P3-3）：
+//   - 共享库签发 + 共享库抖动期间校验 → 回退进程内（该图中途不可校验，用户重试即可）；
+//   - 降级态内存签发 + 共享库恢复后校验 → 库中无此 id，同样回退进程内命中。
 func (b *sqlCaptchaBackend) Verify(id, code string) bool {
 	if id == "" || code == "" {
 		return false
@@ -206,25 +224,28 @@ func (b *sqlCaptchaBackend) Verify(id, code string) bool {
 		b.alarm.logf("captcha-verify", "captcha 共享库校验失败，回退进程内（降级）：%v", err)
 		return b.fallback.Verify(id, code)
 	}
-	return ok
+	if !ok {
+		// 库中无该 id（未命中/已消费/已过期）：再试进程内副本，覆盖内存签发的图。
+		// 命中即消费（同一次性语义），不因混用两种后端放宽防爆破。
+		return b.fallback.Verify(id, code)
+	}
+	return true
 }
 
-// verifySQL 共享库校验路径：先条件 UPDATE 原子消费（无论对错），再比对哈希。
+// verifySQL 共享库校验路径：单语句原子消费并直取哈希（QA P3-2：
+// UPDATE ... RETURNING 一次拿到 code_hash，避免"消费后读哈希"与 GC 的边界竞争）。
 func (b *sqlCaptchaBackend) verifySQL(id, code string) (bool, error) {
 	now := time.Now().Unix()
-	// 原子一次性消费：仅未消费且未过期的行可置 consumed=1，以受影响行数判成败；
-	// 并发校验同一 id 时仅一个 UPDATE 影响行数为 1。
-	res, err := b.db.Exec(`UPDATE captcha_challenges SET consumed = 1
-		WHERE id = ? AND consumed = 0 AND expires_at > ?`, id, now)
-	if err != nil {
-		return false, err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return false, nil
-	}
-	// 行在消费时刻未过期，不会被 GC（GC 仅删 expires_at <= now 的行），SELECT 必命中。
+	// 原子一次性消费：仅未消费且未过期的行可置 consumed=1；并发校验同一 id
+	// 时仅一个请求能 RETURNING 到哈希。
 	var stored string
-	if err := b.db.QueryRow(`SELECT code_hash FROM captcha_challenges WHERE id = ?`, id).Scan(&stored); err != nil {
+	err := b.db.QueryRow(`UPDATE captcha_challenges SET consumed = 1
+		WHERE id = ? AND consumed = 0 AND expires_at > ?
+		RETURNING code_hash`, id, now).Scan(&stored)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil // 无此 id / 已消费 / 已过期
+		}
 		return false, err
 	}
 	// 常量时间比对，防计时侧信道。
@@ -262,6 +283,11 @@ func securityGCOnce(db *sqlutil.DB, alarm *securityAlarm) {
 	// 发信限频行：超过 24h 未再触发即清理（避免按邮箱无限增长）。
 	if _, err := db.Exec(`DELETE FROM operation_intervals WHERE last_at < ?`, now-86400); err != nil {
 		alarm.logf("interval-gc", "发信限频陈旧行清理失败：%v", err)
+	}
+	// 登录失败计数：24h 未再触发且当前未处于锁定窗口的行清理（QA P3-4；
+	// 未清理会让未达阈值且不再回来的 identity 在共享库跨副本永久累积）。
+	if _, err := db.Exec(`DELETE FROM login_attempts WHERE updated_at < ? AND locked_until <= ?`, now-86400, now); err != nil {
+		alarm.logf("login-gc", "登录失败计数陈旧行清理失败：%v", err)
 	}
 }
 
@@ -335,12 +361,13 @@ func newSQLLoginGuard(db *sqlutil.DB, maxFail, lockMin int) *loginGuard {
 }
 
 // isLocked 锁定窗口内直接拒绝。过期锁定记录即删（等价内存实现：
-// 锁定过期后计数清零重新累计）。
+// 锁定过期后计数清零重新累计）。identity 在后端入口归一化（QA P3-6）。
 func (g *sqlLoginGuardBackend) isLocked(identity string) bool {
-	locked, err := g.isLockedSQL(identity)
+	id := normalizeEmail(identity)
+	locked, err := g.isLockedSQL(id)
 	if err != nil {
-		g.alarm.logf("login-isLocked", "登录锁定共享库查询失败，回退进程内（降级）：%v", err)
-		return g.fallback.isLocked(identity)
+		g.alarm.logf("login-isLocked", "ALERT 高等级：登录锁定共享库查询失败，已降级为进程内计数——防护强度按副本数放大（有效尝试 ≈ 副本数 × LOGIN_MAX_FAIL），共享锁定态被架空: %v", err)
+		return g.fallback.isLocked(id)
 	}
 	return locked
 }
@@ -364,30 +391,35 @@ func (g *sqlLoginGuardBackend) isLockedSQL(identity string) (bool, error) {
 // onFail 失败原子自增；达阈值进入锁定窗口（单语句 upsert，跨副本原子无丢失）。
 // 语义与内存实现逐条对齐：计数持续累加，达阈值后每次失败都顺延锁定窗口。
 func (g *sqlLoginGuardBackend) onFail(identity string) {
-	if err := g.onFailSQL(identity); err != nil {
-		g.alarm.logf("login-onFail", "登录失败计数共享库写入失败，回退进程内（降级）：%v", err)
-		g.fallback.onFail(identity)
+	id := normalizeEmail(identity)
+	if err := g.onFailSQL(id); err != nil {
+		g.alarm.logf("login-onFail", "ALERT 高等级：登录失败计数共享库写入失败，已降级为进程内计数——防护强度按副本数放大（有效尝试 ≈ 副本数 × LOGIN_MAX_FAIL）: %v", err)
+		g.fallback.onFail(id)
 	}
 }
 
+// onFailSQL 原子自增并在达阈值时置锁定。maxFail ≤ 0 一律不锁定（QA P2-2）：
+// 与内存侧 `if g.maxFail > 0 && ...` 语义一致——运维常以 LOGIN_MAX_FAIL=0 表"关闭锁定"，
+// 若 SQL 侧无此守卫则 `1 >= 0` 恒真 → 第一次输错即锁定（正常用户被锁死）。
 func (g *sqlLoginGuardBackend) onFailSQL(identity string) error {
 	now := time.Now().Unix()
 	lockUntil := now + int64(g.lockDur/time.Second)
 	_, err := g.db.Exec(`INSERT INTO login_attempts (identity, failed_count, locked_until, updated_at)
-		VALUES (?, 1, CASE WHEN 1 >= ? THEN ? ELSE 0 END, ?)
+		VALUES (?, 1, CASE WHEN ? > 0 AND 1 >= ? THEN ? ELSE 0 END, ?)
 		ON CONFLICT (identity) DO UPDATE SET
 			failed_count = login_attempts.failed_count + 1,
-			locked_until = CASE WHEN login_attempts.failed_count + 1 >= ? THEN ? ELSE 0 END,
+			locked_until = CASE WHEN ? > 0 AND login_attempts.failed_count + 1 >= ? THEN ? ELSE 0 END,
 			updated_at = EXCLUDED.updated_at`,
-		identity, g.maxFail, lockUntil, now, g.maxFail, lockUntil)
+		identity, g.maxFail, g.maxFail, lockUntil, now, g.maxFail, g.maxFail, lockUntil)
 	return err
 }
 
 // onSuccess 登录成功清零（删记录）。
 func (g *sqlLoginGuardBackend) onSuccess(identity string) {
-	if _, err := g.db.Exec(`DELETE FROM login_attempts WHERE identity = ?`, identity); err != nil {
+	id := normalizeEmail(identity)
+	if _, err := g.db.Exec(`DELETE FROM login_attempts WHERE identity = ?`, id); err != nil {
 		g.alarm.logf("login-onSuccess", "登录成功清零共享库删除失败，回退进程内（降级）：%v", err)
-		g.fallback.onSuccess(identity)
+		g.fallback.onSuccess(id)
 	}
 }
 

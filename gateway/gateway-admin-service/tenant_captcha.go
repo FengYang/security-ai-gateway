@@ -62,7 +62,12 @@ func newCaptchaStore(ttlMin, ipLimitPerHour int) *captchaStore {
 }
 
 // allowIP 记录并检查同 IP 签发频率（小时窗口，超过 → false）。
+// 口径统一（QA P3-5）：ipLimit ≤ 0 = 关闭限流（与共享库后端 `if b.ipLimit > 0`
+// 一致）。旧实现在 ipLimit=0 时 `0 >= 0` 恒真 → 拒全部签发，与共享库后端语义相反。
 func (s *captchaStore) allowIP(ip string) bool {
+	if s.ipLimit <= 0 {
+		return true // 关闭限流
+	}
 	now := time.Now().Unix()
 	cutoff := now - 3600
 	s.mu.Lock()

@@ -212,6 +212,8 @@ func loadTenantConfig(cfg *config) error {
 	cfg.passwordResetTTLHours = envInt("PASSWORD_RESET_TTL_HOURS", defaultPasswordResetTTLHours)
 	cfg.passwordResetIntervalMin = envInt("PASSWORD_RESET_EMAIL_INTERVAL_MIN", defaultPasswordResetIntervalMin)
 	cfg.mailTokenFailLimit = envInt("MAIL_TOKEN_FAIL_LIMIT", defaultMailTokenFailLimit)
+	// 口径：LOGIN_MAX_FAIL ≤ 0 = 关闭失败锁定（内存与共享库两端一致；
+	// 共享库后端在 SQL 侧亦有 maxFail > 0 守卫，见 security_store.go QA P2-2）。
 	cfg.loginMaxFail = envInt("LOGIN_MAX_FAIL", defaultLoginMaxFail)
 	cfg.loginLockMin = envInt("LOGIN_LOCK_MIN", defaultLoginLockMin)
 	cfg.registerIPDailyLimit = envInt("REGISTER_IP_DAILY_LIMIT", defaultRegisterIPDailyLimit)
@@ -220,6 +222,7 @@ func loadTenantConfig(cfg *config) error {
 	// C. 图形验证码（§10.3 C；生产禁止关闭 = 仅显式 false 才关）
 	cfg.captchaEnabled = envBool("TENANT_CAPTCHA_ENABLED", true)
 	cfg.captchaTTLMin = envInt("TENANT_CAPTCHA_TTL_MIN", defaultCaptchaTTLMin)
+	// 口径：TENANT_CAPTCHA_IP_RATE_PER_HOUR ≤ 0 = 关闭签发限流（两端一致，QA P3-5）。
 	cfg.captchaIPRatePerHour = envInt("TENANT_CAPTCHA_IP_RATE_PER_HOUR", defaultCaptchaIPRatePerHour)
 
 	// C'. 安全计数器共享库（P2-4 T-1.3/T-1.4，多副本）：显式配置 DSN 才启用，
