@@ -50,6 +50,8 @@ type tenantHandler struct {
 
 	// effects 开通变更联动（N4 重签 / N5 下发），由后续子任务注入；零值 = 空操作。
 	effects provisioningEffects
+	// stopSecurityGC 停止安全计数器共享库的周期清理协程（nil = 未启用共享库）。
+	stopSecurityGC func()
 	// dispatch N5 下发调度器（nil = 未接线；管理员手动重放依赖它）。
 	dispatch *dispatcher
 	// attest N3 证明状态源（nil = 未接线 → 降级 unknown + 强制未闭环，C-19）。

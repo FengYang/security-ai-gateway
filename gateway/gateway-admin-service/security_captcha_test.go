@@ -34,7 +34,6 @@ func newSQLCaptchaTestBackend(t *testing.T, ttlMin, ipLimit int) (*sqlCaptchaBac
 		db.Close()
 	})
 	b := newSQLCaptchaBackend(db, ttlMin, ipLimit)
-	t.Cleanup(b.stopGC)
 	return b, db
 }
 
@@ -206,7 +205,8 @@ func TestCaptchaPGGate(t *testing.T) {
 	}
 	defer db.Close()
 	b := newSQLCaptchaBackend(db, 5, 2)
-	defer b.stopGC()
+	stop := startSecurityGC(db, securityGCInterval) // 共享库层 GC（QA P3-1：与 captcha 解耦）
+	defer stop()
 
 	// 限流 + 跨副本语义同 sqlite 用例。
 	if _, _, err := b.Issue("192.0.2.1"); err != nil {

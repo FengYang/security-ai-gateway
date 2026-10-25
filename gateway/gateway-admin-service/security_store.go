@@ -117,21 +117,21 @@ type sqlCaptchaBackend struct {
 	ttl      time.Duration
 	ipLimit  int
 	fallback *captchaStore // 进程内回退（共享库不可达时的降级路径）
-	gcStop   chan struct{} // GC 协程停止信号（nil = 未启动）
 	alarm    securityAlarm
 }
 
-// newSQLCaptchaBackend 构造共享库验证码后端并启动周期 GC。
+// newSQLCaptchaBackend 构造共享库验证码后端。
 // ttlMin 答案 TTL 分钟；ipLimitPerHour 同 IP 小时窗口上限。
+// 注：过期行清理（GC）**不挂在本类型上**——它属于共享库层（startSecurityGC，
+// 由 useSecurityPGStore 启动），否则 captcha 关闭时 operation_intervals /
+// login_attempts 的过期行永不清、表无界增长（QA P3-1）。
 func newSQLCaptchaBackend(db *sqlutil.DB, ttlMin, ipLimitPerHour int) *sqlCaptchaBackend {
-	b := &sqlCaptchaBackend{
+	return &sqlCaptchaBackend{
 		db:       db,
 		ttl:      time.Duration(ttlMin) * time.Minute,
 		ipLimit:  ipLimitPerHour,
 		fallback: newCaptchaStore(ttlMin, ipLimitPerHour),
 	}
-	b.startGC(5 * time.Minute)
-	return b
 }
 
 // normalizeCaptchaCode 归一化待比对验证码（与内存实现 EqualFold+TrimSpace 等价；
@@ -252,23 +252,36 @@ func (b *sqlCaptchaBackend) verifySQL(id, code string) (bool, error) {
 	return subtle.ConstantTimeCompare([]byte(stored), []byte(captchaCodeHash(code))) == 1, nil
 }
 
-// startGC 启动周期清理协程（复用既有后台 ticker 模式；承载全部安全计数器表的
-// 过期行清理——captcha 挑战/限流行 + 发信限频陈旧行）。
-// 已消费但未过期的挑战行保留（verifySQL 消费后还要读哈希）。
-func (b *sqlCaptchaBackend) startGC(interval time.Duration) {
-	b.gcStop = make(chan struct{})
+// securityGCInterval 共享库过期行清理周期（默认）。
+const securityGCInterval = 5 * time.Minute
+
+// startSecurityGC 启动共享库层的周期清理协程（复用既有后台 ticker 模式；
+// 与 captcha 开关解耦——QA P3-1）。返回停止函数。
+// 清理范围：captcha 挑战/限流行、发信限频陈旧行、登录失败计数陈旧行。
+func startSecurityGC(db *sqlutil.DB, interval time.Duration) (stop func()) {
+	stopCh := make(chan struct{})
+	done := make(chan struct{})
+	alarm := &securityAlarm{}
+	if interval <= 0 {
+		interval = securityGCInterval
+	}
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				securityGCOnce(b.db, &b.alarm)
-			case <-b.gcStop:
+				securityGCOnce(db, alarm)
+			case <-stopCh:
 				return
 			}
 		}
 	}()
+	return func() {
+		close(stopCh)
+		<-done
+	}
 }
 
 // securityGCOnce 一轮安全计数器过期行清理（mfa_states 为长期状态，不清理）。
@@ -288,14 +301,6 @@ func securityGCOnce(db *sqlutil.DB, alarm *securityAlarm) {
 	// 未清理会让未达阈值且不再回来的 identity 在共享库跨副本永久累积）。
 	if _, err := db.Exec(`DELETE FROM login_attempts WHERE updated_at < ? AND locked_until <= ?`, now-86400, now); err != nil {
 		alarm.logf("login-gc", "登录失败计数陈旧行清理失败：%v", err)
-	}
-}
-
-// stopGC 停止周期清理协程（测试用；生产随进程退出）。
-func (b *sqlCaptchaBackend) stopGC() {
-	if b.gcStop != nil {
-		close(b.gcStop)
-		b.gcStop = nil
 	}
 }
 
@@ -320,14 +325,12 @@ func (a *securityAlarm) logf(op, format string, args ...any) {
 	log.Printf("[security-store] "+format, args...)
 }
 
-// securitySharedDB 已启用的安全计数器共享库句柄（useSecurityPGStore 注入）；
-// 供 mfaStore 等在自身初始化点读取开关（nil = 未启用，各组件走原进程内/文件实现）。
-var securitySharedDB *sqlutil.DB
-
 // useSecurityPGStore 将 handler 的安全计数器切换到共享库后端（main.go 接线用，
 // 仅在 SECURITY_STORE_PG_DSN 配置时调用；缺省保持进程内实现，行为不变）。
 func (h *tenantHandler) useSecurityPGStore(db *sqlutil.DB) {
-	securitySharedDB = db
+	// QA P3-1：共享库过期行清理在**共享库层**启动，与 captcha 开关解耦
+	// （captcha 关闭时 login_attempts / operation_intervals 仍需清理）。
+	h.stopSecurityGC = startSecurityGC(db, securityGCInterval)
 	if h.cfg.captchaEnabled {
 		h.captcha = newSQLCaptchaBackend(db, h.cfg.captchaTTLMin, h.cfg.captchaIPRatePerHour)
 	}
@@ -335,7 +338,8 @@ func (h *tenantHandler) useSecurityPGStore(db *sqlutil.DB) {
 	h.loginGuard = newSQLLoginGuard(db, h.cfg.loginMaxFail, h.cfg.loginLockMin)
 	// T-1.5：密码重置发信限频同库切换（最小间隔沿用既有配置，语义不变）。
 	h.resetGuard = newSQLIntervalGuard(db, h.cfg.passwordResetIntervalMin)
-	// T-1.5：mfaStore 经 securitySharedDB 开关注入（loadMFAStore 读取，见 mfa.go）。
+	// T-1.5：MFA 状态共享库后端为**显式传参**（QA P3-2：不使用包级全局）——
+	// mfaState 初始化点须调用 loadMFAStoreShared(path, jwtSecret, db)。
 }
 
 // ---------- 登录失败锁定共享库后端（P2-4 T-1.4，S1(7) login_attempts）----------

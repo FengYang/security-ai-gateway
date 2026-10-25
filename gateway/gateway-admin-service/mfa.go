@@ -206,17 +206,25 @@ func newSQLMFAStore(db *sqlutil.DB, jwtSecret []byte) *mfaStore {
 	return &mfaStore{db: db, masterKey: deriveMFAMasterKey(jwtSecret)}
 }
 
-// loadMFAStore 加载/初始化 MFA 状态存储（fail-closed：文件存在但非法 → 拒绝启用）。
-// masterKey 缺省派生自 JWT 共享密钥（启动告警；生产应显式配置 ADMIN_MFA_MASTER_KEY）。
-// 安全计数器共享库已启用（SECURITY_STORE_PG_DSN，useSecurityPGStore 注入
-// securitySharedDB）时改走共享库后端；否则保持原文件实现，行为不变。
-func loadMFAStore(path string, jwtSecret []byte) (*mfaStore, error) {
+// loadMFAStoreShared 共享库后端的 MFA 状态存储（显式传参，QA P3-2）。
+// path 仅作审计线索（旧状态文件不读取、不迁移：切换后已绑定账号须重新 enroll）。
+func loadMFAStoreShared(path string, jwtSecret []byte, db *sqlutil.DB) (*mfaStore, error) {
 	if path == "" {
 		return nil, nil
 	}
-	if securitySharedDB != nil {
-		log.Printf("[mfa] 安全计数器共享库已启用：MFA 状态改存 mfa_states 表（多副本共享；旧状态文件 %s 不自动迁移，已绑定账号须重新 enroll）", path)
-		return newSQLMFAStore(securitySharedDB, jwtSecret), nil
+	if db == nil {
+		return loadMFAStore(path, jwtSecret)
+	}
+	log.Printf("[mfa] 安全计数器共享库已启用：MFA 状态改存 mfa_states 表（多副本共享；旧状态文件 %s 不自动迁移，已绑定账号须重新 enroll）", path)
+	return newSQLMFAStore(db, jwtSecret), nil
+}
+
+// loadMFAStore 加载/初始化 MFA 状态存储（JSON 文件后端；默认，行为不变）。
+// masterKey 缺省派生自 JWT 共享密钥（启动告警；生产应显式配置 ADMIN_MFA_MASTER_KEY）。
+// 共享库后端请用 loadMFAStoreShared（显式传入共享库句柄；QA P3-2：不使用包级全局）。
+func loadMFAStore(path string, jwtSecret []byte) (*mfaStore, error) {
+	if path == "" {
+		return nil, nil
 	}
 	mk := deriveMFAMasterKey(jwtSecret)
 	s := &mfaStore{path: path, masterKey: mk, recs: map[string]*mfaRecord{}}
@@ -372,7 +380,11 @@ func (s *mfaStore) locked(sub string) bool {
 		}
 		var r mfaRecord
 		if err := json.Unmarshal([]byte(blob), &r); err != nil {
-			return false
+			// 口径统一（QA P3-3）：状态不可解析时按 fail-closed 视为锁定，
+			// 与 enrolled() 的 fail-closed 取向一致（MFA 为等保强制 step-up 控制，
+			// 存储异常不得退化为"放行"）。
+			s.alarm.logf("mfa-locked", "MFA 状态记录反序列化失败（fail-closed 视为锁定）: %v", err)
+			return true
 		}
 		return r.LockedUntil > time.Now().Unix()
 	}
