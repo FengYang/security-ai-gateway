@@ -567,7 +567,10 @@ func (s *EtcdControlStore) GetKeyDirectory(ctx context.Context, keyID string) (t
 			ErrDirectoryMACInvalid, keyID, err)
 	}
 	if err := testkit.VerifyDirectoryMAC(kd, s.dirMACKey); err != nil {
-		return testkit.KeyDirectory{}, 0, err
+		// 包装为本包错误：① 调用方可 errors.Is 判定；② 不把 testkit 内部错误
+		// （带 "testkit:" 前缀）直接透传到产品链路。
+		return testkit.KeyDirectory{}, 0, fmt.Errorf("%w: 目录 %s MAC 校验失败（疑似被篡改或键序/格式不符合 canonical）: %v",
+			ErrDirectoryMACInvalid, keyID, err)
 	}
 	verResp, err := s.cli.Get(ctx, s.k(kDirVS, keyID))
 	if err != nil {

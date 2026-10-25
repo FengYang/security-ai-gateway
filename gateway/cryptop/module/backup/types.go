@@ -96,7 +96,7 @@ type KeyBackupStore interface {
 type Approval struct {
 	ApprovalID string
 	GroupID    string
-	Action     string // backup|restore|rotate|destroy
+	Action     string // backup|restore|clone|destroy（真轮换走 ModuleGroup.RotateKey，不经审批单）
 	Target     string // key_id
 	Digest     string // 动作摘要 SHA-256，Consume 时校验
 	Initiator  string

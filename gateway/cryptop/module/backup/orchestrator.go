@@ -438,11 +438,18 @@ func (o *Orchestrator) Destroy(keyID string, a Approval) error {
 	return nil
 }
 
-// Rotate 轮换：新建 key_id 并按 key_replication 复制副本到 quorum，旧 key 归档。
+// CloneKey 克隆：把已有密钥复制到**新 key_id** 并按 key_replication 同步副本，旧 key 归档。
 //
-// 语义（L596/L610）：轮换须双签；旧 MAC 密钥保留至目录全量重签完成；
+// ⚠️ **不产生新密钥材料**——它把源密钥 wrap 导出后导入为新 key_id 的副本，
+// 新旧 key_id 背后是**同一份密钥材料**。因此：
+//   - **不适用于轮换**：轮换必须更换材料，否则拿到任一副本即可解密全部历史密文；
+//   - 真轮换的权威入口是组侧 `ModuleGroup.RotateKey`（调成员侧 RotateKey 真生成
+//     新材料 + 副本同步 + 旧 key 归档）；
+//   - 本方法适用于**密钥迁移 / 重新编号**（如厂商无原生克隆机制时的跨模块迁移）。
+//
+// 双签：克隆会生成新的可寻址密钥对象，属 §7.2 高危操作，须双签。
 // 未达 quorum 时目录项 state=degraded，**不得宣称 RPO=0**（D-13）。
-func (o *Orchestrator) Rotate(keyID, newKeyID string, a Approval) error {
+func (o *Orchestrator) CloneKey(keyID, newKeyID string, a Approval) error {
 	if err := o.isolatedGuard(); err != nil {
 		return err
 	}
@@ -450,7 +457,7 @@ func (o *Orchestrator) Rotate(keyID, newKeyID string, a Approval) error {
 	if err != nil {
 		return err
 	}
-	if err := o.checkAndConsume("rotate", keyID, a); err != nil {
+	if err := o.checkAndConsume("clone", keyID, a); err != nil {
 		return err
 	}
 
@@ -462,8 +469,8 @@ func (o *Orchestrator) Rotate(keyID, newKeyID string, a Approval) error {
 		return ErrBackupTombstoned
 	}
 
-	opID := fmt.Sprintf("op-%s-rotate", keyID)
-	op := testkit.KeyOp{OpID: opID, Action: "rotate", Status: "pending", ClaimOwner: o.self, ClaimEpoch: st.Epoch}
+	opID := fmt.Sprintf("op-%s-clone", keyID)
+	op := testkit.KeyOp{OpID: opID, Action: "clone", Status: "pending", ClaimOwner: o.self, ClaimEpoch: st.Epoch}
 	if _, err := o.ctrl.CreateKeyOp(op); err != nil {
 		return err
 	}
@@ -519,13 +526,13 @@ func (o *Orchestrator) Rotate(keyID, newKeyID string, a Approval) error {
 		}
 		wrapped, err := srcBE.ExportWrapped(ref, o.kekID)
 		if err != nil {
-			o.markStepFailed(opID, member, "rotate", err.Error())
+			o.markStepFailed(opID, member, "clone", err.Error())
 			continue
 		}
 		wrapped.KeyID, wrapped.Member, wrapped.KEKID = newKeyID, src.Member, o.kekID
 		newRef, err := be.ImportWrapped(wrapped, o.kekID, newKeyID+"|"+member)
 		if err != nil {
-			o.markStepFailed(opID, member, "rotate", err.Error())
+			o.markStepFailed(opID, member, "clone", err.Error())
 			continue
 		}
 		newReplicas = append(newReplicas, testkit.KeyReplica{

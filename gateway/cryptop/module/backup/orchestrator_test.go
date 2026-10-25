@@ -346,13 +346,13 @@ func TestDestroyPendingWhenReplicaUnreachable(t *testing.T) {
 	}
 }
 
-func TestRotateSucceedsAndArchivesOldKey(t *testing.T) {
+func TestCloneKeySucceedsAndArchivesOldKey(t *testing.T) {
 	e := newTestEnv(t, "shared", "quorum", []string{"m1", "m2"})
 	e.seedDirectory(t, "k-rot", "m1")
 
-	a := e.approve(t, "ap-rot", "rotate", "k-rot")
-	if err := e.orch.Rotate("k-rot", "k-rot-v2", a); err != nil {
-		t.Fatalf("Rotate 失败: %v", err)
+	a := e.approve(t, "ap-rot", "clone", "k-rot")
+	if err := e.orch.CloneKey("k-rot", "k-rot-v2", a); err != nil {
+		t.Fatalf("CloneKey 失败: %v", err)
 	}
 
 	// 新 key_id 目录项应就绪，含 quorum 副本（2 成员 → quorum=2）。
@@ -367,15 +367,15 @@ func TestRotateSucceedsAndArchivesOldKey(t *testing.T) {
 	}
 }
 
-func TestRotateQuorumUnmet(t *testing.T) {
+func TestCloneKeyQuorumUnmet(t *testing.T) {
 	e := newTestEnv(t, "shared", "quorum", []string{"m1", "m2"})
 	e.seedDirectory(t, "k-rq", "m1")
 
 	// m2 导入失败 → 只同步到 1 个副本，未达 quorum(2)
 	e.be["m2"].failImport = true
 
-	a := e.approve(t, "ap-rq", "rotate", "k-rq")
-	err := e.orch.Rotate("k-rq", "k-rq-v2", a)
+	a := e.approve(t, "ap-rq", "clone", "k-rq")
+	err := e.orch.CloneKey("k-rq", "k-rq-v2", a)
 	if err != ErrQuorumUnmet {
 		t.Fatalf("未达 quorum 应返回 ErrQuorumUnmet，实际 %v", err)
 	}
