@@ -48,7 +48,7 @@ func newTestGroup(t *testing.T, self string) (*ModuleGroup, *module.MockBackend,
 	m2 := newMockMember()
 	members := map[string]module.ModuleBackend{"dc1-hsm-a": m1, "dc2-hsm-a": m2}
 	store := testkit.NewMemoryControlStore("fin-hsm-a")
-	g, err := NewGroupProvider(cfg, members, self, store, "boot-"+self)
+	g, err := NewGroupProvider(cfg, members, self, store, "boot-"+self, nil)
 	if err != nil {
 		t.Fatalf("NewGroupProvider: %v", err)
 	}
@@ -144,11 +144,11 @@ func TestGroupTwoCoordinatorsOneLeader(t *testing.T) {
 	m2b := newMockMember()
 	// 同一控制存储，两个 sidecar：dc1 与 dc2（分属不同 DC）。
 	store := testkit.NewMemoryControlStore("fin-hsm-a")
-	gA, err := NewGroupProvider(cfg, map[string]module.ModuleBackend{"dc1-hsm-a": m1, "dc2-hsm-a": m2a}, "dc1-hsm-a", store, "boot-a")
+	gA, err := NewGroupProvider(cfg, map[string]module.ModuleBackend{"dc1-hsm-a": m1, "dc2-hsm-a": m2a}, "dc1-hsm-a", store, "boot-a", nil)
 	if err != nil {
 		t.Fatalf("gA: %v", err)
 	}
-	gB, err := NewGroupProvider(cfg, map[string]module.ModuleBackend{"dc1-hsm-a": m1, "dc2-hsm-a": m2b}, "dc2-hsm-a", store, "boot-b")
+	gB, err := NewGroupProvider(cfg, map[string]module.ModuleBackend{"dc1-hsm-a": m1, "dc2-hsm-a": m2b}, "dc2-hsm-a", store, "boot-b", nil)
 	if err != nil {
 		t.Fatalf("gB: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	module "security-ai-gateway/gateway/cryptop/module"
+	"security-ai-gateway/gateway/cryptop/module/backup"
 	"security-ai-gateway/gateway/cryptop/module/testkit"
 )
 
@@ -62,6 +63,13 @@ type ModuleGroup struct {
 	self    string
 	bootID  string
 	metrics *gmetrics
+
+	// 密钥跨模块协同（T-1↔T-2 接线）：仅 key_mode=shared 时非 nil。
+	// shared 模式语义（D-13/G-4）：生命周期写（生成/导入/轮换）须把密钥副本同步到
+	// key_replication 阈值要求的成员数；销毁须连带清副本与备份，否则会留下孤儿副本。
+	// isolated 模式恒为 nil（U-2：isolated 不宣称跨模块协同）。
+	orch   *backup.Orchestrator
+	shared bool
 }
 
 // NewGroupProvider 构造组抽象（不立即启动协调器；Init 内启动）。
@@ -72,9 +80,14 @@ type ModuleGroup struct {
 //   - self：本 sidecar 对应的成员 ID（生命周期写要求其持有组主租约）；
 //   - store：控制存储（Wave A 用 testkit.MemoryControlStore）；
 //   - bootID：本进程启动标识（fence 用，区分陈旧主）。
-func NewGroupProvider(cfg testkit.GroupConfig, members map[string]module.ModuleBackend, self string, store ControlStore, bootID string) (*ModuleGroup, error) {
+func NewGroupProvider(cfg testkit.GroupConfig, members map[string]module.ModuleBackend, self string, store ControlStore, bootID string, deps *BackupDeps) (*ModuleGroup, error) {
 	if len(members) < 2 {
 		return nil, fmt.Errorf("group: 组模式成员数 %d < 2（D-1 至少双成员）", len(members))
+	}
+	// U-5：组内成员 2-4，默认 4；>4 不支持（性能报告可下调，不可上调）。
+	if len(members) > maxMembersPerGroup {
+		return nil, fmt.Errorf("group: 组模式成员数 %d > %d（U-5：组内成员上限 4，>4 不支持）",
+			len(members), maxMembersPerGroup)
 	}
 	if _, ok := members[self]; !ok {
 		return nil, fmt.Errorf("group: self 成员 %q 不在成员集合内", self)
@@ -108,12 +121,29 @@ func NewGroupProvider(cfg testkit.GroupConfig, members map[string]module.ModuleB
 	if v := cfg.Validate(testkit.ProfileTest, caps); len(v) != 0 {
 		return nil, fmt.Errorf("group: 组配置校验未通过: %v", v)
 	}
+	// ② 运行时 wrap/unwrap 能力断言（D-13 shared 前提）：
+	// 配置声明 ImplementsBackup=true 只说明"应当支持"，不能证明"确实支持"；
+	// shared 模式启动即逐个断言成员运行时实现 KeyBackupBackend，不满足拒绝启动，
+	// 避免组已组成、到备份时才失败。
+	if cfg.KeyMode == "shared" {
+		for _, id := range g.order {
+			if _, ok := members[id].(backup.KeyBackupBackend); !ok {
+				return nil, fmt.Errorf("group: key_mode=shared 要求成员 %s 运行时实现 backup.KeyBackupBackend，"+
+					"仅配置声明 ImplementsBackup 不足以成立（D-13）", id)
+			}
+		}
+	}
 	ttl := time.Duration(cfg.Leader.LeaseTTLMS) * time.Millisecond
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
 	g.coord = NewCoordinator(store, self, bootID, selfDC(cfg, self), ttl,
 		cfg.BootstrapOwner == self, cfg.BootstrapOwner, cfg.Failover.AutoFailoverIntraDC)
+	// ① T-1↔T-2 接线：shared 模式接入密钥协同编排器（isolated 恒 nil，U-2）。
+	if cfg.KeyMode == "shared" {
+		g.shared = true
+		g.orch = newKeySync(cfg, self, store, members, deps)
+	}
 	return g, nil
 }
 
@@ -383,9 +413,14 @@ func (g *ModuleGroup) GenerateKeyPair(usage string) (module.KeyRef, []byte, erro
 		g.metrics.recordOp("generate_keypair", "err")
 		return nil, nil, err
 	}
-	env, err := g.wrapKeyRef(ref)
+	env, kid, err := g.wrapKeyRef(ref)
 	if err != nil {
 		g.metrics.recordOp("generate_keypair", "err")
+		return nil, nil, err
+	}
+	// ① shared 模式副本同步（D-13）：非对称私钥同样需在组内多成员持有。
+	if err := g.syncKeyReplicas(kid); err != nil {
+		g.metrics.recordOp("generate_keypair", "quorum_unmet")
 		return nil, nil, err
 	}
 	g.metrics.recordOp("generate_keypair", "ok")
@@ -440,9 +475,15 @@ func (g *ModuleGroup) GenerateKey(spec, alias string) (module.KeyRef, error) {
 		g.metrics.recordOp("generate_key", "err")
 		return nil, err
 	}
-	env, err := g.wrapKeyRef(ref)
+	env, kid, err := g.wrapKeyRef(ref)
 	if err != nil {
 		g.metrics.recordOp("generate_key", "err")
+		return nil, err
+	}
+	// ① shared 模式：把密钥副本同步到 key_replication 阈值（D-13 / G-4）。
+	// 未达阈值时目录已置 degraded，此处按 R-6 向上报错，不静默放行。
+	if err := g.syncKeyReplicas(kid); err != nil {
+		g.metrics.recordOp("generate_key", "quorum_unmet")
 		return nil, err
 	}
 	g.metrics.recordOp("generate_key", "ok")
@@ -462,16 +503,39 @@ func (g *ModuleGroup) ImportKey(spec string, key []byte, alias string) (module.K
 		g.metrics.recordOp("import_key", "err")
 		return nil, err
 	}
-	env, err := g.wrapKeyRef(ref)
+	env, kid, err := g.wrapKeyRef(ref)
 	if err != nil {
 		g.metrics.recordOp("import_key", "err")
+		return nil, err
+	}
+	// ① shared 模式副本同步（D-13）。
+	if err := g.syncKeyReplicas(kid); err != nil {
+		g.metrics.recordOp("import_key", "quorum_unmet")
 		return nil, err
 	}
 	g.metrics.recordOp("import_key", "ok")
 	return env, nil
 }
 
+// DestroyKey 销毁密钥。
+//
+// ⚠️ shared 模式下销毁属 §7.2 高危操作，须连带清副本与备份并**双签**：
+// 不带审批单调用时返回 backup.ErrApprovalRequired（fail-closed），
+// 避免"只销毁了本地对象、组内其他成员留下孤儿副本"的伪销毁。
+// 需销毁 shared 密钥请用 DestroyKeyWithApproval。
 func (g *ModuleGroup) DestroyKey(keyRef module.KeyRef) error {
+	return g.destroyKey(keyRef, backup.Approval{})
+}
+
+// DestroyKeyWithApproval shared 模式销毁：在各成员间清理副本 + 备份，须持双签审批单。
+//
+// 顺序：清其他成员副本 → 编排器清备份/备份库 blob 并 tombstone（须双签）→ 销毁本成员对象。
+// 任一步失败即返回错误，目录保持 destroy_pending，**不宣称已销毁**。
+func (g *ModuleGroup) DestroyKeyWithApproval(keyRef module.KeyRef, a backup.Approval) error {
+	return g.destroyKey(keyRef, a)
+}
+
+func (g *ModuleGroup) destroyKey(keyRef module.KeyRef, a backup.Approval) error {
 	if err := g.requireLeader(); err != nil {
 		g.metrics.recordOp("destroy_key", "no_leader")
 		return err
@@ -480,6 +544,30 @@ func (g *ModuleGroup) DestroyKey(keyRef module.KeyRef) error {
 	if err != nil {
 		g.metrics.recordOp("destroy_key", "err")
 		return err
+	}
+	// ① shared：先清组内其他成员的副本对象（孤儿副本防护）与备份（须双签）。
+	if g.isShared() {
+		kid, kerr := keyIDHex(keyRef)
+		if kerr != nil {
+			g.metrics.recordOp("destroy_key", "err")
+			return kerr
+		}
+		pending := g.destroyReplicas(kid, m.ID)
+		g.mu.RLock()
+		orch := g.orch
+		g.mu.RUnlock()
+		if err := orch.Destroy(kid, a); err != nil {
+			g.metrics.recordOp("destroy_key", "err")
+			return err
+		}
+		if len(pending) > 0 {
+			// 副本未清干净：不留沉默，向上报 ErrDestroyPending（目录已置 destroy_pending）。
+			g.metrics.recordOp("destroy_key", "pending")
+			if err := m.Backend.DestroyKey(inner); err != nil {
+				return err
+			}
+			return backup.ErrDestroyPending
+		}
 	}
 	if err := m.Backend.DestroyKey(inner); err != nil {
 		g.metrics.recordOp("destroy_key", "err")
@@ -504,10 +592,19 @@ func (g *ModuleGroup) RotateKey(oldRef module.KeyRef, spec string) (module.KeyRe
 		g.metrics.recordOp("rotate_key", "err")
 		return nil, err
 	}
-	env, err := g.wrapKeyRef(newRef)
+	env, kid, err := g.wrapKeyRef(newRef)
 	if err != nil {
 		g.metrics.recordOp("rotate_key", "err")
 		return nil, err
+	}
+	// ① shared 模式：新密钥副本同步到阈值（D-13）。
+	if err := g.syncKeyReplicas(kid); err != nil {
+		g.metrics.recordOp("rotate_key", "quorum_unmet")
+		return nil, err
+	}
+	// 旧 key 归档（保留以解旧密文，覆盖 backup.retention_days；D-9/§6.2.5）。
+	if oldKid, err := keyIDHex(oldRef); err == nil {
+		g.archiveKey(oldKid)
 	}
 	g.metrics.recordOp("rotate_key", "ok")
 	return env, nil
@@ -570,7 +667,10 @@ func (g *ModuleGroup) requireLeader() error {
 // wrapKeyRef 把成员内句柄包装为 GroupKeyRef 信封（携带 member/partition，供后续路由）。
 // 同时以组主身份写入目录项（version 0→1，单副本；跨成员复制属 T-2 Wave B），
 // 使目录写路径受 leader epoch/boot_id 约束（陈旧主 CAS 失败）。
-func (g *ModuleGroup) wrapKeyRef(inner module.KeyRef) (module.KeyRef, error) {
+// wrapKeyRef 编码组信封并把目录项写进控制存储。
+//
+// 返回 (信封, 目录 key_id, error)：key_id 供 shared 模式的副本同步定位目录项（D-13）。
+func (g *ModuleGroup) wrapKeyRef(inner module.KeyRef) (module.KeyRef, string, error) {
 	g.mu.RLock()
 	selfM := g.members[g.self]
 	coord := g.coord
@@ -581,15 +681,16 @@ func (g *ModuleGroup) wrapKeyRef(inner module.KeyRef) (module.KeyRef, error) {
 	keyID := newKeyID()
 	env, err := testkit.EncodeGroupKeyRef(keyID, g.self, selfM.Partition, inner)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	ls, ok := coord.LeaderLease()
 	if !ok {
-		return nil, ErrNotLeader
+		return nil, "", ErrNotLeader
 	}
+	kid := hexKeyID(keyID)
 	kd := testkit.KeyDirectory{
 		Version:      0,
-		KeyID:        hexKeyID(keyID),
+		KeyID:        kid,
 		KeyMode:      cfg.KeyMode,
 		Replicas:     []testkit.KeyReplica{{Member: g.self, Partition: selfM.Partition, InnerB64: b64(inner), State: "active"}},
 		State:        "active",
@@ -599,10 +700,10 @@ func (g *ModuleGroup) wrapKeyRef(inner module.KeyRef) (module.KeyRef, error) {
 		LeaseEpoch:   ls.Epoch,
 		UpdatedAt:    time.Now().UTC(),
 	}
-	if _, err := store.CASKeyDirectory(hexKeyID(keyID), 0, ls.Epoch, ls.HolderBootID, kd); err != nil {
-		return nil, fmt.Errorf("group: 目录写失败（leader 约束）: %w", err)
+	if _, err := store.CASKeyDirectory(kid, 0, ls.Epoch, ls.HolderBootID, kd); err != nil {
+		return nil, "", fmt.Errorf("group: 目录写失败（leader 约束）: %w", err)
 	}
-	return env, nil
+	return env, kid, nil
 }
 
 func (g *ModuleGroup) indexLocked(id string) uint16 {

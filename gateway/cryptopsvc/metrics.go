@@ -5,19 +5,19 @@
 //
 // 本文件承载 **source=cryptop** 的指标（§10.1）：
 //
-//	#1 cryptop_ops_total{op,profile}           运算计数（唯一生产者 = dispatch）
-//	#2 cryptop_op_duration_seconds{op}         运算延迟（handler 出口 observe，直方图）
-//	#3 cryptop_errors_total{op,code}           按 §4.4 错误码
-//	#4 cryptop_call_timeout_total              R-3 超时（sidecar HTTP 中间件）
-//	#6 cryptop_key_refs{scope}                 活跃 KeyRef 数（KeyStore.Register/Destroy）
-//	#7 cryptop_key_rotations_total{scope}      轮换（**仅 scope∈{session,static}**；tenant_master 归 tee）
-//	#8 cryptop_key_destroy_total{scope}        销毁（**仅 scope∈{session,static}**；tenant_master 归 tee）
-//	#9 cryptop_profile_info{profile,meets_mpy,compliance_note,active}  P4 如实标注（gauge=1；
-//	    **多序列**：每个出现过的 profile 一条序列，active="true" 者为**真实生效档位**——
-//	    degrade 时配置档（sm-module）与生效档（sm-software）各占一条，绝不复用同一序列
-//    表达两个档位（P1-5 §6.4 R-S3-3 / R-28，2026-10-12 多序列化）
-//	#11 cryptop_mask_stream_values_total       /v1/mask/stream 累计元素
-//	#15 cryptop_compat_mode{feature}           兼容/桥接模式（mask_prg=bridge → 1）
+//		#1 cryptop_ops_total{op,profile}           运算计数（唯一生产者 = dispatch）
+//		#2 cryptop_op_duration_seconds{op}         运算延迟（handler 出口 observe，直方图）
+//		#3 cryptop_errors_total{op,code}           按 §4.4 错误码
+//		#4 cryptop_call_timeout_total              R-3 超时（sidecar HTTP 中间件）
+//		#6 cryptop_key_refs{scope}                 活跃 KeyRef 数（KeyStore.Register/Destroy）
+//		#7 cryptop_key_rotations_total{scope}      轮换（**仅 scope∈{session,static}**；tenant_master 归 tee）
+//		#8 cryptop_key_destroy_total{scope}        销毁（**仅 scope∈{session,static}**；tenant_master 归 tee）
+//		#9 cryptop_profile_info{profile,meets_mpy,compliance_note,active}  P4 如实标注（gauge=1；
+//		    **多序列**：每个出现过的 profile 一条序列，active="true" 者为**真实生效档位**——
+//		    degrade 时配置档（sm-module）与生效档（sm-software）各占一条，绝不复用同一序列
+//	   表达两个档位（P1-5 §6.4 R-S3-3 / R-28，2026-10-12 多序列化）
+//		#11 cryptop_mask_stream_values_total       /v1/mask/stream 累计元素
+//		#15 cryptop_compat_mode{feature}           兼容/桥接模式（mask_prg=bridge → 1）
 //
 // 跨源指标（#7/#8 的 tenant_master 行、#10、#15 的 tee 行）由其它进程发射，见 §10.1.1/§10.3。
 package cryptopsvc
@@ -30,23 +30,23 @@ import (
 	"sync"
 
 	"security-ai-gateway/gateway/cryptop"
-	cryptopmodule "security-ai-gateway/gateway/cryptop/module"
 	"security-ai-gateway/gateway/cryptop/keystore"
+	cryptopmodule "security-ai-gateway/gateway/cryptop/module"
 )
 
 // metrics sidecar 指标集合（按标签维度 map 累加，线程安全）。
 // 同时实现 keystore.Metrics（AddKeyRefs/IncRotations/IncDestroys）。
 type metrics struct {
 	mu        sync.Mutex
-	ops       map[string]int64 // op|profile（#1）
+	ops       map[string]int64      // op|profile（#1）
 	durations map[string]*histogram // op（#2）
-	errors    map[string]int64 // op|code（#3）
-	timeouts  int64            // #4
-	keyRefs   map[string]int64 // scope（#6；可为负 delta）
-	rotations map[string]int64 // scope（#7）
-	destroys  map[string]int64 // scope（#8）
-	maskVals  int64            // #11
-	compat    map[string]int64 // feature（#15：0/1）
+	errors    map[string]int64      // op|code（#3）
+	timeouts  int64                 // #4
+	keyRefs   map[string]int64      // scope（#6；可为负 delta）
+	rotations map[string]int64      // scope（#7）
+	destroys  map[string]int64      // scope（#8）
+	maskVals  int64                 // #11
+	compat    map[string]int64      // feature（#15：0/1）
 
 	// profiles #9 多序列（key=profile；R-28 2026-10-12 由单值扩展）。
 	// 每个被 setProfileInfo 登记过的 profile 一条序列；active=true 为真实生效档位。
@@ -54,6 +54,18 @@ type metrics struct {
 
 	// mod S3 模块指标（M5；仅 sm-module 档绑定后端后发射，见 metrics_module.go）。
 	mod *moduleMetrics
+
+	// groups P2-3 组级指标收集器（T-1 任务表「指标」/ V-1「指标可见」）。
+	// 由装配层注册；未装配组模式时为空，/metrics 不输出组序列。
+	groups []GroupMetricsCollector
+}
+
+// GroupMetricsCollector 组级指标收集器（P2-3 T-1/V-1「指标可见」）。
+//
+// 采用**结构化接口**而非导入 cryptop/module/group：避免本包与组包产生硬依赖，
+// 也使任何满足该接口的实现（含真实组、测试替身）都可挂到 /metrics。
+type GroupMetricsCollector interface {
+	RenderMetrics(w io.Writer)
 }
 
 // profileReg #9 单条序列的登记内容（R-S3-3：档位声明与生效状态分离表达）。
@@ -234,6 +246,28 @@ func (m *metrics) render(w io.Writer) {
 	writeGaugeMap(w, "cryptop_compat_mode", "兼容/桥接模式开启标志（feature=mask_bridge；1=on/0=off）", m.compat, []string{"feature"})
 	// S3 模块指标段（M5；锁序 m.mu → mod.mu，见 metrics_module.go 文件头）。
 	m.mod.renderModule(w)
+	// P2-3 组级指标段（T-1「指标」/ V-1「指标可见」）：仅输出已注册的组实例。
+	// 未装配组模式时为空——缺指标不可伪装成有组。
+	for _, c := range m.groups {
+		c.RenderMetrics(w)
+	}
+}
+
+// RegisterGroupMetrics 注册组级指标收集器，使其指标随 /metrics 输出。
+//
+// 重复注册同一实例会被忽略（幂等）；传 nil 无效。
+func (m *metrics) RegisterGroupMetrics(c GroupMetricsCollector) {
+	if c == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, ex := range m.groups {
+		if ex == c {
+			return
+		}
+	}
+	m.groups = append(m.groups, c)
 }
 
 // ---- 渲染辅助（自足，零外部依赖）----

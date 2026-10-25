@@ -27,7 +27,7 @@ func newBenchGroup(b *testing.B, self string) (*ModuleGroup, *module.MockBackend
 	m2 := newMockMember()
 	members := map[string]module.ModuleBackend{"dc1-hsm-a": m1, "dc2-hsm-a": m2}
 	store := testkit.NewMemoryControlStore("fin-hsm-a")
-	g, err := NewGroupProvider(cfg, members, self, store, "boot-"+self)
+	g, err := NewGroupProvider(cfg, members, self, store, "boot-"+self, nil)
 	if err != nil {
 		b.Fatalf("NewGroupProvider: %v", err)
 	}

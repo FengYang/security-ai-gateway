@@ -58,7 +58,7 @@ func newDrillGroup(t *testing.T, self string, failMembers map[string]bool) (*Mod
 	}
 	members := map[string]module.ModuleBackend{"dc1-hsm-a": b1, "dc2-hsm-a": b2}
 	store := testkit.NewMemoryControlStore("fin-hsm-a")
-	g, err := NewGroupProvider(cfg, members, self, store, "boot-"+self)
+	g, err := NewGroupProvider(cfg, members, self, store, "boot-"+self, nil)
 	if err != nil {
 		t.Fatalf("NewGroupProvider: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestDrillSingleLeaderRedline(t *testing.T) {
 		m1 := newMockMember()
 		m2 := newMockMember()
 		members := map[string]module.ModuleBackend{"dc1-hsm-a": m1, "dc2-hsm-a": m2}
-		g, err := NewGroupProvider(cfg, members, self, store, "boot-"+self)
+		g, err := NewGroupProvider(cfg, members, self, store, "boot-"+self, nil)
 		if err != nil {
 			t.Fatalf("NewGroupProvider(%s): %v", self, err)
 		}

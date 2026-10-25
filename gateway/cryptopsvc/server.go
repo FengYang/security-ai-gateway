@@ -213,6 +213,15 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.m.render(w)
 }
 
+// RegisterGroupMetrics 注册 P2-3 组级指标收集器，使其指标随 /metrics 输出
+// （T-1 任务表「指标」、V-1「指标可见」）。
+//
+// 装配层（cryptop.New 构造 ModuleGroup 后）调用；未装配组模式时不调用，
+// /metrics 即不出现组序列。注册幂等。
+func (s *Server) RegisterGroupMetrics(c GroupMetricsCollector) {
+	s.m.RegisterGroupMetrics(c)
+}
+
 // dispatch 统一入口：发射 #1（op 计数）、#2（延迟）、#3（错误码）。
 // hdr 供 /v1/mask/stream 读取 X-OTPMask-MaskVersion（B-5.3-1）；批量时透传外层请求头。
 func (s *Server) dispatch(op string, raw []byte, hdr http.Header) (map[string]any, *apiError) {
