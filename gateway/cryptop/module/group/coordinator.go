@@ -95,6 +95,11 @@ func (c *Coordinator) Start() {
 		return
 	}
 	c.running = true
+	// 上一次 Stop 已 close 旧 stopCh；此处必须重建，否则：
+	//   ① 续租 goroutine 的 select 会立即从已关闭的 channel 读到零值而直接退出，
+	//      协调器实际不工作（租约无人续）；
+	//   ② 本次 Stop 会 close 一个已关闭的 channel，直接 panic。
+	c.stopCh = make(chan struct{})
 	c.mu.Unlock()
 
 	_, _ = c.acquireLocked(true, nil)
