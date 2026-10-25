@@ -1,0 +1,239 @@
+# P2-4 T-4.4：中央 Prometheus（remote-write **接收侧**）
+#
+# 角色：接收各集群 Prometheus 的 remote-write 写入，作为跨集群统一查询/告警/看板的数据源。
+# 与 per-集群 Prometheus（deploy/monitoring/prometheus.yaml）**分工不同**：
+#   per-集群：本地抓取 + 本地告警（保留既有语义）；
+#   中央：只接收 remote-write（本清单**不配置** scrape_configs），集中查询与跨集群告警。
+#
+# 【cluster 标签口径】各集群在 remote-write 时由 `global.external_labels.cluster=<cluster-id>`
+# 附加（既有锚点 deploy/monitoring/prometheus.yaml:41-43），中央侧不做重命名/重打标，
+# 保证 `by (cluster)` / `cluster=~"$cluster"` 直接可用。
+#
+# 【T-4.3 依赖（他人负责）】通道信任（mTLS + 鉴权）未落地前：
+#   * 启动参数 `--web.enable-remote-write-receiver` 暴露的是**无鉴权**写入端点；
+#   * 生产须由 T-4.3 补齐：① `--web.enable-remote-write-receiver` 前置反向代理做 mTLS 终止
+#     与客户端证书校验（推荐，Prometheus 原生不带 mTLS 校验）；或 ② 走支持 mTLS 的网关。
+#   下方 prometheus.yml 的 `remote_write_receiver` 相关注释段即 T-4.3 的落点。
+#   当前**仅限集群内网/专线**：须以 NetworkPolicy 限制来源（见文件末 NetworkPolicy）。
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus-central
+  namespace: otpmask
+  labels:
+    app: prometheus-central
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-central-config
+  namespace: otpmask
+  labels:
+    app: prometheus-central
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 60s        # 中央只接收远端写入，抓取间隔仅影响自身自监控
+      evaluation_interval: 30s
+      # 中央侧 external label：标明聚合层级，便于与 per-集群数据区分/去重。
+      # 注意：不要覆盖各集群写入时携带的 cluster 标签（remote-write 不做标签重写）。
+      external_labels:
+        tier: central
+    # 告警投递：走中央 Alertmanager（本目录 alertmanager-central.yaml），
+    # 由其按 cluster 维度做 group_by/inhibit 去重。
+    alerting:
+      alertmanagers:
+      - static_configs:
+        - targets: ["alertmanager-central.otpmask.svc.cluster.local:9093"]
+    rule_files:
+    - /etc/prometheus/rules/*.rules.yml
+    # 自监控：抓取中央 Prometheus 自身（remote-write 接收侧健康度信号来源）
+    scrape_configs:
+    - job_name: prometheus-central
+      static_configs:
+      - targets: ["localhost:9090"]
+  # 中央侧告警规则（原生文本格式，与 deploy/monitoring 既有 `prometheus-rules`
+  # ConfigMap 的原生栈口径一致；Operator 环境请转成 PrometheusRule CR，内容保持一致）。
+  # 校验：promtool check rules（本机无 promtool → 见 scripts/check-central-aggregation-assets.py
+  # 的 SKIP 输出，**待环境就绪校验**）。
+  central.rules.yml: |
+    groups:
+      - name: multicluster-central.rules
+        interval: 60s
+        rules:
+          # ---- 全局 remote-write 停滞（warning）：入站样本最高时间戳落后 > 15m ----
+          # 判据：prometheus_remote_storage_highest_timestamp_in_seconds 为接收侧指标，
+          # **不带 cluster 维度**（无法定位到具体集群）→ 定位需配合下面的集群级规则与看板人工核对；
+          # 精确到「某集群停止写入」的判据依赖集群期望清单（T-2.1 registry），本期不臆造。
+          - alert: CentralRemoteWriteStalled
+            expr: time() - max(prometheus_remote_storage_highest_timestamp_in_seconds) > 900
+            for: 5m
+            labels:
+              severity: warning
+              category: multicluster
+              team: ai-gateway-ops
+            annotations:
+              summary: "中央 remote-write 入站停滞（>15m 无新样本）"
+              description: "入站样本最高时间戳落后 {{ $value | humanizeDuration }}。核对各集群 Prometheus 的 remote_write 配置与网络连通性；该指标为全局量，不含 cluster 维度，具体集群请用看板 per-cluster 页核对。"
+          # ---- 样本丢弃（warning）：remote-write 队列丢弃样本 ----
+          - alert: CentralRemoteWriteSamplesDropped
+            expr: increase(prometheus_remote_storage_samples_dropped_total[10m]) > 0
+            for: 10m
+            labels:
+              severity: warning
+              category: multicluster
+              team: ai-gateway-ops
+            annotations:
+              summary: "中央 remote-write 队列出现样本丢弃"
+              description: "近 10m 丢弃 {{ $value }} 个样本（队列满/持续失败）。核对中央侧容量（内存/磁盘）与各集群写入速率。"
+          # ---- 某集群目标全 down（warning）：该集群至少一个抓取目标不可用 ----
+          # cluster 标签来自各集群 remote-write 附加的 external label。
+          - alert: CentralClusterTargetsDown
+            expr: min by (cluster) (up{job="otpmask"}) == 0
+            for: 10m
+            labels:
+              severity: warning
+              category: multicluster
+              team: ai-gateway-ops
+            annotations:
+              summary: "集群 {{ $labels.cluster }} 存在不可用的抓取目标"
+              description: "该集群 job=otpmask 下存在 up=0 的目标（>10m）。注意：整集群 remote-write 中断时序列会消失、本规则不会触发，需配合 CentralRemoteWriteStalled 一起看。"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-central
+  namespace: otpmask
+  labels:
+    app: prometheus-central
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus-central
+  template:
+    metadata:
+      labels:
+        app: prometheus-central
+    spec:
+      serviceAccountName: prometheus-central
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: prometheus
+        image: quay.io/prometheus/prometheus:v2.54.1
+        args:
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --storage.tsdb.path=/prometheus
+        - --storage.tsdb.retention.time=90d   # 中央保留 90d（per-集群 7d），支撑跨集群回溯
+        - --storage.tsdb.retention.size=80Gi
+        - --web.listen-address=:9090
+        # 【核心】开启 remote-write 接收端点：POST /api/v1/write
+        - --web.enable-remote-write-receiver
+        # T-4.3 落点（mTLS/鉴权）：Prometheus 原生**不校验客户端证书**，
+        # 生产须前置 mTLS 终止代理（见文件头说明）；本地/内网直连时保持开启。
+        ports:
+        - name: web
+          containerPort: 9090
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+        - name: rules
+          mountPath: /etc/prometheus/rules
+        - name: data
+          mountPath: /prometheus
+        resources:
+          requests:
+            cpu: 500m
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 8Gi
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: web
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: web
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+      volumes:
+      - name: config
+        configMap:
+          name: prometheus-central-config
+          items:
+          - key: prometheus.yml
+            path: prometheus.yml
+      - name: rules
+        configMap:
+          name: prometheus-central-config
+          items:
+          - key: central.rules.yml
+            path: central.rules.yml
+      - name: data
+        persistentVolumeClaim:
+          claimName: prometheus-central-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-central
+  namespace: otpmask
+  labels:
+    app: prometheus-central
+spec:
+  selector:
+    app: prometheus-central
+  ports:
+  - name: web
+    port: 9090
+    targetPort: web
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-central-data
+  namespace: otpmask
+  labels:
+    app: prometheus-central
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # 不写死 storageClassName（避免绑死环境专有存储类）；按中央容量基线（90d × N 集群）调整。
+  resources:
+    requests:
+      storage: 100Gi
+---
+# 边界收敛（T-4.3 落地前的兜底）：仅允许 otpmask 命名空间内 Pod 写入/查询。
+# T-4.3 落地 mTLS 代理后，需按实际代理 Pod 标签放开入站，并**删除**宽泛的 namespaceSelector。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-central-write
+  namespace: otpmask
+spec:
+  podSelector:
+    matchLabels:
+      app: prometheus-central
+  policyTypes: ["Ingress"]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: otpmask
+    ports:
+    - protocol: TCP
+      port: 9090

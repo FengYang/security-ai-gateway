@@ -1,0 +1,59 @@
+# 【各集群侧发送配置片段 · 模板 · 不在 kustomization resources 内】
+# P2-4 T-4.4：各集群 Prometheus 的 remote-write **发送侧**配置片段。
+#
+# 用法：把本片段合并进该集群 prometheus.yml 的 `global`（external_labels）与顶层
+# `remote_write`（既有锚点：deploy/monitoring/prometheus.yaml:36-45 的 global 段），
+# 然后重启该集群 Prometheus。**每个集群的 cluster 值必须唯一**（建议 = 注册集群 ID，
+# 与 T-2.1 registry 的 cluster_id 一致），否则中央侧无法区分来源。
+#
+# 为什么单独给模板而不直接改 deploy/monitoring/prometheus.yaml：该文件是**默认部署基线**，
+# 改它会让所有集群（含单集群形态）都去连中央端点。多集群与否应逐集群决定 → 走模板 + 运维合并。
+#
+# 【cluster 标签口径】`global.external_labels.cluster` 会被 remote-write 附加到**每条**样本，
+# 是中央侧 `by (cluster)`、`cluster=~"$cluster"`、Alertmanager `equal: [cluster]` 的唯一来源。
+# 与 T-4.1/T-4.2 审计侧的 `schema=admin|tee|core` 属不同维度，二者可并列使用。
+#
+# 【T-4.3 依赖（他人负责）】mTLS/鉴权配置位默认注释：
+#   * `tls_config` 段：ca_file/cert_file/key_file 由 T-4.3 的证书下发机制挂载；
+#   * `authorization` / `basic_auth` / `sigv4` 段：按 T-4.3 选定的鉴权方式启用；
+#   * **未启用 mTLS 前仅限内网/专线**，禁止跨公网明文写入（中央端点为无鉴权接收端点）。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-remote-write-sender-example
+  namespace: otpmask
+data:
+  # 以下是需要合并进目标集群 prometheus.yml 的**片段**（非完整配置）
+  prometheus.remote-write.snippet.yml: |
+    global:
+      # ↓↓↓ 每个集群唯一；缺失会导致中央侧 cluster="" 分组，看板/去重全部失效 ↓↓↓
+      external_labels:
+        cluster: REPLACE_WITH_CLUSTER_ID
+    remote_write:
+    - url: http://prometheus-central.otpmask.svc.cluster.local:9090/api/v1/write
+      # 跨集群写入：放宽队列与批量，容忍网络抖动（按集群规模调整）
+      queue_config:
+        capacity: 10000
+        max_shards: 50
+        max_samples_per_send: 2000
+        batch_send_deadline: 10s
+        min_backoff: 1s
+        max_backoff: 60s
+      # 只发送需要的样本（示例：保留 otpmask_* 与 up；按实际白名单调整）
+      write_relabel_configs:
+      - source_labels: [__name__]
+        regex: "(otpmask_.*|up|gateway_core_.*)"
+        action: keep
+      # ---- T-4.3 落点（mTLS）：取消注释并按证书下发路径调整 ----
+      # tls_config:
+      #   ca_file: /etc/prometheus/mtls/ca.crt
+      #   cert_file: /etc/prometheus/mtls/tls.crt
+      #   key_file: /etc/prometheus/mtls/tls.key
+      #   server_name: prometheus-central.otpmask.svc.cluster.local
+      # ---- T-4.3 落点（鉴权，三选一）----
+      # authorization:
+      #   type: Bearer
+      #   credentials_file: /etc/prometheus/mtls/token
+      # basic_auth:
+      #   username: REPLACE_USER
+      #   password_file: /etc/prometheus/mtls/password

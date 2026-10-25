@@ -1,0 +1,120 @@
+# P2-4 T-4.4：中央聚合部署资产
+
+> **只在承担跨集群聚合的中央集群部署**，与 per-集群栈（`deploy/monitoring/**`）并列、互不干扰。
+> 本目录**不在** `deploy/monitoring/kustomization.yaml` 内 → `kubectl apply -k deploy/monitoring`
+> 的产物与本次提交前**完全一致**（默认部署零影响）。
+
+## 1. 资产清单
+
+| 文件 | 内容 |
+|------|------|
+| `kustomization.yaml` | 中央资产入口：`kubectl apply -k deploy/monitoring/central` |
+| `prometheus-central.yaml` | 中央 Prometheus（`--web.enable-remote-write-receiver`，90d 保留）+ 中央告警规则 + NetworkPolicy + PVC |
+| `alertmanager-central.yaml` | 中央 Alertmanager：按 `cluster` 维度 group_by / inhibit 去重 |
+| `grafana-central-dashboards.yaml` | 统一看板：① 跨集群总览 overview ② 单集群下钻 per-cluster（`cluster` 变量） |
+| `grafana-central-datasources.yaml` | Grafana 中央数据源 `Prometheus-Central`（uid 同名，看板按 uid 引用） |
+| `remote-write-sender.example.yaml` | **各集群侧** remote-write 发送片段模板（含 mTLS 配置位），不在 kustomization 内 |
+
+## 2. `cluster` 标签口径（统一口径，勿另起别名）
+
+- **来源**：各集群 Prometheus 的 `global.external_labels.cluster=<cluster-id>`；remote-write
+  发送时该 external label 附加到**每条样本**，中央侧因此天然带 `cluster` 维度。
+  既有锚点：`deploy/monitoring/prometheus.yaml:41-43`（注释「多集群聚合与告警去重（M12）」）。
+- **中央侧不做重写/重命名**，故 `label_values(cluster)`、`by (cluster)`、
+  `cluster=~"$cluster"`、Alertmanager `equal: [cluster]` 全部直接可用。
+- **不使用** `cluster_id` / `k8s_cluster` 等别名。
+- **与 T-4.1/T-4.2 的 `schema=admin|tee|core` 是不同维度**：
+  `cluster` = 指标来源集群（本目录），`schema` = 审计链类型（审计侧，
+  `GET /v1/adminext/audit-chain/query?cluster=<id>&schema=<admin|tee|core>`）。
+  两者可组合并列使用，互不替代。
+- ⚠️ 某集群漏配 `external_labels.cluster` → 其告警落到 `cluster=""` 分组，看板/去重失效。
+  上线前须**逐集群核对**。
+
+## 3. 告警去重设计（避免 N 集群重复轰炸）
+
+| # | 手段 | 位置 | 语义 |
+|---|------|------|------|
+| ① | **fleet 级聚合（主手段）** | 默认路由 `group_by: [alertname, severity, service]`（**不含 cluster**） | 同一 alertname 在 N 个集群同时触发 → 合并为 **1 条**通知，正文用 `{{ range .Alerts }}` 列出受影响集群 |
+| ② | 安全告警按集群分组 | `category=security` 路由 `group_by: [alertname, cluster, service]` | 安全事件需按集群定位处置，**可追溯性优先于去重** |
+| ③ | 抑制 | `inhibit_rules`：critical 抑制同 `cluster` 的 warning；`CentralClusterTargetsDown` 抑制该集群下游 warning | 避免级联轰炸 |
+
+通知接收人：`ops-fleet`（默认）/ `ops-critical` / `sec-oncall` / `ops-multicluster`。
+⚠️ webhook URL 为占位地址（`alert-relay.otpmask.svc.cluster.local:19099`），
+上线前替换为实际值班系统（与既有 `deploy/monitoring/alertmanager.yaml` 约定一致）。
+
+## 4. 部署与接线步骤
+
+```bash
+# ① 中央集群：部署中央资产
+kubectl apply -k deploy/monitoring/central
+
+# ② 中央集群：Grafana 挂载中央数据源（一次性；未挂载时看板报 datasource not found）
+kubectl -n otpmask patch deployment grafana --type=json -p '[
+  {"op":"add","path":"/spec/template/spec/volumes/-",
+   "value":{"name":"grafana-central-datasources",
+            "configMap":{"name":"grafana-central-datasources"}}},
+  {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-",
+   "value":{"name":"grafana-central-datasources",
+            "mountPath":"/etc/grafana/provisioning/datasources/central","readOnly":true}}
+]'
+kubectl -n otpmask rollout restart deployment/grafana
+
+# ③ 中央集群：导入看板（把 grafana-central-dashboards 的两个 JSON 落到 Grafana
+#    provisioning dashboards 目录，或在 UI 中 import）
+
+# ④ 各集群：合并 remote-write 发送片段（remote-write-sender.example.yaml），
+#    必须设置唯一的 external_labels.cluster，然后重启该集群 Prometheus
+```
+
+## 5. T-4.3 依赖（**他人负责，本目录仅预留配置位**）
+
+remote-write 通道的 **mTLS 与鉴权由 T-4.3 落地**，本目录只按 T-4.3 口径预留配置位并注释：
+
+- 中央侧：`--web.enable-remote-write-receiver` 暴露的是**无鉴权**写入端点。
+  Prometheus 原生**不校验客户端证书** → 生产须前置 mTLS 终止代理（T-4.3 落点）。
+- 发送侧：`remote-write.tls_config` / `authorization` / `basic_auth` 段已注释预留。
+- **T-4.3 未落地前仅限内网/专线**：已用 NetworkPolicy 把入站收敛到 `otpmask` 命名空间，
+  禁止跨公网明文写入。
+
+## 6. 自检脚本
+
+```bash
+python3 scripts/check-central-aggregation-assets.py            # 默认检查两个资产目录
+python3 scripts/check-central-aggregation-assets.py -v         # 输出 PASS 明细
+python3 scripts/check-central-aggregation-assets.py --promtool /path/to/promtool
+```
+
+检查项：① YAML 可解析（含 ConfigMap 内嵌 YAML）② 明文凭据扫描（模板/占位符白名单）
+③ 看板 JSON 合法 + `cluster` 变量 + 表达式含 cluster 维度 ④ Alertmanager 含 cluster 维度
+⑤ 中央 Prometheus 开启 remote-write 接收 ⑥ promtool 规则语法（**无 promtool 则明确 SKIP，不假装通过**）。
+
+退出码：`0` = 全部通过（SKIP 会显式列出）/ `1` = 存在 FAIL / `2` = 环境或输入错误。
+
+## 7. 校验结果（本机，2026-10）
+
+| 项 | 方式 | 结果 |
+|----|------|------|
+| YAML 语法 | 逐文件 + 内嵌 YAML `yaml.safe_load_all` | ✅ PASS |
+| kustomize 构建 | `kubectl kustomize deploy/monitoring/central`（kubectl v1.14 内置 kustomize v2） | ✅ 通过，11 个文档 |
+| 看板 JSON | `json.loads` + 变量/维度断言（2 个看板） | ✅ PASS |
+| Alertmanager cluster 维度 | 解析内嵌配置断言 group_by/inhibit equal 含 cluster | ✅ PASS |
+| remote-write 接收开关 | 断言 Deployment args 含 `--web.enable-remote-write-receiver` | ✅ PASS |
+| 明文凭据扫描 | 正则扫描（模板/REPLACE_ 占位符白名单） | ✅ PASS |
+| 默认栈零影响 | `git status deploy/monitoring` 仅新增 `central/`；既有文件未改动 | ✅ PASS |
+| 汇总 | `PASS=42 FAIL=0 SKIP=5` | ✅ 退出码 0 |
+
+**待环境就绪（如实标注，未做即未做）：**
+
+- ❌ **promtool 规则语法校验未执行**：本机无 promtool，脚本输出 SKIP（不视为通过）。
+  中央规则沿用既有 promtool 校验惯例（参照 `billing-prometheusrule-promtool-test.yaml`），
+  环境就绪后重跑脚本即可自动补验。
+- ❌ **未做集群验证**：本机无 Kubernetes/PG，未执行 `kubectl apply` / server-side dry-run；
+  中央 Prometheus 能否真实接收各集群写入、看板能否取到数，均未实测。
+- ❌ **未做 kustomize v4/v5 构建验证**：本机仅 kubectl v1.14（kustomize v2）。
+- ❌ **T-4.3 mTLS/鉴权未落地**：当前为内网明文通道，跨公网启用属违规。
+- ❌ **各集群 `external_labels.cluster` 未逐集群核对**：漏配将导致 `cluster=""` 分组。
+- ❌ **Grafana 数据源挂载未实测**：`kubectl patch` 命令为静态给出，未在集群执行过。
+- ⚠️ **规则精度限制**：`CentralRemoteWriteStalled` 用的
+  `prometheus_remote_storage_highest_timestamp_in_seconds` 是接收侧**全局量，无 cluster 维度**，
+  只能发现「有集群停写」，不能定位到具体集群；精确到单集群的判据依赖集群期望清单
+  （T-2.1 registry），本期不臆造，暂以看板 per-cluster 页人工核对。

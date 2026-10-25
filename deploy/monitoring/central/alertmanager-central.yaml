@@ -1,0 +1,175 @@
+# P2-4 T-4.4：中央 Alertmanager —— **按 cluster 维度去重**（避免 N 集群重复轰炸）
+#
+# 去重设计（两条互补口径，勿混用）：
+#   ① 默认路由（fleet 级聚合）：group_by **不含** cluster → 同一 alertname 在 N 个集群同时
+#      触发时合并为 **1 条**通知（通知正文用 {{ range .Alerts }} 列出受影响集群），
+#      这是「避免 N 集群重复轰炸」的主手段。
+#   ② 安全类告警（category=security）走单独路由，group_by **含** cluster → 每集群一条，
+#      因为安全事件需要按集群定位处置（可追溯性优先于去重）。
+#   ③ inhibit：critical 抑制同 cluster 的 warning（equal 含 cluster）；
+#      集群失联（CentralClusterTargetsDown 等）抑制该集群的下游告警（equal: [cluster]）。
+#
+# 【cluster 标签口径】告警的 cluster 标签来自各集群 remote-write 附加的
+# `external_labels.cluster`（既有锚点 deploy/monitoring/prometheus.yaml:41-43）。
+# 若某集群未配置该 external label，其告警将落到 cluster="" 分组——故上线前须逐个集群核对。
+#
+# 【运维必做】receivers 的 webhook url 为占位地址，上线前替换为实际值班系统
+# （与既有 deploy/monitoring/alertmanager.yaml 的 alert-relay 约定保持一致）。
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-central-config
+  namespace: otpmask
+  labels:
+    app: alertmanager-central
+data:
+  alertmanager.yml: |
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: ops-fleet
+      # ① fleet 级聚合：不含 cluster → 跨集群合并为 1 条（去重主手段）
+      group_by: [alertname, severity, service]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+      # ② 安全类告警：按集群分组（定位优先），并继续走后续路由
+      - matchers:
+        - category = "security"
+        receiver: sec-oncall
+        group_by: [alertname, cluster, service]
+        group_wait: 10s
+        repeat_interval: 1h
+        continue: true
+      # 严重告警：并行投递值班主管（fleet 级聚合，不按集群拆）
+      - matchers:
+        - severity = "critical"
+        receiver: ops-critical
+        group_by: [alertname, service]
+        group_wait: 10s
+        repeat_interval: 1h
+        continue: true
+      # 多集群域告警（category=multicluster）：单独接收人，便于中央侧运维收敛
+      - matchers:
+        - category = "multicluster"
+        receiver: ops-multicluster
+        group_by: [alertname, cluster]
+        group_wait: 30s
+        repeat_interval: 2h
+    receivers:
+    - name: ops-fleet
+      webhook_configs:
+      - url: http://alert-relay.otpmask.svc.cluster.local:19099/alert/fleet
+        send_resolved: true
+    - name: ops-critical
+      webhook_configs:
+      - url: http://alert-relay.otpmask.svc.cluster.local:19099/alert/critical
+        send_resolved: true
+    - name: ops-multicluster
+      webhook_configs:
+      - url: http://alert-relay.otpmask.svc.cluster.local:19099/alert/multicluster
+        send_resolved: true
+    - name: sec-oncall
+      webhook_configs:
+      - url: http://alert-relay.otpmask.svc.cluster.local:19099/alert/security
+        send_resolved: true
+    # 抑制（去重第二手段）
+    inhibit_rules:
+    # critical 存在时抑制同 alertname+service+cluster 的 warning
+    - source_matchers:
+      - severity = "critical"
+      target_matchers:
+      - severity = "warning"
+      equal: [alertname, service, cluster]
+    # 某集群目标不可用时，抑制该集群的下游告警（避免级联轰炸）
+    - source_matchers:
+      - alertname = "CentralClusterTargetsDown"
+      target_matchers:
+      - severity = "warning"
+      equal: [cluster]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager-central
+  namespace: otpmask
+  labels:
+    app: alertmanager-central
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager-central
+  template:
+    metadata:
+      labels:
+        app: alertmanager-central
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: alertmanager
+        image: quay.io/prometheus/alertmanager:v0.27.0
+        args:
+        - --config.file=/etc/alertmanager/alertmanager.yml
+        - --storage.path=/alertmanager
+        - --web.listen-address=:9093
+        ports:
+        - name: web
+          containerPort: 9093
+        volumeMounts:
+        - name: config
+          mountPath: /etc/alertmanager
+        - name: data
+          mountPath: /alertmanager
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9093
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 9093
+          initialDelaySeconds: 10
+          periodSeconds: 20
+      volumes:
+      - name: config
+        configMap:
+          name: alertmanager-central-config
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager-central
+  namespace: otpmask
+  labels:
+    app: alertmanager-central
+spec:
+  selector:
+    app: alertmanager-central
+  ports:
+  - name: web
+    port: 9093
+    targetPort: web

@@ -1,0 +1,34 @@
+# P2-4 T-4.4：中央聚合部署资产（**独立于默认监控栈，默认部署零影响**）
+#
+# 定位：本目录是**中央聚合侧**的部署资产，只在「承担跨集群聚合的中央集群」上部署。
+# 各集群既有栈（`deploy/monitoring/**`，per-集群 Prometheus/Grafana/Alertmanager）不受影响：
+#   * 本目录**不是** deploy/monitoring/kustomization.yaml 的一部分，
+#     `kubectl apply -k deploy/monitoring` 的输出与本次提交前完全一致；
+#   * 各集群侧只需追加 remote-write 发送配置（见 remote-write-sender.example.yaml）。
+#
+# 部署（中央集群）：
+#   kubectl apply -k deploy/monitoring/central
+#   # Grafana 数据源挂载（一次性，见 README「Grafana 接线」）
+#
+# 【cluster 标签口径（与 T-4.1/T-4.2 对齐）】
+#   * 来源：各集群 Prometheus `global.external_labels.cluster=<cluster-id>`
+#     （既有锚点：deploy/monitoring/prometheus.yaml:41-43，注释「多集群聚合与告警去重（M12）」）；
+#     remote-write 发送时该 external label 附加到每条样本 → 中央侧天然带 cluster 维度。
+#   * 本目录所有资产（看板变量、告警规则、Alertmanager 分组/抑制）统一使用 `cluster` 标签，
+#     不使用 `cluster_id` / `k8s_cluster` 等别名。
+#   * 与 T-4.1/T-4.2 审计聚合 API 的 `schema=admin|tee|core` 是**不同维度**：
+#     `cluster` = 数据来源集群（指标侧），`schema` = 审计链类型（审计侧，
+#     GET /v1/adminext/audit-chain/query?cluster=<id>&schema=<admin|tee|core>）。
+#     两者可组合使用，互不冲突。
+#
+# 【依赖声明】remote-write 通道的 mTLS/鉴权由 **T-4.3** 负责（他人），
+# 本目录仅按 T-4.3 口径**预留配置位与注释**（tls_config / authorization 段，默认注释），
+# 未落地前为明文 HTTP 通道，**禁止跨公网/非可信网络启用**。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- prometheus-central.yaml
+- alertmanager-central.yaml
+- grafana-central-datasources.yaml
+- grafana-central-dashboards.yaml
