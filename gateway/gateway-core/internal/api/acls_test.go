@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"security-ai-gateway/gateway/a2aproxy"
-	"security-ai-gateway/gateway/gateway-core/internal/store"
-	"security-ai-gateway/gateway/mcpsec"
 	"security-ai-gateway/gateway/gateway-core/internal/ratelimit"
 	"security-ai-gateway/gateway/gateway-core/internal/route"
+	"security-ai-gateway/gateway/gateway-core/internal/store"
+	"security-ai-gateway/gateway/mcpsec"
 )
 
 // testACLServer 构造带 ACL 签名器的测试 Server。

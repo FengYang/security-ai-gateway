@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/a2aproject/a2a-go/v2/a2acrypto"
 	sdk "github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acrypto"
 
 	"security-ai-gateway/gateway/a2a"
 	"security-ai-gateway/gateway/a2aproxy"
@@ -222,4 +222,3 @@ func cardErrorToRegError(e *a2a.CardError) *regError {
 	}
 	return errValidation(code, "%s", msg)
 }
-

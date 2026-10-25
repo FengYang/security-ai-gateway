@@ -35,21 +35,21 @@ func (e *regError) withDetails(d map[string]any) *regError {
 
 // 常用错误码（冻结 §5.6）。
 const (
-	codeInvalidRequest      = "invalid_request"
-	codeUnauthorized        = "unauthorized"
-	codeForbidden           = "forbidden"
-	codeNotFound            = "not_found"
-	codeNameConflict        = "name_conflict"
-	codeIdempotencyConflict = "idempotency_conflict"
-	codeRevisionConflict    = "revision_conflict"
+	codeInvalidRequest       = "invalid_request"
+	codeUnauthorized         = "unauthorized"
+	codeForbidden            = "forbidden"
+	codeNotFound             = "not_found"
+	codeNameConflict         = "name_conflict"
+	codeIdempotencyConflict  = "idempotency_conflict"
+	codeRevisionConflict     = "revision_conflict"
 	codePreconditionRequired = "precondition_required"
-	codePayloadTooLarge     = "payload_too_large"
-	codeValidationFailed    = "validation_failed"
-	codeSignatureInvalid    = "signature_invalid"
-	codeUntrustedKey        = "untrusted_key"
-	codeJKUNotAllowed       = "jku_not_allowed"
-	codeRegistryUnavailable = "registry_unavailable"
-	codeInternal            = "internal"
+	codePayloadTooLarge      = "payload_too_large"
+	codeValidationFailed     = "validation_failed"
+	codeSignatureInvalid     = "signature_invalid"
+	codeUntrustedKey         = "untrusted_key"
+	codeJKUNotAllowed        = "jku_not_allowed"
+	codeRegistryUnavailable  = "registry_unavailable"
+	codeInternal             = "internal"
 )
 
 // errInvalid 400。

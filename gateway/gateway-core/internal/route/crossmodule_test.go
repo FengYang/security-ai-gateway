@@ -105,8 +105,8 @@ func toPluginRoutes(rs []route.TableRoute) []routecache.TableRoute {
 			out[i].Canary = &routecache.RouteCanary{
 				Enabled: r.Canary.Enabled, TargetEndpoint: r.Canary.TargetEndpoint,
 				TargetWeight: r.Canary.TargetWeight, RampStep: r.Canary.RampStep,
-				RampIntervalMs: r.Canary.RampIntervalMs,
-				RollbackThreshold: r.Canary.RollbackThreshold,
+				RampIntervalMs:     r.Canary.RampIntervalMs,
+				RollbackThreshold:  r.Canary.RollbackThreshold,
 				RollbackMinSamples: r.Canary.RollbackMinSamples,
 				AllowedTenants:     tenants,
 			}

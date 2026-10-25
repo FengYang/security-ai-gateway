@@ -125,7 +125,7 @@ var errStoreUnavailable = errors.New("a2aregistry: 存储不可用")
 
 // Store 封装 SQLite 访问（单写者；写路径统一用 Begin 开事务，写锁保证 BEGIN IMMEDIATE 语义）。
 type Store struct {
-	db     *sql.DB
+	db      *sql.DB
 	writeMu sync.Mutex
 }
 

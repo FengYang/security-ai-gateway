@@ -93,12 +93,12 @@ func TestAPIRegisterAndGetViaHTTP(t *testing.T) {
 // TestAPIRegisterWithStaticToken DevMode + 静态 token → 可注册，且响应含 ETag。
 func TestAPIRegisterWithStaticToken(t *testing.T) {
 	reg, err := New(Config{
-		DSN:         "file:" + t.TempDir() + "/registry.db",
-		PublicMode:  PublicModePath,
-		GatewayBase: "https://gateway.example.com",
-		StaticToken: "dev-token",
+		DSN:           "file:" + t.TempDir() + "/registry.db",
+		PublicMode:    PublicModePath,
+		GatewayBase:   "https://gateway.example.com",
+		StaticToken:   "dev-token",
 		SnapshotToken: "snap-token",
-		DevMode:     true,
+		DevMode:       true,
 	}, nil)
 	if err != nil {
 		t.Fatalf("构造 Registry 失败: %v", err)

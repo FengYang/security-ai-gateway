@@ -93,19 +93,19 @@ func (s *Server) handleACLHistory(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		items = append(items, map[string]any{
-			"event_id":   e.EventID,
-			"timestamp":  e.Timestamp,
-			"actor":      e.Actor,
-			"action":     e.Action,
+			"event_id":     e.EventID,
+			"timestamp":    e.Timestamp,
+			"actor":        e.Actor,
+			"action":       e.Action,
 			"version_from": e.VersionFrom,
 			"version_to":   e.VersionTo,
-			"rule_id":    e.RuleID,
-			"change":     e.Change,
-			"field":      e.Field,
-			"old_value":  e.OldValue,
-			"new_value":  e.NewValue,
-			"request_id": e.RequestID,
-			"result":     e.Result,
+			"rule_id":      e.RuleID,
+			"change":       e.Change,
+			"field":        e.Field,
+			"old_value":    e.OldValue,
+			"new_value":    e.NewValue,
+			"request_id":   e.RequestID,
+			"result":       e.Result,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": items})
@@ -179,11 +179,11 @@ func (s *Server) applyACLTable(w http.ResponseWriter, r *http.Request, tbl *a2ap
 	s.metrics.incChange(result)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":   tbl.Version,
-		"action":    action,
-		"rules":     len(tbl.Rules),
-		"changes":   changes,
-		"rule_ids":  aclRuleIDs(tbl),
+		"version":             tbl.Version,
+		"action":              action,
+		"rules":               len(tbl.Rules),
+		"changes":             changes,
+		"rule_ids":            aclRuleIDs(tbl),
 		"data_plane_compiled": true,
 	})
 }
