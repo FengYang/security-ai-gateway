@@ -19,6 +19,10 @@ coverage.out
 # vendor（Go modules 模式不需要）
 vendor/
 
+# Go 构建缓存目录（P2-4 多集群研发期临时指定 GOCACHE/GOPATH，勿误提交）
+.gocache-p24/
+.gopath-p24/
+
 # ===== WASM =====
 # wasm 编译产物（源码构建，不入库）
 *.wasm
