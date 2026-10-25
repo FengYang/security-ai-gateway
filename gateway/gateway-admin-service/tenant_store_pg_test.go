@@ -24,6 +24,7 @@
 //	TestS3_Index_Registered_PGGate         S3 租户隔离索引在 PG 侧真实落地
 //	TestS3_PG_CrossTenant_Negative        S3 跨租户负向（真机共享库）
 //	TestS3_PG_CrossCluster_SharedDB_NoLeak S3 跨集群负向（两实例连同一 PG 库）
+//	TestDispatchState_PGGate_CompositePK   T-3.2a 复合主键 (tenant_id, cluster_id) 迁移与并存
 //
 // 复验口径：PG 门控用例一律 **skip 即视为未复验**（本机无 PG/无 docker 时全部
 // skip，不伪装通过）；真机复验后请把输出回传给 P2-4 主线。

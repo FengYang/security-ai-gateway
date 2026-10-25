@@ -240,18 +240,26 @@ CREATE INDEX IF NOT EXISTS idx_statements_tenant ON tenant_statements(tenant_id,
 CREATE INDEX IF NOT EXISTS idx_statements_supersedes ON tenant_statements(tenant_id, supersedes_id) WHERE supersedes_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS tenant_dispatch_state (
-  tenant_id       TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+  tenant_id       TEXT   NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  cluster_id      TEXT   NOT NULL DEFAULT '',
   config_version  BIGINT NOT NULL DEFAULT 0,
   status          TEXT   NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','pending','applying','applied','failed')),
   applied_version BIGINT NOT NULL DEFAULT 0,
   last_error      TEXT,
   retry_count     BIGINT NOT NULL DEFAULT 0,
-  updated_at      BIGINT NOT NULL
+  updated_at      BIGINT NOT NULL,
+  PRIMARY KEY (tenant_id, cluster_id)
 );
+-- P2-4 T-3.2a：存量库补列（幂等）。PG 无 sqlite 的整表重建，改主键走
+-- DROP CONSTRAINT + ADD PRIMARY KEY（见 ensureDispatchSchemaPG）。
+ALTER TABLE tenant_dispatch_state ADD COLUMN IF NOT EXISTS cluster_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_dispatch_status ON tenant_dispatch_state(status);
 -- P2-4 T-1.9（S3）：重启重放扫描按 status 过滤并按 updated_at 排序，
 -- 复合索引避免共享库下排序退化为全表排序。
 CREATE INDEX IF NOT EXISTS idx_dispatch_status_updated ON tenant_dispatch_state(status, updated_at);
+-- P2-4 T-3.2a（T-1.9 交接索引清单）：集群维度索引。
+CREATE INDEX IF NOT EXISTS idx_dispatch_cluster_status ON tenant_dispatch_state(cluster_id, status);
+CREATE INDEX IF NOT EXISTS idx_dispatch_tenant_cluster ON tenant_dispatch_state(tenant_id, cluster_id);
 `
 
 // ---------- 实体 ----------
@@ -315,10 +323,17 @@ type MailActionToken struct {
 // 三、集群维度索引登记（T-3.2 落地 cluster_id 时**必须**同步追加，勿遗漏）：
 //
 //	tenant_dispatch_state: (cluster_id, status)、(tenant_id, cluster_id)
+//	  —— **T-3.2a 已建**：idx_dispatch_cluster_status / idx_dispatch_tenant_cluster
+//	     （主键同步迁移为 (tenant_id, cluster_id)）。
 //	tenant_statements:    (tenant_id, cluster_id, created_at DESC)（若声明按集群分册）
+//	  —— **T-3.2a 未建**：该索引以「承诺边界声明按集群分册」为前提，而 §6.2 的作用域
+//	     模型只覆盖处方/路由/限流表/插件配置/工具目录，承诺边界声明仍是**租户级签名
+//	     产物**（supersedes 链跨集群唯一），故不引入 cluster_id 列、不建该索引。
+//	     若后续裁定声明改为按集群分册，须连带迁移 tenant_statements 并补该索引。
 //
-// 说明：当前租户表**尚无 cluster_id 列**——S3 口径为"+cluster_id 可选"，列本身与
-// "每租户×每集群单飞"语义由 T-3.2 引入；本清单先行登记，避免 T-3.2 漏建索引。
+// 说明：租户表默认**尚无 cluster_id 列**——S3 口径为"+cluster_id 可选"，列本身与
+// "每租户×每集群单飞"语义由 T-3.2 引入（T-3.2a 存储侧 / T-3.2b 下发侧）；
+// 本清单先行登记，避免 T-3.2 漏建索引。
 // 集群维度落地前，跨集群隔离由 tenant 作用域承担：共享库内不同租户的数据不得互相直读
 // （负向用例见 tenant_isolation_s3_test.go）。
 
@@ -385,6 +400,13 @@ type TenantStore interface {
 	MarkDispatchApplying(tx TenantTx, tenantID string, now int64) error
 	MarkDispatchApplied(tx TenantTx, tenantID string, appliedVersion, now int64) error
 	MarkDispatchFailed(tx TenantTx, tenantID string, lastError string, retryCount, now int64) error
+	// 集群维度变体（P2-4 T-3.2a：每租户×每集群一行）。clusterID = '' 即全局行，
+	// 与上方无 cluster 参数的方法等价（存量语义不变）。
+	GetDispatchStateForCluster(tenantID, clusterID string) (*TenantDispatchState, error)
+	BumpDispatchVersionForCluster(tx TenantTx, tenantID, clusterID string, now int64) (int64, error)
+	MarkDispatchApplyingForCluster(tx TenantTx, tenantID, clusterID string, now int64) error
+	MarkDispatchAppliedForCluster(tx TenantTx, tenantID, clusterID string, appliedVersion, now int64) error
+	MarkDispatchFailedForCluster(tx TenantTx, tenantID, clusterID, lastError string, retryCount, now int64) error
 	ListDispatchStatesByStatus(statuses ...string) ([]*TenantDispatchState, error)
 
 	// 套餐升级/降级待确认单（M7）
@@ -543,8 +565,71 @@ func openPostgresTenantStore(dsn string, pepper []byte) (TenantStore, error) {
 		db.Close()
 		return nil, fmt.Errorf("tenant: init pg schema: %w", err)
 	}
+	// P2-4 T-3.2a：tenant_dispatch_state 主键迁移为 (tenant_id, cluster_id)
+	// （PG 走 DROP CONSTRAINT + ADD PRIMARY KEY；幂等可重入）。
+	if err := ensureDispatchSchemaPG(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	// 安全计数器（captcha / 登录锁定）PG 化在 T-1.3/T-1.4 落地，此处不建表。
 	return &sqliteTenantStore{db: db, pepper: append([]byte(nil), pepper...)}, nil
+}
+
+// ensureDispatchSchemaPG PG 侧下发状态机主键迁移（P2-4 T-3.2a）。
+//
+// PG 支持 ALTER TABLE ... ADD/DROP CONSTRAINT ⇒ 不必整表重建：
+// ① 补列（幂等；DDL 内已做一次，此处兜底）；
+// ② 查当前主键约束名与列序；
+// ③ 已是 (tenant_id, cluster_id) 则跳过；否则 DROP CONSTRAINT + ADD PRIMARY KEY。
+// 幂等可重入：重复启动不重复改主键、不重复建索引。
+func ensureDispatchSchemaPG(db *sqlutil.DB) error {
+	if _, err := db.Exec(`ALTER TABLE tenant_dispatch_state
+		ADD COLUMN IF NOT EXISTS cluster_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("tenant: pg dispatch add cluster_id: %w", err)
+	}
+	conName, pkCols, err := pgPrimaryKeyInfo(db, "tenant_dispatch_state")
+	if err != nil {
+		return err
+	}
+	if len(pkCols) == 2 && pkCols[0] == "tenant_id" && pkCols[1] == "cluster_id" {
+		return nil // 已是目标主键
+	}
+	if conName != "" {
+		if _, err := db.Exec(`ALTER TABLE tenant_dispatch_state DROP CONSTRAINT ` + conName); err != nil {
+			return fmt.Errorf("tenant: pg dispatch drop pk: %w", err)
+		}
+	}
+	if _, err := db.Exec(`ALTER TABLE tenant_dispatch_state ADD PRIMARY KEY (tenant_id, cluster_id)`); err != nil {
+		return fmt.Errorf("tenant: pg dispatch add pk: %w", err)
+	}
+	return nil
+}
+
+// pgPrimaryKeyInfo 读取 PG 表的主键约束名与列序（无主键 → 空名 + 空列）。
+func pgPrimaryKeyInfo(db *sqlutil.DB, table string) (string, []string, error) {
+	rows, err := db.Query(`SELECT c.conname, a.attname
+		FROM pg_constraint c
+		CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+		JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+		WHERE c.conrelid = to_regclass(?) AND c.contype = 'p'
+		ORDER BY k.ord`, table)
+	if err != nil {
+		return "", nil, fmt.Errorf("tenant: pg primary key info %s: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var name string
+	var cols []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&name, &col); err != nil {
+			return "", nil, fmt.Errorf("tenant: scan pg primary key %s: %w", table, err)
+		}
+		cols = append(cols, col)
+	}
+	if err := rows.Err(); err != nil {
+		return "", nil, err
+	}
+	return name, cols, nil
 }
 
 // DB 返回底层方言包装（captcha/登录锁定等安全组件共用同一连接池与写锁语义）。
@@ -1608,30 +1693,10 @@ const (
 	dispatchStatusFailed   = "failed"
 )
 
-// dispatchDDL 下发状态机表结构（对齐 §3.5 表 ⑩；每租户一行，config_version 单调递增）。
-//
-// 说明：§3.5 表 ⑩ 写作 `REFERENCES tenants(tenant_id)`，但租户表主键实为 `id`
-// （见 §3.5 tenants 表），故此处按真实列名写 `REFERENCES tenants(id)`（与表 ⑧ FK 同法），
-// 否则 SQLite 开启 foreign_keys 后写入报 "foreign key mismatch"。
-const dispatchDDL = `
-CREATE TABLE IF NOT EXISTS tenant_dispatch_state (
-  tenant_id       TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
-  config_version  INTEGER NOT NULL DEFAULT 0,
-  status          TEXT    NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','pending','applying','applied','failed')),
-  applied_version INTEGER NOT NULL DEFAULT 0,
-  last_error      TEXT,
-  retry_count     INTEGER NOT NULL DEFAULT 0,
-  updated_at      INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_dispatch_status ON tenant_dispatch_state(status);
--- P2-4 T-1.9（S3）：重启重放扫描按 status 过滤并按 updated_at 排序，
--- 复合索引避免共享库下排序退化为全表排序。
-CREATE INDEX IF NOT EXISTS idx_dispatch_status_updated ON tenant_dispatch_state(status, updated_at);
-`
-
-// TenantDispatchState 下发状态机行（每租户一行）。
+// TenantDispatchState 下发状态机行（每租户×每集群一行）。
 type TenantDispatchState struct {
 	TenantID       string
+	ClusterID      string // '' = 全局（未定向）行；其余 = 具体集群 ID
 	ConfigVersion  int64
 	Status         string
 	AppliedVersion int64
@@ -1640,29 +1705,179 @@ type TenantDispatchState struct {
 	UpdatedAt      int64
 }
 
-// ensureDispatchSchema 建表（N5 新表）。
+// dispatchTableDDL 下发状态机**表**结构（建表；存量库已存在则不动）。
+//
+// 对齐 §3.5 表 ⑩；**每租户×每集群**一行，config_version 单调递增；
+// P2-4 T-3.2a 起主键为 (tenant_id, cluster_id)。
+//
+// 说明：§3.5 表 ⑩ 写作 `REFERENCES tenants(tenant_id)`，但租户表主键实为 `id`
+// （见 §3.5 tenants 表），故此处按真实列名写 `REFERENCES tenants(id)`（与表 ⑧ FK 同法），
+// 否则 SQLite 开启 foreign_keys 后写入报 "foreign key mismatch"。
+//
+// cluster_id 语义：'' = 全局（未定向）行——存量行迁移后落在该行，行为与迁移前一致；
+// 其余取值 = 具体集群 ID（T-3.2b 的"每租户×每集群单飞"目标行）。
+const dispatchTableDDL = `
+CREATE TABLE IF NOT EXISTS tenant_dispatch_state (
+  tenant_id       TEXT    NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  cluster_id      TEXT    NOT NULL DEFAULT '',
+  config_version  INTEGER NOT NULL DEFAULT 0,
+  status          TEXT    NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','pending','applying','applied','failed')),
+  applied_version INTEGER NOT NULL DEFAULT 0,
+  last_error      TEXT,
+  retry_count     INTEGER NOT NULL DEFAULT 0,
+  updated_at      INTEGER NOT NULL,
+  PRIMARY KEY (tenant_id, cluster_id)
+);
+`
+
+// dispatchIndexDDL 下发状态机**索引**（须在表结构就位后建——旧表无 cluster_id 列时
+// 建集群维度索引会直接报错，故与建表分离，见 ensureDispatchSchema 的执行顺序）。
+const dispatchIndexDDL = `
+CREATE INDEX IF NOT EXISTS idx_dispatch_status ON tenant_dispatch_state(status);
+-- P2-4 T-1.9（S3）：重启重放扫描按 status 过滤并按 updated_at 排序，
+-- 复合索引避免共享库下排序退化为全表排序。
+CREATE INDEX IF NOT EXISTS idx_dispatch_status_updated ON tenant_dispatch_state(status, updated_at);
+-- P2-4 T-3.2a（T-1.9 交接索引清单）：集群维度索引。
+CREATE INDEX IF NOT EXISTS idx_dispatch_cluster_status ON tenant_dispatch_state(cluster_id, status);
+CREATE INDEX IF NOT EXISTS idx_dispatch_tenant_cluster ON tenant_dispatch_state(tenant_id, cluster_id);
+`
+
+// ensureDispatchSchema 建表（N5 新表）+ T-3.2a 存量主键迁移 + 索引。
+//
+// 执行顺序不可调换：① 建表（新库直得目标结构）→ ② 存量主键迁移（旧库整表重建，
+// 重建后才有 cluster_id 列）→ ③ 建索引（旧库缺列时建集群维度索引会报错）。
 func ensureDispatchSchema(db *sql.DB) error {
-	if _, err := db.Exec(dispatchDDL); err != nil {
+	if _, err := db.Exec(dispatchTableDDL); err != nil {
 		return fmt.Errorf("tenant: init dispatch schema: %w", err)
+	}
+	if err := migrateDispatchStatePKSQLite(db); err != nil {
+		return err
+	}
+	if _, err := db.Exec(dispatchIndexDDL); err != nil {
+		return fmt.Errorf("tenant: init dispatch indexes: %w", err)
 	}
 	return nil
 }
 
-const dispatchColumns = `tenant_id, config_version, status, applied_version, COALESCE(last_error,''), retry_count, updated_at`
+// migrateDispatchStatePKSQLite 把 tenant_dispatch_state 的主键迁移为 (tenant_id, cluster_id)。
+//
+// sqlite 不支持 ALTER TABLE ... DROP/ADD PRIMARY KEY ⇒ **整表重建**：
+// 建新表 → 拷贝存量行（cluster_id 置 ''，即"全局行"）→ 删旧表 → 改名。
+// 幂等可重入：已是目标结构（列齐 + 复合主键）时直接返回，重复启动不重复重建。
+func migrateDispatchStatePKSQLite(db *sql.DB) error {
+	hasClusterID, need, err := dispatchStateSchemaState(db)
+	if err != nil {
+		return err
+	}
+	if !need {
+		return nil
+	}
+	clusterExpr := "''"
+	if hasClusterID {
+		// 已是新列但主键不对（中间态）：按原值拷贝，不丢集群维度。
+		clusterExpr = "cluster_id"
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("tenant: dispatch pk migration: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	steps := []string{
+		`CREATE TABLE tenant_dispatch_state_new (
+  tenant_id       TEXT    NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  cluster_id      TEXT    NOT NULL DEFAULT '',
+  config_version  INTEGER NOT NULL DEFAULT 0,
+  status          TEXT    NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','pending','applying','applied','failed')),
+  applied_version INTEGER NOT NULL DEFAULT 0,
+  last_error      TEXT,
+  retry_count     INTEGER NOT NULL DEFAULT 0,
+  updated_at      INTEGER NOT NULL,
+  PRIMARY KEY (tenant_id, cluster_id)
+)`,
+		`INSERT INTO tenant_dispatch_state_new
+   (tenant_id, cluster_id, config_version, status, applied_version, last_error, retry_count, updated_at)
+ SELECT tenant_id, ` + clusterExpr + `, config_version, status, applied_version, last_error, retry_count, updated_at
+   FROM tenant_dispatch_state`,
+		`DROP TABLE tenant_dispatch_state`,
+		`ALTER TABLE tenant_dispatch_state_new RENAME TO tenant_dispatch_state`,
+	}
+	for _, s := range steps {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("tenant: dispatch pk migration: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("tenant: dispatch pk migration: commit: %w", err)
+	}
+	return nil
+}
+
+// dispatchStateSchemaState 读取 tenant_dispatch_state 的结构状态。
+//
+// 返回 (是否有 cluster_id 列, 是否需要重建为复合主键, error)。
+// 目标结构：含 cluster_id 列，且主键为 (tenant_id, cluster_id)——sqlite 的
+// PRAGMA table_info 用 pk 字段表示主键序号（1 = 第 1 列，2 = 第 2 列，0 = 非主键）。
+func dispatchStateSchemaState(db *sql.DB) (bool, bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(tenant_dispatch_state)`)
+	if err != nil {
+		return false, false, fmt.Errorf("tenant: inspect dispatch state: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	hasClusterID := false
+	pkTenant, pkCluster := 0, 0
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, false, fmt.Errorf("tenant: scan dispatch state info: %w", err)
+		}
+		switch name {
+		case "cluster_id":
+			hasClusterID = true
+			pkCluster = pk
+		case "tenant_id":
+			pkTenant = pk
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, false, err
+	}
+	if !hasClusterID {
+		// 旧结构（无 cluster_id 列）⇒ 须整表重建。
+		return false, true, nil
+	}
+	return true, !(pkTenant == 1 && pkCluster == 2), nil
+}
+
+// dispatchClusterGlobal 全局（未定向）行的 cluster_id 取值。
+//
+// 存量行在 T-3.2a 主键迁移后落在该行（cluster_id=''），既有"每租户单行"语义
+// 与行为完全不变；T-3.2b 的定向集群行使用真实集群 ID。
+const dispatchClusterGlobal = ""
+
+// dispatchColumns 下发状态机行的列投影（含 cluster_id）。
+const dispatchColumns = `tenant_id, cluster_id, config_version, status, applied_version, COALESCE(last_error,''), retry_count, updated_at`
 
 // scanDispatchState 行扫描（*sql.Row / *sql.Rows 共用）。
 func scanDispatchState(sc rowScanner) (*TenantDispatchState, error) {
 	var d TenantDispatchState
-	if err := sc.Scan(&d.TenantID, &d.ConfigVersion, &d.Status, &d.AppliedVersion,
+	if err := sc.Scan(&d.TenantID, &d.ClusterID, &d.ConfigVersion, &d.Status, &d.AppliedVersion,
 		&d.LastError, &d.RetryCount, &d.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &d, nil
 }
 
+// GetDispatchState 取**全局行**（cluster_id=''）——既有语义不变（T-3.2a 前只有这一行）。
 func (s *sqliteTenantStore) GetDispatchState(tenantID string) (*TenantDispatchState, error) {
+	return s.GetDispatchStateForCluster(tenantID, dispatchClusterGlobal)
+}
+
+// GetDispatchStateForCluster 取指定租户×集群的下发状态行（不存在 → nil, nil）。
+func (s *sqliteTenantStore) GetDispatchStateForCluster(tenantID, clusterID string) (*TenantDispatchState, error) {
 	d, err := scanDispatchState(s.db.QueryRow(`SELECT `+dispatchColumns+
-		` FROM tenant_dispatch_state WHERE tenant_id = ?`, tenantID))
+		` FROM tenant_dispatch_state WHERE tenant_id = ? AND cluster_id = ?`, tenantID, clusterID))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1672,54 +1887,73 @@ func (s *sqliteTenantStore) GetDispatchState(tenantID string) (*TenantDispatchSt
 	return d, nil
 }
 
-// BumpDispatchVersion 同事务把 config_version+1、status='pending'（不存在则建行，config_version=1）。
-// 返回自增后的 config_version。用于「配置已存、待下发」的原子性保证（§4.3.5）。
+// BumpDispatchVersion 同事务把**全局行**的 config_version+1、status='pending'
+// （不存在则建行，config_version=1）。返回自增后的 config_version。
+// 用于「配置已存、待下发」的原子性保证（§4.3.5）。
+func (s *sqliteTenantStore) BumpDispatchVersion(tx TenantTx, tenantID string, now int64) (int64, error) {
+	return s.BumpDispatchVersionForCluster(tx, tenantID, dispatchClusterGlobal, now)
+}
+
+// BumpDispatchVersionForCluster 同事务把指定租户×集群行的 config_version+1、
+// status='pending'（不存在则建行，config_version=1）。
 //
 // ⚠️ 方言差异（P2-4 真机 PG 复验发现，SQLSTATE 42702）：在 ON CONFLICT DO UPDATE 中，
 // 未限定的列名在**目标表与 excluded 伪表之间歧义**——PG 报
 // `column reference "config_version" is ambiguous`，SQLite 则容忍。
 // 故 PG 下用表名限定（tenant_dispatch_state.config_version），SQLite 保持原写法。
-func (s *sqliteTenantStore) BumpDispatchVersion(tx TenantTx, tenantID string, now int64) (int64, error) {
+func (s *sqliteTenantStore) BumpDispatchVersionForCluster(tx TenantTx, tenantID, clusterID string, now int64) (int64, error) {
 	bumpExpr := "config_version = config_version + 1"
 	if s.db.Dialect().IsPostgres() {
 		bumpExpr = "config_version = tenant_dispatch_state.config_version + 1"
 	}
 	_, err := tx.tx().Exec(fmt.Sprintf(`INSERT INTO tenant_dispatch_state
-		(tenant_id, config_version, status, applied_version, last_error, retry_count, updated_at)
-		VALUES (?, 1, 'pending', 0, NULL, 0, ?)
-		ON CONFLICT(tenant_id) DO UPDATE SET
+		(tenant_id, cluster_id, config_version, status, applied_version, last_error, retry_count, updated_at)
+		VALUES (?, ?, 1, 'pending', 0, NULL, 0, ?)
+		ON CONFLICT(tenant_id, cluster_id) DO UPDATE SET
 			%s,
 			status = 'pending',
 			last_error = NULL,
 			retry_count = 0,
 			updated_at = excluded.updated_at`, bumpExpr),
-		tenantID, now)
+		tenantID, clusterID, now)
 	if err != nil {
 		return 0, fmt.Errorf("tenant: bump dispatch version: %w", err)
 	}
 	var v int64
-	if err := tx.tx().QueryRow(`SELECT config_version FROM tenant_dispatch_state WHERE tenant_id = ?`, tenantID).
-		Scan(&v); err != nil {
+	if err := tx.tx().QueryRow(`SELECT config_version FROM tenant_dispatch_state
+		WHERE tenant_id = ? AND cluster_id = ?`, tenantID, clusterID).Scan(&v); err != nil {
 		return 0, fmt.Errorf("tenant: read bumped dispatch version: %w", err)
 	}
 	return v, nil
 }
 
-// MarkDispatchApplying 置 status='applying'（不改版本）。
+// MarkDispatchApplying 置**全局行** status='applying'（不改版本）。
 func (s *sqliteTenantStore) MarkDispatchApplying(tx TenantTx, tenantID string, now int64) error {
+	return s.MarkDispatchApplyingForCluster(tx, tenantID, dispatchClusterGlobal, now)
+}
+
+// MarkDispatchApplyingForCluster 置指定租户×集群行 status='applying'（不改版本）。
+func (s *sqliteTenantStore) MarkDispatchApplyingForCluster(tx TenantTx, tenantID, clusterID string, now int64) error {
 	res, err := tx.tx().Exec(`UPDATE tenant_dispatch_state SET status = 'applying', updated_at = ?
-		WHERE tenant_id = ?`, now, tenantID)
+		WHERE tenant_id = ? AND cluster_id = ?`, now, tenantID, clusterID)
 	if err != nil {
 		return fmt.Errorf("tenant: mark dispatch applying: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("tenant: dispatch state %s not found", tenantID)
+		return fmt.Errorf("tenant: dispatch state %s/%s not found", tenantID, clusterID)
 	}
 	return nil
 }
 
-// MarkDispatchApplied 置 status='applied'，applied_version 单调前进（MAX 语义，防乱序回退）。
+// MarkDispatchApplied 置**全局行** status='applied'，applied_version 单调前进
+// （MAX 语义，防乱序回退）。
 func (s *sqliteTenantStore) MarkDispatchApplied(tx TenantTx, tenantID string, appliedVersion, now int64) error {
+	return s.MarkDispatchAppliedForCluster(tx, tenantID, dispatchClusterGlobal, appliedVersion, now)
+}
+
+// MarkDispatchAppliedForCluster 置指定租户×集群行 status='applied'，
+// applied_version 单调前进（MAX 语义，防乱序回退）。
+func (s *sqliteTenantStore) MarkDispatchAppliedForCluster(tx TenantTx, tenantID, clusterID string, appliedVersion, now int64) error {
 	// 标量取大：sqlite 用 MAX(a,b)，PG 的 MAX 是聚合函数，须用 GREATEST(a,b)。
 	maxExpr := "MAX(applied_version, ?)"
 	if s.db.Dialect().IsPostgres() {
@@ -1731,26 +1965,32 @@ func (s *sqliteTenantStore) MarkDispatchApplied(tx TenantTx, tenantID string, ap
 		    last_error = NULL,
 		    retry_count = 0,
 		    updated_at = ?
-		WHERE tenant_id = ?`, appliedVersion, now, tenantID)
+		WHERE tenant_id = ? AND cluster_id = ?`, appliedVersion, now, tenantID, clusterID)
 	if err != nil {
 		return fmt.Errorf("tenant: mark dispatch applied: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("tenant: dispatch state %s not found", tenantID)
+		return fmt.Errorf("tenant: dispatch state %s/%s not found", tenantID, clusterID)
 	}
 	return nil
 }
 
-// MarkDispatchFailed 置 status='failed' + 脱敏 last_error + 重试计数。
+// MarkDispatchFailed 置**全局行** status='failed' + 脱敏 last_error + 重试计数。
 func (s *sqliteTenantStore) MarkDispatchFailed(tx TenantTx, tenantID, lastError string, retryCount, now int64) error {
+	return s.MarkDispatchFailedForCluster(tx, tenantID, dispatchClusterGlobal, lastError, retryCount, now)
+}
+
+// MarkDispatchFailedForCluster 置指定租户×集群行 status='failed' + 脱敏 last_error
+// + 重试计数。
+func (s *sqliteTenantStore) MarkDispatchFailedForCluster(tx TenantTx, tenantID, clusterID, lastError string, retryCount, now int64) error {
 	res, err := tx.tx().Exec(`UPDATE tenant_dispatch_state
 		SET status = 'failed', last_error = ?, retry_count = ?, updated_at = ?
-		WHERE tenant_id = ?`, lastError, retryCount, now, tenantID)
+		WHERE tenant_id = ? AND cluster_id = ?`, lastError, retryCount, now, tenantID, clusterID)
 	if err != nil {
 		return fmt.Errorf("tenant: mark dispatch failed: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("tenant: dispatch state %s not found", tenantID)
+		return fmt.Errorf("tenant: dispatch state %s/%s not found", tenantID, clusterID)
 	}
 	return nil
 }

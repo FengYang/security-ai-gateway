@@ -61,11 +61,22 @@ const migrateMFAReason = "不迁移：MFA 为等保强制 step-up 控制，状�
 
 // migrateTableSpec 迁移表规格：表名 + 主键列（upsert 依据）+ 自增列（序列回填）。
 type migrateTableSpec struct {
-	name   string
-	pk     string
+	name string
+	pk   string // 主键列（单列主键表）
+	// pkCols 复合主键列（非空时优先于 pk）。P2-4 T-3.2a 起
+	// tenant_dispatch_state 的主键为 (tenant_id, cluster_id)。
+	pkCols []string
 	serial string // 自增列名；空 = 无自增
 	skip   string // 非空 = 不迁移（口径原因），仅 plan/verify 列出
 	source string // 源库分组："" = 默认源（-from）；"cluster" = 集群注册表源（-from-cluster）
+}
+
+// pkColumns 返回该表的主键列序列（复合主键优先）。
+func (s migrateTableSpec) pkColumns() []string {
+	if len(s.pkCols) > 0 {
+		return s.pkCols
+	}
+	return []string{s.pk}
 }
 
 // migrateSourceCluster 集群注册表源分组标识（T-2.1/T-2.3 的表在 sqlite 部署下
@@ -86,7 +97,9 @@ var migrateTables = []migrateTableSpec{
 	{name: "subscription_requests", pk: "request_id"},
 	{name: "tenant_provisionings", pk: "tenant_id"},
 	{name: "tenant_statements", pk: "statement_id"},
-	{name: "tenant_dispatch_state", pk: "tenant_id"},
+	// P2-4 T-3.2a：主键迁移为复合键 (tenant_id, cluster_id)——
+	// upsert / purge 均按复合键定位，"每租户×每集群"各占一行。
+	{name: "tenant_dispatch_state", pk: "tenant_id", pkCols: []string{"tenant_id", "cluster_id"}},
 	// ---- 安全计数器表（T-1.3/T-1.4/T-1.5）----
 	{name: "captcha_rate_limits", pk: "ip"},
 	{name: "captcha_challenges", pk: "id"},
@@ -454,7 +467,7 @@ func migrateChecksum(rows [][]any) string {
 
 // migrateReadTable 读取整表（按主键排序，保证两端顺序一致）。
 func migrateReadTable(db *sqlutil.DB, spec migrateTableSpec) (migrateTableDump, error) {
-	out := migrateTableDump{Name: spec.name, PK: spec.pk}
+	out := migrateTableDump{Name: spec.name, PK: strings.Join(spec.pkColumns(), ",")}
 	if spec.skip != "" {
 		out.Skipped = spec.skip
 		return out, nil
@@ -464,7 +477,8 @@ func migrateReadTable(db *sqlutil.DB, spec migrateTableSpec) (migrateTableDump, 
 		return out, err
 	}
 	out.Columns = cols
-	q := fmt.Sprintf(`SELECT %s FROM %s ORDER BY %s`, strings.Join(cols, ", "), spec.name, spec.pk)
+	q := fmt.Sprintf(`SELECT %s FROM %s ORDER BY %s`, strings.Join(cols, ", "), spec.name,
+		strings.Join(spec.pkColumns(), ", "))
 	rows, err := db.Query(q)
 	if err != nil {
 		return out, fmt.Errorf("读表 %s 失败: %w", spec.name, err)
@@ -581,7 +595,7 @@ func migrateRunExport(opt *migrateOptions, specs []migrateTableSpec) int {
 				return 1
 			}
 			fmt.Printf("导出 %-24s 集群注册表源不可用，跳过\n", spec.name)
-			dump.Tables[spec.name] = migrateTableDump{Name: spec.name, PK: spec.pk, Skipped: "集群注册表源不可用"}
+			dump.Tables[spec.name] = migrateTableDump{Name: spec.name, PK: strings.Join(spec.pkColumns(), ","), Skipped: "集群注册表源不可用"}
 			continue
 		}
 		exists, err := migrateTableExists(src, spec.name)
@@ -594,7 +608,7 @@ func migrateRunExport(opt *migrateOptions, specs []migrateTableSpec) int {
 			// 部署里不存在）→ 跳过；显式 -tables 指定则 fail-closed 报错。
 			if !explicit {
 				fmt.Printf("导出 %-24s 源库无此表，跳过\n", spec.name)
-				dump.Tables[spec.name] = migrateTableDump{Name: spec.name, PK: spec.pk, Skipped: "源库无此表"}
+				dump.Tables[spec.name] = migrateTableDump{Name: spec.name, PK: strings.Join(spec.pkColumns(), ","), Skipped: "源库无此表"}
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "migrate: 导出失败: 源库缺表 %s（-tables 显式指定，fail-closed）\n", spec.name)
@@ -694,21 +708,27 @@ func migrateImportTable(dst *sqlutil.DB, spec migrateTableSpec, td migrateTableD
 		}
 		idx = append(idx, pos)
 	}
+	// 主键列不进入 SET（复合主键的每一列都不进）；仅主键列的表用 DO NOTHING（幂等）。
+	pkCols := spec.pkColumns()
+	pkSet := make(map[string]bool, len(pkCols))
+	for _, c := range pkCols {
+		pkSet[c] = true
+	}
 	var sets []string
 	for _, c := range cols {
-		if c == spec.pk {
+		if pkSet[c] {
 			continue
 		}
 		sets = append(sets, fmt.Sprintf("%s = excluded.%s", c, c))
 	}
-	if len(sets) == 0 {
-		// 仅主键列：冲突即忽略（幂等）。
-		sets = append(sets, fmt.Sprintf("%s = %s.%s", spec.pk, spec.name, spec.pk))
+	conflict := "DO NOTHING"
+	if len(sets) > 0 {
+		conflict = "DO UPDATE SET " + strings.Join(sets, ", ")
 	}
-	q := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s`,
+	q := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) %s`,
 		spec.name, strings.Join(cols, ", "),
 		strings.TrimRight(strings.Repeat("?, ", len(cols)), ", "),
-		spec.pk, strings.Join(sets, ", "))
+		strings.Join(pkCols, ", "), conflict)
 
 	tx, err := dst.Begin()
 	if err != nil {
@@ -888,15 +908,21 @@ func migratePurgeTable(dst *sqlutil.DB, spec migrateTableSpec, td migrateTableDu
 	if len(td.Rows) == 0 {
 		return 0, nil
 	}
-	pkIdx := -1
-	for i, c := range td.Columns {
-		if c == spec.pk {
-			pkIdx = i
-			break
+	pkCols := spec.pkColumns()
+	// dump 中的主键列下标（复合主键逐列定位）。
+	pkIdx := make([]int, 0, len(pkCols))
+	for _, c := range pkCols {
+		pos := -1
+		for i, dc := range td.Columns {
+			if dc == c {
+				pos = i
+				break
+			}
 		}
-	}
-	if pkIdx < 0 {
-		return 0, fmt.Errorf("dump 中找不到主键列 %s", spec.pk)
+		if pos < 0 {
+			return 0, fmt.Errorf("dump 中找不到主键列 %s", c)
+		}
+		pkIdx = append(pkIdx, pos)
 	}
 	const batch = 500
 	total := int64(0)
@@ -905,16 +931,28 @@ func migratePurgeTable(dst *sqlutil.DB, spec migrateTableSpec, td migrateTableDu
 		if end > len(td.Rows) {
 			end = len(td.Rows)
 		}
-		args := make([]any, 0, end-start)
+		args := make([]any, 0, (end-start)*len(pkIdx))
 		holders := make([]string, 0, end-start)
 		for _, row := range td.Rows[start:end] {
-			if pkIdx >= len(row) {
-				return total, fmt.Errorf("dump 行长度异常（主键列越界）")
+			rowHolders := make([]string, 0, len(pkIdx))
+			for _, pos := range pkIdx {
+				if pos >= len(row) {
+					return total, fmt.Errorf("dump 行长度异常（主键列越界）")
+				}
+				args = append(args, row[pos])
+				rowHolders = append(rowHolders, "?")
 			}
-			args = append(args, row[pkIdx])
-			holders = append(holders, "?")
+			holders = append(holders, "("+strings.Join(rowHolders, ", ")+")")
 		}
-		q := fmt.Sprintf(`DELETE FROM %s WHERE %s IN (%s)`, spec.name, spec.pk, strings.Join(holders, ", "))
+		var q string
+		if len(pkCols) == 1 {
+			// 单列主键：IN 列表（与既有实现一致，避开行值语法的方言差异）。
+			q = fmt.Sprintf(`DELETE FROM %s WHERE %s IN (%s)`, spec.name, pkCols[0], strings.Join(holders, ", "))
+		} else {
+			// 复合主键：行值 IN（sqlite ≥3.15 / PG 均支持）。
+			q = fmt.Sprintf(`DELETE FROM %s WHERE (%s) IN (%s)`, spec.name,
+				strings.Join(pkCols, ", "), strings.Join(holders, ", "))
+		}
 		res, err := dst.Exec(q, args...)
 		if err != nil {
 			return total, fmt.Errorf("按主键清除失败: %w", err)
