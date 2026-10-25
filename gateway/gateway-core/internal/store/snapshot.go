@@ -37,6 +37,37 @@
 //
 // 快照内容覆盖（当前登记）：路由处方、默认路由表、限流/预算表、A2A ACL 表、
 // A2A 复合限流表、MCP 工具目录、RBAC 授权策略、MCP 后端注册域。
+//
+// —— 防回退**总口径**（P2-4 T-1.7，**不依赖部署配置**）——
+//
+//	**"revision 单调 + 内容不回退"由两道机制共同保证：**
+//
+//	  1. **内容级版本判据（主防线）**：按表逐个比较自报版本，磁盘更新 ⇒ 拒绝写盘
+//	     （磁盘内容逐字节不变）；本地缺表 / 同版本内容漂移 ⇒ 保守拒绝 + 告警。
+//	     详见 snapshotcontent.go。
+//	  2. **写者串行化（lockfile 互斥）**：临界区覆盖"读盘 → 比较 → 写盘"整段，
+//	     消除 TOCTOU（比较与写之间的时间窗口）；第二写者阻塞等待或明确失败，
+//	     **绝不覆盖**他人快照。详见 snapshotlock.go。
+//
+//	⇒ 即便出现"两进程共享同一快照路径"的异常部署形态，也不会发生内容回退。
+//
+// —— 部署侧约束（**gateway-core 侧口径记录；deploy/ 属他人域，未在本仓修改**）——
+//
+//   - gateway-core 的**多副本 overlay 必须带 `maxSurge=0`**（与
+//     deploy/k8s-overlays/multicluster/ 现有口径一致），杜绝滚动更新期间新旧
+//     Pod 并存、共享同一快照路径；
+//
+//   - 基线部署 replicas=1 + RWO PVC（旧实例退净后再起新实例）。
+//
+//     以上是**部署侧加固**，不是唯一保障：代码层的写者锁与内容判据独立成立，
+//     不依赖部署形态（部署约束只是"少一次冲突"，不是"防回退的手段"）。
+//
+// —— 可观测性口径 ——
+//
+//   - `RollbackRejects()`：**revision 判据**拒绝次数；>0 ⇒ 出现过多写者窗口
+//     （建议接入告警；本仓只提供计数与文案，告警接线点不在 gateway-core 域）。
+//   - `ContentBlocks()`：**内容判据**拦截次数；>0 ⇒ 磁盘内容比本地新、本次写盘
+//     被**主动放弃**（**独立告警文案**，与"防回退拒绝"不共用，二者可分别归因）。
 package store
 
 import (
@@ -80,13 +111,20 @@ const (
 	// 拒绝时基线已推进到磁盘 revision（下一写必然 > 磁盘），自动重试通常一次即成；
 	// 设上限避免与"持续推进的写者"无限对撞（忙循环）。
 	maxRollbackAutoRetries = 3
-	// rollbackRetryDelay 防回退拒绝后的自动重试延迟（错开重试，避免紧贴磁盘抖动）。
-	rollbackRetryDelay = 50 * time.Millisecond
 	// renameRetryAttempts 原子替换的重试次数（Windows 瞬时 sharing violation 退避）。
 	renameRetryAttempts = 5
 	// renameRetryDelay 原子替换重试的退避间隔。
 	renameRetryDelay = 20 * time.Millisecond
+	// contentBlockRepeatLogEvery 内容回退拦截的**重复告警**节流：同一冲突集合
+	// 连续出现时，每 N 次才打一条"重复"告警（避免每 200ms 合并写窗口刷屏）。
+	contentBlockRepeatLogEvery = 10
 )
+
+// rollbackRetryDelay 防回退拒绝后的自动重试延迟（错开重试，避免紧贴磁盘抖动）。
+//
+// ⚠️ 变量而非常量：单测需要**拉长**该延迟以构造"重试窗口内磁盘被他人更新"的
+// 确定性时序（见 TestSnapshotAutoRetryAbandonsOnNewerDiskContent）。
+var rollbackRetryDelay = 50 * time.Millisecond
 
 // rollbackRejectError 防回退拒绝错误（QA P2-新）。
 //
@@ -213,6 +251,13 @@ type SnapshotStore struct {
 	rollbackRejects uint64
 	// autoRetries 防回退拒绝后的自动重试次数（有界；成功落盘后归零）。
 	autoRetries int
+	// contentBlocks 内容回退拦截累计次数（可观测；>0 ⇒ 磁盘内容比本地新，
+	// 本次写盘被主动放弃——**与 rollbackRejects 分开计数、分开归因**）。
+	contentBlocks uint64
+	// contentAlertKey 最近一次内容冲突集合的标识（告警去重：同一集合不重复刷屏）。
+	contentAlertKey string
+	// contentBlockRepeats 同一冲突集合连续出现的次数（告警节流用）。
+	contentBlockRepeats int
 
 	writeMu sync.Mutex // 串行化快照写盘（防回退检查 + rename）
 }
@@ -305,6 +350,10 @@ func (s *SnapshotStore) Disable() {
 // 返回 nil 的情形：文件不存在（首次启动，正常空内存启动）或恢复成功。
 // 返回错误的情形（快照损坏/被篡改/不识别）：调用方应告警并以空内存启动
 // （fail-open，理由见包注释），内存态保持空、不受半恢复污染。
+//
+// ⚠️ **读路径不获取写锁**（有意）：写盘采用"临时文件 + rename 原子替换"，
+// 读者只会看到**替换前或替换后的完整文件**（不会出现半写/截断），因此读无需
+// 与写互斥；更重要的是**启动期不得被陈旧锁阻塞**（锁只保护写侧临界区）。
 func (s *SnapshotStore) LoadSnapshot() error {
 	if s.disabled {
 		return nil
@@ -450,6 +499,15 @@ func (s *SnapshotStore) flushNow() {
 //
 // 非防回退错误（I/O 故障、编码失败等）**不自动重试**：重试无意义且会放大故障。
 // 重试次数有上限（maxRollbackAutoRetries），避免与"持续推进的写者"无限对撞。
+//
+// ⚠️ **重试前必须重读磁盘做内容比对**（第三道防线，P2-4 T-1.7）：
+// 重试会**重新走完整的写盘路径**——重新获取写者锁、**重新读盘**、**重新执行
+// 内容级版本判据**。因此若磁盘内容在这段窗口内已被他人推进（本地更旧），
+// 重试会被**内容级判据拦下** ⇒ 走"放弃写盘 + 独立告警 + 独立计数"
+// （ContentBlocks），**不会**用旧内容覆盖磁盘。
+// （历史缺陷：此前重试路径只比对 revision，而覆盖方写出的 revision 仍单调递增
+// ⇒ 内容回退完全静默通过——QA 实跑复现：磁盘 rev=6/路由表=v9 → 覆盖后 rev=7/
+// 路由表=v3，零告警。）
 func (s *SnapshotStore) scheduleRollbackRetry(cause error) {
 	var rre *rollbackRejectError
 	if !errors.As(cause, &rre) {
@@ -490,9 +548,15 @@ func (s *SnapshotStore) nextRevision() int64 {
 
 // writeSnapshotAt 以指定 revision 写盘（内部；测试可注入 revision 验证防回退）。
 //
-// 防回退（**主判据 = revision**，QA P2-2）：写盘前读磁盘快照，
-// 磁盘 revision ≥ 待写 revision ⇒ **拒绝覆盖**（磁盘更新或持平 ⇒ 本进程状态
-// 陈旧，回写即回退；陈旧进程不得覆盖他人已推进的快照）。
+// —— 三道防线（P2-4 T-1.7，详见包注释的总口径）——
+//
+//	① **写者锁（lockfile 互斥）**：临界区覆盖"读盘 → 比较 → 写盘"**整段**。
+//	   必须锁住比较与写之间的整段，否则存在 TOCTOU（两个写者先后通过判据、随后
+//	   互相覆盖）。获取锁失败 ⇒ **明确失败，绝不覆盖**持锁者的快照。
+//	② **内容级版本判据（主防线）**：按表逐个比较自报版本；磁盘更新 / 本地缺表 /
+//	   同版本内容漂移 ⇒ **拒绝写入**（磁盘内容逐字节不变）。
+//	③ **revision 单调判据（兜底）**：磁盘 revision ≥ 待写 revision ⇒ 拒绝覆盖
+//	   （陈旧进程不得覆盖他人已推进的快照）。
 //
 // 时钟（saved_at）**仅辅助**：磁盘 saved_at 晚于本次 ⇒ 告警但仍以 revision 为准
 // （时钟回拨/漂移不得造成误拒）。
@@ -509,14 +573,22 @@ func (s *SnapshotStore) writeSnapshotAt(revision int64, savedAt int64) error {
 		return err
 	}
 
-	// 磁盘快照基线：用于防回退比对。
-	var diskRev int64
-	var diskSavedAt int64
+	// —— ① 写者锁：临界区覆盖"读盘 → 比较 → 写盘"整段（消除 TOCTOU）——
+	// 获取失败 ⇒ 明确失败（绝不覆盖持锁者的快照）。
+	lock := newSnapshotLock(s.path, s.logger)
+	if err := lock.acquire(); err != nil {
+		werr := fmt.Errorf("获取快照写锁失败（本次写盘已放弃，不覆盖其它写者的快照）: %w", err)
+		s.recordFailure(werr)
+		s.logf("错误: 快照写锁获取失败，本次写盘已放弃（不覆盖其它写者的快照）: %v", err)
+		return werr
+	}
+	defer lock.release()
+
+	// 磁盘快照（**锁内读取**：与比较、写盘同属临界区）。
+	disk, curErr := readSnapshotFile(s.path)
 	diskReadable := true
-	cur, curErr := readSnapshotFile(s.path)
 	switch {
 	case curErr == nil:
-		diskRev, diskSavedAt = cur.Revision, cur.SavedAt
 	case errors.Is(curErr, fs.ErrNotExist):
 		diskReadable = false // 无既有快照：正常首写
 	default:
@@ -524,7 +596,25 @@ func (s *SnapshotStore) writeSnapshotAt(revision int64, savedAt int64) error {
 		diskReadable = false
 		s.logf("警告: 磁盘快照不可解析，将以新快照覆盖修复: %v", curErr)
 	}
-	if diskReadable && diskRev >= revision {
+
+	// 本地载荷（**锁内采集**：与磁盘读取同一临界区 ⇒ 比较的是同一时刻的视图）。
+	payload, err := s.collectPayload(revision, savedAt)
+	if err != nil {
+		s.recordFailure(err)
+		return err
+	}
+
+	// —— ② 内容级版本判据（主防线）——
+	// 磁盘内容比本地新 ⇒ 放弃本次写盘（磁盘内容逐字节不变），**不重试**、
+	// **不推进基线**；独立计数 + 独立告警文案（与"防回退拒绝"分开归因）。
+	if diskReadable {
+		if conflicts := compareContent(disk, payload); len(conflicts) > 0 {
+			return s.blockContentWrite(conflicts)
+		}
+	}
+
+	// —— ③ revision 单调判据（兜底）——
+	if diskReadable && disk.Revision >= revision {
 		// 防回退拒绝：磁盘快照更新或持平 ⇒ 本进程状态陈旧，回写即回退。
 		//
 		// —— 多写者语义（QA P2-新）——
@@ -543,41 +633,36 @@ func (s *SnapshotStore) writeSnapshotAt(revision int64, savedAt int64) error {
 		//  - 走 recordFailure ⇒ 失败计数 + 最近错误可查 + 连续 ≥3 次升级为错误级告警；
 		//  - 内存态不回滚（内存为准），本进程后续变更仍会尝试落盘。
 		//
-		// 残余风险（**明确记录，避免误读为"绝对安全"**）：基线推进后本进程确实能再次
-		// 写入，但其内存内容可能落后于磁盘上**他人**写入的新内容 ⇒ 下一次成功写入
-		// 是"较旧内容 + 更大 revision"：revision 单调性成立，**内容新旧性不保证**。
-		// 根治需下列演进之一（**本期不做**）：
-		//  - 显式 Rebase()/Reload()：拒绝后由运维显式触发"以磁盘为准重载"，
-		//    彻底消除内容覆盖（需新增 API 与状态同步语义）；
-		//  - lockfile 串行化（O_EXCL 锁文件）：单写者语义，从根上排除多写者窗口；
-		//  - 部署侧保证单写者（replicas=1 + RWO PVC + 旧实例退净后再起新实例）。
+		// ⚠️ 基线推进**仅作兜底**：内容级判据（②）才是主防线——它保证"内容不回退"；
+		// 本分支只保证"revision 单调"。基线推进后本进程写入的是"较旧内容 + 更大
+		// revision"，故内容新旧性由 ② 保证、由 ①（写者锁）保证同一时刻只有一个写者。
 		err := &rollbackRejectError{
-			msg: fmt.Sprintf("拒绝覆盖更新的快照（防回退）：磁盘 revision=%d ≥ 待写 revision=%d", diskRev, revision),
+			msg: fmt.Sprintf("拒绝覆盖更新的快照（防回退）：磁盘 revision=%d ≥ 待写 revision=%d", disk.Revision, revision),
 			// 基线推进后下一写用的 revision（> 磁盘 ⇒ 必然被接受）。
-			nextRev: diskRev + 1,
+			nextRev: disk.Revision + 1,
 		}
 		s.mu.Lock()
-		if diskRev > s.revision {
-			s.revision = diskRev // 基线推进：下一写用 diskRev+1，消除永久停滞
+		if disk.Revision > s.revision {
+			s.revision = disk.Revision // 基线推进：下一写用 diskRev+1，消除永久停滞
 		}
 		s.rollbackRejects++
 		s.mu.Unlock()
 		// 计入失败指标 + 告警升级（复用既有通道）⇒ "失去持久化"可观测。
 		s.recordFailure(err)
 		s.logf("警告: 防回退拒绝回写（多写者窗口）：磁盘 revision=%d ≥ 待写 revision=%d；本地基线已推进至 revision=%d，下一次写入将使用 revision=%d",
-			diskRev, revision, diskRev, diskRev+1)
+			disk.Revision, revision, disk.Revision, disk.Revision+1)
 		return err
 	}
-	if diskReadable && diskSavedAt > savedAt {
+	if diskReadable && disk.SavedAt > savedAt {
 		// 时钟异常仅告警：防回退以 revision 为准（QA P2-2）。
 		s.logf("警告: 快照时钟异常（磁盘 saved_at=%d 晚于本次 %d），防回退以 revision 为准（磁盘 revision=%d）",
-			diskSavedAt, savedAt, diskRev)
+			disk.SavedAt, savedAt, disk.Revision)
 	}
 
-	payloadBytes, err := s.buildPayload(revision, savedAt)
+	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		s.recordFailure(err)
-		return err
+		s.recordFailure(fmt.Errorf("快照载荷编码失败: %w", err))
+		return fmt.Errorf("快照载荷编码失败: %w", err)
 	}
 	sum := sha256.Sum256(payloadBytes)
 	env := snapshotEnvelope{
@@ -601,6 +686,54 @@ func (s *SnapshotStore) writeSnapshotAt(revision int64, savedAt int64) error {
 	s.autoRetries = 0 // 落盘成功：防回退自动重试计数归零
 	s.mu.Unlock()
 	return nil
+}
+
+// blockContentWrite 内容回退拦截：放弃本次写盘（磁盘内容逐字节不变）。
+//
+// 语义（与"防回退拒绝"**刻意区分**）：
+//   - **不重试**（重试无意义：本地内容确实更旧，重试仍会被拦）；
+//   - **不推进本地基线**（基线推进只对 revision 判据的拒绝生效）；
+//   - 独立计数（ContentBlocks）+ **独立告警文案**（便于与"多写者窗口"归因区分）。
+//
+// 处置建议（写进告警文案）：以磁盘为准重载（重启进程或显式调用 LoadSnapshot），
+// 或终止陈旧写者；**不得**通过"放宽判据"绕过。
+func (s *SnapshotStore) blockContentWrite(conflicts []contentConflict) error {
+	key := contentConflictKey(conflicts)
+	s.mu.Lock()
+	s.contentBlocks++
+	total := s.contentBlocks
+	repeat := 0
+	if key == s.contentAlertKey {
+		s.contentBlockRepeats++
+		repeat = s.contentBlockRepeats
+	} else {
+		s.contentAlertKey = key
+		s.contentBlockRepeats = 0
+	}
+	s.mu.Unlock()
+
+	err := &contentBlockError{conflicts: conflicts}
+	// 计入通用写失败指标（"本次写盘未发生"必须可观测）。
+	s.recordFailure(err)
+	switch {
+	case repeat == 0:
+		s.logf("错误: 快照内容回退拦截（磁盘内容比本地新；本次写盘已放弃，磁盘快照内容逐字节不变）: %s；处置：以磁盘为准重载（重启进程或显式调用 LoadSnapshot）或终止陈旧写者",
+			contentConflictSummary(conflicts))
+	case repeat%contentBlockRepeatLogEvery == 0:
+		s.logf("警告: 快照内容回退拦截重复发生（累计 %d 次，冲突集合未变化）: %s", total, contentConflictSummary(conflicts))
+	}
+	return err
+}
+
+// ContentBlocks 返回**内容回退拦截**的累计次数（可观测）。
+//
+// >0 表示曾出现"磁盘内容比本地新"而被拦截的写盘：本地进程状态陈旧（多写者窗口
+// 的典型症状），本次写盘被**主动放弃**，磁盘内容保持不变。
+// 与 RollbackRejects()（revision 判据拒绝次数）**分开计数、分开归因**。
+func (s *SnapshotStore) ContentBlocks() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.contentBlocks
 }
 
 // RollbackRejects 返回防回退拒绝的累计次数（可观测）。
@@ -628,12 +761,16 @@ func (s *SnapshotStore) recordFailure(err error) {
 	s.logf("警告: 快照写入失败（累计 %d 次）: %v", total, err)
 }
 
-// buildPayload 在**读锁内**完成状态采集与序列化。
+// collectPayload 在**读锁内**完成状态采集（返回未序列化的载荷结构体）。
 //
 // QA P3-8：此前"锁内浅拷贝 + 锁外 marshal"存在并发改写竞态与快照不一致风险；
-// 现改为在读锁内直接序列化，得到一致的原子视图（代价：写者短暂阻塞，
+// 现改为在读锁内直接采集，得到一致的原子视图（代价：写者短暂阻塞，
 // 控制面非热路径，可接受）。
-func (s *SnapshotStore) buildPayload(revision, savedAt int64) ([]byte, error) {
+//
+// 采集与序列化分离的原因：内容级判据需要**载荷结构体**（逐域比较版本与内容），
+// 而写盘需要**载荷字节**（算校验和）；二者必须来自**同一份**采集结果，
+// 否则比较的与写入的可能是两个不同时刻的视图。
+func (s *SnapshotStore) collectPayload(revision, savedAt int64) (*snapshotPayload, error) {
 	m := s.Memory
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -666,6 +803,15 @@ func (s *SnapshotStore) buildPayload(revision, savedAt int64) ([]byte, error) {
 	sort.Strings(svIDs)
 	for _, id := range svIDs {
 		p.MCPServers = append(p.MCPServers, m.mcpServers[id])
+	}
+	return p, nil
+}
+
+// buildPayload 采集 + 序列化（既有签名保持不变，供既有调用与测试使用）。
+func (s *SnapshotStore) buildPayload(revision, savedAt int64) ([]byte, error) {
+	p, err := s.collectPayload(revision, savedAt)
+	if err != nil {
+		return nil, err
 	}
 	b, err := json.Marshal(p)
 	if err != nil {
