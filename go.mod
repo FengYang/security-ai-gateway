@@ -9,6 +9,7 @@ require (
 	github.com/google/go-tdx-guest v0.3.1
 	github.com/higress-group/proxy-wasm-go-sdk v0.0.0-20260525073613-662ed045bf0b
 	github.com/higress-group/wasm-go v1.1.2
+	github.com/jackc/pgx/v5 v5.7.6
 	github.com/miekg/pkcs11 v1.1.1
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pkoukk/tiktoken-go v0.1.8
@@ -48,6 +49,9 @@ require (
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jonboulle/clockwork v0.5.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
