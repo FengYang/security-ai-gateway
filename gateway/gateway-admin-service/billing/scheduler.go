@@ -113,8 +113,20 @@ func (s *Scheduler) spawn(ctx context.Context, name string, interval time.Durati
 // lookbackDays: 只回看最近 N 天（<=0 = 不限）。today 取 UTC+8 自然日（与计量归日同口径）。
 // 失败仅记录：任务本身不 panic、不退出（单点失败留待下轮重试）。
 func BackfillTask(svc *BillingService, lookbackDays int) func(context.Context) {
+	return BackfillTaskWithClock(svc, lookbackDays, time.Now)
+}
+
+// BackfillTaskWithClock 与 BackfillTask 同语义，但**时钟可注入**。
+//
+// 用途：测试与回放。用例若依赖墙上时钟推进（如 today = 今天），账本种子日一旦
+// 超出回看窗口即**恒失败**（时间炸弹）；注入固定时钟可让结果与真实时间无关。
+// now 为 nil 时回落到 time.Now（生产语义与 BackfillTask 逐字一致）。
+func BackfillTaskWithClock(svc *BillingService, lookbackDays int, now func() time.Time) func(context.Context) {
 	return func(ctx context.Context) {
-		today := dayOfNs(time.Now().UnixNano())
+		if now == nil {
+			now = time.Now
+		}
+		today := dayOfNs(now().UnixNano())
 		rep, err := svc.BackfillGaps(ctx, today, lookbackDays)
 		if err != nil {
 			log.Printf("[billing] S-8 缺口扫描失败：%v", err)

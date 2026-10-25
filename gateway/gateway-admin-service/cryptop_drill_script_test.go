@@ -110,6 +110,31 @@ func newDrillMocks(t *testing.T, rejectAll bool) *drillMocks {
 	return m
 }
 
+// skipIfSandboxBlocked 在**沙箱/受限环境阻断脚本内部派生子进程**时跳过用例。
+//
+// 部分受限环境（Windows 沙箱策略）允许启动 bash，但禁止 bash 派生子进程或执行
+// 外部命令（典型输出："dofork: child -1 - CreateProcessW failed"、"fork: Permission denied"、
+// "/usr/bin/sed: Permission denied"），此时脚本退出码由环境决定、与被测逻辑无关 →
+// 必须**跳过**（环境限制 ≠ 用例失败），否则会把环境问题误报为回归失败。
+// 对齐 PrometheusRule 缺文件 skip 先例。
+func skipIfSandboxBlocked(t *testing.T, output string) {
+	t.Helper()
+	low := strings.ToLower(output)
+	sigs := []string{
+		"dofork:",
+		"createprocessw failed",
+		"errno 13",
+		"fork: permission denied",
+		"/usr/bin/sed: permission denied",
+		"access is denied",
+	}
+	for _, s := range sigs {
+		if strings.Contains(low, s) {
+			t.Skipf("当前环境阻断脚本内部派生进程（输出含 %q）→ 跳过脚本用例（环境限制，非用例失败）", s)
+		}
+	}
+}
+
 // runDrill 执行演练脚本，返回退出码与报告（若产出）。
 func runDrill(t *testing.T, m *drillMocks, env [][2]string) (int, map[string]any) {
 	t.Helper()
@@ -152,6 +177,7 @@ func runDrill(t *testing.T, m *drillMocks, env [][2]string) (int, map[string]any
 		}
 	}
 	t.Logf("drill stderr: %s", stderr.String())
+	skipIfSandboxBlocked(t, stderr.String())
 
 	reportPath := filepath.Join(outDir, "drill-report.json")
 	report := map[string]any{}

@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // ---------- S-8 缺口扫描（补账，§6.6.2）单测 ----------
@@ -170,6 +171,11 @@ func TestBackfillGaps_EmptyLedgerNoop(t *testing.T) {
 }
 
 // TestBackfillTask_NoPanic 任务包一层后仍安全（含枚举失败路径）。
+//
+// 【时间炸弹修复】原用例依赖墙上时钟：任务内 today = 今天（UTC+8），账本种子日
+// 固定为 2026-10-01，一旦今天越过 2026-10-08，种子日即超出 7 天回看窗口 →
+// 用例恒失败（与产品缺陷无关）。现改为**注入确定性时钟**：today 固定 2026-10-03，
+// 回看窗口 = [2026-09-26, 2026-10-03)，稳定覆盖种子日 2026-10-01。
 func TestBackfillTask_NoPanic(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
@@ -178,7 +184,8 @@ func TestBackfillTask_NoPanic(t *testing.T) {
 		TokensIn: 1000, StdIn: 1000, EventKey: "a",
 	})
 	svc := newBackfillService(s)
-	task := BackfillTask(svc, 7)
+	fixedNow := func() time.Time { return time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC) }
+	task := BackfillTaskWithClock(svc, 7, fixedNow)
 	task(context.Background()) // 首次触发
 	task(context.Background()) // 幂等重入
 	bills, _ := s.Bills().List(BillQuery{TenantID: "t1", Kind: BillKindDaily})

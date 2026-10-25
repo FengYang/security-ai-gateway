@@ -242,6 +242,7 @@ func bashPath(t *testing.T) string {
 		if _, err := exec.LookPath("bash"); err != nil {
 			t.Skip("bash 不可用，跳过脚本链路")
 		}
+		probeBash(t, "bash")
 		return "bash"
 	}
 	candidates := []string{`C:\Program Files\Git\bin\bash.exe`}
@@ -250,11 +251,33 @@ func bashPath(t *testing.T) string {
 	}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
+			probeBash(t, c)
 			return c
 		}
 	}
 	t.Skip("Git for Windows bash 不可用，跳过脚本链路")
 	return ""
+}
+
+// probeBash 探测 bash 是否**可执行**：部分受限环境能定位到 bash.exe 但禁止执行
+// （fork/exec ...bash.exe: Access is denied）→ 此时应**跳过**脚本链路用例
+// （环境限制 ≠ 用例失败），对齐 PrometheusRule 缺文件 skip 先例。
+func probeBash(t *testing.T, bash string) {
+	t.Helper()
+	out, err := exec.Command(bash, "--version").CombinedOutput()
+	if err == nil {
+		return
+	}
+	if _, ok := err.(*exec.ExitError); ok {
+		return // bash 可执行（自身非零退出 ≠ 不可用）
+	}
+	msg := strings.ToLower(err.Error())
+	for _, k := range []string{"access is denied", "permission denied", "operation is not permitted", "exec format error"} {
+		if strings.Contains(msg, k) {
+			t.Skipf("当前环境禁止执行 bash（%v）→ 跳过脚本链路用例（环境限制，非用例失败）", err)
+		}
+	}
+	t.Fatalf("bash 探测失败: %v\n%s", err, out)
 }
 
 // runSwitchScript 运行 cryptop-switch-profile.sh，返回退出码与输出。
