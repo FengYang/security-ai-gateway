@@ -204,6 +204,11 @@ func serve(name, addr string, h http.Handler) {
 }
 
 func main() {
+	// P2-4 T-1.6：存储迁移工具（sqlite → 共享库）内建子命令；未调用即零副作用。
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		os.Exit(runMigrate(os.Args[2:]))
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("配置加载失败（fail-closed）：%v", err)
