@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -375,6 +376,94 @@ func readPayloadSoft(path string) (*snapshotPayload, error) {
 	return decodeSnapshot(b)
 }
 
+// TestSnapshotCoversAllMemoryFields **防回归断言（QA P3 口径项）**：
+// 快照覆盖边界 = **store.Memory 的状态域全集**。
+//
+//  1. Memory 的每个字段都必须在 snapshotCoverage 清单中登记（新增字段未登记 ⇒ 失败）；
+//  2. 登记为「持久化」的字段，其载荷字段名必须真实存在于 snapshotPayload；
+//  3. 登记为「持久化」的字段，其值必须真的出现在 buildPayload 的产物里
+//     （填满全部状态域后逐字段断言载荷非零）⇒ 防"登记了却没写进快照"。
+//
+// 失败含义：**漏域 ⇒ 重启后静默丢配置**（不报错、不可观测）。
+func TestSnapshotCoversAllMemoryFields(t *testing.T) {
+	// —— 1) Memory 字段全集 ↔ 覆盖清单 双向比对 ——
+	memType := reflect.TypeOf(Memory{})
+	registered := make(map[string]bool, len(snapshotCoverage))
+	for _, e := range snapshotCoverage {
+		if registered[e.Field] {
+			t.Fatalf("覆盖清单重复登记字段: %s", e.Field)
+		}
+		registered[e.Field] = true
+	}
+	for i := 0; i < memType.NumField(); i++ {
+		name := memType.Field(i).Name
+		if !registered[name] {
+			t.Fatalf("Memory 字段 %s 未登记快照覆盖清单（新增状态域必须登记 + 纳入 buildPayload/restore，"+
+				"否则重启后静默丢配置）", name)
+		}
+		delete(registered, name)
+	}
+	if len(registered) > 0 {
+		t.Fatalf("覆盖清单登记了 Memory 中不存在的字段: %v", registered)
+	}
+
+	// —— 2) 载荷字段名真实性 ——
+	payloadType := reflect.TypeOf(snapshotPayload{})
+	for _, e := range snapshotCoverage {
+		if e.Kind != coveragePersisted {
+			if e.Payload != "" {
+				t.Fatalf("字段 %s 归类为非持久化，不应声明载荷字段 %s", e.Field, e.Payload)
+			}
+			continue
+		}
+		if e.Payload == "" {
+			t.Fatalf("字段 %s 归类为持久化，必须声明载荷字段名", e.Field)
+		}
+		if _, ok := payloadType.FieldByName(e.Payload); !ok {
+			t.Fatalf("字段 %s 声明的载荷字段 %s 在 snapshotPayload 中不存在", e.Field, e.Payload)
+		}
+	}
+
+	// —— 3) 填满全部状态域，逐字段断言真的写进了载荷 ——
+	m := NewMemory()
+	m.byID = map[string]*route.RoutePrescription{
+		"rx-1": {PrescriptionID: "rx-1", Tenant: "tenant-a"},
+	}
+	m.byT = map[string][]string{"tenant-a": {"rx-1"}}
+	m.routeTable = route.NewRouteTable(7, 1234)
+	m.rateLimitTable = ratelimit.NewTable(5, time.Unix(1234, 0))
+	m.aclTable = a2aproxy.NewACLTable(3, time.Unix(1234, 0))
+	m.a2aRLTable = a2aproxy.NewRateLimitTable(4, time.Unix(1234, 0))
+	m.toolCatalog = &mcpsec.ToolCatalog{Version: 9, UpdatedAt: 1234, Tools: []mcpsec.TableTool{}}
+	m.rbacPolicy = &mcpsec.RBACPolicy{Version: 6, UpdatedAt: 1234}
+	m.mcpServers = map[string]*mcpsrv.Server{
+		"sv-1": {ID: "sv-1", BaseURL: "https://mcp.example.com"},
+	}
+
+	ss := NewSnapshotStore(m, filepath.Join(t.TempDir(), "snap.json"), nil)
+	raw, err := ss.buildPayload(1, 100)
+	if err != nil {
+		t.Fatalf("构造载荷失败: %v", err)
+	}
+	var got snapshotPayload
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("解码载荷失败: %v", err)
+	}
+	gv := reflect.ValueOf(got)
+	for _, e := range snapshotCoverage {
+		if e.Kind != coveragePersisted {
+			continue
+		}
+		fv := gv.FieldByName(e.Payload)
+		if !fv.IsValid() {
+			t.Fatalf("载荷字段不存在: %s", e.Payload)
+		}
+		if fv.IsZero() {
+			t.Fatalf("状态域 %s 未写入快照载荷字段 %s（漏域 ⇒ 重启后静默丢配置）", e.Field, e.Payload)
+		}
+	}
+}
+
 // TestSnapshotClockIsAuxiliaryOnly **时钟仅辅助**：磁盘 saved_at 更新但 revision
 // 更旧 ⇒ 告警但仍以 revision 为准（允许写入），不因时钟回拨误拒。
 func TestSnapshotClockIsAuxiliaryOnly(t *testing.T) {
@@ -510,8 +599,9 @@ func TestSnapshotMergedWriteFlush(t *testing.T) {
 	_ = ss.Save(&route.RoutePrescription{PrescriptionID: "rx-z", Tenant: "t"})
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		p2 := readPayload(t, path)
-		if len(p2.Prescriptions) == 6 {
+		// 轮询期间可能正好撞上原子替换（Windows 上读会瞬时失败）⇒ 容忍瞬时错误。
+		p2, err := readPayloadSoft(path)
+		if err == nil && len(p2.Prescriptions) == 6 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

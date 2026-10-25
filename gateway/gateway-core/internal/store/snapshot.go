@@ -20,8 +20,23 @@
 //     重启可用性优先，策略/路由配置可由管理面重新下发；若因快照损坏拒绝启动，
 //     整个网关控制面失联，代价远大于短暂回退空态。
 //
-// 快照内容覆盖（store 全部状态域）：路由处方、默认路由表、限流/预算表、
-// A2A ACL 表、A2A 复合限流表、MCP 工具目录、RBAC 授权策略、MCP 后端注册域。
+// 快照内容覆盖（**覆盖边界口径，QA P3 口径项 / team-lead 登记项**）：
+//
+//		**快照覆盖 = `store.Memory` 的状态域全集。**
+//
+//	  - Memory 的**每一个字段**都必须在 snapshotCoverage 清单中登记，且明确归类为
+//	    「持久化 / 派生 / 非状态」之一（清单即口径的书面形式）；
+//	  - 新增状态域时**必须**同步：① 登记清单 ② 纳入 buildPayload（写）③ 纳入
+//	    restore（读）。漏任一步 ⇒ TestSnapshotCoversAllMemoryFields 失败
+//	    （"漏域 = 重启后静默丢配置"，不报错、不可观测，最危险）；
+//	  - **不属于 store.Memory 的控制面状态不在快照覆盖范围内**：例如 api.Server
+//	    上的 applied 配置版本缓存（configversion.Cache）——它是插件上报的**观测
+//	    缓存**（可重报），不是策略/路由配置；重启后为空、插件下次拉取即恢复，
+//	    心跳的 applied_config_version 随之恢复。若将来出现**必须跨重启保留**的
+//	    控制面状态，须先落到 store.Memory（否则会静默丢失）。
+//
+// 快照内容覆盖（当前登记）：路由处方、默认路由表、限流/预算表、A2A ACL 表、
+// A2A 复合限流表、MCP 工具目录、RBAC 授权策略、MCP 后端注册域。
 package store
 
 import (
@@ -67,6 +82,10 @@ const (
 	maxRollbackAutoRetries = 3
 	// rollbackRetryDelay 防回退拒绝后的自动重试延迟（错开重试，避免紧贴磁盘抖动）。
 	rollbackRetryDelay = 50 * time.Millisecond
+	// renameRetryAttempts 原子替换的重试次数（Windows 瞬时 sharing violation 退避）。
+	renameRetryAttempts = 5
+	// renameRetryDelay 原子替换重试的退避间隔。
+	renameRetryDelay = 20 * time.Millisecond
 )
 
 // rollbackRejectError 防回退拒绝错误（QA P2-新）。
@@ -80,6 +99,54 @@ type rollbackRejectError struct {
 
 // Error 实现 error 接口。
 func (e *rollbackRejectError) Error() string { return e.msg }
+
+// coverageKind Memory 字段的快照覆盖归类。
+type coverageKind int
+
+const (
+	// coveragePersisted 状态域：写入快照载荷（重启可恢复）。
+	coveragePersisted coverageKind = iota
+	// coverageDerived 派生域：由其它状态域无损重建，不单独持久化。
+	coverageDerived
+	// coverageNonState 非状态：锁等运行期设施，无持久化语义。
+	coverageNonState
+)
+
+// memoryFieldCoverage 单个 Memory 字段的快照覆盖登记（**覆盖边界口径的书面形式**）。
+type memoryFieldCoverage struct {
+	// Field Memory 结构体字段名（与源码一致）。
+	Field string
+	// Kind 覆盖归类（持久化 / 派生 / 非状态）。
+	Kind coverageKind
+	// Payload 持久化字段在 snapshotPayload 中的字段名（仅 Kind=coveragePersisted 有值）。
+	Payload string
+	// Note 说明（评审检查点：新增字段时在此写清为何这样归类）。
+	Note string
+}
+
+// snapshotCoverage **快照覆盖清单**：store.Memory 的字段全集登记。
+//
+// 口径（QA P3 口径项 / team-lead 登记项）：**快照覆盖 = store.Memory 的状态域全集**。
+// 本清单是该口径的**唯一书面事实源**，由 TestSnapshotCoversAllMemoryFields 强制：
+//   - Memory 新增字段而未登记 ⇒ 测试失败（必须先决策"是否纳入快照"）；
+//   - 登记为持久化但未真正写入载荷 ⇒ 测试失败（防"登记了却漏写"）；
+//   - 载荷字段名写错 ⇒ 测试失败（防"写到了别的字段"）。
+//
+// ⚠️ 新增 Memory 字段时的**强制流程**：① 在本清单登记（并写清 Note）
+// ② 在 buildPayload 中写入 ③ 在 restore 中恢复 ④ 跑本用例。
+// 漏 ② 或 ③ 的后果是"重启后静默丢配置"——不报错、不可观测，最危险。
+var snapshotCoverage = []memoryFieldCoverage{
+	{Field: "mu", Kind: coverageNonState, Note: "读写锁，非状态域"},
+	{Field: "byID", Kind: coveragePersisted, Payload: "Prescriptions", Note: "处方集合（按 ID 字典序输出，保证字节级确定性）"},
+	{Field: "byT", Kind: coverageDerived, Note: "tenant→处方ID 索引：由 byID 无损重建（顺序口径见 restore 注释）"},
+	{Field: "routeTable", Kind: coveragePersisted, Payload: "RouteTable", Note: "默认路由表"},
+	{Field: "rateLimitTable", Kind: coveragePersisted, Payload: "RateLimitTable", Note: "限流/预算表"},
+	{Field: "aclTable", Kind: coveragePersisted, Payload: "ACLTable", Note: "A2A ACL 策略表（独立策略域 R-6）"},
+	{Field: "a2aRLTable", Kind: coveragePersisted, Payload: "A2ARateLimitTable", Note: "A2A 复合限流表（独立策略域 R-6）"},
+	{Field: "toolCatalog", Kind: coveragePersisted, Payload: "ToolCatalog", Note: "MCP 工具目录"},
+	{Field: "rbacPolicy", Kind: coveragePersisted, Payload: "RBACPolicy", Note: "MCP RBAC 授权策略"},
+	{Field: "mcpServers", Kind: coveragePersisted, Payload: "MCPServers", Note: "MCP 后端注册域（按 ID 字典序输出）"},
+}
 
 // snapshotPayload 快照业务载荷：store 全部状态域 + 元数据。
 type snapshotPayload struct {
@@ -786,7 +853,7 @@ func atomicWriteFile(path string, data []byte) error {
 	if err := os.Chmod(tmp, 0o600); err != nil {
 		return fail(fmt.Errorf("快照临时文件权限设置失败: %w", err))
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameWithRetry(tmp, path); err != nil {
 		return fail(fmt.Errorf("快照原子替换失败: %w", err))
 	}
 	// 目录 fsync：保证 rename 落盘（Linux）；失败不影响正确性，忽略。
@@ -795,6 +862,27 @@ func atomicWriteFile(path string, data []byte) error {
 		_ = d.Close()
 	}
 	return nil
+}
+
+// renameWithRetry 原子替换（rename）：对**瞬时**共享冲突做有界重试。
+//
+// 背景（Windows）：目标文件若正被其它句柄打开（并发读方、杀软扫描、备份进程等），
+// rename 覆盖会瞬时返回 sharing violation（Access is denied）——这是**瞬时窗口**，
+// 不是权限故障。短暂退避后重试即可跨过；真实错误（如只读目录）重试耗尽后照常报错。
+//
+// 退避上限 = renameRetryAttempts × renameRetryDelay（默认 5×20ms=100ms），
+// 对合并写（默认 200ms 窗口）的吞吐影响可忽略。
+func renameWithRetry(oldPath, newPath string) error {
+	var err error
+	for attempt := 0; attempt < renameRetryAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(renameRetryDelay)
+		}
+		if err = os.Rename(oldPath, newPath); err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 // —— 版本号提取辅助（仅用于恢复日志展示；nil 表计 0）——
