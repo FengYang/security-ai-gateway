@@ -56,7 +56,9 @@ func (b *PKCS11Backend) ExportWrapped(keyRef KeyRef, kekID string) (WrappedKey, 
 	if err != nil {
 		return WrappedKey{}, fmt.Errorf("module: 定位备份 KEK(alias=%s) 失败: %w", kekID, err)
 	}
-	ckm, err := b.lookupMechCKM(MechAESKeyWrap)
+	// 厂商专有备份机制优先（profile 登记 vendor-backup-wrap），否则回退标准
+	// aes-key-wrap（标准路径备份不了不可导出密钥，调用方会拿到明确错误）。
+	ckm, err := b.lookupMechCKM(b.backupMechOr())
 	if err != nil {
 		return WrappedKey{}, err
 	}
@@ -116,7 +118,9 @@ func (b *PKCS11Backend) ImportWrapped(w WrappedKey, kekID, alias string) (KeyRef
 	if err != nil {
 		return nil, fmt.Errorf("module: 定位备份 KEK(alias=%s) 失败: %w", kekID, err)
 	}
-	ckm, err := b.lookupMechCKM(MechAESKeyWrap)
+	// 厂商专有备份机制优先（profile 登记 vendor-backup-wrap），否则回退标准
+	// aes-key-wrap（标准路径备份不了不可导出密钥，调用方会拿到明确错误）。
+	ckm, err := b.lookupMechCKM(b.backupMechOr())
 	if err != nil {
 		return nil, err
 	}
@@ -200,4 +204,23 @@ func (b *PKCS11Backend) findObjectByLabel(sh pkcs11.SessionHandle, label string)
 // isObjectNotFound 是否为"对象不存在"类错误（用于幂等销毁判定）。
 func isObjectNotFound(err error) bool {
 	return err != nil && errors.Is(err, ErrKeyNotFound)
+}
+
+// backupMechOr 取生效的备份机制名：厂商专有机制优先，否则标准 aes-key-wrap。
+func (b *PKCS11Backend) backupMechOr() string {
+	if b != nil && b.backupMech != "" {
+		return b.backupMech
+	}
+	return MechAESKeyWrap
+}
+
+// BackupMechanismKind 当前生效的备份机制种类（供组模式启动判定 shared 是否成立）。
+func (b *PKCS11Backend) BackupMechanismKind() BackupMechanismKind {
+	if b == nil {
+		return BackupMechNone
+	}
+	if c := ProbeVendorBackup(b.mech); c.Supported {
+		return c.Kind
+	}
+	return BackupMechNone
 }

@@ -69,6 +69,7 @@ type PKCS11Backend struct {
 	closed        bool
 	randHealth    RandHealthStatus // R-S3-12 随机数启动自检状态（零值=未检）
 	mech          *MechTable       // B-6.1-2 机制翻译表（profile 驱动；空表=仅 rand）
+	backupMech    string           // 厂商专有备份机制名（profile 登记 vendor-backup-wrap 时非空）
 	mechProfileID string           // profile 溯源（Capabilities.Profile）
 }
 
@@ -165,6 +166,13 @@ func (b *PKCS11Backend) Init(cfg *Config) error {
 		b.mechProfileID = p.ProfileID
 	} else {
 		b.mech = EmptyMechTable()
+	}
+
+	// 厂商备份机制探测（D-2/U-2）：profile 登记 vendor-* 即启用对应备份路径，
+	// 未登记则 backupMech 为空（三方法回退标准 aes-key-wrap，而标准路径备份不了
+	// 不可导出密钥——见 vendorbackup.go 的规范说明）。
+	if caps := ProbeVendorBackup(b.mech); caps.Supported && caps.Kind == BackupMechVendorWrap {
+		b.backupMech = caps.MechName
 	}
 
 	// 能力探测（B-6.1-6/R-S3-11）：只登记探测命中的机制。
