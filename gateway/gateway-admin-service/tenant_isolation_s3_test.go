@@ -21,12 +21,16 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"security-ai-gateway/gateway/gateway-admin-service/sqlutil"
 )
 
 // ---------- 数据准备 ----------
@@ -479,4 +483,76 @@ func TestS3_Index_Registered_PGGate(t *testing.T) {
 			t.Errorf("PG 索引 %s 未落地（count=%d）", idx, n)
 		}
 	}
+}
+
+// ---------- PG 门控变体（真机共享库下的隔离复验） ----------
+
+// TestS3_PG_CrossTenant_Negative PG 门控：真实共享库下的跨租户负向
+// （V-1 验收「共享库多集群租户隔离用例通过（无跨集群泄露，S3）」的 PG 侧证据）。
+func TestS3_PG_CrossTenant_Negative(t *testing.T) {
+	s := newPGTestStore(t)
+	defer s.Close()
+	if !s.Dialect().IsPostgres() {
+		t.Fatalf("dialect = %s, want postgres", s.Dialect())
+	}
+	// 后缀隔离，避免与其它用例/其它环境的租户数据撞名
+	// （PG 库跨次运行不清理，key_id/statement_id/request_id 是主键 → tag 必须逐次唯一）
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tenantA := "s3pg-a-" + suffix
+	tenantB := "s3pg-b-" + suffix
+	tagA := "pga-" + suffix
+	tagB := "pgb-" + suffix
+
+	s3SeedTenant(t, s, tenantA, tagA)
+	s3SeedTenant(t, s, tenantB, tagB)
+
+	s3AssertTenantVisible(t, s, tenantA, tagA)
+	s3AssertTenantVisible(t, s, tenantB, tagB)
+	s3AssertTenantInvisible(t, s, tenantB, tenantA, tagA)
+	s3AssertTenantInvisible(t, s, tenantA, tenantB, tagB)
+}
+
+// TestS3_PG_CrossCluster_SharedDB_NoLeak PG 门控：两个管理面实例连**同一个 PG 库**
+// （模拟不同集群的管理面共享共享库）→ 互不可见对方租户数据；同租户数据跨实例可见。
+func TestS3_PG_CrossCluster_SharedDB_NoLeak(t *testing.T) {
+	dsn := os.Getenv("ADMIN_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("ADMIN_TEST_PG_DSN 未设置，跳过 PG 门控用例")
+	}
+	open := func() *sqliteTenantStore {
+		t.Helper()
+		ts, err := OpenTenantStoreWithDialect(sqlutil.Postgres, dsn, false, []byte("pg-test-pepper-1234"))
+		if err != nil {
+			t.Fatalf("open pg tenant store: %v", err)
+		}
+		s, ok := ts.(*sqliteTenantStore)
+		if !ok {
+			t.Fatalf("unexpected store type %T", ts)
+		}
+		return s
+	}
+	clusterA := open()
+	defer func() { _ = clusterA.Close() }()
+	clusterB := open()
+	defer func() { _ = clusterB.Close() }()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tenantA := "s3pgc-a-" + suffix
+	tenantB := "s3pgc-b-" + suffix
+	tagA := "pgca-" + suffix
+	tagB := "pgcb-" + suffix
+
+	// 集群 A 写入租户 A 的数据
+	s3SeedTenant(t, clusterA, tenantA, tagA)
+
+	// 集群 B：以租户 B 视角读不到租户 A 的数据（跨集群/跨租户泄露负向）
+	s3AssertTenantInvisible(t, clusterB, tenantB, tenantA, tagA)
+
+	// 集群 B：以租户 A 视角可读到（共享库一致性 —— 同一租户数据在共享库中全局一致）
+	s3AssertTenantVisible(t, clusterB, tenantA, tagA)
+
+	// 集群 B 写入租户 B 数据；集群 A 以租户 A 视角仍读不到租户 B 数据
+	s3SeedTenant(t, clusterB, tenantB, tagB)
+	s3AssertTenantInvisible(t, clusterA, tenantA, tenantB, tagB)
+	s3AssertTenantVisible(t, clusterA, tenantA, tagA)
 }
