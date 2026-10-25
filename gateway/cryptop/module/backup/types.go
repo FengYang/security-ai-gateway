@@ -41,46 +41,16 @@ var (
 	ErrDestroyPending = errors.New("backup_destroy_pending")
 )
 
-// WrappedKey 成员本地 wrap 产物的元数据 + blob。
-//
-// Blob **禁止**写入控制存储/日志/审计/指标；只经由 KeyBackupStore.Put 落备份库，
-// 控制面与 admin 只流转 backup_id（§6.2.5）。
-type WrappedKey struct {
-	BackupID    string // 由备份库分配并回填；成员不得自行编造
-	KeyID       string
-	Member      string
-	KEKID       string
-	Blob        []byte // wrap 产物本体；不得序列化进控制面
-	Checksum    []byte // blob 校验和，恢复前必校
-	WrappedSize int64
-	Vendor      string // 交叉校验用：厂商/型号/机制（§6.2.5）
-	Model       string
-	Mechanism   string
-	CreatedAt   time.Time
-	State       string // ready|destroy_pending|destroyed
-}
+// WrappedKey / BackupMeta / KeyBackupBackend 的契约类型已下沉到 module 包
+// （否则 module → backup 与 backup → module 循环依赖，PKCS#11 后端无法实现
+// KeyBackupBackend）。此处以别名引用，对本包及 group 的现有调用方完全透明。
+type (
+	WrappedKey       = module.WrappedKey
+	BackupMeta       = module.BackupMeta
+	KeyBackupBackend = module.KeyBackupBackend
+)
 
-// BackupMeta 备份库回执：控制面/审计只放这些字段，**不放 blob**。
-type BackupMeta struct {
-	BackupID    string
-	Checksum    []byte
-	WrappedSize int64
-	CreatedAt   time.Time
-	State       string
-}
-
-// KeyBackupBackend 成员侧 wrap/unwrap 能力（模块内完成，密钥明文不出模块）。
-//
-// 语义对齐 §6.2.5：
-//   - ExportWrapped 只能由具备 CKA_WRAP 白名单的 KEK 执行，仅当前组主可调用；
-//   - ImportWrapped 在目标模块内直接建对象（CKA_SENSITIVE=true/CKA_EXTRACTABLE=false），
-//     失败不得留下半成品（审计 orphan 并尝试 DestroyKey）；
-//   - DestroyWrapped 删除成员本地/厂商备份对象，备份库 blob 删除走 KeyBackupStore.Delete。
-type KeyBackupBackend interface {
-	ExportWrapped(keyRef module.KeyRef, kekID string) (WrappedKey, error)
-	ImportWrapped(wrapped WrappedKey, kekID string, alias string) (module.KeyRef, error)
-	DestroyWrapped(backupID string) error
-}
+// KeyBackupBackend 契约见 module 包（此处为别名，语义与 §6.2.5 一致）。
 
 // KeyBackupStore 备份库客户端契约（成员侧用 mTLS 连接；§6.2.5）。
 //
