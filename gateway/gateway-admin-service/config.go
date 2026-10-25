@@ -24,12 +24,18 @@ type config struct {
 	jwtAudience string              // 本服务 audience（缺省 gateway-admin-service）
 	roleAdmins  map[string]struct{} // 最小角色控制（M2 §2.4）：写权限用户名白名单
 
-	// 租户自助门户（可选启用：TENANT_STORE_PATH 未配置 = 不启用）。
+	// 租户自助门户（可选启用：TENANT_STORE_PATH 与 TENANT_STORE_PG_DSN 均未配置 = 不启用）。
 	// 租户会话令牌复用 cfg.jwtSecret（§6.1：Console 用共享密钥签发 role=tenant_user JWT，
 	// Go 侧校验；**无独立租户密钥**，恒 HS256，与内部令牌链的 SM3 分派解耦，R-9）。
-	tenantEnabled   bool
-	tenantStorePath string // SQLite 存储路径（空 = 功能关闭）
-	tenantPepper    []byte // 邮件令牌哈希 pepper（启用时必填）
+	//
+	// 方言选择（P2-4 T-1.2b）：**PG DSN 优先**——PG 非空走共享库（多集群部署形态，
+	// 多副本共享同一份租户数据）；PG 为空且 path 非空走 SQLite（既有单副本行为，逐字不变）；
+	// 两者都空 = 租户门户功能关闭（不注册 /v1/tenant/*）。
+	// 切 PG 前置：必须先跑迁移工具（T-1.6）完成数据迁移并 verify 通过，否则租户数据不可见。
+	tenantEnabled    bool
+	tenantStorePath  string // SQLite 存储路径（PG DSN 非空时可不设置）
+	tenantStorePGDSN string // PostgreSQL 连接串（非空 = 走共享库；P2-4 T-1.2b）
+	tenantPepper     []byte // 邮件令牌哈希 pepper（启用时必填）
 
 	// 令牌 TTL / 限流 / 锁定（§10.3 B）
 	emailVerifyTTLHours         int
@@ -191,7 +197,9 @@ func envBool(name string, def bool) bool {
 // loadTenantConfig 加载租户门户配置到 cfg（可选特性，未配置时 tenantEnabled=false）。
 func loadTenantConfig(cfg *config) error {
 	storePath := os.Getenv("TENANT_STORE_PATH")
-	if storePath == "" {
+	// P2-4 T-1.2b：PG DSN 优先——非空即启用租户门户并走共享库（多集群形态）。
+	pgDSN := os.Getenv("TENANT_STORE_PG_DSN")
+	if storePath == "" && pgDSN == "" {
 		return nil // 未启用
 	}
 
@@ -205,6 +213,7 @@ func loadTenantConfig(cfg *config) error {
 
 	cfg.tenantEnabled = true
 	cfg.tenantStorePath = storePath
+	cfg.tenantStorePGDSN = pgDSN
 	cfg.tenantPepper = []byte(pepper)
 
 	// B. 令牌 TTL / 限流 / 锁定（§10.3 B）

@@ -297,7 +297,9 @@ func main() {
 	var tenantStore TenantStore
 	var tenantH *tenantHandler
 	if cfg.tenantEnabled {
-		ts, err := OpenTenantStore(cfg.tenantStorePath, true, cfg.tenantPepper)
+		// P2-4 T-1.2b：按配置选择方言（TENANT_STORE_PG_DSN 非空 → 共享库 PG；否则 SQLite）。
+		// PG 打开失败一律 fail-closed 拒启动（多副本共享语义不可静默丢失）。
+		ts, err := openTenantStoreForConfig(cfg)
 		if err != nil {
 			log.Fatalf("租户存储初始化失败（fail-closed）：%v", err)
 		}
