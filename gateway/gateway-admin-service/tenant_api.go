@@ -894,10 +894,38 @@ func (h *tenantHandler) handlePasswordResetConfirm(w http.ResponseWriter, r *htt
 	tenantWriteJSON(w, http.StatusOK, map[string]string{"status": "password_reset"})
 }
 
-// ---------- 登录失败/锁定（内存，单副本约束）----------
+// ---------- 登录失败/锁定（P2-4 T-1.4：默认进程内，可切共享库）----------
 
-// loginGuard 登录失败计数与自动锁定（§10.3 B）。
+// loginAttemptBackend 登录失败计数后端：
+//   - *memoryLoginGuard：进程内实现（默认，单副本语义，行为不变）；
+//   - *sqlLoginGuardBackend：共享库实现（security_store.go，多副本共享计数）。
+type loginAttemptBackend interface {
+	isLocked(identity string) bool
+	onFail(identity string)
+	onSuccess(identity string)
+}
+
+// loginGuard 登录失败计数与自动锁定（§10.3 B）。backend 决定进程内或共享库。
 type loginGuard struct {
+	backend loginAttemptBackend
+}
+
+// newLoginGuard 构造登录锁定门禁（默认进程内实现）。
+func newLoginGuard(maxFail, lockMin int) *loginGuard {
+	return &loginGuard{backend: newMemoryLoginGuard(maxFail, lockMin)}
+}
+
+// isLocked 是否处于锁定窗口。
+func (g *loginGuard) isLocked(email string) bool { return g.backend.isLocked(email) }
+
+// onFail 记录一次失败；达上限则进入锁定窗口。
+func (g *loginGuard) onFail(email string) { g.backend.onFail(email) }
+
+// onSuccess 清零失败计数。
+func (g *loginGuard) onSuccess(email string) { g.backend.onSuccess(email) }
+
+// memoryLoginGuard 登录失败计数的进程内实现（原 loginGuard 实现，行为不变）。
+type memoryLoginGuard struct {
 	mu       sync.Mutex
 	attempts map[string]*loginAttempt
 	maxFail  int
@@ -909,8 +937,8 @@ type loginAttempt struct {
 	lockedUntil time.Time
 }
 
-func newLoginGuard(maxFail, lockMin int) *loginGuard {
-	return &loginGuard{
+func newMemoryLoginGuard(maxFail, lockMin int) *memoryLoginGuard {
+	return &memoryLoginGuard{
 		attempts: make(map[string]*loginAttempt),
 		maxFail:  maxFail,
 		lockDur:  time.Duration(lockMin) * time.Minute,
@@ -918,7 +946,7 @@ func newLoginGuard(maxFail, lockMin int) *loginGuard {
 }
 
 // isLocked 是否处于锁定窗口（顺带清理已过期的锁定记录）。
-func (g *loginGuard) isLocked(email string) bool {
+func (g *memoryLoginGuard) isLocked(email string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	a, ok := g.attempts[email]
@@ -935,7 +963,7 @@ func (g *loginGuard) isLocked(email string) bool {
 }
 
 // onFail 记录一次失败；达上限则进入锁定窗口。
-func (g *loginGuard) onFail(email string) {
+func (g *memoryLoginGuard) onFail(email string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	a := g.attempts[email]
@@ -950,7 +978,7 @@ func (g *loginGuard) onFail(email string) {
 }
 
 // onSuccess 清零失败计数。
-func (g *loginGuard) onSuccess(email string) {
+func (g *memoryLoginGuard) onSuccess(email string) {
 	g.mu.Lock()
 	delete(g.attempts, email)
 	g.mu.Unlock()

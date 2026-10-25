@@ -21,6 +21,7 @@ package main
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -50,6 +51,13 @@ CREATE TABLE IF NOT EXISTS captcha_challenges (
   consumed   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_captcha_challenge_expires ON captcha_challenges(expires_at);
+
+CREATE TABLE IF NOT EXISTS login_attempts (
+  identity     TEXT    PRIMARY KEY,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  locked_until BIGINT  NOT NULL DEFAULT 0,
+  updated_at   BIGINT  NOT NULL
+);
 `
 
 // openSecurityStore 打开安全计数器共享库并初始化 DDL。
@@ -260,5 +268,85 @@ func (h *tenantHandler) useSecurityPGStore(db *sqlutil.DB) {
 	if h.cfg.captchaEnabled {
 		h.captcha = newSQLCaptchaBackend(db, h.cfg.captchaTTLMin, h.cfg.captchaIPRatePerHour)
 	}
-	// T-1.4：登录失败锁定同库切换（useSecurityPGLoginGuard，见下）。
+	// T-1.4：登录失败锁定同库切换（阈值/窗口沿用既有 loginGuard 配置，语义不变）。
+	h.loginGuard = newSQLLoginGuard(db, h.cfg.loginMaxFail, h.cfg.loginLockMin)
+}
+
+// ---------- 登录失败锁定共享库后端（P2-4 T-1.4，S1(7) login_attempts）----------
+
+// sqlLoginGuardBackend 登录失败锁定共享库后端（双方言；多副本共享计数，
+// 不存在按副本放大）。共享库操作失败时回退进程内实现（等价单副本旧行为）并告警。
+type sqlLoginGuardBackend struct {
+	db       *sqlutil.DB
+	maxFail  int
+	lockDur  time.Duration
+	fallback *memoryLoginGuard // 进程内回退（共享库不可达时的降级路径）
+	alarm    securityAlarm
+}
+
+// newSQLLoginGuard 构造共享库登录锁定门禁。
+func newSQLLoginGuard(db *sqlutil.DB, maxFail, lockMin int) *loginGuard {
+	return &loginGuard{backend: &sqlLoginGuardBackend{
+		db:       db,
+		maxFail:  maxFail,
+		lockDur:  time.Duration(lockMin) * time.Minute,
+		fallback: newMemoryLoginGuard(maxFail, lockMin),
+	}}
+}
+
+// isLocked 锁定窗口内直接拒绝。过期锁定记录即删（等价内存实现：
+// 锁定过期后计数清零重新累计）。
+func (g *sqlLoginGuardBackend) isLocked(identity string) bool {
+	locked, err := g.isLockedSQL(identity)
+	if err != nil {
+		g.alarm.logf("login-isLocked", "登录锁定共享库查询失败，回退进程内（降级）：%v", err)
+		return g.fallback.isLocked(identity)
+	}
+	return locked
+}
+
+func (g *sqlLoginGuardBackend) isLockedSQL(identity string) (bool, error) {
+	now := time.Now().Unix()
+	if _, err := g.db.Exec(`DELETE FROM login_attempts
+		WHERE identity = ? AND locked_until > 0 AND locked_until <= ?`, identity, now); err != nil {
+		return false, err
+	}
+	var lockedUntil int64
+	switch err := g.db.QueryRow(`SELECT locked_until FROM login_attempts WHERE identity = ?`, identity).Scan(&lockedUntil); {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return lockedUntil > now, nil
+}
+
+// onFail 失败原子自增；达阈值进入锁定窗口（单语句 upsert，跨副本原子无丢失）。
+// 语义与内存实现逐条对齐：计数持续累加，达阈值后每次失败都顺延锁定窗口。
+func (g *sqlLoginGuardBackend) onFail(identity string) {
+	if err := g.onFailSQL(identity); err != nil {
+		g.alarm.logf("login-onFail", "登录失败计数共享库写入失败，回退进程内（降级）：%v", err)
+		g.fallback.onFail(identity)
+	}
+}
+
+func (g *sqlLoginGuardBackend) onFailSQL(identity string) error {
+	now := time.Now().Unix()
+	lockUntil := now + int64(g.lockDur/time.Second)
+	_, err := g.db.Exec(`INSERT INTO login_attempts (identity, failed_count, locked_until, updated_at)
+		VALUES (?, 1, CASE WHEN 1 >= ? THEN ? ELSE 0 END, ?)
+		ON CONFLICT (identity) DO UPDATE SET
+			failed_count = login_attempts.failed_count + 1,
+			locked_until = CASE WHEN login_attempts.failed_count + 1 >= ? THEN ? ELSE 0 END,
+			updated_at = EXCLUDED.updated_at`,
+		identity, g.maxFail, lockUntil, now, g.maxFail, lockUntil)
+	return err
+}
+
+// onSuccess 登录成功清零（删记录）。
+func (g *sqlLoginGuardBackend) onSuccess(identity string) {
+	if _, err := g.db.Exec(`DELETE FROM login_attempts WHERE identity = ?`, identity); err != nil {
+		g.alarm.logf("login-onSuccess", "登录成功清零共享库删除失败，回退进程内（降级）：%v", err)
+		g.fallback.onSuccess(identity)
+	}
 }
