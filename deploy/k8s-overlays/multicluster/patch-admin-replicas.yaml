@@ -1,0 +1,22 @@
+# P2-4 T-1.10 ①：gateway-admin-service 副本数 2（strategic merge，按 Deployment 名匹配）
+#
+# 为什么不在基础清单改：C-18（M9 修订 2→1）「管理面必须单副本」仍是**默认部署**的硬约束，
+# 只有完成共享库迁移的集群才允许放开销项 → 放 overlay，默认语义不变。
+#
+# 滚动策略防爆双写（关键，安全动机）：
+#   maxSurge=0 + maxUnavailable=1 → 滚动升级时**先终止旧 Pod 再拉起新 Pod**，
+#   任何时刻最多 1 个 Pod 承载写入，杜绝 tenant store / 共享库切换窗口内出现双写者。
+#   （默认 RollingUpdate 的 maxUnavailable=25% 在 replicas=2 下取整为 0，
+#     一旦新 Pod 因 PVC/PG 未就绪而 Pending，滚动会永久卡住 → 显式给出确定值。）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-admin-service
+  namespace: otpmask
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1

@@ -1,0 +1,38 @@
+# P2-4 T-1.10 ④：gateway-core 持久化卷声明（新增资源，不影响基础清单）
+#
+# 说明（有意不写死 storageClassName）：
+#   * 未指定 storageClassName → 使用集群默认 SC，避免把本 overlay 绑死到某个
+#     环境专有存储类（基础清单的 tee-encrypted 为示例名，非所有环境具备）；
+#   * 加密/WORM 要求由运维按环境基线另行指定（sz T-4.3/等保基线），
+#     如需加密存储：先确认目标 SC 存在，再在**本地副本**上补 storageClassName。
+---
+# 策略变更审计链（判据 7）：WORM/追加锁定语义由存储层提供（对象锁/immutable），
+# 应用侧仅保证追加写（policyaudit 追加 + 锚点文件）。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gateway-core-audit-worm
+  namespace: otpmask
+  labels:
+    app: gateway-core
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+# T-1.7 存储快照：路由处方 / 默认路由表 / 限流预算表 / A2A ACL / A2A 复合限流 /
+# MCP 工具目录 / RBAC 策略 / MCP 后端注册域（原子写 + 校验和 + 防回退）。
+# 容量按状态域规模估算：单集群策略规模 <10MB，1Gi 为安全余量（含 rename 临时文件）。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gateway-core-store-snapshot
+  namespace: otpmask
+  labels:
+    app: gateway-core
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi

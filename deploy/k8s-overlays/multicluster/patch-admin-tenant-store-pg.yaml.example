@@ -1,0 +1,41 @@
+# 【可选补丁 · 默认不启用 · 不在 kustomization patches 内】
+# P2-4 T-1.10：tenant store 由 SQLite 切到 PG 后**才可**启用本补丁。
+#
+# 启用前置（硬条件，缺一不可）：
+#   1. main.go 打开入口已按方言装配：
+#      OpenTenantStoreWithDialect(sqlutil.Postgres, os.Getenv("TENANT_STORE_PG_DSN"), ...)
+#      ——当前（2026-10）main.go:300 仍为 OpenTenantStore(...)=固定 SQLite，
+#        双方言入口 tenant_store.go:397 已就绪但**无 env 驱动的方言选择**；
+#   2. T-1.6 迁移工具已完成 13 张表迁移 + 对账通过；
+#   3. 已在 patch-admin-security-pg-env.yaml 中放开 TENANT_STORE_PG_DSN。
+#
+# 为什么必须同时移除 SQLite 卷：
+#   * 保留挂载但代码走 PG → 卷闲置且占用 RWO 调度约束；
+#   * 反之保留 TENANT_STORE_PATH 而卷被移除 → readOnlyRootFilesystem 下打开 SQLite
+#     失败 → fail-closed 拒启动。二者必须成对切换。
+#
+# 启用方式：把本文件加入 kustomization.yaml 的 patchesStrategicMerge，
+# 并在 patch-admin-security-pg-env.yaml 中取消 TENANT_STORE_PG_DSN 注释、注释掉 TENANT_STORE_PATH。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-admin-service
+  namespace: otpmask
+spec:
+  template:
+    spec:
+      containers:
+      - name: gateway-admin-service
+        env:
+        # 置空 = 关闭门户存储路径（改由 PG DSN 承接；config.go:193 空即 tenantEnabled=false，
+        # 故装配接通后应改以 PG DSN 判定启用，勿直接置空——置空会关闭整个租户门户）。
+        # - name: TENANT_STORE_PATH
+        #   value: ""
+        volumeMounts:
+        - name: tenant-store
+          mountPath: /var/lib/otpmask-tenant
+      volumes:
+      - name: tenant-store
+        emptyDir: null
+        persistentVolumeClaim:
+          claimName: gateway-admin-tenant-store

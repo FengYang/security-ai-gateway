@@ -1,0 +1,59 @@
+# P2-4 T-1.10：多副本/共享库部署 overlay（**默认部署语义零变化**）
+#
+# 定位：本目录是 `deploy/k8s`（基础清单）之上的**可选 overlay**。基础清单
+# `deploy/k8s/*.yaml` 保持 `gateway-admin-service replicas=1` + PDB `maxUnavailable=0`
+# 的 C-18 单副本硬约束；只有显式 `kubectl apply -k deploy/k8s/overlays/multicluster`
+# 才会切到本 overlay 的 2 副本形态。
+#
+# 用法：
+#   kubectl apply -k deploy/k8s                                # 默认单副本（不变）
+#   kubectl apply -k deploy/k8s-overlays/multicluster          # 本 overlay（须先满足前置）
+#
+# 【目录位置说明（与任务书建议的 deploy/k8s/overlays/... 有意偏差）】
+#   kustomize 拒绝「base 为 overlay 的祖先目录」：若把本目录放在 deploy/k8s/overlays/
+#   下并以 `../../` 指向 deploy/k8s，构建时报
+#     cycle detected: candidate root 'deploy/k8s' contains visited root 'deploy/k8s/overlays/...'
+#   （kustomize v2 本机实测；新版亦有同样的 cycle 检测）。故 overlay 置于 deploy/k8s 的
+#   **同级**目录 deploy/k8s-overlays/，以 `../../k8s` 引用基础清单，符合 kustomize 标准布局。
+#
+# 【启用前置（缺一不可，见 README.md）】
+#   1. T-1.6 迁移工具已完成 SQLite → PG 数据迁移并对账通过；
+#   2. 共享 PG 实例就绪且 otpmask-shared-pg Secret 已由 KMS/Vault 注入创建；
+#   3. tenant store PG 装配（main.go 打开入口）已接通——**未接通前第二副本因
+#      tenant store PVC 为 ReadWriteOnce 而 Pending，本 overlay 不生效**（安全阀）。
+#
+# 兼容性：`resources`/`patchesStrategicMerge`/`patchesJson6902` 为 kustomize
+# v2(kubectl 1.14)~v5 均支持的字段（v5 起标记 deprecated 但仍可用）。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# 继承基础清单（deploy/k8s/kustomization.yaml）。
+# 兼容性说明：此处用 `bases`（kustomize v2~v4 原生字段，v5 起标记 deprecated 但仍可用）；
+# 若所用 kustomize 已移除 bases（报 unknown field），把 `bases` 改名为 `resources` 即可，
+# 语义完全等价（现代 kustomize 支持 resources 引用含 kustomization.yaml 的目录）。
+bases:
+- ../../k8s
+resources:
+- pvc-core-store.yaml
+
+# ① gateway-admin-service：副本 2 + 滚动策略防爆双写（maxSurge=0）
+patchesStrategicMerge:
+- patch-admin-replicas.yaml
+# ③ PG 共享库 env（值全部取自 Secret 引用，无明文凭据）
+- patch-admin-security-pg-env.yaml
+# ④ gateway-core 快照路径持久化 + WORM 审计卷（emptyDir → PVC）
+- patch-core-snapshot.yaml
+
+# ② PDB：基础清单 `maxUnavailable=0` 在 2 副本下会**完全阻断节点驱逐**，
+# 故以 JSON6902 移除 maxUnavailable 并改为 minAvailable=1
+# （策略：2 副本时允许 1 个自愿干扰，正常 drain/滚动不被阻断）。
+# 说明：maxUnavailable 与 minAvailable 互斥，无法用 strategic merge 直接覆盖，
+# 必须使用 JSON6902 先删后加。
+patchesJson6902:
+- target:
+    group: policy
+    version: v1
+    kind: PodDisruptionBudget
+    name: gateway-admin-service
+    namespace: otpmask
+  path: patch-admin-pdb.json.yaml

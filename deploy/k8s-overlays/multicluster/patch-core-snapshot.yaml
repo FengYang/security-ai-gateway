@@ -1,0 +1,39 @@
+# P2-4 T-1.10 ④：gateway-core 存储持久化（快照卷 + WORM 审计卷）
+#
+# 开关语义（gateway/gateway-core/cmd/main.go:82-98）：
+#   GATEWAY_CORE_STORE_SNAPSHOT_PATH 为空（默认）→ 纯内存，**默认行为零变化**；
+#   非空 → 文件快照持久化（原子写 + SHA-256 校验 + 防回退 + 损坏 fail-open 回退空内存）。
+# 该变量是**文件路径**（snapshot.go:119 os.ReadFile(s.path)、:376 filepath.Dir），
+# 故挂载 PVC 到其父目录 /var/lib/otpmask-core。
+#
+# 同时把基础清单的 WORM 审计卷由 emptyDir 换成 PVC：
+# 基础清单 deploy/k8s/gateway-core.yaml 已注明「本地轻集群用 emptyDir；生产须改为持久卷
+# （WORM/追加锁定存储），否则重启后策略变更审计链丢失（判据 7 持久性要求）」——
+# 本 overlay 即该「生产」形态。emptyDir 置 null 表示删除该键（避免与 PVC 同时存在触发
+# 「must specify exactly one volume source」校验失败）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-core
+  namespace: otpmask
+spec:
+  template:
+    spec:
+      containers:
+      - name: gateway-core
+        env:
+        - name: GATEWAY_CORE_STORE_SNAPSHOT_PATH
+          value: "/var/lib/otpmask-core/store-snapshot.json"
+        volumeMounts:
+        - name: core-store-snapshot
+          mountPath: /var/lib/otpmask-core
+      volumes:
+      # 策略变更审计（判据 7 WORM）：emptyDir → PVC（键置 null 即删除）
+      - name: policy-audit
+        emptyDir: null
+        persistentVolumeClaim:
+          claimName: gateway-core-audit-worm
+      # T-1.7 存储快照（路由处方/限流/ACL/MCP 目录等全状态域）
+      - name: core-store-snapshot
+        persistentVolumeClaim:
+          claimName: gateway-core-store-snapshot

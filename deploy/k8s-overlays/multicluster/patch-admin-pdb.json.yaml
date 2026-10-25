@@ -1,0 +1,14 @@
+# P2-4 T-1.10 ②：PDB 由「阻断式」改为「保底式」（RFC6902 JSON Patch）
+#
+# 基础清单 deploy/k8s/gateway-admin-service.yaml 末尾的 PDB 为 `maxUnavailable: 0`，
+# 其语义是「任何自愿干扰都不放行」——在单副本+C-18 场景下这是**有意**的（驱逐须运维显式介入）。
+# 本 overlay 放开到 2 副本后若保留该语义，节点 drain / 滚动升级会被永久阻断（allowedDisruptions=0），
+# 因此改为 `minAvailable: 1`：2 副本下允许 1 个 Pod 被驱逐，正常运维不被阻断，
+# 同时保证至少 1 个副本承载管理面写入。
+#
+# maxUnavailable 与 minAvailable 互斥（同时存在 → API 拒绝），故先删后加。
+- op: remove
+  path: /spec/maxUnavailable
+- op: add
+  path: /spec/minAvailable
+  value: 1

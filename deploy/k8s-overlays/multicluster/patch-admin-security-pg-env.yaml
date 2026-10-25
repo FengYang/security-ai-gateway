@@ -1,0 +1,60 @@
+# P2-4 T-1.10 ③：共享库（PG）env —— **值全部取自 Secret 引用，严禁明文凭据入库**
+#
+# 生效开关语义（与代码一致，config.go / main.go）：
+#   SECURITY_STORE_PG_DSN（gateway/gateway-admin-service/config.go:230）
+#     = 空（默认）           → 走原进程内实现（captcha 限流/答案、登录失败锁定、
+#                              MFA、发信限频），**默认行为零变化**；
+#     = 显式 PG DSN          → 走共享库实现（多副本原子）。开库/建表失败 → fail-closed 拒启动。
+#
+# 【Secret 前置】otpmask-shared-pg 由 KMS/Vault 或运维离线注入，不在仓库内落地：
+#   kubectl -n otpmask create secret generic otpmask-shared-pg \
+#     --from-literal=security-store-dsn="$(vault kv get -field=dsn secret/otpmask/pg)" \
+#     --from-literal=tenant-store-dsn="$(vault kv get -field=tenant-dsn secret/otpmask/pg)"
+# 模板见同目录 secret-shared-pg.example.yaml（**不在 kustomization resources 内，勿 apply**）。
+# 未创建该 Secret → Pod 因 secretKeyRef 缺失而 CreateContainerConfigError（fail-closed，符合预期）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-admin-service
+  namespace: otpmask
+spec:
+  template:
+    spec:
+      containers:
+      - name: gateway-admin-service
+        env:
+        # ---- 安全计数器共享库（P2-4 T-1.3/T-1.4：captcha 限流+答案、登录失败锁定、MFA、发信限频）----
+        - name: SECURITY_STORE_PG_DSN
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-shared-pg
+              key: security-store-dsn
+        # ---- 图形验证码签发限流口径（P3-5）----
+        # TENANT_CAPTCHA_IP_RATE_PER_HOUR ≤ 0 = **关闭**签发限流（内存/PG 两端一致，
+        # config.go:225-226 注释 + defaultCaptchaIPRatePerHour=30）。
+        # 此处显式写默认值 30 仅作口径留档：**置 0 即关闭限流，生产禁止**；
+        # 多副本场景必须走 PG 共享库才有意义（进程内计数按副本数放大）。
+        - name: TENANT_CAPTCHA_IP_RATE_PER_HOUR
+          value: "30"
+        # ---- 登录失败锁定（P2-1 裁决口径，见 README）----
+        # LOGIN_MAX_FAIL ≤ 0 = 关闭锁定；LOGIN_LOCK_MIN = 锁定时长（分钟）。
+        # 共享库降级期间（PG 不可达 → 回退进程内实现）锁定强度按**副本数放大**：
+        # N 副本下攻击者实际可尝试次数 ≈ N × LOGIN_MAX_FAIL。故：
+        #   * 本 overlay 显式写默认值（5 / 15）留档，不做静默放宽；
+        #   * 多副本部署必须监控「共享库降级」信号并按副本数折算告警阈值（README 监控项）。
+        - name: LOGIN_MAX_FAIL
+          value: "5"
+        - name: LOGIN_LOCK_MIN
+          value: "15"
+        # ---- tenant store PG DSN（**暂不启用**，依赖装配线）----
+        # 现状（2026-10 核实）：main.go 打开入口仍为 OpenTenantStore(...) = 固定 SQLite
+        # （gateway/gateway-admin-service/main.go:300），双方言入口
+        # OpenTenantStoreWithDialect(sqlutil.Postgres, dsn, ...) 已在 tenant_store.go:397 就绪
+        # 但**尚无 env 驱动的方言选择**。此时置该 env 无任何效果，且会让运维误判为「已共享库」，
+        # 故默认注释；待装配线接通后启用，并同时启用
+        # patch-admin-tenant-store-pg.yaml.example（移除 SQLite 卷）。
+        # - name: TENANT_STORE_PG_DSN
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: otpmask-shared-pg
+        #       key: tenant-store-dsn
