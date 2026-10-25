@@ -70,7 +70,47 @@ kubectl apply -k deploy/k8s-overlays/trust
 （`deploy/monitoring/central/trust/networkpolicy-central-collector-egress.yaml`：
 采集器出站默认拒绝 + 白名单放行各集群导出端口），**不触碰各集群既有数据面策略**。
 
-## 6. 待环境就绪（本目录资产无法本机验证）
+## 6. 红线（复用本 overlay 前必读）：字符串列表型 `args` 一律用 JSON6902 追加
+
+**K8s 的 strategic merge patch 对「无 patchMergeKey 的列表字段」是整体替换，不是追加。**
+容器 `args` 正是这类字段（元素为纯字符串，无法按 key 合并）→ 用 `patchesStrategicMerge`
+提交 args 补丁时，**基础清单里的既有参数会被整体清空**。
+
+本 overlay 的实例（`deploy/k8s/tee-infer-service.yaml` 既有 12 个参数）：
+`-sig-key` / `-attest-token` / `-output-guard` / `-output-guard-policy-dir` /
+`-cmaas-url` / `-cmaas-model` / `-dev-mode` —— 若被整体替换：
+
+- 签名密钥/证明令牌参数消失 → 启动守卫或验签直接失败；
+- `-cmaas-url` / `-cmaas-model` 消失 → 上游模型地址丢失；
+- `-dev-mode` 消失 → 生产形态下**启动守卫拒绝启动**（反而"更安全"，但同样是故障）。
+
+**正确做法（本 overlay 已采用）**：`patchesJson6902` 追加，**只 add、不 replace**：
+
+```yaml
+patchesJson6902:
+- target: {group: apps, version: v1, kind: Deployment, name: tee-infer-service, namespace: otpmask}
+  path: patch-tee-infer-audit-export.json.yaml
+```
+
+```yaml
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "-audit-export-enabled"
+```
+
+**红线（写新 overlay 前逐条自查）**：
+
+1. 要给容器**加参数** → 只用 `patchesJson6902` 的 `add ... /args/-`；**禁止**用
+   `patchesStrategicMerge` 改 `args`（会替换整段）。
+2. 用 JSON6902 的**下标路径**（`containers/0/args/-`）前，先确认目标容器确为第 0 个、
+   且列表非空；基础清单若调整容器顺序，本补丁会打到错误容器 → **改基础清单时必须同步复核本补丁**。
+3. 有 merge key 的列表（如容器 `env`（key=name）、`volumeMounts`（key=mountPath）、
+   `volumes`（key=name））用 strategic merge 是安全的；但**同样要确认 key 值**，
+   否则会出现"同名覆盖"而非"新增"。
+4. 合并后**必须核验**：`kubectl kustomize <overlay>` 的产物中，**既有参数一个不少**
+   （本 overlay 已核验：原 12 个参数全部保留 + 新增 8 个）。
+
+## 7. 待环境就绪（本目录资产无法本机验证）
 
 - ❌ 未做集群验证（本机无 K8s/PG）：端点实际启用、403/404 行为未实测。
 - ❌ 未验证各集群来源 CIDR（客户/中央采集器实际出口 IP）与 NetworkPolicy ipBlock 的匹配关系。
