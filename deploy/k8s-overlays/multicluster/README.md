@@ -42,13 +42,17 @@ kubectl apply -k deploy/k8s-overlays/multicluster
 **迁移顺序（硬要求，不可颠倒）：**
 
 ```
-① 旧形态（单副本 + SQLite 卷）内：admin-service migrate -action plan|export|import|verify
+① 旧形态（单副本 + SQLite 卷）内：先用【新版本】完成一次启动（schema 自动升级）
+   └─ 否则新表在源库缺失 → export 会丢表
+     （迁移工具已加 fail-closed 校验，并写入 migrate 帮助文本；跳过此步即被拒）
+② 仍在旧形态内：admin-service migrate -action plan|export|import|verify
    └─ 源 SQLite 路径由 -from 显式给出、目标 PG 由 -to 给出（迁移工具不读 env）
-② verify 对账通过后：kubectl apply -k deploy/k8s-overlays/multicluster
+③ verify 对账通过后：kubectl apply -k deploy/k8s-overlays/multicluster
    └─ PG DSN 生效 + 移除 SQLite 卷 + 副本 2
 ```
 
-反序（先移除 SQLite 卷再迁移）→ 源 SQLite 文件不可达，迁移无法执行、数据不可见。
+反序（先移除 SQLite 卷再迁移）→ 源 SQLite 文件不可达，迁移无法执行、数据不可见；
+跳过①（未先用新版本启动升 schema）→ 新表不在源库，迁移**丢表**。
 
 目录位置说明：任务书建议的 `deploy/k8s/overlays/...` 会因 kustomize 的
 `cycle detected`（base 不能是 overlay 的祖先目录）而无法构建，故置于 `deploy/k8s` 的

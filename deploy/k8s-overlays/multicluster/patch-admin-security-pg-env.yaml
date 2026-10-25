@@ -57,8 +57,10 @@ spec:
         #     （tenant_store_pg_wiring_test.go 用例④）⇒ 基础清单的 TENANT_STORE_PATH
         #     保留即可（惰性 env），**基础清单零改动**。
         #   TENANT_TOKEN_PEPPER 由基础清单以 secretKeyRef（非 optional）注入 ⇒ 已 fail-closed。
-        # 迁移顺序（硬要求）：先在旧形态（单副本 + SQLite 卷）内跑完 T-1.6 的
-        # `admin-service migrate -action plan|export|import|verify`，verify 通过后再 apply 本 overlay。
+        # 迁移顺序（硬要求）：先在旧形态（单副本 + SQLite 卷）内**用新版本完成一次启动**
+        # （schema 自动升级；否则新表在源库缺失 → export 丢表；迁移工具已加 fail-closed 校验），
+        # 再跑完 T-1.6 的 `admin-service migrate -action plan|export|import|verify`，
+        # verify 通过后再 apply 本 overlay。
         - name: TENANT_STORE_PG_DSN
           valueFrom:
             secretKeyRef:

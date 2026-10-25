@@ -24,11 +24,15 @@
 #   ⇒ PG 形态下**卷与挂载成对移除**（两者都是 merge key = name 的列表项）。
 #
 # 【迁移顺序（硬要求，不可颠倒）】
-#   1. 在**仍为单副本 + SQLite 卷**的既有部署上执行 T-1.6 迁移
+#   1. 在**仍为单副本 + SQLite 卷**的既有部署上，**先用新版本完成一次启动**
+#      （schema 自动升级；否则新表在源库缺失 → export 丢表。迁移工具已加 fail-closed
+#      校验并写入 migrate 帮助文本，跳过此步即被拒）；
+#   2. 仍在旧形态内执行 T-1.6 迁移
 #      （`admin-service migrate -action plan|export|import|verify`，源 SQLite 路径由
 #      `-from` 显式给出、目标 PG 由 `-to` 给出；**不读 env**，故迁移必须在旧形态内完成）；
-#   2. `verify` 对账通过后，再 apply 本 overlay（PG DSN 生效 + 移除 SQLite 卷 + 副本 2）。
-#   反序（先移除卷再迁移）→ 源 SQLite 文件不可达，迁移无法执行、数据不可见。
+#   3. `verify` 对账通过后，再 apply 本 overlay（PG DSN 生效 + 移除 SQLite 卷 + 副本 2）。
+#   反序（先移除卷再迁移）→ 源 SQLite 文件不可达，迁移无法执行、数据不可见；
+#   跳过①（未先用新版本启动升 schema）→ 新表不在源库，迁移**丢表**。
 #
 # 【启用前置（缺一不可）】
 #   * T-1.6 迁移 + 对账通过（§1 前置表 #1）；
