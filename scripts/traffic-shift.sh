@@ -141,18 +141,6 @@ parse_schedule_file() {
   ' "$1"
 }
 
-health_url_of() {
-  # 优先 HEALTH_URL_<CLUSTER 大写、下划线化>，再退化为全局 HEALTH_URL。
-  # 注：集群 id 含 '-' 时不可直接做变量名（${HEALTH_URL_cluster-a:-} 会被 bash 误解析），故统一下划线化。
-  local cid="$1" key
-  key="$(printf '%s' "$cid" | tr '[:lower:]-' '[:upper:]_')"
-  local v1="HEALTH_URL_${key}" v3="HEALTH_URL"
-  eval "local a=\"\${$v1:-}\"; local c=\"\${$v3:-}\""
-  if [ -n "$a" ]; then printf '%s' "$a"; return 0; fi
-  if [ -n "$c" ]; then printf '%s' "$c"; return 0; fi
-  return 1
-}
-
 # ---------- 阶段 1：预检 ----------
 dr_step "1-precheck" "预检（模型/健康/依赖）" pass "开始"
 
@@ -208,7 +196,7 @@ dr_pass "1.2-deps" "依赖就绪" "NB_SET_WEIGHT_CMD 已注入（北向执行点
 # 1.3 健康源可达（§6.4 health_source）
 health_ok=1
 for cid in "$FROM_CLUSTER" "$TO_CLUSTER"; do
-  url="$(health_url_of "$cid")" || url=""
+  url="$(dr_health_url_of "$cid")" || url=""
   if [ -z "$url" ]; then
     dr_skip "1.3-health-$cid" "健康源探测 $cid" "未配置 HEALTH_URL（$cid）"
     continue
@@ -268,7 +256,7 @@ fi
 # ---------- 阶段 3：观测 ----------
 dr_step "3-observe" "观测（窗口 ${IMPACT_WINDOW_SEC}s）" pass "开始"
 # 3.1 目标集群健康复检
-url="$(health_url_of "$TO_CLUSTER")" || url=""
+url="$(dr_health_url_of "$TO_CLUSTER")" || url=""
 if [ -n "$url" ]; then
   code="$(dr_http_code "$url")"
   if dr_dryrun_dependent "3.1-health" "切后健康复检 $TO_CLUSTER" "须在切流生效后成立；dry-run 未切流故不断言"; then

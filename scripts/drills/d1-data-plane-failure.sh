@@ -42,18 +42,6 @@ DRILL_ID="d1-data-plane-failure"
 DRILL_TITLE="单集群数据面故障（目标 $TARGET_CLUSTER，对照 $PEER_CLUSTER）"
 dr_init
 
-health_url_of() {
-  # HEALTH_URL_<CLUSTER 大写、下划线化> → HEALTH_URL（全局）。
-  # 注：集群 id 含 '-' 不可直接做变量名，故统一下划线化（${HEALTH_URL_cluster-a:-} 会被 bash 误解析）。
-  local cid="$1" key
-  key="$(printf '%s' "$cid" | tr '[:lower:]-' '[:upper:]_')"
-  local v1="HEALTH_URL_${key}" v3="HEALTH_URL"
-  eval "local a=\"\${$v1:-}\"; local c=\"\${$v3:-}\""
-  if [ -n "$a" ]; then printf '%s' "$a"; return 0; fi
-  if [ -n "$c" ]; then printf '%s' "$c"; return 0; fi
-  return 1
-}
-
 # ---------- 阶段 1：预检 ----------
 dr_step "1-precheck" "预检" pass "开始"
 if ! dr_require_env "故障注入钩子" FAULT_INJECT_CMD; then
@@ -62,8 +50,8 @@ fi
 if ! dr_require_env "故障清除钩子" FAULT_CLEAR_CMD; then
   dr_write_report; dr_write_evidence_md "- 故障清除方式：TODO(人工)"; exit "$DR_EXIT_ENV"
 fi
-url_t="$(health_url_of "$TARGET_CLUSTER")" || url_t=""
-url_p="$(health_url_of "$PEER_CLUSTER")" || url_p=""
+url_t="$(dr_health_url_of "$TARGET_CLUSTER")" || url_t=""
+url_p="$(dr_health_url_of "$PEER_CLUSTER")" || url_p=""
 if [ -z "$url_t" ] || [ -z "$url_p" ]; then
   dr_step "env" "双集群健康源" env_unmet "缺少 HEALTH_URL（需 $TARGET_CLUSTER 与 $PEER_CLUSTER 各一）"
   DR_ENV_UNMET=1

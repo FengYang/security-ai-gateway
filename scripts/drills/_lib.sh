@@ -315,6 +315,21 @@ dr_require_cmd() {
 }
 
 # ---------- HTTP 探测 ----------
+# dr_health_url_of <cluster_id> —— 解析该集群的健康源（§6.4 health_source）：
+#   优先 HEALTH_URL_<CLUSTER 大写、下划线化>，其次全局 HEALTH_URL；都没有则返回 1。
+#   注：集群 id 含 '-' 时不可直接做变量名（${HEALTH_URL_cluster-a:-} 会被 bash 误解析成 a:-），
+#   故统一下划线化。
+dr_health_url_of() {
+  local cid="$1" key v1 v3 a c
+  key="$(printf '%s' "$cid" | tr '[:lower:]-' '[:upper:]_')"
+  v1="HEALTH_URL_${key}"
+  v3="HEALTH_URL"
+  eval "a=\"\${$v1:-}\"; c=\"\${$v3:-}\""
+  if [ -n "$a" ]; then printf '%s' "$a"; return 0; fi
+  if [ -n "$c" ]; then printf '%s' "$c"; return 0; fi
+  return 1
+}
+
 # dr_http_code <url> [curl 额外参数...] → stdout 输出 HTTP 码（失败输出 000）
 # ★ 健康源是**内网/集群内**地址：默认绕过 HTTP 代理（--noproxy '*'），
 #   否则受控环境里的 http_proxy 会把探测转发出去并返回 502（假阴性）。

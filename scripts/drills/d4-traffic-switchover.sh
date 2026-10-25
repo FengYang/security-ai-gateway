@@ -48,12 +48,7 @@ dr_pass "0-tooling" "执行体存在性" "$SWITCH_SCRIPT"
 
 # ---------- 阶段 1：预检（切流前置：standby 必须健康）----------
 dr_step "1-precheck" "预检（回切目标健康）" pass "开始"
-key="$(printf '%s' "$STANDBY" | tr '[:lower:]-' '[:upper:]_')"
-standby_url=""
-eval "standby_url=\"\${HEALTH_URL_${key}:-}\""
-if [ -z "$standby_url" ]; then
-  eval "standby_url=\"\${HEALTH_URL:-}\""
-fi
+standby_url="$(dr_health_url_of "$STANDBY")" || standby_url=""
 if [ -z "$standby_url" ]; then
   dr_step "env" "回切目标健康源" env_unmet "缺少 HEALTH_URL（$STANDBY）"
   DR_ENV_UNMET=1
