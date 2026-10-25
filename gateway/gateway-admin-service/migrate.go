@@ -16,6 +16,21 @@
 //
 // 序列一致性：PG 侧 BIGSERIAL 列在导入后回填序列（setval），避免后续插入主键冲突。
 //
+// 源库分组（P2-4 T-1.6 补）：sqlite 部署下**集群注册表在独立文件**
+// （ADMIN_CLUSTER_STORE_PATH，缺省 <TENANT_STORE_PATH>.clusters），不在租户库文件内；
+// PG 部署则与租户库同库（TENANT_STORE_PG_DSN）。因此迁移有两个源：
+//   - 默认源（-from）：租户表 + 安全计数器表；
+//   - 集群注册表源（-from-cluster，缺省推导 <from>.clusters）：clusters /
+//     cluster_heartbeats / cluster_credentials。
+//
+// **集群注册表必须随迁**（否则切库即丢集群拓扑、集群身份凭证失效 → 心跳被
+// fail-closed 拒绝 → 注册表状态机直接 degraded/unreachable）；
+// 集群注册表源文件不存在时该组表跳过（未启用集群注册表的部署），
+// 显式 -from-cluster 指向不存在路径则 fail-closed。
+//
+// 回滚语义：rollback 默认只打印 SOP；-purge 按 dump 中的主键**精确删除本次导入的行**
+// （不动目标库既有数据；缺 dump 则 fail-closed 拒绝执行清除）。
+//
 // 已知口径（MFA）：mfa_states **不迁移**——MFA 属等保强制的 step-up 控制，
 // 状态内含 TOTP 种子信封密文与应急码摘要，跨库搬迁需同一主密钥且不放大密钥
 // 暴露面；切换到共享库后已绑定账号须**重新 enroll**（见 mfa.go 注记与本文件
@@ -50,7 +65,12 @@ type migrateTableSpec struct {
 	pk     string
 	serial string // 自增列名；空 = 无自增
 	skip   string // 非空 = 不迁移（口径原因），仅 plan/verify 列出
+	source string // 源库分组："" = 默认源（-from）；"cluster" = 集群注册表源（-from-cluster）
 }
+
+// migrateSourceCluster 集群注册表源分组标识（T-2.1/T-2.3 的表在 sqlite 部署下
+// 位于独立文件 <TENANT_STORE_PATH>.clusters，不与租户库同文件）。
+const migrateSourceCluster = "cluster"
 
 // migrateTables 迁移范围：T-1.2 的 11 张租户表 + T-1.3/T-1.4/T-1.5 的安全计数器表
 // + mfa_states（不迁移，仅登记口径）。
@@ -73,6 +93,19 @@ var migrateTables = []migrateTableSpec{
 	{name: "login_attempts", pk: "identity"},
 	{name: "operation_intervals", pk: "op_key"},
 	{name: "mfa_states", pk: "sub", skip: migrateMFAReason},
+	// ---- 集群注册表（P2-4 T-2.1/T-2.3）----
+	//
+	// 口径（必须随迁，否则切库即丢集群拓扑）：
+	//   - clusters：控制面集群注册表（id/端点/形态/容量/状态）。不迁 → 目标库
+	//     ensureSchema 建出空表 → 已注册集群全部"消失"，调度与下发无目标。
+	//   - cluster_credentials：集群身份凭证（只存哈希）。不迁 → 切库后所有集群
+	//     心跳被 fail-closed 拒绝 → 注册表状态机直接 degraded/unreachable。
+	//   - cluster_heartbeats：心跳明细（含 applied_config_version 历史）。
+	//     不迁 → T-3.3 收敛核对失去"实际上报版本"的历史证据链。
+	// 注：sqlite 部署下这三张表在独立文件（-from-cluster）；PG 部署与租户库同库。
+	{name: "clusters", pk: "id", source: migrateSourceCluster},
+	{name: "cluster_heartbeats", pk: "seq", serial: "seq", source: migrateSourceCluster},
+	{name: "cluster_credentials", pk: "id", source: migrateSourceCluster},
 }
 
 // migrateTableDump 单表导出内容（含校验和，供 import 前自检）。
@@ -96,14 +129,15 @@ type migrateDump struct {
 
 // migrateOptions 迁移命令参数。
 type migrateOptions struct {
-	action   string   // plan|export|import|verify|rollback
-	from     string   // 源 sqlite 路径
-	to       string   // 目标 DSN
-	toDriver string   // 目标方言：pgx|sqlite
-	out      string   // dump 文件（export 写 / import 读）
-	apply    bool     // import 真正写入（默认 dry-run）
-	purge    bool     // rollback 清除目标库已导入行
-	tables   []string // 限定表（空 = 全部）
+	action      string   // plan|export|import|verify|rollback
+	from        string   // 源 sqlite 路径
+	fromCluster string   // 集群注册表源 sqlite 路径（缺省 = <from>.clusters，不存在则该组表跳过）
+	to          string   // 目标 DSN
+	toDriver    string   // 目标方言：pgx|sqlite
+	out         string   // dump 文件（export 写 / import 读）
+	apply       bool     // import 真正写入（默认 dry-run）
+	purge       bool     // rollback 清除目标库已导入行
+	tables      []string // 限定表（空 = 全部）
 }
 
 // migrateUsage 命令用法与双跑/切换 SOP（help 与错误信息共用）。
@@ -113,8 +147,10 @@ const migrateUsage = `用法：admin-service migrate -action <plan|export|import
             export   源（sqlite，只读）→ dump 文件
             import   dump → 目标库（默认 dry-run；-apply 才写入）
             verify   逐表比对源/目标行数与内容摘要（不通过即不得切换）
-            rollback 打印回滚 SOP；-purge 清除目标库本次导入的行
+            rollback 打印回滚 SOP；-purge 按 dump 主键清除**本次导入的行**
+                      （须带 -out 指定 dump；缺 dump → fail-closed 不清库）
   -from     源 sqlite 文件路径（以 query_only 打开，导出侧只读）
+  -from-cluster  集群注册表源 sqlite 路径（缺省 = <from>.clusters；不存在则集群组表跳过）
   -to       目标 DSN（PG 连接串或 sqlite 路径）
   -driver   目标方言：pgx（默认）| sqlite（影子库演练用）
   -out      dump 文件路径（默认 migrate-dump.json）
@@ -136,7 +172,10 @@ const migrateUsage = `用法：admin-service migrate -action <plan|export|import
      观察一个完整业务周期。
   6) 回滚：DNS/env 切回 sqlite（进程内实现），共享库数据保留待对账；
      确需清除目标库导入行时：
-     admin-service migrate -action rollback -to <dsn> -purge
+     admin-service migrate -action rollback -to <dsn> -purge -out dump.json
+
+  注：sqlite 部署下集群注册表在独立文件（<sqlite>.clusters），迁移工具会自动
+  推导该源；如路径不同，显式加 -from-cluster <path>。
 `
 
 // runMigrate 迁移命令入口（main.go 分派）；返回进程退出码。
@@ -146,6 +185,7 @@ func runMigrate(args []string) int {
 	opt := &migrateOptions{}
 	fs.StringVar(&opt.action, "action", "plan", "plan|export|import|verify|rollback")
 	fs.StringVar(&opt.from, "from", "", "源 sqlite 文件路径")
+	fs.StringVar(&opt.fromCluster, "from-cluster", "", "集群注册表源 sqlite 路径（缺省 <from>.clusters）")
 	fs.StringVar(&opt.to, "to", "", "目标 DSN")
 	fs.StringVar(&opt.toDriver, "driver", string(sqlutil.Postgres), "pgx|sqlite")
 	fs.StringVar(&opt.out, "out", "migrate-dump.json", "dump 文件路径")
@@ -231,6 +271,72 @@ func migrateOpenTarget(dsn, driver string) (*sqlutil.DB, error) {
 		return nil, fmt.Errorf("打开目标库失败: %w", err)
 	}
 	return db, nil
+}
+
+// ---------- 多源（租户库 + 集群注册表） ----------
+
+// migrateSources 迁移源库集合：默认源（租户/安全表）+ 集群注册表源（T-2.1/T-2.3）。
+type migrateSources struct {
+	def     *sqlutil.DB // 默认源（-from）
+	cluster *sqlutil.DB // 集群注册表源（-from-cluster）；nil = 未启用/文件不存在
+}
+
+// migrateOpenSources 打开迁移所需的源库集合。
+//
+// 集群注册表源路径：显式 -from-cluster 优先；缺省推导 <from>.clusters
+// （与 config.go 中 ADMIN_CLUSTER_STORE_PATH 的缺省推导一致）。
+// 文件不存在 → cluster=nil（该组表跳过）。**必须先判存在再打开**：sqlite 打开
+// 不存在的路径会新建空库（query_only 也拦不住建库），会把"未启用集群注册表"的
+// 部署凭空造出一个空源库。
+func migrateOpenSources(opt *migrateOptions) (*migrateSources, error) {
+	def, err := migrateOpenSource(opt.from)
+	if err != nil {
+		return nil, err
+	}
+	s := &migrateSources{def: def}
+	clusterPath := opt.fromCluster
+	if clusterPath == "" && opt.from != "" {
+		clusterPath = opt.from + ".clusters"
+	}
+	if clusterPath == "" {
+		return s, nil
+	}
+	if _, statErr := os.Stat(clusterPath); statErr != nil {
+		if opt.fromCluster != "" {
+			// 显式指定却不存在 → fail-closed（路径拼错不得静默跳过整组表）。
+			_ = def.Close()
+			return nil, fmt.Errorf("集群注册表源不存在: %s", clusterPath)
+		}
+		return s, nil
+	}
+	cdb, cerr := migrateOpenSource(clusterPath)
+	if cerr != nil {
+		_ = def.Close()
+		return nil, fmt.Errorf("打开集群注册表源失败: %w", cerr)
+	}
+	s.cluster = cdb
+	return s, nil
+}
+
+// forSpec 返回该表所属的源库句柄（cluster 分组 → 集群注册表源；nil = 该源不可用）。
+func (s *migrateSources) forSpec(spec migrateTableSpec) *sqlutil.DB {
+	if spec.source == migrateSourceCluster {
+		return s.cluster
+	}
+	return s.def
+}
+
+// close 关闭所有源库句柄。
+func (s *migrateSources) close() {
+	if s == nil {
+		return
+	}
+	if s.cluster != nil {
+		_ = s.cluster.Close()
+	}
+	if s.def != nil {
+		_ = s.def.Close()
+	}
 }
 
 // ---------- 读取与校验和 ----------
@@ -381,16 +487,26 @@ func migrateReadTable(db *sqlutil.DB, spec migrateTableSpec) (migrateTableDump, 
 
 // migrateRunPlan 只读列出两端行数与校验和（不写任何库）。
 func migrateRunPlan(opt *migrateOptions, specs []migrateTableSpec) int {
-	src, err := migrateOpenSource(opt.from)
+	sources, err := migrateOpenSources(opt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 		return 2
 	}
-	defer src.Close()
+	defer sources.close()
+	explicit := len(opt.tables) > 0
 	fmt.Printf("迁移计划：源=%s 目标=%s(%s)\n", opt.from, opt.to, opt.toDriver)
 	fmt.Printf("%-24s %8s %8s %-16s %s\n", "表", "源行数", "目标行数", "校验和(前8)", "备注")
 	ok := true
 	for _, spec := range specs {
+		src := sources.forSpec(spec)
+		if src == nil {
+			if explicit {
+				fmt.Fprintf(os.Stderr, "migrate: 集群注册表源不可用（-tables 显式指定，fail-closed）\n")
+				return 1
+			}
+			fmt.Printf("%-24s 集群注册表源不可用（跳过）\n", spec.name)
+			continue
+		}
 		if exists, err := migrateTableExists(src, spec.name); err == nil && !exists {
 			fmt.Printf("%-24s 源库无此表（跳过）\n", spec.name)
 			continue
@@ -443,15 +559,25 @@ func migrateNote(spec migrateTableSpec, srcSum, tgtSum string) string {
 
 // migrateRunExport 导出源库到 dump 文件。
 func migrateRunExport(opt *migrateOptions, specs []migrateTableSpec) int {
-	src, err := migrateOpenSource(opt.from)
+	sources, err := migrateOpenSources(opt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 		return 2
 	}
-	defer src.Close()
+	defer sources.close()
 	dump := migrateDump{Version: migrateDumpVersion, GeneratedAt: time.Now().Unix(), Source: opt.from, Tables: map[string]migrateTableDump{}}
 	explicit := len(opt.tables) > 0
 	for _, spec := range specs {
+		src := sources.forSpec(spec)
+		if src == nil {
+			if explicit {
+				fmt.Fprintf(os.Stderr, "migrate: 导出失败: 集群注册表源不可用（-tables 显式指定，fail-closed）\n")
+				return 1
+			}
+			fmt.Printf("导出 %-24s 集群注册表源不可用，跳过\n", spec.name)
+			dump.Tables[spec.name] = migrateTableDump{Name: spec.name, PK: spec.pk, Skipped: "集群注册表源不可用"}
+			continue
+		}
 		exists, err := migrateTableExists(src, spec.name)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "migrate: 导出失败: %v\n", err)
@@ -491,18 +617,9 @@ func migrateRunExport(opt *migrateOptions, specs []migrateTableSpec) int {
 
 // migrateRunImport 导入 dump 到目标库（默认 dry-run；-apply 才写入；upsert 幂等）。
 func migrateRunImport(opt *migrateOptions, specs []migrateTableSpec) int {
-	raw, err := os.ReadFile(opt.out)
+	dump, err := migrateLoadDump(opt.out)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "migrate: 读 dump 失败: %v\n", err)
-		return 2
-	}
-	var dump migrateDump
-	if err := json.Unmarshal(raw, &dump); err != nil {
-		fmt.Fprintf(os.Stderr, "migrate: dump 解析失败（文件损坏？）: %v\n", err)
-		return 2
-	}
-	if dump.Version != migrateDumpVersion {
-		fmt.Fprintf(os.Stderr, "migrate: dump 版本 %d 不受支持（当前 %d）\n", dump.Version, migrateDumpVersion)
+		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 		return 2
 	}
 	dst, err := migrateOpenTarget(opt.to, opt.toDriver)
@@ -630,20 +747,30 @@ func migrateFixSequences(dst *sqlutil.DB, specs []migrateTableSpec) error {
 
 // migrateRunVerify 逐表比对源/目标行数与校验和（不通过 → 退出码 1，禁止切换）。
 func migrateRunVerify(opt *migrateOptions, specs []migrateTableSpec) int {
-	src, err := migrateOpenSource(opt.from)
+	sources, err := migrateOpenSources(opt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 		return 2
 	}
-	defer src.Close()
+	defer sources.close()
 	dst, err := migrateOpenTarget(opt.to, opt.toDriver)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 		return 2
 	}
 	defer dst.Close()
+	explicit := len(opt.tables) > 0
 	diff := 0
 	for _, spec := range specs {
+		src := sources.forSpec(spec)
+		if src == nil {
+			if explicit {
+				fmt.Fprintf(os.Stderr, "migrate: 集群注册表源不可用（-tables 显式指定，fail-closed）\n")
+				return 1
+			}
+			fmt.Printf("%-24s 集群注册表源不可用（跳过对账）\n", spec.name)
+			continue
+		}
 		if exists, err := migrateTableExists(src, spec.name); err == nil && !exists {
 			fmt.Printf("%-24s 源库无此表（跳过对账）\n", spec.name)
 			continue
@@ -684,7 +811,7 @@ func migrateRunVerify(opt *migrateOptions, specs []migrateTableSpec) int {
 	return 0
 }
 
-// migrateRunRollback 回滚：默认打印 SOP；-purge 时清除目标库已导入行。
+// migrateRunRollback 回滚：默认打印 SOP；-purge 时清除目标库**本次导入的行**。
 func migrateRunRollback(opt *migrateOptions, specs []migrateTableSpec) int {
 	fmt.Print("回滚 SOP：\n" +
 		"  1) 先把 SECURITY_STORE_PG_DSN / 租户库方言切回 sqlite（进程内实现），滚动重启；\n" +
@@ -699,26 +826,97 @@ func migrateRunRollback(opt *migrateOptions, specs []migrateTableSpec) int {
 		return 2
 	}
 	defer dst.Close()
+	// 精确清除：按 dump 中的主键删除本次导入的行，**不动目标库既有数据**
+	// （早前实现是清空整表，会误删目标库已有数据——与文档口径不符，已修正）。
+	dump, err := migrateLoadDump(opt.out)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "migrate: 清除失败: %v\n", err)
+		return 2
+	}
 	// 自引用表（tenant_statements.supersedes_id）按倒序删，避免自引用冲突。
 	order := make([]migrateTableSpec, len(specs))
 	copy(order, specs)
 	sort.SliceStable(order, func(i, j int) bool {
 		return migrateDeleteRank(order[i].name) > migrateDeleteRank(order[j].name)
 	})
+	total := int64(0)
 	for _, spec := range order {
 		if spec.skip != "" {
 			continue
 		}
-		res, err := dst.Exec(fmt.Sprintf(`DELETE FROM %s`, spec.name))
+		td, ok := dump.Tables[spec.name]
+		if !ok || td.Skipped != "" {
+			fmt.Printf("%-24s 未导入，跳过\n", spec.name)
+			continue
+		}
+		n, err := migratePurgeTable(dst, spec, td)
 		if err != nil {
 			fmt.Printf("%-24s 清除失败: %v\n", spec.name, err)
 			continue
 		}
-		n, _ := res.RowsAffected()
+		total += n
 		fmt.Printf("%-24s 已清除 rows=%d\n", spec.name, n)
 	}
-	fmt.Print("目标库已清除本次导入行（源 sqlite 未受影响）\n")
+	fmt.Printf("目标库已清除本次导入的行（共 %d 行；源 sqlite 未受影响）\n", total)
 	return 0
+}
+
+// migrateLoadDump 读取并校验 dump 文件（版本不符 → fail-closed）。
+func migrateLoadDump(path string) (migrateDump, error) {
+	var dump migrateDump
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return dump, fmt.Errorf("读 dump 失败（-purge 需 dump 才能精确清除已导入行）: %w", err)
+	}
+	if err := json.Unmarshal(raw, &dump); err != nil {
+		return dump, fmt.Errorf("dump 解析失败（文件损坏？）: %w", err)
+	}
+	if dump.Version != migrateDumpVersion {
+		return dump, fmt.Errorf("dump 版本 %d 不受支持（当前 %d）", dump.Version, migrateDumpVersion)
+	}
+	return dump, nil
+}
+
+// migratePurgeTable 按 dump 主键精确删除本次导入的行（分批 IN，避免超长语句）。
+func migratePurgeTable(dst *sqlutil.DB, spec migrateTableSpec, td migrateTableDump) (int64, error) {
+	if len(td.Rows) == 0 {
+		return 0, nil
+	}
+	pkIdx := -1
+	for i, c := range td.Columns {
+		if c == spec.pk {
+			pkIdx = i
+			break
+		}
+	}
+	if pkIdx < 0 {
+		return 0, fmt.Errorf("dump 中找不到主键列 %s", spec.pk)
+	}
+	const batch = 500
+	total := int64(0)
+	for start := 0; start < len(td.Rows); start += batch {
+		end := start + batch
+		if end > len(td.Rows) {
+			end = len(td.Rows)
+		}
+		args := make([]any, 0, end-start)
+		holders := make([]string, 0, end-start)
+		for _, row := range td.Rows[start:end] {
+			if pkIdx >= len(row) {
+				return total, fmt.Errorf("dump 行长度异常（主键列越界）")
+			}
+			args = append(args, row[pkIdx])
+			holders = append(holders, "?")
+		}
+		q := fmt.Sprintf(`DELETE FROM %s WHERE %s IN (%s)`, spec.name, spec.pk, strings.Join(holders, ", "))
+		res, err := dst.Exec(q, args...)
+		if err != nil {
+			return total, fmt.Errorf("按主键清除失败: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
 }
 
 // migrateDeleteRank 删除次序（大 = 先删）：子表先于父表，自引用表优先。

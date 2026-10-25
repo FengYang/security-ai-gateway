@@ -189,7 +189,11 @@ func TestMigrate_RollbackPurge(t *testing.T) {
 	if code := runMigrate([]string{"-action", "rollback", "-to", dst, "-driver", "sqlite"}); code != 0 {
 		t.Fatalf("rollback（仅 SOP）退出码 %d", code)
 	}
-	if code := runMigrate([]string{"-action", "rollback", "-to", dst, "-driver", "sqlite", "-purge"}); code != 0 {
+	// -purge 需带 dump（按主键精确清除本次导入的行；缺 dump → fail-closed）。
+	if code := runMigrate([]string{"-action", "rollback", "-to", dst, "-driver", "sqlite", "-purge"}); code != 2 {
+		t.Fatalf("缺 dump 的 purge 应退出码 2（fail-closed），实际 %d", code)
+	}
+	if code := runMigrate([]string{"-action", "rollback", "-to", dst, "-driver", "sqlite", "-purge", "-out", dump}); code != 0 {
 		t.Fatalf("rollback -purge 退出码 %d", code)
 	}
 	db, err := sqlutil.Open(sqlutil.SQLite, "file:"+dst+"?_pragma=query_only(1)", 0)
