@@ -4,6 +4,29 @@
 // postgres://user:pass@host:5432/db?sslmode=disable）；未设置时 t.Skip，
 // 不伪装通过。覆盖：PG DDL 等价迁移（11 张表）/ CRUD（含 RETURNING 自增、
 // 乐观锁冲突、ON CONFLICT upsert、GREATEST 应用版本）/ 写事务串行。
+//
+// ---------- PG 门控用例总索引（P2-4 真机复验用） ----------
+//
+// 本包所有"只在真机 PG 上跑"的用例，统一用一条命令跑完（Go 的 -run 为非锚定
+// 正则，匹配所有名字中含 "PG" 的用例）：
+//
+//	ADMIN_TEST_PG_DSN='postgres://user:pass@host:5432/db?sslmode=disable' \
+//	  go test -count=1 -v -run PG ./gateway/gateway-admin-service/...
+//
+// 用例清单：
+//
+//	TestTenantStorePG_DDLAndCRUD          租户表 PG DDL 等价迁移 + CRUD
+//	TestTenantStorePG_WriteTxMutex        PG advisory xact lock 跨副本写串行
+//	TestCaptchaPGGate                     captcha 限流/一次性消费的 PG 原子性
+//	TestLoginGuardPGGate                  登录失败锁定的 PG 原子性
+//	TestMFAIntervalPGGate                 MFA/intervalGuard 的 PG 后端
+//	TestMigrate_PGPGate                   存储迁移工具 PG 侧导入/对账/序列回填
+//	TestS3_Index_Registered_PGGate         S3 租户隔离索引在 PG 侧真实落地
+//	TestS3_PG_CrossTenant_Negative        S3 跨租户负向（真机共享库）
+//	TestS3_PG_CrossCluster_SharedDB_NoLeak S3 跨集群负向（两实例连同一 PG 库）
+//
+// 复验口径：PG 门控用例一律 **skip 即视为未复验**（本机无 PG/无 docker 时全部
+// skip，不伪装通过）；真机复验后请把输出回传给 P2-4 主线。
 package main
 
 import (
