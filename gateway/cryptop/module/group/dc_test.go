@@ -203,24 +203,85 @@ func TestVendorAdminNotProbedIsUnsupported(t *testing.T) {
 
 func TestRTOBudget(t *testing.T) {
 	b := DefaultRTOBudget()
-	if b.MaxRTO != 30*time.Second {
-		t.Fatalf("默认 RTO 预算应为 30s（G-0②），实际 %v", b.MaxRTO)
+	// 默认是**占位**阈值（U-4 提议基线），不是已确认判据——G-0② 仍挂起（S-32）。
+	if b.MaxRTO != PlaceholderMaxRTO {
+		t.Fatalf("默认 RTO 预算应为占位值 %v（U-4 提议基线），实际 %v", PlaceholderMaxRTO, b.MaxRTO)
 	}
-	// 未实测 → 不得宣称达标
+	if b.Confirmed {
+		t.Fatal("默认预算必须为未确认（占位）状态")
+	}
+	// 未实测/未确认 → 不得宣称达标
 	if b.WithinRTO() {
-		t.Fatal("未实测时 WithinRTO() 应为 false")
+		t.Fatal("未实测且未确认时 WithinRTO() 应为 false")
 	}
-	// 实测达标
+	// 确认后实测达标
+	b.ConfirmMaxRTO(30 * time.Second)
 	start := time.Now()
 	b.Record(start, start.Add(12*time.Second))
 	if !b.WithinRTO() {
-		t.Fatalf("实测 12s 应达标（预算 30s），实际 %v", b.Measured)
+		t.Fatalf("确认后实测 12s 应达标（预算 30s），实际 %v", b.Measured)
 	}
 	// 实测超标
 	b2 := DefaultRTOBudget()
+	b2.ConfirmMaxRTO(30 * time.Second)
 	s := time.Now()
 	b2.Record(s, s.Add(45*time.Second))
 	if b2.WithinRTO() {
 		t.Fatalf("实测 45s 应超预算 30s，不得判达标")
+	}
+}
+
+// 占位符口径（U-4 / S-32）：客户书面确认前，RTO 阈值只是占位值，
+// 不得据此判达标——即使实测值远小于占位阈值。
+func TestRTOBudgetPlaceholderIsNotVerdict(t *testing.T) {
+	b := DefaultRTOBudget()
+	if b.MaxRTO != PlaceholderMaxRTO {
+		t.Fatalf("占位阈值应为 %v，实际 %v", PlaceholderMaxRTO, b.MaxRTO)
+	}
+	if b.Confirmed {
+		t.Fatal("默认预算必须是未确认状态（占位符）")
+	}
+
+	// 实测远小于占位阈值，也不得判达标（占位值不是判据）。
+	start := time.Now()
+	b.Record(start, start.Add(10*time.Millisecond))
+	if b.WithinRTO() {
+		t.Fatal("未确认时 WithinRTO 恒应为 false（不得把占位阈值当验收判据）")
+	}
+	if got := b.Verdict(); got != "pending" {
+		t.Fatalf("未确认时判据应为 pending，实际 %q", got)
+	}
+
+	// 客户书面确认后才可判达标。
+	b.ConfirmMaxRTO(30 * time.Second)
+	if !b.Confirmed || b.MaxRTO != 30*time.Second {
+		t.Fatalf("确认后阈值应为 30s 且 Confirmed=true，实际 %v/%v", b.MaxRTO, b.Confirmed)
+	}
+	if !b.WithinRTO() || b.Verdict() != "pass" {
+		t.Fatalf("确认且实测达标应判 pass，实际 WithinRTO=%v Verdict=%q", b.WithinRTO(), b.Verdict())
+	}
+}
+
+// 确认后实测超阈值 → fail（不是 pending，也不是静默通过）。
+func TestRTOBudgetConfirmedButExceeded(t *testing.T) {
+	b := DefaultRTOBudget()
+	b.ConfirmMaxRTO(30 * time.Second)
+	start := time.Now()
+	b.Record(start, start.Add(2*time.Minute))
+	if b.WithinRTO() {
+		t.Fatal("实测超阈值不应判达标")
+	}
+	if got := b.Verdict(); got != "fail" {
+		t.Fatalf("确认且超阈值应判 fail，实际 %q", got)
+	}
+}
+
+// 无效确认（d<=0）不得把判据清掉或置为已确认。
+func TestRTOBudgetInvalidConfirmIgnored(t *testing.T) {
+	b := DefaultRTOBudget()
+	b.ConfirmMaxRTO(0)
+	b.ConfirmMaxRTO(-time.Second)
+	if b.Confirmed {
+		t.Fatal("d<=0 的确认应被忽略（避免空值清掉判据）")
 	}
 }

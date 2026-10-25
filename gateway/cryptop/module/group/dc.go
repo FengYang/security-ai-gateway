@@ -250,14 +250,44 @@ func (v *VendorAdmin) Revoke(member, partition string) error {
 //
 // **边界**：骨架只提供计时与判据；RTO **实测值须由真机演练（T-7/Wave B）登记**，
 // 未取得真实演练数据前 `WithinRTO()` 恒为 false——不得宣称达标。
+//
+// **占位符口径（U-4 / S-32）**：`MaxRTO` 在客户书面确认前是**占位值**（见
+// `PlaceholderMaxRTO`），仅用于让代码可运行、判据可计算；占位值**不得作为验收
+// 通过判据**——`Confirmed=false` 时 `WithinRTO()` 恒为 false，`Verdict()` 报
+// "pending"，绝不输出 pass。客户书面确认后调 `ConfirmMaxRTO` 方可将占位值转为判据。
 type RTOBudget struct {
 	MaxRTO     time.Duration
 	Measured   time.Duration
 	HasMeasure bool
+	// Confirmed 标记 MaxRTO 是否已由客户书面确认（U-4）。
+	// false = 仍是占位值，不得据此判达标。
+	Confirmed bool
 }
 
-// DefaultRTOBudget 默认 RTO 预算（G-0② 闭合时确定：RTO≤30s / RPO=0）。
-func DefaultRTOBudget() RTOBudget { return RTOBudget{MaxRTO: 30 * time.Second} }
+// PlaceholderMaxRTO RTO 占位阈值（U-4 提议基线）。
+//
+// **这是占位符，不是验收判据**：客户书面确认（S-32）前，它只保证代码有值可算；
+// 确认后应由客户给出的目标值替换（`ConfirmMaxRTO`）。
+//
+// 与旧硬编码 30s 的差异：30s 未标注来源且与 U-4 提议基线（≤5min）不一致，
+// 易被误当成已确认判据，故改为显式占位常量。
+const PlaceholderMaxRTO = 5 * time.Minute
+
+// DefaultRTOBudget 返回**占位** RTO 预算（未确认状态）。
+func DefaultRTOBudget() RTOBudget {
+	return RTOBudget{MaxRTO: PlaceholderMaxRTO, Confirmed: false}
+}
+
+// ConfirmMaxRTO 客户书面确认后调用，把占位阈值转为正式判据。
+//
+// d<=0 视为无效确认（保持未确认状态），避免用空值把判据清掉。
+func (b *RTOBudget) ConfirmMaxRTO(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	b.MaxRTO = d
+	b.Confirmed = true
+}
 
 // Record 记录一次切换的实测耗时。
 func (b *RTOBudget) Record(start, end time.Time) {
@@ -265,7 +295,25 @@ func (b *RTOBudget) Record(start, end time.Time) {
 	b.HasMeasure = true
 }
 
-// WithinRTO 判定实测是否达标；**未实测返回 false**（不得宣称达标）。
+// WithinRTO 判定实测是否达标；**未确认或未实测一律返回 false**（不得宣称达标）。
 func (b RTOBudget) WithinRTO() bool {
-	return b.HasMeasure && b.Measured <= b.MaxRTO
+	return b.Confirmed && b.HasMeasure && b.Measured <= b.MaxRTO
+}
+
+// Verdict RTO 判据三态（供审计/报告输出，避免把占位值说成"达标"）。
+//
+//	pending = 阈值未确认或未实测（占位期间只能报这个）
+//	pass    = 已确认且实测达标
+//	fail    = 已确认但实测超阈值
+func (b RTOBudget) Verdict() string {
+	if !b.Confirmed {
+		return "pending" // 占位阈值不是判据
+	}
+	if !b.HasMeasure {
+		return "pending" // 无实测数据
+	}
+	if b.Measured <= b.MaxRTO {
+		return "pass"
+	}
+	return "fail"
 }
