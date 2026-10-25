@@ -11,10 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"security-ai-gateway/gateway/a2aproxy"
@@ -30,6 +33,9 @@ import (
 
 // maxRequestBodyBytes 请求体上限（4MiB）：控制面载荷极小，取保守上限（T-1 评审项）。
 const maxRequestBodyBytes = 4 << 20
+
+// shutdownTimeout 优雅退出时排空在途请求的上限（超时后放弃等待，继续收尾）。
+const shutdownTimeout = 10 * time.Second
 
 // limitBody 请求体限制中间件：Content-Length 超限确定性 413；chunked 越限由
 // MaxBytesReader 在读取时拦截（处理器读取失败走既有 400 fail-closed 路径）。
@@ -126,11 +132,7 @@ func main() {
 			st = ss
 			snapState = fmt.Sprintf("%s（合并写窗口=%dms）", snapPath, flushMS)
 			// 优雅退出补写窗口内变更（崩溃窗口 ≤ flushMS 的语义见 snapshot.go 注释）。
-			snapFlush = func() {
-				if err := ss.Close(); err != nil {
-					log.Printf("警告: gateway-core 快照收尾刷盘失败: %v", err)
-				}
-			}
+			snapFlush = snapshotShutdown(ss)
 		}
 	}
 	rt := defaultRouteTable(signer)
@@ -199,13 +201,82 @@ func main() {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	if err := httpSrv.ListenAndServe(); err != nil {
-		// log.Fatalf 不执行 defer：此处显式收尾刷盘（快照窗口内变更不丢）。
+	// 监听器显式创建：绑定失败快速失败（fail-fast），且可观测真实绑定地址。
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("监听 %s 失败: %v", addr, err)
+	}
+	// 退出信号接管（QA P3-新）：K8s 滚动更新删 Pod 发 SIGTERM 属**可预期的优雅
+	// 退出**，不应按崩溃处理（Go 默认收到 SIGTERM 直接终止，defer 不执行 ⇒
+	// 合并写窗口 ≤200ms 内的快照变更丢失）。故显式接管 SIGTERM/SIGINT：
+	// 排空在途请求 → 快照收尾补写（ss.Close → Flush）→ 正常退出。
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigCh)
+	// snapShutdown 收尾刷盘（幂等：ss.Close 只生效一次）。
+	snapShutdown := func() {
 		if snapFlush != nil {
 			snapFlush()
 			snapFlush = nil
 		}
+	}
+	if err := serveWithShutdown(httpSrv, ln, sigCh, snapShutdown); err != nil {
+		// log.Fatalf 不执行 defer：此处显式收尾刷盘（快照窗口内变更不丢）。
+		snapShutdown()
 		log.Fatalf("HTTP 服务退出: %v", err)
+	}
+}
+
+// serveWithShutdown 在给定监听器上启动 HTTP 服务并阻塞，直到收到退出信号
+// （SIGTERM/SIGINT）或服务出错。
+//
+// **优雅退出语义**（P2-4 T-1.7 / QA P3-新）：
+//   - K8s 滚动更新删 Pod 会发 SIGTERM；Go 进程收到 SIGTERM 的默认行为是
+//     **直接终止**（defer 不执行）⇒ 合并写窗口（≤200ms）内的快照变更丢失。
+//     这属于"可预期的优雅退出"，不应按崩溃处理。
+//   - 故显式接管：收到信号 → httpSrv.Shutdown(ctx) 排空在途请求 → 调用
+//     onShutdown（快照 ss.Close() → Flush 补写窗口内变更）→ 返回 nil。
+//
+// 返回值：nil = 正常退出（信号触发的优雅退出，或服务已被外部关闭）；
+// 非 nil = 服务错误（调用方按致命错误处理）。
+func serveWithShutdown(httpSrv *http.Server, ln net.Listener, sigCh <-chan os.Signal, onShutdown func()) error {
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- httpSrv.Serve(ln)
+	}()
+	select {
+	case err := <-errCh:
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case sig := <-sigCh:
+		log.Printf("收到信号 %v，开始优雅退出（排空在途请求 → 快照收尾补写）", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := httpSrv.Shutdown(ctx); err != nil {
+			log.Printf("警告: HTTP 服务优雅关闭未完成（可能有长连接未结束）: %v", err)
+		}
+		// 无论 Shutdown 是否超时，都必须收尾补写（快照窗口内变更不丢）。
+		if onShutdown != nil {
+			onShutdown()
+		}
+		return nil
+	}
+}
+
+// snapshotShutdown 返回快照收尾刷盘函数（优雅退出补写合并写窗口内的变更）。
+//
+// 幂等：store.SnapshotStore.Close 内部以 closed 标记保证只生效一次；
+// 失败只告警不阻断退出（内存为准，快照是旁路）。
+func snapshotShutdown(ss *store.SnapshotStore) func() {
+	return func() {
+		if ss == nil {
+			return
+		}
+		if err := ss.Close(); err != nil {
+			log.Printf("警告: gateway-core 快照收尾刷盘失败: %v", err)
+		}
 	}
 }
 
