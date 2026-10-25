@@ -59,15 +59,15 @@ func (r *clusterApprovalRegistry) RegisterApproval(actor, target string) (string
 		Target: target,
 		Result: "ok",
 	}
-	if err := r.chain.append(ev); err != nil {
+	// 单锁内"生成 ID + 写入"，返回确切 ID（不靠事后回读最新事件——并发下会取错审批）。
+	id, err := r.chain.appendWithID(ev)
+	if err != nil {
 		return "", fmt.Errorf("cluster_approval: 审批事件落链失败: %w", err)
 	}
-	// append 内部生成 EventID（evt-<纳秒>）；回读以取得确切 ID。
-	events, _ := r.chain.list(1, 0)
-	if len(events) == 0 || events[0].Actor != actor || events[0].Action != auditActionClusterRegistryApproval {
-		return "", fmt.Errorf("cluster_approval: 审批事件回读失败（fail-closed）")
+	if id == "" {
+		return "", fmt.Errorf("cluster_approval: 审批事件未返回 ID（fail-closed）")
 	}
-	return events[0].EventID, nil
+	return id, nil
 }
 
 // ValidateDualApproval 校验双签是否成立（不消费）。

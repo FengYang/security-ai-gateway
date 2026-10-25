@@ -296,6 +296,15 @@ func (c *adminAuditChain) load(path string) error {
 // 调用方（broker_secret.go upsert/remove）必须拒绝该次业务变更。
 // 成功后更新指标并按间隔锚定。
 func (c *adminAuditChain) append(e adminAuditEvent) error {
+	_, err := c.appendWithID(e)
+	return err
+}
+
+// appendWithID 追加事件并返回其 EventID。
+//
+// 单锁内完成"生成 ID + 写入"，避免调用方事后回读最新事件来推断 ID——
+// 并发追加时回读可能取到**别人**的事件（双签受理会引用错审批）。P2-4 T-2.4。
+func (c *adminAuditChain) appendWithID(e adminAuditEvent) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e.PrevHash = c.lastHex
@@ -313,15 +322,15 @@ func (c *adminAuditChain) append(e adminAuditEvent) error {
 	}
 	// R-12：算法非法即拒绝落链（凭据变更不留痕/不可复算不可接受）
 	if _, herr := e.hashWithErr(); herr != nil {
-		return fmt.Errorf("audit: 事件哈希算法非法: %w", herr)
+		return "", fmt.Errorf("audit: 事件哈希算法非法: %w", herr)
 	}
 	line, err := json.Marshal(e)
 	if err != nil {
-		return fmt.Errorf("audit: 事件序列化失败: %w", err)
+		return "", fmt.Errorf("audit: 事件序列化失败: %w", err)
 	}
 	if _, err := c.file.Write(append(line, '\n')); err != nil {
 		// 内存链不推进：失败事件未持久化，保持与文件一致
-		return fmt.Errorf("audit: 事件文件写入失败: %w", err)
+		return "", fmt.Errorf("audit: 事件文件写入失败: %w", err)
 	}
 	c.events = append(c.events, e)
 	c.lastHex = e.hash()
@@ -330,7 +339,7 @@ func (c *adminAuditChain) append(e adminAuditEvent) error {
 	if c.anchor != nil && c.sinceAnchor >= auditAnchorInterval {
 		c.writeAnchorLocked()
 	}
-	return nil
+	return e.EventID, nil
 }
 
 // eventByID 按事件 ID 查找事件（集群双签受理校验用；线性扫描，审批量级小）。
