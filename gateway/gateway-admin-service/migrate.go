@@ -176,6 +176,12 @@ const migrateUsage = `用法：admin-service migrate -action <plan|export|import
 
   注：sqlite 部署下集群注册表在独立文件（<sqlite>.clusters），迁移工具会自动
   推导该源；如路径不同，显式加 -from-cluster <path>。
+
+  schema 演进口径：导出前须让**源实例已运行新版本**（新版本启动即补齐新增列，
+  如 T-3.1 的 policy_overlays.scope / model_configs.scope / tenant_provisionings.scope）。
+  源仍是旧 schema 时 import 会以"目标列在 dump 中缺失（schema 漂移）"fail-closed
+  拒绝——这是有意为之：宁可拒绝切换，也不把旧 schema 的行静默写成缺列数据。
+  处理办法：先滚动升级源实例（启动即补列），再重新 export/import/verify。
 `
 
 // runMigrate 迁移命令入口（main.go 分派）；返回进程退出码。

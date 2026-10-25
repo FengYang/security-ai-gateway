@@ -38,6 +38,8 @@ type provisioningRequest struct {
 	// ProviderCredRefs provider 凭据引用（N2；仅 vault 句柄 + 元数据，禁明文）。
 	// nil = 保持既有引用不变；非 nil = 全量替换。
 	ProviderCredRefs *[]providerCredRef `json:"provider_cred_refs,omitempty"`
+	// Scope 策略作用域（P2-4 T-3.1，§6.2）：nil = 保持既有 scope 不变更。
+	Scope *scopeWriteRequest `json:"scope,omitempty"`
 }
 
 // provisioningView 开通配置视图（GET/PUT 响应，§6.12）。
@@ -50,6 +52,8 @@ type provisioningView struct {
 	Segment2Mode    string        `json:"segment2_mode"`
 	TemplateVersion string        `json:"template_version"`
 	Provisioned     bool          `json:"provisioned"`
+	// Scope 策略作用域（P2-4 T-3.1，§6.2）：回显当前生效作用域。
+	Scope *scopeWriteRequest `json:"scope,omitempty"`
 }
 
 // provisioningEffects 开通变更后的联动副作用（N4 重签声明 / N5 下发）。
@@ -101,7 +105,16 @@ func (h *tenantHandler) handleTenantProvisioningGet(w http.ResponseWriter, r *ht
 		tenantWriteError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	tenantWriteJSON(w, http.StatusOK, provisioningViewOf(p))
+	// P2-4 T-3.1：回显策略作用域（存量数据 = global；数据非法 → fail-closed 500）。
+	sc, err := parseDispatchScope(scopeRawOfProvisioning(p))
+	if err != nil {
+		log.Printf("[tenant-provisioning] 作用域数据非法 tenant=%s: %v", tenantID, err)
+		tenantWriteError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	view := provisioningViewOf(p)
+	view.Scope = scopeResponseOf(sc)
+	tenantWriteJSON(w, http.StatusOK, view)
 }
 
 // handleTenantProvisioningPut 开通/变更场景。
@@ -193,6 +206,13 @@ func (h *tenantHandler) handleTenantProvisioningPut(w http.ResponseWriter, r *ht
 		credRefs = refsJSON
 	}
 
+	// P2-4 T-3.1：策略作用域（缺省 = 保持既有；非法取值 / 集群未注册 → 拒绝写入）。
+	scope, _, err := h.resolveScopeWrite(r.Context(), req.Scope, scopeRawOfProvisioning(cur))
+	if err != nil {
+		tenantWriteError(w, http.StatusBadRequest, "作用域非法："+err.Error())
+		return
+	}
+
 	p := &TenantProvisioning{
 		TenantID:             tenantID,
 		Scenario:             scenario,
@@ -205,6 +225,7 @@ func (h *tenantHandler) handleTenantProvisioningPut(w http.ResponseWriter, r *ht
 		ProviderCredRefsJSON: credRefs,
 		ProvisionedAt:        provisionedAt,
 		UpdatedAt:            now,
+		ScopeJSON:            marshalDispatchScope(scope),
 	}
 
 	// 同事务：写表 ⑧ + 联动 N5 下发（config_version+1，表 ⑩）——保证"配置已存、待下发"原子性。
@@ -257,6 +278,7 @@ func provisioningViewOf(p *TenantProvisioning) provisioningView {
 			Segment2Mode:    segment2None,
 			TemplateVersion: "",
 			Provisioned:     false,
+			Scope:           &scopeWriteRequest{Global: true},
 		}
 	}
 	chain, _ := unmarshalPluginSet(p.PluginSetJSON)
@@ -267,7 +289,7 @@ func provisioningViewOf(p *TenantProvisioning) provisioningView {
 	if p.Segment1Enabled {
 		seg1 = 1
 	}
-	return provisioningView{
+	v := provisioningView{
 		Scenario:        p.Scenario,
 		TrustTier:       p.TrustTier,
 		AccessMode:      p.AccessMode,
@@ -277,6 +299,11 @@ func provisioningViewOf(p *TenantProvisioning) provisioningView {
 		TemplateVersion: p.TemplateVersion,
 		Provisioned:     true,
 	}
+	// P2-4 T-3.1：回显作用域（解析失败时留空，由调用方 fail-closed 处理）。
+	if sc, err := parseDispatchScope(p.ScopeJSON); err == nil {
+		v.Scope = scopeResponseOf(sc)
+	}
+	return v
 }
 
 // provisioningDiffDetail 生成场景/可信域档变更摘要（不含敏感值）。

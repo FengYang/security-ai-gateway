@@ -77,6 +77,21 @@ type DispatchPlan struct {
 	TenantID      string           `json:"tenant_id"`
 	ConfigVersion int64            `json:"config_version"`
 	Targets       []DispatchTarget `json:"targets"`
+	// Scope 计划级作用域（P2-4 T-3.1，§6.2）：由三张表的 scope **交集**得出。
+	// global = 不限定集群；clusters 非空 = 定向集群集合；clusters 为空且 global=false
+	// = **不下发**（交集为空，fail-closed，不退化为 global）。
+	Scope DispatchScope `json:"scope"`
+}
+
+// TargetClusters 返回该计划的目标集群集合。
+//
+// 返回 (集合, 是否下发)：global → (nil, true)；clusters 非空 → (集合, true)；
+// 空交集 → (nil, false)——调用方必须跳过投递（不得退化为 global）。
+func (p *DispatchPlan) TargetClusters() ([]string, bool) {
+	if p == nil {
+		return nil, false
+	}
+	return scopeTargetClusters(p.Scope)
 }
 
 // dispatchQuota 套餐配额维度（billing 域；nil = 未知，不下发配额目标）。
@@ -115,6 +130,19 @@ type dispatchStatusView struct {
 // gateway-core 处方（策略 overlay + 模型 ACL，经 X-Otp-Route）。
 func BuildDispatch(in DispatchInput) (*DispatchPlan, error) {
 	plan := &DispatchPlan{TenantID: in.TenantID, ConfigVersion: in.ConfigVersion, Targets: []DispatchTarget{}}
+
+	// 0) 计划级作用域（P2-4 T-3.1，§6.2）：三张表的 scope 取**交集**。
+	// global 视为全集（不收窄）；任一 cluster 作用域收窄目标集群集合；
+	// 交集为空 ⇒ 不下发（fail-closed，不退化为 global）。
+	scope, err := effectiveDispatchScope(
+		provisioningScopeRaw(in.Provisioning),
+		policyScopeRaw(in.Policy),
+		modelsScopeRaw(in.Models),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("tenant: dispatch 解析作用域: %w", err)
+	}
+	plan.Scope = scope
 
 	// 1) N6 插件组合（WasmPlugin）+ 场景/段①② 参数
 	if in.Provisioning != nil {
@@ -511,6 +539,14 @@ func (d *dispatcher) runOnce(tenantID string) {
 	if err != nil {
 		d.markFailed(tenantID, sanitizeDispatchError(err), 0)
 		d.raise(tenantID, "build_failed", sanitizeDispatchError(err))
+		return
+	}
+
+	// P2-4 T-3.1（§6.2）：作用域交集为空 ⇒ **不下发**（fail-closed，不退化为 global）。
+	// 此时"下发到哪个集群"无解，硬发会把配置投递到不该收的集群（V-3 串扰）。
+	if _, ok := plan.TargetClusters(); !ok {
+		d.markFailed(tenantID, "scope 交集为空，不下发", 0)
+		d.raise(tenantID, "scope_empty", "配置作用域交集为空，已跳下发")
 		return
 	}
 

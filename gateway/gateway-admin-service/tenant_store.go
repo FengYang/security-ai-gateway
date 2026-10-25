@@ -182,6 +182,9 @@ CREATE TABLE IF NOT EXISTS policy_overlays (
   category_actions TEXT   NOT NULL DEFAULT '{}',
   updated_at       BIGINT NOT NULL
 );
+-- P2-4 T-3.1：scope 列（策略作用域 §6.2）。PG 无 sqlite 的整表重建逻辑，存量库用
+-- ADD COLUMN IF NOT EXISTS 补齐；列可空，NULL/空视作 global（存量兼容，不回填）。
+ALTER TABLE policy_overlays ADD COLUMN IF NOT EXISTS scope TEXT;
 
 CREATE TABLE IF NOT EXISTS model_configs (
   tenant_id      TEXT   PRIMARY KEY,
@@ -190,6 +193,7 @@ CREATE TABLE IF NOT EXISTS model_configs (
   version        BIGINT NOT NULL DEFAULT 1,
   updated_at     BIGINT NOT NULL
 );
+ALTER TABLE model_configs ADD COLUMN IF NOT EXISTS scope TEXT;
 
 CREATE TABLE IF NOT EXISTS subscription_requests (
   request_id TEXT PRIMARY KEY,
@@ -217,6 +221,7 @@ CREATE TABLE IF NOT EXISTS tenant_provisionings (
   provisioned_at     BIGINT NOT NULL,
   updated_at         BIGINT NOT NULL
 );
+ALTER TABLE tenant_provisionings ADD COLUMN IF NOT EXISTS scope TEXT;
 
 CREATE TABLE IF NOT EXISTS tenant_statements (
   statement_id     TEXT PRIMARY KEY,
@@ -515,6 +520,12 @@ func openSQLiteTenantStore(dsn string, wal bool, pepper []byte) (TenantStore, er
 	}
 	// 下发状态机表（N5，§3.5 表 ⑩）
 	if err := ensureDispatchSchema(db.DB); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// P2-4 T-3.1：策略作用域列（policy_overlays / model_configs / tenant_provisionings）。
+	// 存量库补列（可空，NULL = global）；PG 侧由 DDL 内 ADD COLUMN IF NOT EXISTS 覆盖。
+	if err := ensureScopeColumns(db.DB); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -1001,6 +1012,9 @@ func (s *sqliteTenantStore) RevokeAPIKeyForTenant(tx TenantTx, tenantID, keyID s
 var errTenantVersionConflict = errors.New("tenant: version conflict")
 
 // policyDDL 策略 overlay 与模型配置表结构（对齐 §3.5 ⑤⑥）。
+//
+// scope 列为 P2-4 T-3.1 策略作用域（§6.2）：可空，NULL/空视作 global（存量兼容，
+// 不回填）；sqlite 无 ADD COLUMN IF NOT EXISTS，存量库由 ensureScopeColumns 补列。
 const policyDDL = `
 CREATE TABLE IF NOT EXISTS policy_overlays (
   tenant_id        TEXT PRIMARY KEY,
@@ -1008,7 +1022,8 @@ CREATE TABLE IF NOT EXISTS policy_overlays (
   whitelist        TEXT    NOT NULL DEFAULT '{"entries":[]}',
   blacklist        TEXT    NOT NULL DEFAULT '{"entries":[]}',
   category_actions TEXT    NOT NULL DEFAULT '{}',
-  updated_at       INTEGER NOT NULL
+  updated_at       INTEGER NOT NULL,
+  scope            TEXT
 );
 
 CREATE TABLE IF NOT EXISTS model_configs (
@@ -1016,7 +1031,8 @@ CREATE TABLE IF NOT EXISTS model_configs (
   allowed_models TEXT    NOT NULL DEFAULT '[]',
   default_model  TEXT    NOT NULL DEFAULT '',
   version        INTEGER NOT NULL DEFAULT 1,
-  updated_at     INTEGER NOT NULL
+  updated_at     INTEGER NOT NULL,
+  scope          TEXT
 );
 `
 
@@ -1028,6 +1044,9 @@ type PolicyOverlay struct {
 	BlacklistJSON       string
 	CategoryActionsJSON string // {<内置类目>: block|mask|allow}
 	UpdatedAt           int64
+	// ScopeJSON 策略作用域（P2-4 T-3.1，§6.2）：{"global":true} 或 {"global":false,"clusters":[...]}；
+	// 空/NULL = global（存量兼容，不回填）。
+	ScopeJSON string
 }
 
 // ModelConfig 租户模型配置（每租户一行）。
@@ -1037,6 +1056,8 @@ type ModelConfig struct {
 	DefaultModel      string
 	Version           int64
 	UpdatedAt         int64
+	// ScopeJSON 策略作用域（P2-4 T-3.1，§6.2）；空/NULL = global。
+	ScopeJSON string
 }
 
 // ensurePolicySchema 建表；M1 旧占位表（无 version 列）→ 重建（旧表从未写入，安全）。
@@ -1058,11 +1079,57 @@ func ensurePolicySchema(db *sql.DB) error {
 	return nil
 }
 
+// ensureScopeColumns 为存量 sqlite 库补齐 scope 列（P2-4 T-3.1 策略作用域）。
+//
+// sqlite 无 `ADD COLUMN IF NOT EXISTS`，须先 PRAGMA table_info 判存再 ALTER；
+// 列可空（NULL = global，存量数据不回填），故补列不影响既有行与既有语义。
+// PG 侧由 tenantDDLSchemaPG 内的 `ADD COLUMN IF NOT EXISTS` 覆盖，无需本函数。
+func ensureScopeColumns(db *sql.DB) error {
+	for _, t := range []string{"policy_overlays", "model_configs", "tenant_provisionings"} {
+		exists, has, err := tableHasColumn(db, t, "scope")
+		if err != nil {
+			return err
+		}
+		if !exists || has {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE ` + t + ` ADD COLUMN scope TEXT`); err != nil {
+			return fmt.Errorf("tenant: add scope column to %s: %w", t, err)
+		}
+	}
+	return nil
+}
+
+// tableHasColumn 判定表是否存在且是否含指定列（sqlite PRAGMA table_info）。
+func tableHasColumn(db *sql.DB, table, column string) (bool, bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, false, fmt.Errorf("tenant: inspect %s: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	exists, has := false, false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, false, fmt.Errorf("tenant: scan %s info: %w", table, err)
+		}
+		exists = true
+		if name == column {
+			has = true
+		}
+	}
+	return exists, has, rows.Err()
+}
+
 func (s *sqliteTenantStore) GetPolicyOverlay(tenantID string) (*PolicyOverlay, error) {
 	var p PolicyOverlay
-	err := s.db.QueryRow(`SELECT tenant_id, version, whitelist, blacklist, category_actions, updated_at
+	err := s.db.QueryRow(`SELECT tenant_id, version, whitelist, blacklist, category_actions, updated_at,
+		COALESCE(scope, '')
 		FROM policy_overlays WHERE tenant_id = ?`, tenantID).
-		Scan(&p.TenantID, &p.Version, &p.WhitelistJSON, &p.BlacklistJSON, &p.CategoryActionsJSON, &p.UpdatedAt)
+		Scan(&p.TenantID, &p.Version, &p.WhitelistJSON, &p.BlacklistJSON, &p.CategoryActionsJSON, &p.UpdatedAt,
+			&p.ScopeJSON)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1076,9 +1143,11 @@ func (s *sqliteTenantStore) GetPolicyOverlay(tenantID string) (*PolicyOverlay, e
 // 版本不匹配 → errTenantVersionConflict。
 func (s *sqliteTenantStore) UpsertPolicyOverlay(tx TenantTx, p *PolicyOverlay) error {
 	res, err := tx.tx().Exec(`UPDATE policy_overlays
-		SET version = version + 1, whitelist = ?, blacklist = ?, category_actions = ?, updated_at = ?
+		SET version = version + 1, whitelist = ?, blacklist = ?, category_actions = ?, updated_at = ?,
+			scope = ?
 		WHERE tenant_id = ? AND version = ?`,
-		p.WhitelistJSON, p.BlacklistJSON, p.CategoryActionsJSON, p.UpdatedAt, p.TenantID, p.Version)
+		p.WhitelistJSON, p.BlacklistJSON, p.CategoryActionsJSON, p.UpdatedAt, p.ScopeJSON,
+		p.TenantID, p.Version)
 	if err != nil {
 		return fmt.Errorf("tenant: upsert policy overlay: %w", err)
 	}
@@ -1091,9 +1160,9 @@ func (s *sqliteTenantStore) UpsertPolicyOverlay(tx TenantTx, p *PolicyOverlay) e
 		return errTenantVersionConflict
 	}
 	if _, err := tx.tx().Exec(`INSERT INTO policy_overlays
-		(tenant_id, version, whitelist, blacklist, category_actions, updated_at)
-		VALUES (?, 1, ?, ?, ?, ?)`,
-		p.TenantID, p.WhitelistJSON, p.BlacklistJSON, p.CategoryActionsJSON, p.UpdatedAt); err != nil {
+		(tenant_id, version, whitelist, blacklist, category_actions, updated_at, scope)
+		VALUES (?, 1, ?, ?, ?, ?, ?)`,
+		p.TenantID, p.WhitelistJSON, p.BlacklistJSON, p.CategoryActionsJSON, p.UpdatedAt, p.ScopeJSON); err != nil {
 		return fmt.Errorf("tenant: insert policy overlay: %w", err)
 	}
 	return nil
@@ -1101,9 +1170,10 @@ func (s *sqliteTenantStore) UpsertPolicyOverlay(tx TenantTx, p *PolicyOverlay) e
 
 func (s *sqliteTenantStore) GetModelConfig(tenantID string) (*ModelConfig, error) {
 	var m ModelConfig
-	err := s.db.QueryRow(`SELECT tenant_id, allowed_models, default_model, version, updated_at
+	err := s.db.QueryRow(`SELECT tenant_id, allowed_models, default_model, version, updated_at,
+		COALESCE(scope, '')
 		FROM model_configs WHERE tenant_id = ?`, tenantID).
-		Scan(&m.TenantID, &m.AllowedModelsJSON, &m.DefaultModel, &m.Version, &m.UpdatedAt)
+		Scan(&m.TenantID, &m.AllowedModelsJSON, &m.DefaultModel, &m.Version, &m.UpdatedAt, &m.ScopeJSON)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1116,9 +1186,9 @@ func (s *sqliteTenantStore) GetModelConfig(tenantID string) (*ModelConfig, error
 // UpsertModelConfig 写入模型配置（乐观锁同 UpsertPolicyOverlay）。
 func (s *sqliteTenantStore) UpsertModelConfig(tx TenantTx, m *ModelConfig) error {
 	res, err := tx.tx().Exec(`UPDATE model_configs
-		SET version = version + 1, allowed_models = ?, default_model = ?, updated_at = ?
+		SET version = version + 1, allowed_models = ?, default_model = ?, updated_at = ?, scope = ?
 		WHERE tenant_id = ? AND version = ?`,
-		m.AllowedModelsJSON, m.DefaultModel, m.UpdatedAt, m.TenantID, m.Version)
+		m.AllowedModelsJSON, m.DefaultModel, m.UpdatedAt, m.ScopeJSON, m.TenantID, m.Version)
 	if err != nil {
 		return fmt.Errorf("tenant: upsert model config: %w", err)
 	}
@@ -1131,9 +1201,9 @@ func (s *sqliteTenantStore) UpsertModelConfig(tx TenantTx, m *ModelConfig) error
 		return errTenantVersionConflict
 	}
 	if _, err := tx.tx().Exec(`INSERT INTO model_configs
-		(tenant_id, allowed_models, default_model, version, updated_at)
-		VALUES (?, ?, ?, 1, ?)`,
-		m.TenantID, m.AllowedModelsJSON, m.DefaultModel, m.UpdatedAt); err != nil {
+		(tenant_id, allowed_models, default_model, version, updated_at, scope)
+		VALUES (?, ?, ?, 1, ?, ?)`,
+		m.TenantID, m.AllowedModelsJSON, m.DefaultModel, m.UpdatedAt, m.ScopeJSON); err != nil {
 		return fmt.Errorf("tenant: insert model config: %w", err)
 	}
 	return nil
@@ -1296,7 +1366,8 @@ CREATE TABLE IF NOT EXISTS tenant_provisionings (
   template_version   TEXT    NOT NULL,
   provider_cred_refs TEXT    NOT NULL DEFAULT '[]',
   provisioned_at     INTEGER NOT NULL,
-  updated_at         INTEGER NOT NULL
+  updated_at         INTEGER NOT NULL,
+  scope              TEXT
 );
 `
 
@@ -1313,6 +1384,8 @@ type TenantProvisioning struct {
 	ProviderCredRefsJSON string // [{name,vault_ref,updated_at}]（仅 vault 句柄 + 元数据，禁明文）
 	ProvisionedAt        int64
 	UpdatedAt            int64
+	// ScopeJSON 策略作用域（P2-4 T-3.1，§6.2）；空/NULL = global。
+	ScopeJSON string
 }
 
 // ensureProvisioningSchema 建表（N1 新表）。
@@ -1326,11 +1399,12 @@ func ensureProvisioningSchema(db *sql.DB) error {
 func (s *sqliteTenantStore) GetProvisioning(tenantID string) (*TenantProvisioning, error) {
 	var p TenantProvisioning
 	err := s.db.QueryRow(`SELECT tenant_id, scenario, trust_tier, access_mode, plugin_set,
-		segment1_enabled, segment2_mode, template_version, provider_cred_refs, provisioned_at, updated_at
+		segment1_enabled, segment2_mode, template_version, provider_cred_refs, provisioned_at, updated_at,
+		COALESCE(scope, '')
 		FROM tenant_provisionings WHERE tenant_id = ?`, tenantID).
 		Scan(&p.TenantID, &p.Scenario, &p.TrustTier, &p.AccessMode, &p.PluginSetJSON,
 			&p.Segment1Enabled, &p.Segment2Mode, &p.TemplateVersion, &p.ProviderCredRefsJSON,
-			&p.ProvisionedAt, &p.UpdatedAt)
+			&p.ProvisionedAt, &p.UpdatedAt, &p.ScopeJSON)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1355,8 +1429,8 @@ func (s *sqliteTenantStore) UpsertProvisioning(tx TenantTx, p *TenantProvisionin
 	// （PG 亦无 boolean→integer 隐式转换），sqlite 不受影响；统一存 0/1。
 	_, err := tx.tx().Exec(`INSERT INTO tenant_provisionings
 		(tenant_id, scenario, trust_tier, access_mode, plugin_set, segment1_enabled,
-		 segment2_mode, template_version, provider_cred_refs, provisioned_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 segment2_mode, template_version, provider_cred_refs, provisioned_at, updated_at, scope)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(tenant_id) DO UPDATE SET
 			scenario = excluded.scenario,
 			trust_tier = excluded.trust_tier,
@@ -1366,9 +1440,10 @@ func (s *sqliteTenantStore) UpsertProvisioning(tx TenantTx, p *TenantProvisionin
 			segment2_mode = excluded.segment2_mode,
 			template_version = excluded.template_version,
 			provider_cred_refs = excluded.provider_cred_refs,
-			updated_at = excluded.updated_at`,
+			updated_at = excluded.updated_at,
+			scope = excluded.scope`,
 		p.TenantID, p.Scenario, p.TrustTier, p.AccessMode, p.PluginSetJSON, boolToInt64(p.Segment1Enabled),
-		p.Segment2Mode, p.TemplateVersion, p.ProviderCredRefsJSON, p.ProvisionedAt, p.UpdatedAt)
+		p.Segment2Mode, p.TemplateVersion, p.ProviderCredRefsJSON, p.ProvisionedAt, p.UpdatedAt, p.ScopeJSON)
 	if err != nil {
 		return fmt.Errorf("tenant: upsert provisioning: %w", err)
 	}

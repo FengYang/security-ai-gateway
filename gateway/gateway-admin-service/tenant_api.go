@@ -56,6 +56,15 @@ type tenantHandler struct {
 	dispatch *dispatcher
 	// attest N3 证明状态源（nil = 未接线 → 降级 unknown + 强制未闭环，C-19）。
 	attest attestStatusSource
+
+	// scopeResolver 集群注册表校验器（P2-4 T-3.1：scope{global|cluster[]} 写入校验）。
+	// nil = 未显式注入 → 按配置懒加载（scopeLazy）；两者都不可用 ⇒ 注册表视为未启用
+	// ⇒ 只允许 global 作用域（决策点③ fail-closed）。
+	scopeResolver clusterScopeChecker
+	// scopeLazy 按配置懒加载的集群注册表校验器（scopeResolver 为 nil 时构造一次）。
+	scopeLazy clusterScopeChecker
+	// scopeLazyOnce scopeLazy 的懒加载同步原语。
+	scopeLazyOnce sync.Once
 }
 
 // newTenantHandler 构造租户 handler（captcha 仅在启用时创建）。

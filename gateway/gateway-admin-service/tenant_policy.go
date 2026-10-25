@@ -74,6 +74,9 @@ type policyView struct {
 	Whitelist       policyListView    `json:"whitelist"`
 	Blacklist       policyListView    `json:"blacklist"`
 	CategoryActions map[string]string `json:"category_actions"`
+	// Scope 策略作用域（P2-4 T-3.1，§6.2）。
+	// 请求侧：缺省（nil）= 保持既有 scope 不变更；响应侧：回显当前生效作用域。
+	Scope *scopeWriteRequest `json:"scope,omitempty"`
 }
 
 // modelsConfigView 模型配置响应/请求体（§6.6）。
@@ -81,6 +84,8 @@ type modelsConfigView struct {
 	Version       int64    `json:"version"`
 	AllowedModels []string `json:"allowed_models"`
 	DefaultModel  string   `json:"default_model"`
+	// Scope 策略作用域（P2-4 T-3.1，§6.2）；语义同 policyView.Scope。
+	Scope *scopeWriteRequest `json:"scope,omitempty"`
 }
 
 // registerTenantPolicyMux 注册策略/模型端点（租户令牌 + CSRF（写））。
@@ -131,6 +136,14 @@ func (h *tenantHandler) handleTenantPolicyGet(w http.ResponseWriter, r *http.Req
 			view.CategoryActions = map[string]string{}
 		}
 	}
+	// P2-4 T-3.1：回显策略作用域（存量数据 = global）。
+	sc, err := parseDispatchScope(scopeRawOfPolicy(po))
+	if err != nil {
+		log.Printf("[tenant-policy] 作用域数据非法 tenant=%s: %v", tenantID, err)
+		tenantWriteError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	view.Scope = scopeResponseOf(sc)
 	tenantWriteJSON(w, http.StatusOK, view)
 }
 
@@ -172,6 +185,13 @@ func (h *tenantHandler) handleTenantPolicyPut(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// P2-4 T-3.1：策略作用域（缺省 = 保持既有；非法取值 / 集群未注册 → 拒绝写入）。
+	scope, _, err := h.resolveScopeWrite(r.Context(), req.Scope, scopeRawOfPolicy(cur))
+	if err != nil {
+		tenantWriteError(w, http.StatusBadRequest, "作用域非法："+err.Error())
+		return
+	}
+
 	wl := normalizePolicyEntries(req.Whitelist)
 	bl := normalizePolicyEntries(req.Blacklist)
 	wlJSON, _ := json.Marshal(wl)
@@ -182,6 +202,7 @@ func (h *tenantHandler) handleTenantPolicyPut(w http.ResponseWriter, r *http.Req
 		TenantID: tenantID, Version: curVersion,
 		WhitelistJSON: string(wlJSON), BlacklistJSON: string(blJSON),
 		CategoryActionsJSON: string(caJSON), UpdatedAt: time.Now().Unix(),
+		ScopeJSON: marshalDispatchScope(scope),
 	}
 	tx, err := h.store.Begin()
 	if err != nil {
@@ -220,6 +241,7 @@ func (h *tenantHandler) handleTenantPolicyPut(w http.ResponseWriter, r *http.Req
 		Whitelist:       wl,
 		Blacklist:       bl,
 		CategoryActions: req.CategoryActions,
+		Scope:           scopeResponseOf(scope),
 	})
 }
 
@@ -338,6 +360,14 @@ func (h *tenantHandler) handleTenantModelsConfigGet(w http.ResponseWriter, r *ht
 			view.AllowedModels = []string{}
 		}
 	}
+	// P2-4 T-3.1：回显策略作用域（存量数据 = global）。
+	sc, err := parseDispatchScope(modelsScopeRaw(mc))
+	if err != nil {
+		log.Printf("[tenant-models] 作用域数据非法 tenant=%s: %v", tenantID, err)
+		tenantWriteError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	view.Scope = scopeResponseOf(sc)
 	tenantWriteJSON(w, http.StatusOK, view)
 }
 
@@ -417,10 +447,18 @@ func (h *tenantHandler) handleTenantModelsConfigPut(w http.ResponseWriter, r *ht
 		req.DefaultModel = ""
 	}
 
+	// P2-4 T-3.1：策略作用域（缺省 = 保持既有；非法取值 / 集群未注册 → 拒绝写入）。
+	scope, _, err := h.resolveScopeWrite(r.Context(), req.Scope, modelsScopeRaw(cur))
+	if err != nil {
+		tenantWriteError(w, http.StatusBadRequest, "作用域非法："+err.Error())
+		return
+	}
+
 	allowedJSON, _ := json.Marshal(allowed)
 	mc := &ModelConfig{
 		TenantID: tenantID, AllowedModelsJSON: string(allowedJSON),
 		DefaultModel: req.DefaultModel, Version: curVersion, UpdatedAt: time.Now().Unix(),
+		ScopeJSON: marshalDispatchScope(scope),
 	}
 	tx, err := h.store.Begin()
 	if err != nil {
@@ -455,6 +493,7 @@ func (h *tenantHandler) handleTenantModelsConfigPut(w http.ResponseWriter, r *ht
 
 	tenantWriteJSON(w, http.StatusOK, modelsConfigView{
 		Version: curVersion + 1, AllowedModels: allowed, DefaultModel: req.DefaultModel,
+		Scope: scopeResponseOf(scope),
 	})
 }
 
