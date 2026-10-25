@@ -13,6 +13,23 @@ kubectl apply -k deploy/k8s
 kubectl apply -k deploy/k8s-overlays/multicluster
 ```
 
+### 1.0 原子切换单元（**不可拆开用**，team-lead 裁决①）
+
+> **本 overlay 是「副本数提升 + 共享库切换」的原子切换单元：两者必须同时生效。**
+> **不存在**「只加副本、不切共享库」的中间形态——因为基础 PVC
+> `gateway-admin-tenant-store` 是 `ReadWriteOnce`（`deploy/k8s/gateway-admin-service.yaml:355-368`），
+> **2 副本 + SQLite 卷 ⇒ 第二副本必然 Pending（不可调度）**，该中间形态本身即不可用。
+
+| 形态 | 副本数 | tenant store | 第二副本可调度 | 是否交付价值 |
+|------|--------|-------------|---------------|-------------|
+| 默认部署（不 apply overlay） | 1 | SQLite | — | ✅ 单副本形态，正常 |
+| **仅加副本、不切 PG**（无此交付物） | 2 | SQLite | ❌ **Pending**（RWO） | ❌ **无价值**：不可用形态，仅制造「以为可以只加副本」的误用风险 |
+| **本 overlay（原子切换）** | 2 | **PG 共享库**（SQLite 卷已移除） | ✅ 可调度 | ✅ 目标形态 |
+
+**因此**：`ReadWriteOnce` 卷下**必须先切共享库（PG）**，才能提升副本数；
+`kubectl apply -k deploy/k8s-overlays/multicluster` 是**唯一**进入 2 副本形态的入口，
+**不要**手工只改 `replicas` 或只删 PVC（会出现双写者或副本不可调度）。
+
 **启用前置（缺一不可）：**
 
 | # | 前置 | 说明 |

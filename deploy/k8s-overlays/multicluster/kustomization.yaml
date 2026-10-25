@@ -16,6 +16,11 @@
 #   （kustomize v2 本机实测；新版亦有同样的 cycle 检测）。故 overlay 置于 deploy/k8s 的
 #   **同级**目录 deploy/k8s-overlays/，以 `../../k8s` 引用基础清单，符合 kustomize 标准布局。
 #
+# 【原子切换单元（team-lead 裁决①）：副本数提升与共享库切换必须同时生效】
+#   基础 PVC gateway-admin-tenant-store 是 ReadWriteOnce ⇒「2 副本 + SQLite 卷」必然
+#   第二副本 Pending（不可调度），该中间形态无交付价值。故本 overlay 是唯一入口，
+#   不要手工只改 replicas 或只删 PVC（前者双写者、后者副本不可调度）。
+#
 # 【启用前置（缺一不可，见 README.md）】
 #   1. T-1.6 迁移工具已完成 SQLite → PG 数据迁移并对账通过（**必须在移除 SQLite 卷之前完成**）；
 #   2. 共享 PG 实例就绪且 otpmask-shared-pg Secret 已由 KMS/Vault 注入创建；
