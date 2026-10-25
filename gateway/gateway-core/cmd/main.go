@@ -79,7 +79,22 @@ func main() {
 	if err != nil {
 		log.Fatalf("构造 A2A 限流表签名器失败: %v", err)
 	}
-	st := store.NewMemory()
+	// P2-4 T-1.7：存储持久化（文件快照 + 原子写 + 重启恢复）。
+	// 显式开关：GATEWAY_CORE_STORE_SNAPSHOT_PATH 非空才启用；空 = 纯内存，零行为变化。
+	mem := store.NewMemory()
+	var st store.Store = mem
+	snapState := "内存（重启丢失）"
+	if snapPath := os.Getenv("GATEWAY_CORE_STORE_SNAPSHOT_PATH"); snapPath != "" {
+		ss := store.NewSnapshotStore(mem, snapPath, log.Default())
+		if err := ss.LoadSnapshot(); err != nil {
+			// fail-open：损坏快照拒绝加载后回退空内存启动。理由：core 重启可用性
+			// 优先，路由/策略配置可由管理面重新下发；若因快照损坏拒绝启动，整个
+			// 网关控制面失联，代价远大于短暂回退空态。
+			log.Printf("警告: gateway-core 快照加载失败，回退空内存启动（fail-open）: %v", err)
+		}
+		st = ss
+		snapState = snapPath
+	}
 	rt := defaultRouteTable(signer)
 	rlt := defaultRateLimitTable(rsigner)
 	// TEE 侧配额下发器（S3）：OTP_CORE_TEE_URL 为空 = nil（预算/TPM 不下发，仅在响应 Note 中说明）
@@ -114,8 +129,8 @@ func main() {
 		log.Fatalf("初始化 A2A 注册中心失败: %v", err)
 	}
 
-	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d 限流版本=%d TEE配额下发=%v 变更审计=%s A2A注册中心=%s",
-		addr, authToken != "", rt.Version, rlt.Version, teeQuota != nil, auditState, a2aStatus)
+	log.Printf("gateway-core 启动: addr=%s 鉴权=%v 路由版本=%d 限流版本=%d TEE配额下发=%v 变更审计=%s A2A注册中心=%s 存储快照=%s",
+		addr, authToken != "", rt.Version, rlt.Version, teeQuota != nil, auditState, a2aStatus, snapState)
 	// 控制面无流式响应，全量超时；body 上限防资源耗尽（T-1 评审项）
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -157,15 +172,15 @@ func setupA2ARegistry(srv *api.Server) (string, error) {
 		return "", fmt.Errorf("生产模式必须配置 A2A_JWT_SECRET（静态 token 仅在 A2A_DEV_MODE=true 时可用）")
 	}
 	cfg := a2aregistry.Config{
-		DSN:            dsn,
-		PublicMode:     os.Getenv("A2A_PUBLIC_MODE"),
-		GatewayBase:    os.Getenv("A2A_GATEWAY_PUBLIC_BASE"),
-		TenantDomains:  parseTenantDomains(os.Getenv("A2A_TENANT_DOMAINS")),
-		JWTSecret:      jwtSecret,
-		StaticToken:    staticToken,
-		SnapshotToken:  os.Getenv("A2A_SNAPSHOT_TOKEN"),
-		DevMode:        devMode,
-		JKUAllowlist:   splitCSV(os.Getenv("A2A_JKU_ALLOWLIST")),
+		DSN:           dsn,
+		PublicMode:    os.Getenv("A2A_PUBLIC_MODE"),
+		GatewayBase:   os.Getenv("A2A_GATEWAY_PUBLIC_BASE"),
+		TenantDomains: parseTenantDomains(os.Getenv("A2A_TENANT_DOMAINS")),
+		JWTSecret:     jwtSecret,
+		StaticToken:   staticToken,
+		SnapshotToken: os.Getenv("A2A_SNAPSHOT_TOKEN"),
+		DevMode:       devMode,
+		JKUAllowlist:  splitCSV(os.Getenv("A2A_JKU_ALLOWLIST")),
 	}
 	reg, err := a2aregistry.New(cfg, srv.PolicyAuditChain())
 	if err != nil {
