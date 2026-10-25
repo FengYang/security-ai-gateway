@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"security-ai-gateway/cipher/mask"
+	"security-ai-gateway/gateway/auditexport"
 	"security-ai-gateway/gateway/tee-infer-service/cacheengine"
 	"security-ai-gateway/gateway/tee-infer-service/mcpguard"
 	"security-ai-gateway/gateway/tee-infer-service/mcpproto"
@@ -177,7 +178,11 @@ type teeServer struct {
 	// A 项（判据 4 扩展）：数据面明文路由影子的**窗口级汇总上报**幂等状态（nil = 不判重）。
 	shadowReports *shadowReportState
 	audit         *auditChain // 审计哈希链
-	guard         *guardrail  // 内容安全检测（M9-4）
+	// P2-4 T-4.2：审计链导出端点配置（零值 = 未启用，路由不注册）。
+	auditExportCfg auditexport.Config
+	// P2-4 T-4.2：锚定文件路径（只读读取最后一条锚定记录；空 = 未启用锚定）。
+	auditAnchorPath string
+	guard           *guardrail // 内容安全检测（M9-4）
 	// 输入侧语义分类器侧车探活（2026-09-26；nil = 未配置侧车，此时用进程内关键词分类器，
 	// 不存在"不可用"问题）；不健康 → readiness 503。
 	guardProbe *guardClassifierProbe
@@ -3977,6 +3982,10 @@ func main() {
 	cmaasAPIKey := flag.String("cmaas-api-key", "", "C-MaaS API Key（DASHSCOPE_API_KEY，Bearer 透传代理；未指定时回退环境变量 CMAAS_API_KEY，推荐经 deploy/secrets/cmaas.env 注入）")
 	cmaasModel := flag.String("cmaas-model", "", "C-MaaS 缺省模型 code（cmaas-glm-5.2 等；请求未指定模型时使用）")
 	auditFile := flag.String("audit-file", "", "审计事件 WORM 文件路径（JSON Lines 只追加；为空 = 内存模式）")
+	auditExportEnabled := flag.Bool("audit-export-enabled", false, "审计链导出端点开关（P2-4 T-4.2）：false（默认）= 不注册 /v1/internal/audit/chain/export（请求 404，零新增攻击面）")
+	auditExportToken := flag.String("audit-export-token", "", "审计链导出端点静态 Bearer 令牌（**临时联调口径**，待 T-2.3 集群身份凭证替换）；空 = deny-all（全部 403）")
+	auditExportCIDRs := flag.String("audit-export-cidrs", "", "审计链导出端点来源 IP CIDR 白名单（逗号分隔，如 10.0.0.0/8,192.168.1.1/32）；**空 = 拒绝所有来源**，启用时为空即拒绝启动")
+	auditExportMax := flag.Int("audit-export-max", auditexport.DefaultMaxLimit, "审计链导出单次导出行数上限（保护：超大响应不拖垮推理面）")
 	auditAnchor := flag.String("audit-anchor", "", "审计锚定文件路径（链尾哈希追加；仅 audit-file 开启时生效）")
 	auditFsync := flag.String("audit-fsync", "batch", "审计 WORM 落盘强度（P1-7 T0 / D-17）：batch=每 1000 条或每 1 秒 fsync（默认；掉电最多丢最近 1000 条/1 秒）｜per_event=每事件 fsync（合规档，须重估 V-10 p99）")
 	auditAnchorInterval := flag.Duration("audit-anchor-interval", time.Hour, "审计周期锚定间隔（T10，MOD8；默认 1h；仅 -audit-anchor 配置时生效）。锚定链尾哈希供 audit-verify 复核截断（D-9）")
@@ -4628,6 +4637,22 @@ func main() {
 	mux.HandleFunc("/audit/anchor", srv.handleAuditAnchor)                             // C-5 审计锚定
 	mux.HandleFunc("/audit/retention", srv.handleAuditRetention)                       // P1-7 T9：留存/分层声明读写（§6.4）
 	mux.HandleFunc("/audit/canary", srv.handleAuditCanary)                             // P1-7 T15：租户级灰度开关读写（§7.10；GET 快照 / PUT 切换并落链）
+	// P2-4 T-4.2：审计链导出端点（**默认关闭**：未启用即不注册 → 404）。
+	// ⚠️ T-2.3 接线点：授权由 auditexport.Authorizer 提供，真实实现（集群身份凭证
+	//    签发/校验/轮换/吊销）就绪后在此注入替换临时静态令牌口径。
+	if *auditExportEnabled {
+		cfg, cerr := setupTeeAuditExport(*auditExportCIDRs, *auditExportToken, *auditExportMax)
+		if cerr != nil {
+			log.Fatalf("[audit] 审计链导出端点配置非法（fail-closed 拒绝启动）: %v", cerr)
+		}
+		srv.auditExportCfg = cfg
+		srv.auditAnchorPath = *auditAnchor
+		mux.HandleFunc("/v1/internal/audit/chain/export", srv.handleAuditExport)
+		log.Printf("[audit] 审计链导出端点已注册：GET /v1/internal/audit/chain/export（schema=tee 来源=%s 上限=%d 授权=%s）",
+			*auditExportCIDRs, cfg.MaxLimit, auditExportAuthState(cfg))
+	} else {
+		log.Printf("[audit] -audit-export-enabled 缺省 → 审计链导出端点未注册（默认关闭，零行为变化）")
+	}
 	mux.HandleFunc("/metrics", srv.handleMetrics)                                      // M10 可观测性
 	mux.HandleFunc("/config", srv.handleConfig)                                        // M3-B 安全中心：配置只读快照
 	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig)                     // M3-B 高敏复核：Guardrail 降级生效点
