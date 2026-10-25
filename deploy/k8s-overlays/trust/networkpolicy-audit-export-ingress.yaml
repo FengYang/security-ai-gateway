@@ -1,0 +1,115 @@
+# P2-4 T-4.3：导出端点的**网络边界（可选纵深防御）** —— 默认不启用，需先完成核对清单
+#
+# ⚠️ 为什么默认不启用：本文件对 gateway-core / tee-infer 的**整个容器端口**做入站收敛，
+# 而导出端点与业务端点**同端口**（gateway-core 8085、tee-infer 19090）→ NetworkPolicy 属
+# L3/L4，**无法按 URL 路径放行导出、拒绝业务**，只能整体收敛来源。
+# 一旦放行项不全会**误伤数据面**（插件拉表失败 / TEE 配额调用失败 / 抓取中断）。
+#
+# 【应用层才是路径级边界】T-4.2 已实现：
+#   * 来源 CIDR 白名单（空 = 拒绝所有来源；启用时为空 → 拒绝启动）
+#   * Bearer 令牌（空 = deny-all）
+# → 即「默认拒绝」在未配置 CIDR/令牌时已成立；本策略只作为**纵深防御**的第二道网。
+#
+# 【启用前核对清单（逐项确认，缺一不得 apply）】
+#   1. 数据面插件（经 Higress McpBridge DNS registry 拉取 gateway-core 路由/限流表）的
+#      **真实来源命名空间与标签**（属 P1-8 域，本任务不得改动 deploy/higress/**）：
+#        kubectl get pods -A --show-labels | grep -i higress
+#      → 把下方 REPLACE_WITH_HIGRESS_NAMESPACE 换成实际命名空间（**不确定就用命名空间级放行**，
+#        不要臆造 pod 标签）。
+#   2. 管理面 admin-service → gateway-core 的策略下发调用是否在用 → 确认放行项。
+#   3. gateway-core → tee-infer（19090）的 TEE 配额下发是否在用 → 确认放行项。
+#   4. envoy-gateway → tee-infer（19090）的推理转发是否在用 → 确认放行项。
+#   5. Prometheus 抓取（prometheus.io/scrape 注解）目标端口是否包含 8085 / 19090 → 确认放行项。
+#   6. 中央审计采集器来源（应用层 CIDR 白名单）是否与本策略放行项一致。
+#   7. 建议顺序：先在**测试集群**apply → 观察 15 分钟（插件拉表/配额/抓取/推理是否正常）
+#      → 再推广到生产；出现异常立即 kubectl delete networkpolicy 撤销（策略删除即恢复放通）。
+---
+# ① gateway-core（8085）：数据面拉表 + 管理面下发 + 中央采集器 + 抓取
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-core-ingress-baseline
+  namespace: otpmask
+spec:
+  podSelector:
+    matchLabels:
+      app: gateway-core
+  policyTypes: ["Ingress"]
+  ingress:
+  # Prometheus 抓取 /metrics
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 8085
+  # 数据面插件拉表（经 Higress McpBridge DNS registry 出站；命名空间级放行，标签属 P1-8 域待核对）
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: REPLACE_WITH_HIGRESS_NAMESPACE
+    ports:
+    - protocol: TCP
+      port: 8085
+  # 管理面 → 控制面（策略/处方下发）
+  - from:
+    - podSelector:
+        matchLabels:
+          app: gateway-admin-service
+    ports:
+    - protocol: TCP
+      port: 8085
+  # 中央审计采集器（跨集群拉取 /v1/internal/audit/chain/export）
+  - from:
+    - podSelector:
+        matchLabels:
+          otpmask.io/role: central-collector
+    ports:
+    - protocol: TCP
+      port: 8085
+---
+# ② tee-infer-service（19090）：推理转发 + TEE 配额下发 + 抓取 + 中央采集器
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tee-infer-service-ingress-baseline
+  namespace: otpmask
+spec:
+  podSelector:
+    matchLabels:
+      app: tee-infer-service
+  policyTypes: ["Ingress"]
+  ingress:
+  # Prometheus 抓取 /metrics
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 19090
+  # 网关数据面 → TEE 推理
+  - from:
+    - podSelector:
+        matchLabels:
+          app: envoy-gateway
+    ports:
+    - protocol: TCP
+      port: 19090
+  # 控制面 → TEE 配额下发
+  - from:
+    - podSelector:
+        matchLabels:
+          app: gateway-core
+    ports:
+    - protocol: TCP
+      port: 19090
+  # 中央审计采集器（跨集群拉取 /v1/internal/audit/chain/export?schema=tee）
+  - from:
+    - podSelector:
+        matchLabels:
+          otpmask.io/role: central-collector
+    ports:
+    - protocol: TCP
+      port: 19090

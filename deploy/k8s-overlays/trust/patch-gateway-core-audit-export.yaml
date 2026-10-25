@@ -1,0 +1,37 @@
+# P2-4 T-4.3：gateway-core 审计链导出端点装配（env，T-4.2 口径）
+#
+# 开关语义（gateway/gateway-core/cmd/main.go:216-220，逐条对齐）：
+#   GATEWAY_CORE_AUDIT_EXPORT_ENABLED = 1|true|yes|on 才启用；其余 = 路由不注册 → 404。
+#   GATEWAY_CORE_AUDIT_EXPORT_CIDRS   = 来源 IP CIDR 白名单（逗号分隔）；
+#                                      **启用时为空 → 拒绝启动**（配置遗漏不得变成"启用即全开"）。
+#   GATEWAY_CORE_AUDIT_EXPORT_TOKEN   = 静态 Bearer 令牌；**空 = deny-all（全部 403）**。
+#   GATEWAY_CORE_AUDIT_EXPORT_MAX     = 单次导出行数上限（保护推理面）。
+#
+# 取值来源（均非明文凭据）：
+#   CIDRS ← ConfigMap gateway-core-audit-export/cidrs（占位值未替换 → CIDR 非法 → 拒绝启动，fail-closed）
+#   TOKEN ← Secret otpmask-audit-export/export-token（空 → deny-all）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-core
+  namespace: otpmask
+spec:
+  template:
+    spec:
+      containers:
+      - name: gateway-core
+        env:
+        - name: GATEWAY_CORE_AUDIT_EXPORT_ENABLED
+          value: "1"
+        - name: GATEWAY_CORE_AUDIT_EXPORT_CIDRS
+          valueFrom:
+            configMapKeyRef:
+              name: gateway-core-audit-export
+              key: cidrs
+        - name: GATEWAY_CORE_AUDIT_EXPORT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-audit-export
+              key: export-token
+        - name: GATEWAY_CORE_AUDIT_EXPORT_MAX
+          value: "10000"

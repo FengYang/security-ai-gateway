@@ -1,0 +1,32 @@
+# P2-4 T-4.3：审计链导出端点的**来源 IP CIDR 白名单**（非敏感，可入清单）
+#
+# 默认拒绝口径（T-4.2）：
+#   * CIDR 为空 → 应用层**拒绝启动**（gateway-core：setupAuditExport 报错；tee：setupTeeAuditExport 报错），
+#     即「启用端点」必须同时给出白名单，不存在「启用即全开」；
+#   * 白名单按**来源 IP** 判定（代理/节点出口 IP），不是 Pod IP。
+#
+# ⚠️ 占位值未替换时：CIDR 解析非法 → **拒绝启动**（fail-closed），不会误放行。
+#    替换步骤见 README.md「启用步骤」。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-core-audit-export
+  namespace: otpmask
+  labels:
+    app: gateway-core
+data:
+  # 允许访问 gateway-core 导出端点的来源 CIDR（逗号分隔）。
+  # 例：中央采集器所在集群的出口网段，如 "10.20.0.0/16,10.30.0.0/16"
+  cidrs: "REPLACE_WITH_CENTRAL_COLLECTOR_CIDRS"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tee-infer-audit-export
+  namespace: otpmask
+  labels:
+    app: tee-infer-service
+data:
+  # 允许访问 tee-infer-service 导出端点的来源 CIDR（逗号分隔）。
+  # ⚠️ tee 端点与推理业务**同端口 19090** → 白名单只约束导出端点，不影响推理面。
+  cidrs: "REPLACE_WITH_CENTRAL_COLLECTOR_CIDRS"

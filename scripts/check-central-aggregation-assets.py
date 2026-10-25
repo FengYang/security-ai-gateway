@@ -53,7 +53,9 @@ PLACEHOLDER_RE = re.compile(r"(REPLACE_[A-Z_]+|<user>|<pass>|<password>|\$\(|xxx
 
 DEFAULT_DIRS = [
     os.path.join("deploy", "monitoring", "central"),
+    os.path.join("deploy", "monitoring-overlays", "remote-write-mtls"),
     os.path.join("deploy", "k8s-overlays", "multicluster"),
+    os.path.join("deploy", "k8s-overlays", "trust"),
 ]
 
 
@@ -222,6 +224,89 @@ def check_embedded_yaml(directory: str, rep: Report) -> None:
                 rep.add(PASS, item, "可解析（顶层键: {}）".format(
                     sorted(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__
                 ))
+
+
+def walk_dicts(node: object):
+    """递归遍历任意 YAML 结构中的所有 dict（用于定位 env/args 片段）。"""
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from walk_dicts(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from walk_dicts(v)
+
+
+def check_secret_reference(directory: str, rep: Report) -> None:
+    """检查项 7：导出端点凭证/白名单必须经 Secret / ConfigMap 引用（禁明文与默认写死）。
+
+    - `*AUDIT_EXPORT_TOKEN`  → 必须 valueFrom.secretKeyRef（令牌不得写在清单里）
+    - `*AUDIT_EXPORT_CIDRS`  → 必须 valueFrom.configMapKeyRef（白名单来源可追溯、可运维替换）
+    """
+    found = 0
+    for f in yaml_files(directory):
+        try:
+            docs = load_docs(f)
+        except Exception:  # noqa: BLE001
+            continue
+        for doc in docs:
+            for d in walk_dicts(doc):
+                name = d.get("name")
+                if not isinstance(name, str):
+                    continue
+                vf = d.get("valueFrom")
+                if not isinstance(vf, dict):
+                    continue
+                if "AUDIT_EXPORT_TOKEN" in name:
+                    found += 1
+                    if "secretKeyRef" in vf:
+                        rep.add(PASS, "凭证引用: {}#{}".format(os.path.basename(f), name), "经 secretKeyRef")
+                    else:
+                        rep.add(FAIL, "凭证引用: {}#{}".format(os.path.basename(f), name), "令牌未走 Secret 引用")
+                elif "AUDIT_EXPORT_CIDRS" in name:
+                    found += 1
+                    if "configMapKeyRef" in vf:
+                        rep.add(PASS, "白名单引用: {}#{}".format(os.path.basename(f), name), "经 configMapKeyRef")
+                    else:
+                        rep.add(FAIL, "白名单引用: {}#{}".format(os.path.basename(f), name), "CIDR 白名单未走 ConfigMap 引用")
+    if found == 0:
+        rep.add(SKIP, "凭证引用: {}".format(directory), "该目录无导出端点开关引用（不适用）")
+
+
+def check_remote_write_endpoint(directory: str, rep: Report) -> None:
+    """检查项 8：remote_write 目标地址必须可配置（占位符），禁止写死内网地址。
+
+    口径：中央侧落地形态由客户环境决定（客户既有 Prometheus 或我方交付的 central 栈），
+    两者地址不同 → 资产中只能留占位符 `REPLACE_WITH_CENTRAL_WRITE_ENDPOINT`。
+    """
+    found = 0
+    for f in yaml_files(directory) + [
+        os.path.join(directory, "prometheus-remote-write-snippet.yml")
+    ]:
+        if not os.path.isfile(f):
+            continue
+        try:
+            text = open(f, "r", encoding="utf-8").read()
+        except OSError:
+            continue
+        if "remote_write" not in text:
+            continue
+        found += 1
+        urls = re.findall(r"url:\s*[\"']?([^\"'\n]+)", text)
+        hardcoded = [u.strip() for u in urls if "REPLACE_WITH" not in u and "prometheus-central" in u]
+        placeholder = [u.strip() for u in urls if "REPLACE_WITH" in u]
+        if hardcoded:
+            rep.add(
+                FAIL,
+                "remote_write 地址: {}".format(os.path.basename(f)),
+                "写死了内网地址: {}".format(hardcoded[:2]),
+            )
+        elif placeholder:
+            rep.add(PASS, "remote_write 地址: {}".format(os.path.basename(f)), "占位符可配置: {}".format(placeholder[:1]))
+        else:
+            rep.add(SKIP, "remote_write 地址: {}".format(os.path.basename(f)), "未见 remote_write url（不适用）")
+    if found == 0:
+        rep.add(SKIP, "remote_write 地址: {}".format(directory), "该目录无 remote_write 配置")
 
 
 def check_alertmanager(directory: str, rep: Report) -> None:
@@ -419,6 +504,8 @@ def main(argv: list[str]) -> int:
         check_dashboards(d, rep)
         check_alertmanager(d, rep)
         check_remote_write_receiver(d, rep)
+        check_secret_reference(d, rep)
+        check_remote_write_endpoint(d, rep)
         check_promtool(d, rep, args.promtool)
 
     print("\n" + "=" * 78)

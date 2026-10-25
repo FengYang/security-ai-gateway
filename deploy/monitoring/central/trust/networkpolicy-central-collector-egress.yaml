@@ -1,0 +1,52 @@
+# P2-4 T-4.3：中央审计采集器的**出站默认拒绝**（跨集群导出通道边界）
+#
+# 作用对象：带标签 `otpmask.io/role=central-collector` 的 Pod（中央侧审计采集器，
+# **由客户环境提供**，我方不交付该组件本体）。本策略按标签契约对其施加边界：
+#   默认拒绝**全部出站**，仅白名单放行：
+#     ① DNS（kube-system:53）——解析各集群地址；
+#     ② 各集群的**审计链导出端点端口**：gateway-core 8085 / tee-infer-service 19090。
+#
+# 为什么把边界放在中央侧（而不是各集群侧）：
+#   * 跨集群采集是**本次新增的信任面**（既有数据面策略不受影响，零误伤风险）；
+#   * 各集群侧因导出端点与业务端点**同端口**（L3/L4 无法按路径隔离），
+#     收敛整端口来源会误伤插件拉表/配额/抓取 → 该侧边界以「应用层 deny-all + 可选 NP」
+#     交付（见 deploy/k8s-overlays/trust/README.md）。
+#
+# 默认拒绝口径：
+#   * 未列入白名单的目标一律拒绝出站；
+#   * 白名单网段占位值未替换 → 该集群采集不可达（**fail-closed**，不会静默全开）。
+#
+# 【IPBlock 注意】ipBlock 的 CIDR 是**集群出口网段**（Pod 源 IP 未必落在其中，
+# 取决于 CNI 的 SNAT 策略）→ 请以「采集器 Pod 实际出口 IP」为准核对。
+#   核对命令（客户环境）：kubectl -n otpmask get pod -l otpmask.io/role=central-collector -o wide
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: central-collector-egress-baseline
+  namespace: otpmask
+spec:
+  podSelector:
+    matchLabels:
+      otpmask.io/role: central-collector
+  policyTypes: ["Egress"]
+  egress:
+  # ① DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # ② 各集群审计链导出端点（按集群逐条列出；同一集群多网段时逗号并列）
+  #    形态：网关专用网络/专线网段（跨集群走专线或 VPN 时填专线出口网段）
+  - to:
+    - ipBlock:
+        cidr: REPLACE_WITH_CLUSTER_A_COLLECTOR_EGRESS_CIDR
+    ports:
+    - protocol: TCP
+      port: 8085   # gateway-core：GET /v1/internal/audit/chain/export?schema=core
+    - protocol: TCP
+      port: 19090  # tee-infer-service：GET /v1/internal/audit/chain/export?schema=tee

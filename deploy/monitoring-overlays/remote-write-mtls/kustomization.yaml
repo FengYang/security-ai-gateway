@@ -1,0 +1,38 @@
+# P2-4 T-4.3：各集群 Prometheus 的 **remote-write mTLS** 发送侧 overlay
+#
+# 定位：为 per-集群 Prometheus（deploy/monitoring/prometheus.yaml）补齐跨集群写入的
+# **客户端证书挂载**与**目标地址可配置化**。本 overlay 只做部署侧装配，
+# 不改动默认监控栈（`kubectl apply -k deploy/monitoring` 产物不变）。
+#
+# 用法：
+#   1) 签发并注入证书（禁止入库）：
+#        kubectl -n otpmask create secret tls otpmask-remote-write-mtls \
+#          --cert=/path/client.crt --key=/path/client.key --ca-file=/path/ca.crt
+#      （模板见 secret-remote-write-mtls.example.yaml，**不在 resources 内，勿 apply**）
+#   2) 应用 overlay（挂载证书卷）：
+#        kubectl apply -k deploy/monitoring-overlays/remote-write-mtls
+#   3) 把 prometheus-remote-write-snippet.yml 的内容并入该集群的 prometheus.yml
+#      （ConfigMap 数据是字符串，strategic merge 无法安全改写 → 用文件合并/运维流程，
+#       本 overlay 不代劳，避免误改既有配置）：
+#        - global.external_labels.cluster: <本集群唯一 ID>   ← cluster 标签口径来源
+#        - remote_write: url / tls_config / authorization
+#      合并后重启 Prometheus：kubectl -n otpmask rollout restart deployment/prometheus
+#
+# 【cluster 标签口径】snippet 中的 external_labels.cluster 是中央侧 `by (cluster)`、
+# 看板变量、Alertmanager `equal: [cluster]` 的唯一来源；每集群必须唯一，
+# 建议与 T-2.1 registry 的 cluster_id 一致。
+#
+# 【目标地址必须可配置】url 一律为占位符 REPLACE_WITH_CENTRAL_WRITE_ENDPOINT，
+# **禁止写死内网地址**：中央侧落地形态由客户环境决定（客户既有 Prometheus 或我方交付的
+# deploy/monitoring/central 二选一），两者地址不同 → 详见该目录 README。
+#
+# 目录位置：与 deploy/monitoring 同级（bases: ../../monitoring）——kustomize 禁止
+# base 为 overlay 的祖先目录（放 deploy/monitoring/overlays/... 会 cycle detected）。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+- ../../monitoring
+
+patchesStrategicMerge:
+- patch-prometheus-tls-volume.yaml

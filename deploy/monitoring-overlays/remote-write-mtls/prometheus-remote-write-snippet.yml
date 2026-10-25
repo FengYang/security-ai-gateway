@@ -1,0 +1,46 @@
+# P2-4 T-4.3：per-集群 Prometheus 的 remote_write 配置片段（**待合并进 prometheus.yml**）
+#
+# ⚠️ 这是**片段**，不是完整 prometheus.yml。请并入该集群 prometheus.yml 的对应位置：
+#   global.external_labels.cluster → global.external_labels 下
+#   remote_write                   → 顶层
+# 合并后重启：kubectl -n otpmask rollout restart deployment/prometheus
+#
+# 【cluster 标签口径】external_labels.cluster 会被 remote-write 附加到每条样本，
+# 是中央侧看板/告警/去重的唯一来源；每集群唯一（建议 = registry cluster_id）。
+external_labels:
+  cluster: REPLACE_WITH_CLUSTER_ID
+remote_write:
+# 【目标地址必须可配置 · 禁止写死内网地址】
+#   形态 A（客户既有 Prometheus/监控平台）：https://<客户接收端>/api/v1/write
+#   形态 B（我方交付的中央栈）：http(s)://prometheus-central.<中央命名空间>.svc.cluster.local:9090/api/v1/write
+#   两者均需按客户环境替换；形态 A 通常为 HTTPS + mTLS，形态 B 内网可先 HTTP（不跨公网）。
+- url: "REPLACE_WITH_CENTRAL_WRITE_ENDPOINT"
+  # 跨集群写入：放宽队列与批量，容忍网络抖动（按集群规模调整）
+  queue_config:
+    capacity: 10000
+    max_shards: 50
+    max_samples_per_send: 2000
+    batch_send_deadline: 10s
+    min_backoff: 1s
+    max_backoff: 60s
+  # 只发送需要的样本（示例白名单；按实际调整）
+  write_relabel_configs:
+  - source_labels: [__name__]
+    regex: "(otpmask_.*|up|gateway_core_.*)"
+    action: keep
+  # 【mTLS】证书由 deploy/monitoring-overlays/remote-write-mtls 的 overlay 挂载到
+  # /etc/prometheus/mtls（Secret otpmask-remote-write-mtls）。
+  # server_name 必须与接收端证书 SAN 一致，否则证书校验失败。
+  tls_config:
+    ca_file: /etc/prometheus/mtls/ca.crt
+    cert_file: /etc/prometheus/mtls/tls.crt
+    key_file: /etc/prometheus/mtls/tls.key
+    server_name: REPLACE_WITH_CENTRAL_SERVER_NAME
+    insecure_skip_verify: false
+  # 【鉴权】（三选一，按客户环境；Bearer 令牌文件由 Secret 挂载，禁止明文写死在配置里）
+  authorization:
+    type: Bearer
+    credentials_file: /etc/prometheus/mtls/token
+  # basic_auth:
+  #   username: REPLACE_USER
+  #   password_file: /etc/prometheus/mtls/password

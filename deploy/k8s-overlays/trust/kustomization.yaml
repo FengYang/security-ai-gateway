@@ -1,0 +1,58 @@
+# P2-4 T-4.3：跨集群通道信任——**审计链导出端点**启用与边界（per-cluster 侧）
+#
+# 定位：为 T-4.2 已实现的审计链导出端点提供**部署侧装配**（开关 + 凭证引用 + 来源白名单）。
+# 默认关闭语义保持不变：
+#   * gateway-core：GATEWAY_CORE_AUDIT_EXPORT_ENABLED 未设 → 路由不注册 → 404（零新增攻击面）
+#   * tee-infer-service：-audit-export-enabled 未设 → 路由不注册 → 404
+#   本 overlay **显式打开**这两个端点 → 属**主动启用**，必须与 README 的核对清单一并执行。
+#
+# 【与 T-4.2 开关的对应关系】
+#   gateway-core（env，T-4.2 gateway/gateway-core/cmd/main.go:216-220）
+#     GATEWAY_CORE_AUDIT_EXPORT_ENABLED  ← 本 overlay 置 "1"（1|true|yes|on 才启用）
+#     GATEWAY_CORE_AUDIT_EXPORT_CIDRS    ← 本 overlay 取自 ConfigMap（来源 IP CIDR 白名单；
+#                                         **启用时为空 = 拒绝启动**，fail-closed）
+#     GATEWAY_CORE_AUDIT_EXPORT_TOKEN    ← 本 overlay 取自 Secret（空 = deny-all，全部 403）
+#     GATEWAY_CORE_AUDIT_EXPORT_MAX      ← 本 overlay 置 10000（单次导出行数上限）
+#   tee-infer-service（flag，T-4.2 gateway/tee-infer-service/main.go:3985-3988）
+#     -audit-export-enabled / -audit-export-cidrs / -audit-export-token / -audit-export-max
+#     ← 本 overlay 通过 **args 追加**（JSON6902）传入，值取自 env（env → args 的 $(VAR) 展开），
+#       避免 strategic merge 覆盖整段 args（args 无 merge key → 会被整体替换，破坏既有参数）。
+#
+# 【凭证】令牌一律经 Secret 引用（otpmask-audit-export/export-token），**禁止明文入库**；
+# 模板见 secret-audit-export.example.yaml（**不在 resources 内，勿 apply**）。
+# 【T-2.3 依赖】当前 TokenAuthorizer 为**临时联调口径**；T-2.3「集群身份凭证」落地后
+# 应替换为集群身份鉴权，届时本 overlay 的 TOKEN 引用随之替换。
+#
+# 【网络边界】导出端点与业务端点**同端口**（gateway-core 8085、tee-infer 19090），
+# NetworkPolicy 属 L3/L4，**无法按 URL 路径隔离** → 路径级隔离由 T-4.2 的
+# 「来源 CIDR 白名单（空=拒绝所有来源）+ Bearer 令牌（空=deny-all）」承担；
+# networkpolicy-audit-export-ingress.yaml 为**可选的纵深防御**（默认不启用，
+# 启用前必须完成 README 的核对清单，避免误伤数据面）。
+#
+# 用法：kubectl apply -k deploy/k8s-overlays/trust
+# 目录位置：与 deploy/k8s 同级（bases: ../../k8s）——kustomize 禁止 base 为 overlay 的祖先目录。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+- ../../k8s
+
+resources:
+- configmap-audit-export-cidrs.yaml
+
+patchesStrategicMerge:
+- patch-gateway-core-audit-export.yaml
+
+patchesJson6902:
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: tee-infer-service
+    namespace: otpmask
+  path: patch-tee-infer-audit-export.json.yaml
+
+# 【默认不启用】networkpolicy-audit-export-ingress.yaml：
+# 入站默认拒绝会同时约束业务流量（插件拉表、TEE 配额调用、抓取），
+# 必须在核对清单确认放行项后再单独 apply：
+#   kubectl apply -f deploy/k8s-overlays/trust/networkpolicy-audit-export-ingress.yaml

@@ -1,0 +1,27 @@
+# P2-4 T-4.3：per-集群 Prometheus 挂载 remote-write mTLS 客户端证书
+#
+# 只挂载证书（Secret → 只读卷），不改任何 prometheus.yml 内容：
+# remote_write 的 tls_config / authorization / 目标地址由
+# prometheus-remote-write-snippet.yml 合并进 prometheus.yml（见 README 第 3 步）。
+#
+# 挂载路径与 snippet 中的 tls_config 路径严格一致：
+#   /etc/prometheus/mtls/{ca.crt,tls.crt,tls.key}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: otpmask
+spec:
+  template:
+    spec:
+      containers:
+      - name: prometheus
+        volumeMounts:
+        - name: remote-write-mtls
+          mountPath: /etc/prometheus/mtls
+          readOnly: true
+      volumes:
+      - name: remote-write-mtls
+        secret:
+          secretName: otpmask-remote-write-mtls
+          defaultMode: 0400

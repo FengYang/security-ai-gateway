@@ -1,0 +1,51 @@
+# P2-4 T-4.3：tee-infer-service 审计链导出端点装配（flag，T-4.2 口径）
+#
+# 为什么用 RFC6902 而不是 strategic merge：容器 args 是**无 merge key 的字符串列表**，
+# strategic merge 会**整体替换** args → 既有参数（-sig-key / -attest-token / -output-guard /
+# -cmaas-url / -cmaas-model / -dev-mode）会被清空，服务直接起不来。
+# 故本补丁只做「追加」：args 末尾追加开关参数，env 末尾追加两个引用。
+#
+# 开关语义（gateway/tee-infer-service/main.go:3985-3988）：
+#   -audit-export-enabled  未设 = 路由不注册 → 404（默认关闭）
+#   -audit-export-cidrs    来源 IP CIDR 白名单；**启用时为空 → 拒绝启动**（fail-closed）
+#   -audit-export-token    静态 Bearer 令牌；**空 = deny-all（全部 403）**
+#   -audit-export-max      单次导出行数上限
+#
+# 参数值经 env 的 $(VAR) 展开传入 → 令牌与 CIDR 均**不经命令行明文**（避免 ps 可见）。
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "-audit-export-enabled"
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "-audit-export-cidrs"
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "$(AUDIT_EXPORT_CIDRS)"
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "-audit-export-token"
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "$(AUDIT_EXPORT_TOKEN)"
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "-audit-export-max"
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "10000"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: AUDIT_EXPORT_CIDRS
+    valueFrom:
+      configMapKeyRef:
+        name: tee-infer-audit-export
+        key: cidrs
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: AUDIT_EXPORT_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: otpmask-audit-export
+        key: export-token
