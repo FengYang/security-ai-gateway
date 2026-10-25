@@ -100,9 +100,11 @@ func (c *Coordinator) Start() {
 	//      协调器实际不工作（租约无人续）；
 	//   ② 本次 Stop 会 close 一个已关闭的 channel，直接 panic。
 	c.stopCh = make(chan struct{})
-	c.mu.Unlock()
-
+	// acquireLocked 的契约是「调用方须持锁」——它写 c.epoch / c.lease 并触发 notify。
+	// 此前在锁外调用，与 renewOrReacquire 的持锁调用不一致，构成数据竞争
+	// （-race 实测：Start 内的写 与 LeaderLease 内的读 竞争同一 lease 字段）。
 	_, _ = c.acquireLocked(true, nil)
+	c.mu.Unlock()
 
 	c.wg.Add(1)
 	go func() {
