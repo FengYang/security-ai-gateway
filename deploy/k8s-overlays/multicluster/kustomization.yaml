@@ -2,7 +2,7 @@
 #
 # 定位：本目录是 `deploy/k8s`（基础清单）之上的**可选 overlay**。基础清单
 # `deploy/k8s/*.yaml` 保持 `gateway-admin-service replicas=1` + PDB `maxUnavailable=0`
-# 的 C-18 单副本硬约束；只有显式 `kubectl apply -k deploy/k8s/overlays/multicluster`
+# 的 C-18 单副本硬约束；只有显式 `kubectl apply -k deploy/k8s-overlays/multicluster`
 # 才会切到本 overlay 的 2 副本形态。
 #
 # 用法：
@@ -17,10 +17,14 @@
 #   **同级**目录 deploy/k8s-overlays/，以 `../../k8s` 引用基础清单，符合 kustomize 标准布局。
 #
 # 【启用前置（缺一不可，见 README.md）】
-#   1. T-1.6 迁移工具已完成 SQLite → PG 数据迁移并对账通过；
+#   1. T-1.6 迁移工具已完成 SQLite → PG 数据迁移并对账通过（**必须在移除 SQLite 卷之前完成**）；
 #   2. 共享 PG 实例就绪且 otpmask-shared-pg Secret 已由 KMS/Vault 注入创建；
-#   3. tenant store PG 装配（main.go 打开入口）已接通——**未接通前第二副本因
-#      tenant store PVC 为 ReadWriteOnce 而 Pending，本 overlay 不生效**（安全阀）。
+#   3. tenant store PG 装配已接通（T-1.2b 已落地：main.go → openTenantStoreForConfig，
+#      TENANT_STORE_PG_DSN 非空走 PG、PG 打开失败 fail-closed 拒启动）。
+#
+# 【迁移顺序（硬要求，不可颠倒）】
+#   先在**旧形态（单副本 + SQLite 卷）**内跑 `admin-service migrate -action plan|export|import|verify`，
+#   verify 通过后再 apply 本 overlay。反序 → 源 SQLite 文件不可达，迁移无法执行。
 #
 # 兼容性：`resources`/`patchesStrategicMerge`/`patchesJson6902` 为 kustomize
 # v2(kubectl 1.14)~v5 均支持的字段（v5 起标记 deprecated 但仍可用）。
@@ -41,6 +45,8 @@ patchesStrategicMerge:
 - patch-admin-replicas.yaml
 # ③ PG 共享库 env（值全部取自 Secret 引用，无明文凭据）
 - patch-admin-security-pg-env.yaml
+# ③（补）tenant store 切 PG 后移除 SQLite 卷与挂载（RWO PVC 会卡住第二副本调度）
+- patch-admin-tenant-store-pg.yaml
 # ④ gateway-core 快照路径持久化 + WORM 审计卷（emptyDir → PVC）
 - patch-core-snapshot.yaml
 

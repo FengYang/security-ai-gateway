@@ -46,15 +46,21 @@ spec:
           value: "5"
         - name: LOGIN_LOCK_MIN
           value: "15"
-        # ---- tenant store PG DSN（**暂不启用**，依赖装配线）----
-        # 现状（2026-10 核实）：main.go 打开入口仍为 OpenTenantStore(...) = 固定 SQLite
-        # （gateway/gateway-admin-service/main.go:300），双方言入口
-        # OpenTenantStoreWithDialect(sqlutil.Postgres, dsn, ...) 已在 tenant_store.go:397 就绪
-        # 但**尚无 env 驱动的方言选择**。此时置该 env 无任何效果，且会让运维误判为「已共享库」，
-        # 故默认注释；待装配线接通后启用，并同时启用
-        # patch-admin-tenant-store-pg.yaml.example（移除 SQLite 卷）。
-        # - name: TENANT_STORE_PG_DSN
-        #   valueFrom:
-        #     secretKeyRef:
-        #       name: otpmask-shared-pg
-        #       key: tenant-store-dsn
+        # ---- tenant store PG DSN（**已接通**，T-1.2b 落地 2026-10-26）----
+        # 装配口径（实读代码，非记忆）：
+        #   main.go:299-305 → openTenantStoreForConfig(cfg)（tenant_store_open.go:26-34）
+        #     TENANT_STORE_PG_DSN 非空 → OpenTenantStoreWithDialect(sqlutil.Postgres, ...)
+        #     否则 TENANT_STORE_PATH 非空 → OpenTenantStore(...)（SQLite，逐字不变）
+        #     两者都空 → 租户门户未启用（不注册 /v1/tenant/*）
+        #   PG 打开/建表失败 → main.go log.Fatalf **fail-closed 拒启动**（不静默退回本地存储）。
+        #   **PG 优先**：两者都配时 cfg 两项都保留、运行时按 PG 选
+        #     （tenant_store_pg_wiring_test.go 用例④）⇒ 基础清单的 TENANT_STORE_PATH
+        #     保留即可（惰性 env），**基础清单零改动**。
+        #   TENANT_TOKEN_PEPPER 由基础清单以 secretKeyRef（非 optional）注入 ⇒ 已 fail-closed。
+        # 迁移顺序（硬要求）：先在旧形态（单副本 + SQLite 卷）内跑完 T-1.6 的
+        # `admin-service migrate -action plan|export|import|verify`，verify 通过后再 apply 本 overlay。
+        - name: TENANT_STORE_PG_DSN
+          valueFrom:
+            secretKeyRef:
+              name: otpmask-shared-pg
+              key: tenant-store-dsn

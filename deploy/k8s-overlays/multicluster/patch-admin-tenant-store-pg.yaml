@@ -1,0 +1,68 @@
+# P2-4 T-1.10 ③（补）：tenant store 由 SQLite 切到共享库 PG 后，**移除** SQLite 卷与挂载。
+#
+# 【装配口径核实（2026-10-26，实读代码，非记忆）】
+#   * 装配已接通：main.go:299-305 → `openTenantStoreForConfig(cfg)`
+#     （gateway/gateway-admin-service/tenant_store_open.go:26-34）
+#       —— `TENANT_STORE_PG_DSN` 非空 → `OpenTenantStoreWithDialect(sqlutil.Postgres, dsn, true, pepper)`；
+#          否则 `TENANT_STORE_PATH` 非空 → `OpenTenantStore(...)`（SQLite，既有行为逐字不变）；
+#          两者都空 → 租户门户未启用（不注册 /v1/tenant/*）。
+#   * **fail-closed**：PG 打开/建表失败 → main.go `log.Fatalf` **拒启动**，
+#     不静默退回本地存储（多副本各持一份租户数据会让跨集群一致性失效）。
+#   * **PG 优先**（tenant_store_pg_wiring_test.go 用例④）：两者都配时 cfg 两项**都保留**，
+#     运行时按 PG 选择 ⇒ 基础清单的 `TENANT_STORE_PATH` env 保留即可，**无需删除**
+#     （基础清单零改动；PG 形态下该 env 是惰性的）。
+#   * `TENANT_TOKEN_PEPPER` 由基础清单以 `secretKeyRef`（非 optional）注入
+#     （deploy/k8s/gateway-admin-service.yaml:114-118）⇒ 门户 fail-closed 已由基础清单保障，
+#     本补丁**不重复注入、不改动凭据来源**。
+#
+# 【为什么必须移除 SQLite 卷（不是"顺手清理"）】
+#   基础清单的 tenant-store PVC `gateway-admin-tenant-store` 为 `accessModes: ReadWriteOnce`
+#   （deploy/k8s/gateway-admin-service.yaml:355-368）。切 PG 后该卷**不再承载数据**，若继续挂载：
+#     ① 占用 RWO 调度约束——第二副本跨节点即 Pending；叠加本 overlay 的
+#        `replicas=2 + maxSurge=0 + maxUnavailable=1`，滚动升级会卡在「1 可用」无法推进；
+#     ② 本地不再需要 SQLite 明文落盘（数据在 PG），保留挂载属最小化原则下多余暴露面。
+#   ⇒ PG 形态下**卷与挂载成对移除**（两者都是 merge key = name 的列表项）。
+#
+# 【迁移顺序（硬要求，不可颠倒）】
+#   1. 在**仍为单副本 + SQLite 卷**的既有部署上执行 T-1.6 迁移
+#      （`admin-service migrate -action plan|export|import|verify`，源 SQLite 路径由
+#      `-from` 显式给出、目标 PG 由 `-to` 给出；**不读 env**，故迁移必须在旧形态内完成）；
+#   2. `verify` 对账通过后，再 apply 本 overlay（PG DSN 生效 + 移除 SQLite 卷 + 副本 2）。
+#   反序（先移除卷再迁移）→ 源 SQLite 文件不可达，迁移无法执行、数据不可见。
+#
+# 【启用前置（缺一不可）】
+#   * T-1.6 迁移 + 对账通过（§1 前置表 #1）；
+#   * 共享 PG 就绪，Secret `otpmask-shared-pg` 已注入（含 `tenant-store-dsn` 键）；
+#   * 本补丁已列入 kustomization.yaml 的 patchesStrategicMerge（见下）。
+#
+# 【PVC 去留】
+#   PVC `gateway-admin-tenant-store` **保留不删**（基础清单资源，overlay 不删）：
+#     ① 回退路径可用（回退到 SQLite 形态时原卷与数据仍在）；
+#     ② 该卷为加密卷（`storageClassName: tee-encrypted`），残留 SQLite 不违反明文落盘约束。
+#   验收通过、确认不再回退后，由运维**手工**删除该 PVC（属环境操作，不在本仓库资产内）。
+#
+# 【回退方式】
+#   从 kustomization.yaml 的 patchesStrategicMerge 移除本文件，并同步注释掉
+#   patch-admin-security-pg-env.yaml 中的 `TENANT_STORE_PG_DSN` → 回到 SQLite 单副本形态
+#   （卷与挂载自动随基础清单回到原状）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-admin-service
+  namespace: otpmask
+spec:
+  template:
+    spec:
+      containers:
+      - name: gateway-admin-service
+        volumeMounts:
+        # 列表项删除指令：merge key = mountPath（K8s schema：volumeMounts 的
+        # patchMergeKey 是 mountPath，**不是** name；只写 name 会报
+        # "does not contain declared merge key: mountPath"），$patch: delete
+        - $patch: delete
+          name: tenant-store
+          mountPath: /var/lib/otpmask-tenant
+      volumes:
+      # 列表项删除指令：merge key = name，$patch: delete
+      - $patch: delete
+        name: tenant-store
