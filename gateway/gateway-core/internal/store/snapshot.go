@@ -3,13 +3,16 @@
 // 设计要点（P2 多集群管理设计 v0.10 · T-1.7/U-1 裁决：本期以文件快照落地，
 // PG/Redis 仅登记口径不实现）：
 //   - 内存为准：Memory 仍是事实源，快照只是重启恢复的旁路；
-//     快照写入失败仅告警，不阻断控制面操作；
+//     快照写入失败**只告警不阻断**（失败计数 + 告警升级，见 PersistFailures）；
 //   - 显式开关：GATEWAY_CORE_STORE_SNAPSHOT_PATH 非空才启用（main 装配处接线）；
 //     空 = 纯内存，零行为变化；
 //   - 原子写：临时文件 + fsync + rename 原子替换，杜绝半写/截断文件被读到；
 //   - 完整性：快照整体携带 SHA-256 校验和，截断/篡改/损坏 → 拒绝加载；
-//   - 防回退：快照带 saved_at 时间戳与 schema 版本号；磁盘快照比待写快照新
-//     → 拒绝覆盖（防陈旧进程回写旧状态）；schema 版本不识别 → 拒绝加载；
+//   - **防回退以内容级判据为主（QA P2-2）**：快照内含单调递增的 revision；
+//     写盘前比对磁盘 revision，磁盘 revision ≥ 待写 revision ⇒ 拒绝覆盖
+//     （磁盘更新 ⇒ 本进程状态陈旧，回写即回退）；时钟 saved_at **仅作辅助判据**
+//     （时钟异常只告警，不作为拒绝依据，避免时钟回拨/漂移造成误拒）；
+//     schema 版本号不识别 → 拒绝加载；
 //   - fail-open：损坏快照拒绝加载后回退空内存启动并明确告警——理由：core
 //     重启可用性优先，策略/路由配置可由管理面重新下发；若因快照损坏拒绝启动，
 //     整个网关控制面失联，代价远大于短暂回退空态。
@@ -41,20 +44,31 @@ import (
 	"security-ai-gateway/gateway/mcpsec"
 )
 
-// snapshotSchemaVersion 快照 schema 版本：结构不兼容变更时递增；
-// 加载端只认当前版本，其余拒绝（防旧代码误读新格式 / 新代码误读旧格式）。
-const snapshotSchemaVersion = 1
-
-// checksumPrefix 校验和字段前缀（算法显式化，便于后续演进）。
-const checksumPrefix = "sha256:"
-
-// tmpPattern 原子写临时文件命名模式（隐藏文件，落在目标同目录保证 rename 原子性）。
-const tmpPattern = ".gateway-core-snapshot-*.tmp"
+const (
+	// snapshotSchemaVersion 快照 schema 版本：结构不兼容变更时递增；
+	// 加载端只认当前版本，其余拒绝（防旧代码误读新格式 / 新代码误读旧格式）。
+	snapshotSchemaVersion = 1
+	// checksumPrefix 校验和字段前缀（算法显式化，便于后续演进）。
+	checksumPrefix = "sha256:"
+	// tmpPattern 原子写临时文件命名模式（隐藏文件，落在目标同目录保证 rename 原子性）。
+	tmpPattern = ".gateway-core-snapshot-*.tmp"
+	// precheckPattern 启动期可写性自检的临时文件命名模式。
+	precheckPattern = ".gateway-core-snapshot-precheck-*"
+	// DefaultFlushInterval 合并写窗口：窗口内的多次变更合并为一次全量落盘。
+	DefaultFlushInterval = 200 * time.Millisecond
+	// persistWarnThreshold 连续写失败达到该次数后告警升级（错误级措辞 + 计数）。
+	persistWarnThreshold = 3
+)
 
 // snapshotPayload 快照业务载荷：store 全部状态域 + 元数据。
 type snapshotPayload struct {
-	SchemaVersion int                        `json:"schema_version"`
-	SavedAt       int64                      `json:"saved_at"` // unix 秒，防回退时间戳
+	SchemaVersion int `json:"schema_version"`
+	// Revision 内容级单调递增版本（**防回退主判据**，QA P2-2）：
+	// 每次成功落盘 +1；加载时采纳磁盘值作为后续写盘基线。
+	// 旧版快照缺该字段 = 0（兼容读，视为"最旧"）。
+	Revision int64 `json:"revision"`
+	// SavedAt unix 秒（**防回退辅助判据**：仅用于时钟异常告警，不作为拒绝依据）。
+	SavedAt       int64                      `json:"saved_at"`
 	Prescriptions []*route.RoutePrescription `json:"prescriptions,omitempty"`
 	RouteTable    *route.RouteTable          `json:"route_table,omitempty"`
 	// 限流/预算表（Phase 1 门禁 #7）
@@ -78,17 +92,37 @@ type snapshotEnvelope struct {
 // SnapshotStore 在 Memory 之上叠加文件快照持久化的 Store 实现（P2-4 T-1.7）。
 //
 // 语义：内嵌 *Memory 直接继承全部读/写行为（不改内存实现既有行为）；
-// 仅拦截变更方法，在内存变更成功后同步落快照。快照写入失败只告警不回滚——
+// 仅拦截变更方法，在内存变更成功后请求落快照。快照写入失败只告警不回滚——
 // 内存是事实源，符合 T-1.7「内存为准」口径。
+//
+// 写盘时机（QA P3-5：处方签发热路径曾"每张处方一次全量快照 + fsync"）：
+// **合并写**——变更只置脏标记，由后台 flusher 在合并窗口（默认 200ms）内
+// 合并为一次全量落盘。**崩溃窗口语义**：进程被强杀（SIGKILL/掉电）时，
+// 最近一个窗口内（≤ 200ms）的变更可能未落盘而丢失；优雅退出（Close）会强制
+// 补写。窗口内变更可由管理面重新下发（处方本就可重发），故可接受。
+// 需"每次变更即落盘"的严格场景：SetFlushInterval(0)。
 //
 // 接口实现完全经内嵌提升，未改动 store.Store 接口签名。
 type SnapshotStore struct {
 	*Memory
 
 	path     string      // 快照文件路径；"" = 持久化关闭（零行为变化）
-	disabled bool        // path 为空时置位：所有持久化动作退化为 no-op
-	writeMu  sync.Mutex  // 串行化快照写盘（含防回退检查 + rename）
+	disabled bool        // 持久化关闭（path 为空或 Prepare 失败后降级）
 	logger   *log.Logger // nil 时用 log.Default()
+
+	// ---- 状态（由 mu 保护）----
+	mu          sync.Mutex
+	revision    int64  // 已落盘/已加载的快照 revision（防回退基准）
+	dirty       bool   // 有未落盘变更
+	consecFails uint64 // 连续写失败次数（告警升级用）
+	totalFails  uint64 // 累计写失败次数（可观测）
+	lastFailErr error  // 最近一次写失败原因
+	flushTimer  *time.Timer
+	closed      bool
+	// flushInterval 合并写窗口（0 = 每次变更同步落盘）。
+	flushInterval time.Duration
+
+	writeMu sync.Mutex // 串行化快照写盘（防回退检查 + rename）
 }
 
 // NewSnapshotStore 构造快照持久化存储。
@@ -99,12 +133,79 @@ func NewSnapshotStore(mem *Memory, path string, logger *log.Logger) *SnapshotSto
 	if logger == nil {
 		logger = log.Default()
 	}
-	ss := &SnapshotStore{Memory: mem, path: path, logger: logger}
+	ss := &SnapshotStore{Memory: mem, path: path, logger: logger, flushInterval: DefaultFlushInterval}
 	if path == "" {
 		ss.disabled = true
-		logger.Printf("store: 快照持久化未启用（纯内存，重启丢失）")
+		ss.closed = true
+		logger.Printf("[store] 快照持久化未启用（纯内存，重启丢失）")
+		return ss
 	}
 	return ss
+}
+
+// SetFlushInterval 设置合并写窗口（0 = 每次变更同步落盘；默认 DefaultFlushInterval）。
+func (s *SnapshotStore) SetFlushInterval(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	s.mu.Lock()
+	s.flushInterval = d
+	s.mu.Unlock()
+}
+
+// Prepare 启动准备：父目录创建 + 同目录可写性自检 + 路径类型校验。
+//
+// 校验项（QA P3-9 / 符号链接问题）：
+//   - 父目录不存在 → MkdirAll（0750）；
+//   - 目录不可写 → 创建/删除临时文件实测（拒绝静默失效）；
+//   - 快照路径是**符号链接** → 拒绝（rename 只替换链接本身，其目标挂载点将停止
+//     被更新且不报错——静默失效比报错更危险）；
+//   - 快照路径是目录 → 拒绝。
+//
+// 失败语义：返回错误由调用方处置（main 侧：告警并降级为纯内存，不阻断启动）。
+func (s *SnapshotStore) Prepare() error {
+	if s.disabled {
+		return nil
+	}
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("创建快照父目录失败: %w", err)
+	}
+	// 可写性实测：同目录创建并删除临时文件。
+	f, err := os.CreateTemp(dir, precheckPattern)
+	if err != nil {
+		return fmt.Errorf("快照目录不可写: %w", err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return s.checkPathType()
+}
+
+// checkPathType 校验快照路径类型（符号链接 / 目录 → 拒绝）。
+func (s *SnapshotStore) checkPathType() error {
+	fi, err := os.Lstat(s.path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // 尚不存在：首写时由原子写创建
+		}
+		return fmt.Errorf("检查快照路径失败: %w", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("快照路径是符号链接，拒绝使用（rename 仅替换链接本身，其目标将停止被更新）: %s", s.path)
+	}
+	if fi.IsDir() {
+		return fmt.Errorf("快照路径是目录，拒绝使用: %s", s.path)
+	}
+	return nil
+}
+
+// Disable 关闭持久化（降级为纯内存），用于启动准备失败时的显式降级。
+func (s *SnapshotStore) Disable() {
+	s.mu.Lock()
+	s.disabled = true
+	s.mu.Unlock()
+	s.logf("警告: 快照持久化已关闭（降级为纯内存，重启丢失）")
 }
 
 // LoadSnapshot 从磁盘加载快照并恢复内存态。
@@ -119,10 +220,10 @@ func (s *SnapshotStore) LoadSnapshot() error {
 	b, err := os.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			s.logf("store: 快照文件不存在，空内存启动: %s", s.path)
+			s.logf("快照文件不存在，空内存启动: %s", s.path)
 			return nil
 		}
-		return fmt.Errorf("store: 读取快照失败: %w", err)
+		return fmt.Errorf("读取快照失败: %w", err)
 	}
 	payload, err := decodeSnapshot(b)
 	if err != nil {
@@ -131,8 +232,14 @@ func (s *SnapshotStore) LoadSnapshot() error {
 	if err := s.restore(payload); err != nil {
 		return err
 	}
-	s.logf("store: 快照恢复完成: %s（saved_at=%d 处方=%d 路由表=v%d 限流表=v%d ACL表=v%d A2A限流表=v%d 工具目录=v%d RBAC=v%d MCP后端=%d）",
-		s.path, payload.SavedAt, len(payload.Prescriptions),
+	// 采纳磁盘 revision 作为后续写盘的防回退基线。
+	s.mu.Lock()
+	if payload.Revision > s.revision {
+		s.revision = payload.Revision
+	}
+	s.mu.Unlock()
+	s.logf("快照恢复完成: %s（revision=%d saved_at=%d 处方=%d 路由表=v%d 限流表=v%d ACL表=v%d A2A限流表=v%d 工具目录=v%d RBAC=v%d MCP后端=%d）",
+		s.path, payload.Revision, payload.SavedAt, len(payload.Prescriptions),
 		tableVersion(payload.RouteTable), rlVersion(payload.RateLimitTable),
 		aclVersion(payload.ACLTable), a2aRLVersion(payload.A2ARateLimitTable),
 		catalogVersion(payload.ToolCatalog), rbacVersion(payload.RBACPolicy),
@@ -140,21 +247,176 @@ func (s *SnapshotStore) LoadSnapshot() error {
 	return nil
 }
 
-// Persist 将当前内存状态同步原子落盘。供变更路径与运维工具显式触发。
+// Persist 立即同步落盘当前状态（绕开合并写窗口；运维/测试用）。
 func (s *SnapshotStore) Persist() error {
+	if s.disabled {
+		return nil
+	}
 	return s.persistAt(time.Now().Unix())
 }
 
-// persistAt 以指定 saved_at 落盘（测试注入时间戳用）。
-// 防回退：磁盘已有更新的快照（saved_at 更大）→ 跳过本次写入并告警。
+// Flush 强制把待写变更落盘（合并写窗口到期前的显式刷盘；优雅退出用）。
+func (s *SnapshotStore) Flush() error {
+	if s.disabled {
+		return nil
+	}
+	s.mu.Lock()
+	s.dirty = false
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
+	s.mu.Unlock()
+	return s.persistAt(time.Now().Unix())
+}
+
+// Close 停止合并写定时器并补写最后状态（优雅退出不丢窗口内变更）。
+func (s *SnapshotStore) Close() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	dirty := s.dirty
+	s.mu.Unlock()
+	if !dirty {
+		return nil // 无待写变更：不必产生额外写盘
+	}
+	return s.Flush()
+}
+
+// PersistFailures 返回累计写失败次数（可观测；>0 表示曾发生写失败）。
+func (s *SnapshotStore) PersistFailures() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.totalFails
+}
+
+// LastPersistError 返回最近一次写失败原因（nil = 从未失败）。
+func (s *SnapshotStore) LastPersistError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastFailErr
+}
+
+// persist 变更后请求落盘：默认合并写（窗口内多次变更合并为一次全量写）。
+func (s *SnapshotStore) persist() {
+	if s.disabled {
+		return
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.dirty = true
+	interval := s.flushInterval
+	if interval <= 0 {
+		// 严格模式：每次变更同步落盘。
+		s.mu.Unlock()
+		s.flushNow()
+		return
+	}
+	if s.flushTimer == nil {
+		s.flushTimer = time.AfterFunc(interval, s.flushNow)
+	}
+	s.mu.Unlock()
+}
+
+// flushNow 执行一次落盘（合并写定时器回调）。
+func (s *SnapshotStore) flushNow() {
+	s.mu.Lock()
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
+	if !s.dirty || s.disabled || s.closed {
+		s.dirty = false
+		s.mu.Unlock()
+		return
+	}
+	s.dirty = false
+	s.mu.Unlock()
+	if err := s.persistAt(time.Now().Unix()); err != nil {
+		// 失败计数与告警升级已在 persistAt 内统一处理；此处仅保留脏标记以便后续重试。
+		s.mu.Lock()
+		if !s.closed {
+			s.dirty = true
+		}
+		s.mu.Unlock()
+	}
+}
+
+// persistAt 组装并原子写盘（revision 自增 + 内容级防回退比对）。
 func (s *SnapshotStore) persistAt(savedAt int64) error {
 	if s.disabled {
 		return nil
 	}
-	payload := s.buildPayload(savedAt)
-	payloadBytes, err := json.Marshal(payload)
+	return s.writeSnapshotAt(s.nextRevision(), savedAt)
+}
+
+// nextRevision 分配下一个 revision（内容级单调递增；本地基线 +1）。
+func (s *SnapshotStore) nextRevision() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.revision + 1
+}
+
+// writeSnapshotAt 以指定 revision 写盘（内部；测试可注入 revision 验证防回退）。
+//
+// 防回退（**主判据 = revision**，QA P2-2）：写盘前读磁盘快照，
+// 磁盘 revision ≥ 待写 revision ⇒ **拒绝覆盖**（磁盘更新或持平 ⇒ 本进程状态
+// 陈旧，回写即回退；陈旧进程不得覆盖他人已推进的快照）。
+//
+// 时钟（saved_at）**仅辅助**：磁盘 saved_at 晚于本次 ⇒ 告警但仍以 revision 为准
+// （时钟回拨/漂移不得造成误拒）。
+func (s *SnapshotStore) writeSnapshotAt(revision int64, savedAt int64) error {
+	if s.disabled {
+		return nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	// 路径类型校验：符号链接/目录 → 拒绝写入（静默失效比报错更危险）。
+	if err := s.checkPathType(); err != nil {
+		s.recordFailure(err)
+		return err
+	}
+
+	// 磁盘快照基线：用于防回退比对。
+	var diskRev int64
+	var diskSavedAt int64
+	diskReadable := true
+	cur, curErr := readSnapshotFile(s.path)
+	switch {
+	case curErr == nil:
+		diskRev, diskSavedAt = cur.Revision, cur.SavedAt
+	case errors.Is(curErr, fs.ErrNotExist):
+		diskReadable = false // 无既有快照：正常首写
+	default:
+		// 磁盘快照不可解析（损坏）：允许覆盖修复（告警）。
+		diskReadable = false
+		s.logf("警告: 磁盘快照不可解析，将以新快照覆盖修复: %v", curErr)
+	}
+	if diskReadable && diskRev >= revision {
+		// 防回退拒绝：磁盘快照更新或持平 ⇒ 本进程状态陈旧，回写即回退。
+		// **不算写失败**（不是 I/O 故障），仅告警一次；不重试（重试也无意义，
+		// 磁盘不会自己变旧）。
+		err := fmt.Errorf("拒绝覆盖更新的快照（防回退）：磁盘 revision=%d ≥ 待写 revision=%d", diskRev, revision)
+		s.logf("警告: %v", err)
+		return err
+	}
+	if diskReadable && diskSavedAt > savedAt {
+		// 时钟异常仅告警：防回退以 revision 为准（QA P2-2）。
+		s.logf("警告: 快照时钟异常（磁盘 saved_at=%d 晚于本次 %d），防回退以 revision 为准（磁盘 revision=%d）",
+			diskSavedAt, savedAt, diskRev)
+	}
+
+	payloadBytes, err := s.buildPayload(revision, savedAt)
 	if err != nil {
-		return fmt.Errorf("store: 快照载荷编码失败: %w", err)
+		s.recordFailure(err)
+		return err
 	}
 	sum := sha256.Sum256(payloadBytes)
 	env := snapshotEnvelope{
@@ -163,30 +425,50 @@ func (s *SnapshotStore) persistAt(savedAt int64) error {
 	}
 	envBytes, err := json.Marshal(env)
 	if err != nil {
-		return fmt.Errorf("store: 快照信封编码失败: %w", err)
+		s.recordFailure(fmt.Errorf("快照信封编码失败: %w", err))
+		return fmt.Errorf("快照信封编码失败: %w", err)
 	}
-
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	// 防回退：磁盘快照可解析且比待写快照新 → 拒绝覆盖（陈旧进程回写保护）。
-	// 磁盘不可解析（损坏/截断）→ 允许覆盖：正好用新快照修复损坏文件。
-	if cur, derr := readSnapshotFile(s.path); derr == nil && cur.SavedAt > savedAt {
-		s.logf("警告: store: 磁盘快照 saved_at=%d 比待写快照 saved_at=%d 新，防回退跳过写入: %s",
-			cur.SavedAt, savedAt, s.path)
-		return nil
+	if err := atomicWriteFile(s.path, envBytes); err != nil {
+		s.recordFailure(err)
+		return err
 	}
-	return atomicWriteFile(s.path, envBytes)
+	s.mu.Lock()
+	if revision > s.revision {
+		s.revision = revision
+	}
+	s.consecFails = 0
+	s.mu.Unlock()
+	return nil
 }
 
-// buildPayload 在读锁下采集内存全量状态（ID 字典序，输出确定）。
-func (s *SnapshotStore) buildPayload(savedAt int64) *snapshotPayload {
+// recordFailure 记录写失败并升级告警（连续失败达阈值 → 错误级措辞）。
+func (s *SnapshotStore) recordFailure(err error) {
+	s.mu.Lock()
+	s.totalFails++
+	s.consecFails++
+	total, consec := s.totalFails, s.consecFails
+	s.lastFailErr = err
+	s.mu.Unlock()
+	if consec >= persistWarnThreshold {
+		s.logf("错误: 快照写入失败（累计 %d 次、连续 %d 次；快照持久化已不可靠）: %v", total, consec, err)
+		return
+	}
+	s.logf("警告: 快照写入失败（累计 %d 次）: %v", total, err)
+}
+
+// buildPayload 在**读锁内**完成状态采集与序列化。
+//
+// QA P3-8：此前"锁内浅拷贝 + 锁外 marshal"存在并发改写竞态与快照不一致风险；
+// 现改为在读锁内直接序列化，得到一致的原子视图（代价：写者短暂阻塞，
+// 控制面非热路径，可接受）。
+func (s *SnapshotStore) buildPayload(revision, savedAt int64) ([]byte, error) {
 	m := s.Memory
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	p := &snapshotPayload{
 		SchemaVersion:     snapshotSchemaVersion,
+		Revision:          revision,
 		SavedAt:           savedAt,
 		Prescriptions:     make([]*route.RoutePrescription, 0, len(m.byID)),
 		RouteTable:        m.routeTable,
@@ -213,20 +495,28 @@ func (s *SnapshotStore) buildPayload(savedAt int64) *snapshotPayload {
 	for _, id := range svIDs {
 		p.MCPServers = append(p.MCPServers, m.mcpServers[id])
 	}
-	return p
+	b, err := json.Marshal(p)
+	if err != nil {
+		return nil, fmt.Errorf("快照载荷编码失败: %w", err)
+	}
+	return b, nil
 }
 
 // restore 将快照载荷整体恢复进内存（先在锁外构造完整新态，校验全部通过后
 // 一次性换入，避免半恢复污染）。
+//
+// ⚠️ 顺序口径（QA P3-10，仅注释不改行为）：byT 索引按处方 ID 字典序重建，
+// 故 ListByTenant 的**返回顺序**与原始写入顺序可能不同（集合内容一致）；
+// 处方本体也按 ID 字典序输出，保证快照字节级确定性。
 func (s *SnapshotStore) restore(p *snapshotPayload) error {
 	byID := make(map[string]*route.RoutePrescription, len(p.Prescriptions))
 	byT := make(map[string][]string)
 	for _, rx := range p.Prescriptions {
 		if rx == nil || rx.PrescriptionID == "" {
-			return errors.New("store: 快照含空处方条目，拒绝加载")
+			return errors.New("快照含空处方条目，拒绝加载")
 		}
 		if _, dup := byID[rx.PrescriptionID]; dup {
-			return fmt.Errorf("store: 快照处方 ID 重复: %s，拒绝加载", rx.PrescriptionID)
+			return fmt.Errorf("快照处方 ID 重复: %s，拒绝加载", rx.PrescriptionID)
 		}
 		byID[rx.PrescriptionID] = rx
 		byT[rx.Tenant] = append(byT[rx.Tenant], rx.PrescriptionID)
@@ -234,10 +524,10 @@ func (s *SnapshotStore) restore(p *snapshotPayload) error {
 	servers := make(map[string]*mcpsrv.Server, len(p.MCPServers))
 	for _, sv := range p.MCPServers {
 		if sv == nil || sv.ID == "" {
-			return errors.New("store: 快照含空 MCP 后端条目，拒绝加载")
+			return errors.New("快照含空 MCP 后端条目，拒绝加载")
 		}
 		if _, dup := servers[sv.ID]; dup {
-			return fmt.Errorf("store: 快照 MCP 后端 ID 重复: %s，拒绝加载", sv.ID)
+			return fmt.Errorf("快照 MCP 后端 ID 重复: %s，拒绝加载", sv.ID)
 		}
 		servers[sv.ID] = sv
 	}
@@ -257,79 +547,72 @@ func (s *SnapshotStore) restore(p *snapshotPayload) error {
 	return nil
 }
 
-// —— 以下为变更路径拦截：内存变更成功后同步落快照 ——
+// —— 以下为变更路径拦截：内存变更成功后请求落快照（默认合并写）——
 
-// Save 实现 Store。ErrDup（无状态变化）不落快照。
+// Save 实现 Store。ErrDup（无状态变化）不请求落盘。
 func (s *SnapshotStore) Save(p *route.RoutePrescription) error {
 	if err := s.Memory.Save(p); err != nil {
 		return err
 	}
-	s.persistWarn()
+	s.persist()
 	return nil
 }
 
-// Delete 实现 Store。无论目标是否存在均落快照（删除语义幂等，宁可多写一次）。
+// Delete 实现 Store。无论目标是否存在均请求落盘（删除语义幂等，宁可多写一次）。
 func (s *SnapshotStore) Delete(id string) {
 	s.Memory.Delete(id)
-	s.persistWarn()
+	s.persist()
 }
 
 // SaveRouteTable 实现 Store。
 func (s *SnapshotStore) SaveRouteTable(t *route.RouteTable) {
 	s.Memory.SaveRouteTable(t)
-	s.persistWarn()
+	s.persist()
 }
 
 // SaveRateLimitTable 实现 Store。
 func (s *SnapshotStore) SaveRateLimitTable(t *ratelimit.Table) {
 	s.Memory.SaveRateLimitTable(t)
-	s.persistWarn()
+	s.persist()
 }
 
 // SaveACLTable 实现 Store。
 func (s *SnapshotStore) SaveACLTable(t *a2aproxy.ACLTable) {
 	s.Memory.SaveACLTable(t)
-	s.persistWarn()
+	s.persist()
 }
 
 // SaveA2ARateLimitTable 实现 Store。
 func (s *SnapshotStore) SaveA2ARateLimitTable(t *a2aproxy.RateLimitTable) {
 	s.Memory.SaveA2ARateLimitTable(t)
-	s.persistWarn()
+	s.persist()
 }
 
 // SaveToolCatalog 实现 Store。
 func (s *SnapshotStore) SaveToolCatalog(c *mcpsec.ToolCatalog) {
 	s.Memory.SaveToolCatalog(c)
-	s.persistWarn()
+	s.persist()
 }
 
 // SaveRBACPolicy 实现 Store。
 func (s *SnapshotStore) SaveRBACPolicy(p *mcpsec.RBACPolicy) {
 	s.Memory.SaveRBACPolicy(p)
-	s.persistWarn()
+	s.persist()
 }
 
 // SaveMCPServer 实现 Store。
 func (s *SnapshotStore) SaveMCPServer(sv *mcpsrv.Server) {
 	s.Memory.SaveMCPServer(sv)
-	s.persistWarn()
+	s.persist()
 }
 
-// DeleteMCPServer 实现 Store。仅在实际摘除时落快照。
+// DeleteMCPServer 实现 Store。仅在实际摘除时请求落盘。
 func (s *SnapshotStore) DeleteMCPServer(id string) bool {
 	removed := s.Memory.DeleteMCPServer(id)
 	if removed {
-		s.persistWarn()
+		s.persist()
 	}
 	return removed
-}
-
-// persistWarn 落快照；失败仅告警（内存为准，不阻断控制面操作）。
-func (s *SnapshotStore) persistWarn() {
-	if err := s.Persist(); err != nil {
-		s.logf("警告: store: 快照写入失败（内存不受影响）: %v", err)
-	}
 }
 
 // decodeSnapshot 解码并完整校验快照字节：JSON 结构 → 校验和 → 载荷。
@@ -337,25 +620,25 @@ func (s *SnapshotStore) persistWarn() {
 func decodeSnapshot(b []byte) (*snapshotPayload, error) {
 	var env snapshotEnvelope
 	if err := json.Unmarshal(b, &env); err != nil {
-		return nil, fmt.Errorf("store: 快照解析失败（截断或损坏）: %w", err)
+		return nil, fmt.Errorf("快照解析失败（截断或损坏）: %w", err)
 	}
 	if !strings.HasPrefix(env.Checksum, checksumPrefix) {
-		return nil, errors.New("store: 快照校验和缺失或格式非法，拒绝加载")
+		return nil, errors.New("快照校验和缺失或格式非法，拒绝加载")
 	}
 	want, err := hex.DecodeString(strings.TrimPrefix(env.Checksum, checksumPrefix))
 	if err != nil {
-		return nil, fmt.Errorf("store: 快照校验和编码非法: %w", err)
+		return nil, fmt.Errorf("快照校验和编码非法: %w", err)
 	}
 	got := sha256.Sum256(env.Payload)
 	if subtle.ConstantTimeCompare(got[:], want) != 1 {
-		return nil, errors.New("store: 快照校验和不匹配（内容损坏或被篡改），拒绝加载")
+		return nil, errors.New("快照校验和不匹配（内容损坏或被篡改），拒绝加载")
 	}
 	var p snapshotPayload
 	if err := json.Unmarshal(env.Payload, &p); err != nil {
-		return nil, fmt.Errorf("store: 快照载荷解析失败: %w", err)
+		return nil, fmt.Errorf("快照载荷解析失败: %w", err)
 	}
 	if p.SchemaVersion != snapshotSchemaVersion {
-		return nil, fmt.Errorf("store: 快照 schema 版本不识别: got %d want %d，拒绝加载（防误读/防回退）",
+		return nil, fmt.Errorf("快照 schema 版本不识别: got %d want %d，拒绝加载（防误读/防回退）",
 			p.SchemaVersion, snapshotSchemaVersion)
 	}
 	return &p, nil
@@ -376,7 +659,7 @@ func atomicWriteFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, tmpPattern)
 	if err != nil {
-		return fmt.Errorf("store: 创建快照临时文件失败: %w", err)
+		return fmt.Errorf("创建快照临时文件失败: %w", err)
 	}
 	tmp := f.Name()
 	// 任一步失败都清理临时文件，避免残留垃圾。
@@ -386,20 +669,20 @@ func atomicWriteFile(path string, data []byte) error {
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
-		return fail(fmt.Errorf("store: 快照临时文件写入失败: %w", err))
+		return fail(fmt.Errorf("快照临时文件写入失败: %w", err))
 	}
 	if err := f.Sync(); err != nil {
-		return fail(fmt.Errorf("store: 快照临时文件 fsync 失败: %w", err))
+		return fail(fmt.Errorf("快照临时文件 fsync 失败: %w", err))
 	}
 	if err := f.Close(); err != nil {
-		return fail(fmt.Errorf("store: 快照临时文件关闭失败: %w", err))
+		return fail(fmt.Errorf("快照临时文件关闭失败: %w", err))
 	}
 	// 0600：快照含路由/策略/租户配置，收紧权限。
 	if err := os.Chmod(tmp, 0o600); err != nil {
-		return fail(fmt.Errorf("store: 快照临时文件权限设置失败: %w", err))
+		return fail(fmt.Errorf("快照临时文件权限设置失败: %w", err))
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return fail(fmt.Errorf("store: 快照原子替换失败: %w", err))
+		return fail(fmt.Errorf("快照原子替换失败: %w", err))
 	}
 	// 目录 fsync：保证 rename 落盘（Linux）；失败不影响正确性，忽略。
 	if d, derr := os.Open(dir); derr == nil {
@@ -418,7 +701,6 @@ func tableVersion(t *route.RouteTable) int {
 	return t.Version
 }
 
-// rlVersion 限流/预算表版本号（nil 计 0）。
 func rlVersion(t *ratelimit.Table) int {
 	if t == nil {
 		return 0
@@ -454,7 +736,7 @@ func rbacVersion(p *mcpsec.RBACPolicy) int {
 	return p.Version
 }
 
-// logf 统一日志出口。
+// logf 统一日志出口（统一前缀 "[store]"，避免重复 "store: store:" —— QA P3-7）。
 func (s *SnapshotStore) logf(format string, args ...any) {
-	s.logger.Printf("store: "+format, args...)
+	s.logger.Printf("[store] "+format, args...)
 }

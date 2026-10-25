@@ -84,19 +84,52 @@ func main() {
 	}
 	// P2-4 T-1.7：存储持久化（文件快照 + 原子写 + 重启恢复）。
 	// 显式开关：GATEWAY_CORE_STORE_SNAPSHOT_PATH 非空才启用；空 = 纯内存，零行为变化。
+	// 合并写窗口：GATEWAY_CORE_STORE_SNAPSHOT_FLUSH_MS（默认 200ms；0 = 每次变更同步落盘）。
 	mem := store.NewMemory()
 	var st store.Store = mem
 	snapState := "内存（重启丢失）"
+	// snapFlush 收尾刷盘（优雅退出补写窗口内变更）；log.Fatalf 不跑 defer，
+	// 故错误退出路径也显式调用（幂等：Close 只生效一次）。
+	var snapFlush func()
+	defer func() {
+		if snapFlush != nil {
+			snapFlush()
+		}
+	}()
 	if snapPath := os.Getenv("GATEWAY_CORE_STORE_SNAPSHOT_PATH"); snapPath != "" {
 		ss := store.NewSnapshotStore(mem, snapPath, log.Default())
-		if err := ss.LoadSnapshot(); err != nil {
-			// fail-open：损坏快照拒绝加载后回退空内存启动。理由：core 重启可用性
-			// 优先，路由/策略配置可由管理面重新下发；若因快照损坏拒绝启动，整个
-			// 网关控制面失联，代价远大于短暂回退空态。
-			log.Printf("警告: gateway-core 快照加载失败，回退空内存启动（fail-open）: %v", err)
+		// 合并写窗口（QA P3-5）：热路径不再"每张处方一次全量快照 + fsync"。
+		flushMS := 200
+		if raw := strings.TrimSpace(os.Getenv("GATEWAY_CORE_STORE_SNAPSHOT_FLUSH_MS")); raw != "" {
+			n, perr := strconv.Atoi(raw)
+			if perr != nil || n < 0 {
+				log.Fatalf("GATEWAY_CORE_STORE_SNAPSHOT_FLUSH_MS 非法: %q", raw)
+			}
+			flushMS = n
 		}
-		st = ss
-		snapState = snapPath
+		ss.SetFlushInterval(time.Duration(flushMS) * time.Millisecond)
+		// 启动准备（QA P3-9）：父目录创建 + 可写性实测 + 符号链接/目录路径拒绝。
+		// 失败不阻断启动（内存为准 + 显式开关口径）：降级为纯内存并明确告警。
+		if err := ss.Prepare(); err != nil {
+			log.Printf("错误: gateway-core 快照路径准备失败，降级为纯内存（重启丢失）: %v", err)
+			ss.Disable()
+			snapState = fmt.Sprintf("内存（快照不可用: %v）", err)
+		} else {
+			if err := ss.LoadSnapshot(); err != nil {
+				// fail-open：损坏快照拒绝加载后回退空内存启动。理由：core 重启可用性
+				// 优先，路由/策略配置可由管理面重新下发；若因快照损坏拒绝启动，整个
+				// 网关控制面失联，代价远大于短暂回退空态。
+				log.Printf("警告: gateway-core 快照加载失败，回退空内存启动（fail-open）: %v", err)
+			}
+			st = ss
+			snapState = fmt.Sprintf("%s（合并写窗口=%dms）", snapPath, flushMS)
+			// 优雅退出补写窗口内变更（崩溃窗口 ≤ flushMS 的语义见 snapshot.go 注释）。
+			snapFlush = func() {
+				if err := ss.Close(); err != nil {
+					log.Printf("警告: gateway-core 快照收尾刷盘失败: %v", err)
+				}
+			}
+		}
 	}
 	rt := defaultRouteTable(signer)
 	rlt := defaultRateLimitTable(rsigner)
@@ -158,6 +191,11 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 	if err := httpSrv.ListenAndServe(); err != nil {
+		// log.Fatalf 不执行 defer：此处显式收尾刷盘（快照窗口内变更不丢）。
+		if snapFlush != nil {
+			snapFlush()
+			snapFlush = nil
+		}
 		log.Fatalf("HTTP 服务退出: %v", err)
 	}
 }

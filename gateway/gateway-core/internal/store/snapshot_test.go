@@ -1,7 +1,10 @@
-// P2-4 T-1.7 快照持久化单测：原子性、恢复一致性、损坏拒载、开关关闭零行为、防回退。
+// P2-4 T-1.7 快照持久化单测：原子性、恢复一致性、损坏拒载、开关关闭零行为、
+// 回退防护（内容级 revision 判据）、启动准备（父目录/可写/符号链接）、
+// 写失败计数与告警升级（QA P3-6）、合并写节流（QA P3-5）。
 package store
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -96,7 +99,7 @@ func assertSameState(t *testing.T, want, got *Memory) {
 	if wrt == nil || grt == nil || wrt.Version != grt.Version || len(wrt.Routes) != len(grt.Routes) {
 		t.Fatalf("路由表恢复不一致")
 	}
-	if wrt.Version != grt.Version || wrt.UpdatedAt != grt.UpdatedAt {
+	if wrt.UpdatedAt != grt.UpdatedAt {
 		t.Fatalf("路由表元数据恢复不一致")
 	}
 	wrl, grl := want.GetRateLimitTable(), got.GetRateLimitTable()
@@ -126,7 +129,8 @@ func TestSnapshotAtomicWriteSemantics(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "snap.json")
 	ss := NewSnapshotStore(NewMemory(), path, nil)
-	fillSampleState(ss) // 每次变更都会触发一次原子写
+	ss.SetFlushInterval(0) // 同步写：便于断言写盘结果
+	fillSampleState(ss)    // 每次变更都会触发一次原子写
 
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("快照文件应存在: %v", err)
@@ -228,8 +232,8 @@ func tamperPayload(t *testing.T, raw []byte) []byte {
 		t.Fatalf("解析信封失败: %v", err)
 	}
 	// 把 checksum 替换成空载荷的正确校验和：内容变了、校验和与真实内容不符。
-	sum := sha256.Sum256([]byte(`{}`))
-	env.Checksum = checksumPrefix + hex.EncodeToString(sum[:])
+	sum := sha256Sum([]byte(`{}`))
+	env.Checksum = checksumPrefix + hexEncode(sum)
 	out, err := json.Marshal(env)
 	if err != nil {
 		t.Fatalf("重编码信封失败: %v", err)
@@ -237,64 +241,205 @@ func tamperPayload(t *testing.T, raw []byte) []byte {
 	return out
 }
 
-// TestSnapshotSchemaVersionReject 不识别的 schema 版本拒绝加载（防误读/防回退）。
-func TestSnapshotSchemaVersionReject(t *testing.T) {
-	payload, err := json.Marshal(snapshotPayload{SchemaVersion: 99, SavedAt: 100})
-	if err != nil {
-		t.Fatalf("编码载荷失败: %v", err)
-	}
-	sum := sha256.Sum256(payload)
-	env, err := json.Marshal(snapshotEnvelope{Payload: payload, Checksum: checksumPrefix + hex.EncodeToString(sum[:])})
-	if err != nil {
-		t.Fatalf("编码信封失败: %v", err)
-	}
-	cpath := filepath.Join(t.TempDir(), "snap.json")
-	if err := os.WriteFile(cpath, env, 0o600); err != nil {
-		t.Fatalf("写快照失败: %v", err)
-	}
-	ss := NewSnapshotStore(NewMemory(), cpath, nil)
-	if err := ss.LoadSnapshot(); err == nil {
-		t.Fatalf("未知 schema 版本应拒绝加载")
-	}
-}
-
-// TestSnapshotAntiRollback 磁盘快照比待写快照新 → 拒绝覆盖（陈旧进程回写保护）。
-func TestSnapshotAntiRollback(t *testing.T) {
+// TestSnapshotAntiRollbackByRevision **防回退主判据 = 内容级 revision**：
+// 磁盘 revision ≥ 待写 revision ⇒ 拒绝覆盖（陈旧进程不得回写旧状态）。
+func TestSnapshotAntiRollbackByRevision(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "snap.json")
 	ss := NewSnapshotStore(NewMemory(), path, nil)
 
-	if err := ss.persistAt(200); err != nil {
-		t.Fatalf("写入 saved_at=200 失败: %v", err)
+	if err := ss.writeSnapshotAt(5, 1000); err != nil {
+		t.Fatalf("写入 revision=5 失败: %v", err)
 	}
-	if got := readPayload(t, path).SavedAt; got != 200 {
-		t.Fatalf("saved_at 应为 200: got %d", got)
+	if got := readPayload(t, path).Revision; got != 5 {
+		t.Fatalf("revision 应为 5: got %d", got)
 	}
 	stale, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("读快照失败: %v", err)
 	}
 
-	// 陈旧进程尝试回写更旧的状态 → 跳过写入、文件不变。
-	if err := ss.persistAt(100); err != nil {
-		t.Fatalf("防回退跳过应返回 nil: %v", err)
+	// 陈旧进程（revision=3 < 磁盘 5）→ 拒绝覆盖，文件字节不变。
+	if err := ss.writeSnapshotAt(3, 2000); err == nil {
+		t.Fatalf("陈旧 revision 应被拒绝覆盖")
+	} else if !strings.Contains(err.Error(), "防回退") {
+		t.Fatalf("错误信息应说明防回退: %v", err)
 	}
 	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("读快照失败: %v", err)
 	}
-	if string(after) != string(stale) {
-		t.Fatalf("防回退应保持磁盘快照不变（saved_at=200）")
-	}
-	if !strings.Contains(string(after), `"saved_at":200`) {
-		t.Fatalf("磁盘快照应仍为 saved_at=200")
+	if !bytes.Equal(after, stale) {
+		t.Fatalf("防回退应保持磁盘快照不变")
 	}
 
-	// 更新的快照正常覆盖。
-	if err := ss.persistAt(300); err != nil {
-		t.Fatalf("写入 saved_at=300 失败: %v", err)
+	// revision 推进（6 > 5）→ 正常覆盖。
+	if err := ss.writeSnapshotAt(6, 3000); err != nil {
+		t.Fatalf("revision=6 应允许写入: %v", err)
 	}
-	if got := readPayload(t, path).SavedAt; got != 300 {
-		t.Fatalf("saved_at 应为 300: got %d", got)
+	if got := readPayload(t, path).Revision; got != 6 {
+		t.Fatalf("revision 应为 6: got %d", got)
+	}
+}
+
+// TestSnapshotClockIsAuxiliaryOnly **时钟仅辅助**：磁盘 saved_at 更新但 revision
+// 更旧 ⇒ 告警但仍以 revision 为准（允许写入），不因时钟回拨误拒。
+func TestSnapshotClockIsAuxiliaryOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.json")
+	ss := NewSnapshotStore(NewMemory(), path, nil)
+
+	if err := ss.writeSnapshotAt(5, 5000); err != nil {
+		t.Fatalf("写入失败: %v", err)
+	}
+	// revision 更高但 saved_at 更早（时钟回拨）→ 允许写入（内容判据为主）。
+	if err := ss.writeSnapshotAt(6, 1000); err != nil {
+		t.Fatalf("时钟回拨不应导致误拒: %v", err)
+	}
+	p := readPayload(t, path)
+	if p.Revision != 6 || p.SavedAt != 1000 {
+		t.Fatalf("写入结果不符: revision=%d saved_at=%d", p.Revision, p.SavedAt)
+	}
+}
+
+// TestSnapshotRevisionMonotonic 连续写盘 revision 单调递增（内容级判据成立的基础）。
+func TestSnapshotRevisionMonotonic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.json")
+	ss := NewSnapshotStore(NewMemory(), path, nil)
+	ss.SetFlushInterval(0)
+	for i := 0; i < 5; i++ {
+		_ = ss.Save(&route.RoutePrescription{PrescriptionID: "rx-" + string(rune('a'+i)), Tenant: "t"})
+	}
+	p := readPayload(t, path)
+	if p.Revision < 5 {
+		t.Fatalf("revision 应单调递增至 ≥5: got %d", p.Revision)
+	}
+}
+
+// TestSnapshotPrepareCreatesParentDir 启动准备：父目录不存在 → 自动创建（QA P3-9）。
+func TestSnapshotPrepareCreatesParentDir(t *testing.T) {
+	base := t.TempDir()
+	path := filepath.Join(base, "nested", "deeper", "snap.json")
+	ss := NewSnapshotStore(NewMemory(), path, nil)
+	if err := ss.Prepare(); err != nil {
+		t.Fatalf("Prepare 应创建父目录: %v", err)
+	}
+	if fi, err := os.Stat(filepath.Dir(path)); err != nil || !fi.IsDir() {
+		t.Fatalf("父目录应已创建: %v", err)
+	}
+	// 准备通过后可正常写盘。
+	if err := ss.Persist(); err != nil {
+		t.Fatalf("落盘失败: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("快照文件应存在: %v", err)
+	}
+}
+
+// TestSnapshotPrepareRejectsSymlink 快照路径为符号链接 → 拒绝（rename 只替换链接
+// 本身，其目标挂载点将停止更新且无报错——静默失效比报错更危险）。
+func TestSnapshotPrepareRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("写目标文件失败: %v", err)
+	}
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("当前环境不支持符号链接: %v", err)
+	}
+	ss := NewSnapshotStore(NewMemory(), link, nil)
+	if err := ss.Prepare(); err == nil {
+		t.Fatalf("符号链接路径应被拒绝")
+	} else if !strings.Contains(err.Error(), "符号链接") {
+		t.Fatalf("错误信息应说明符号链接: %v", err)
+	}
+	// 写盘路径同样拒绝（不静默替换链接）。
+	if err := ss.Persist(); err == nil {
+		t.Fatalf("符号链接路径写盘应被拒绝")
+	}
+}
+
+// TestSnapshotPrepareRejectsDirectory 快照路径是目录 → 拒绝（rename 必失败）。
+func TestSnapshotPrepareRejectsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snapdir")
+	if err := os.Mkdir(path, 0o750); err != nil {
+		t.Fatalf("建目录失败: %v", err)
+	}
+	ss := NewSnapshotStore(NewMemory(), path, nil)
+	if err := ss.Prepare(); err == nil {
+		t.Fatalf("目录路径应被拒绝")
+	}
+}
+
+// TestSnapshotWriteFailureCounted **写失败必须可见**（QA P3-6：path 为目录时
+// rename 被拒且此前静默失效）→ 失败计数 + 最近错误可查。
+func TestSnapshotWriteFailureCounted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snapdir")
+	if err := os.Mkdir(path, 0o750); err != nil {
+		t.Fatalf("建目录失败: %v", err)
+	}
+	ss := NewSnapshotStore(NewMemory(), path, nil)
+	ss.SetFlushInterval(0) // 同步写：立即暴露失败
+	if err := ss.Save(&route.RoutePrescription{PrescriptionID: "rx-1", Tenant: "t"}); err != nil {
+		t.Fatalf("变更本身不应报错（内存为准）: %v", err)
+	}
+	if ss.PersistFailures() == 0 {
+		t.Fatalf("写失败应被计数")
+	}
+	if ss.LastPersistError() == nil {
+		t.Fatalf("应记录最近一次写失败原因")
+	}
+}
+
+// TestSnapshotMergedWriteFlush 合并写（QA P3-5）：窗口内多次变更合并为一次写盘；
+// Flush 后落盘内容完整；优雅退出 Close 补写最后状态。
+func TestSnapshotMergedWriteFlush(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snap.json")
+	ss := NewSnapshotStore(NewMemory(), path, nil)
+	ss.SetFlushInterval(50 * time.Millisecond)
+
+	// 窗口内多次变更。
+	for i := 0; i < 5; i++ {
+		_ = ss.Save(&route.RoutePrescription{PrescriptionID: "rx-" + string(rune('a'+i)), Tenant: "t"})
+	}
+	// 显式刷盘后内容完整（5 条处方）。
+	if err := ss.Flush(); err != nil {
+		t.Fatalf("Flush 失败: %v", err)
+	}
+	p := readPayload(t, path)
+	if len(p.Prescriptions) != 5 {
+		t.Fatalf("刷盘后应有 5 条处方: got %d", len(p.Prescriptions))
+	}
+	// 合并写窗口到期后也应自动落盘（无需显式 Flush）。
+	_ = ss.Save(&route.RoutePrescription{PrescriptionID: "rx-z", Tenant: "t"})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		p2 := readPayload(t, path)
+		if len(p2.Prescriptions) == 6 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("合并写窗口到期后应自动落盘")
+}
+
+// TestSnapshotCloseFlushesPending Close 补写窗口内变更（优雅退出不丢数据）。
+func TestSnapshotCloseFlushesPending(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.json")
+	ss := NewSnapshotStore(NewMemory(), path, nil)
+	ss.SetFlushInterval(time.Hour) // 窗口极大：只有 Close 能触发写盘
+	_ = ss.Save(&route.RoutePrescription{PrescriptionID: "rx-1", Tenant: "t"})
+	if _, err := os.Stat(path); err == nil {
+		t.Fatalf("窗口内不应立即落盘")
+	}
+	if err := ss.Close(); err != nil {
+		t.Fatalf("Close 失败: %v", err)
+	}
+	p := readPayload(t, path)
+	if len(p.Prescriptions) != 1 {
+		t.Fatalf("Close 后应有 1 条处方: got %d", len(p.Prescriptions))
 	}
 }
 
@@ -310,6 +455,9 @@ func TestSnapshotDisabledZeroBehavior(t *testing.T) {
 	if err := ss.Persist(); err != nil {
 		t.Fatalf("禁用态 Persist 应为 no-op nil: %v", err)
 	}
+	if err := ss.Flush(); err != nil {
+		t.Fatalf("禁用态 Flush 应为 no-op nil: %v", err)
+	}
 	if err := ss.LoadSnapshot(); err != nil {
 		t.Fatalf("禁用态 LoadSnapshot 应为 no-op nil: %v", err)
 	}
@@ -319,6 +467,9 @@ func TestSnapshotDisabledZeroBehavior(t *testing.T) {
 	}
 	if !ss.DeleteMCPServer("sv-1") {
 		t.Fatalf("禁用态 DeleteMCPServer 行为应与 Memory 一致")
+	}
+	if ss.PersistFailures() != 0 {
+		t.Fatalf("禁用态不应有写失败")
 	}
 }
 
@@ -339,6 +490,7 @@ func TestSnapshotMissingFileOK(t *testing.T) {
 func TestSnapshotDuplicateIDRejected(t *testing.T) {
 	payload, err := json.Marshal(snapshotPayload{
 		SchemaVersion: snapshotSchemaVersion,
+		Revision:      1,
 		SavedAt:       100,
 		Prescriptions: []*route.RoutePrescription{
 			{PrescriptionID: "rx-1", Tenant: "t1"},
@@ -348,8 +500,8 @@ func TestSnapshotDuplicateIDRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("编码载荷失败: %v", err)
 	}
-	sum := sha256.Sum256(payload)
-	env, err := json.Marshal(snapshotEnvelope{Payload: payload, Checksum: checksumPrefix + hex.EncodeToString(sum[:])})
+	sum := sha256Sum(payload)
+	env, err := json.Marshal(snapshotEnvelope{Payload: payload, Checksum: checksumPrefix + hexEncode(sum)})
 	if err != nil {
 		t.Fatalf("编码信封失败: %v", err)
 	}
@@ -365,4 +517,61 @@ func TestSnapshotDuplicateIDRejected(t *testing.T) {
 	if _, ok := m.Get("rx-1"); ok {
 		t.Fatalf("拒载后内存应保持空")
 	}
+}
+
+// TestSnapshotSchemaVersionReject 不识别的 schema 版本拒绝加载（防误读/防回退）。
+func TestSnapshotSchemaVersionReject(t *testing.T) {
+	payload, err := json.Marshal(snapshotPayload{SchemaVersion: 99, Revision: 1, SavedAt: 100})
+	if err != nil {
+		t.Fatalf("编码载荷失败: %v", err)
+	}
+	sum := sha256Sum(payload)
+	env, err := json.Marshal(snapshotEnvelope{Payload: payload, Checksum: checksumPrefix + hexEncode(sum)})
+	if err != nil {
+		t.Fatalf("编码信封失败: %v", err)
+	}
+	cpath := filepath.Join(t.TempDir(), "snap.json")
+	if err := os.WriteFile(cpath, env, 0o600); err != nil {
+		t.Fatalf("写快照失败: %v", err)
+	}
+	ss := NewSnapshotStore(NewMemory(), cpath, nil)
+	if err := ss.LoadSnapshot(); err == nil {
+		t.Fatalf("未知 schema 版本应拒绝加载")
+	}
+}
+
+// TestSnapshotReadOnly 导出/读路径不改变链状态（只读语义）。
+func TestSnapshotReadOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.json")
+	m := NewMemory()
+	fillSampleState(m)
+	ss := NewSnapshotStore(m, path, nil)
+	ss.SetFlushInterval(0)
+	if err := ss.Persist(); err != nil {
+		t.Fatalf("落盘失败: %v", err)
+	}
+	beforeLen := len(m.ListByTenant("tenant-a")) + len(m.ListByTenant("tenant-b"))
+	beforeTables := m.GetRouteTable().Version + m.GetRateLimitTable().Version
+	for i := 0; i < 3; i++ {
+		if _, ok := m.Get("rx-1"); !ok {
+			t.Fatalf("读路径异常")
+		}
+		_ = m.ListByTenant("tenant-a")
+	}
+	if got := len(m.ListByTenant("tenant-a")) + len(m.ListByTenant("tenant-b")); got != beforeLen {
+		t.Fatalf("读路径改变了链长度")
+	}
+	if got := m.GetRouteTable().Version + m.GetRateLimitTable().Version; got != beforeTables {
+		t.Fatalf("读路径改变了策略表")
+	}
+}
+
+// sha256Sum / hexEncode 小工具（测试内联实现，避免引入额外依赖）。
+func sha256Sum(b []byte) []byte {
+	sum := sha256.Sum256(b)
+	return sum[:]
+}
+
+func hexEncode(b []byte) string {
+	return hex.EncodeToString(b)
 }
