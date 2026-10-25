@@ -13,7 +13,8 @@
 | `alertmanager-central.yaml` | 中央 Alertmanager：按 `cluster` 维度 group_by / inhibit 去重 |
 | `grafana-central-dashboards.yaml` | 统一看板：① 跨集群总览 overview ② 单集群下钻 per-cluster（`cluster` 变量） |
 | `grafana-central-datasources.yaml` | Grafana 中央数据源 `Prometheus-Central`（uid 同名，看板按 uid 引用） |
-| `remote-write-sender.example.yaml` | **各集群侧** remote-write 发送片段模板（含 mTLS 配置位），不在 kustomization 内 |
+| `remote-write-sender.example.yaml` | **各集群侧** remote-write 发送片段模板（含 mTLS 配置位），不在 kustomization 内（权威版本见 `deploy/monitoring-overlays/remote-write-mtls/`） |
+| `trust/` | **T-4.3 通道信任**子目录：中央侧证书引用示例 + 采集器出站默认拒绝策略 + 落地形态二选一说明 |
 
 ## 2. `cluster` 标签口径（统一口径，勿另起别名）
 
@@ -62,9 +63,26 @@ kubectl -n otpmask rollout restart deployment/grafana
 # ③ 中央集群：导入看板（把 grafana-central-dashboards 的两个 JSON 落到 Grafana
 #    provisioning dashboards 目录，或在 UI 中 import）
 
-# ④ 各集群：合并 remote-write 发送片段（remote-write-sender.example.yaml），
+# ④ 各集群：合并 remote-write 发送片段
+#    权威资产：deploy/monitoring-overlays/remote-write-mtls/
+#      （证书挂载 overlay + prometheus-remote-write-snippet.yml，含 mTLS 配置位）
 #    必须设置唯一的 external_labels.cluster，然后重启该集群 Prometheus
 ```
+
+## 4.1 中央侧落地形态（由客户环境决定，二选一）
+
+本项目**不自建**中央接收端（GSLB / 自研采集均不采用）。中央侧只有两种落地形态，
+**启用步骤差异**与证书/mTLS 口径详见 `trust/README.md` 第 1 节：
+
+| | 形态 A：客户既有 Prometheus | 形态 B：我方交付的中央栈（本目录） |
+|---|---|---|
+| 部署动作 | 不部署我方 central 资产，只需对接看板/告警配置 | `kubectl apply -k deploy/monitoring/central` + Grafana 挂载数据源 + 导入看板 |
+| remote_write 目标地址 | `https://<客户接收端>/api/v1/write` | `http(s)://prometheus-central.<中央命名空间>.svc.cluster.local:9090/api/v1/write` |
+| mTLS 终止 | 由客户接收端或其前置网关承担 | Prometheus 原生不校验客户端证书 → 须前置 mTLS 代理 |
+| 告警去重 | 客户侧 Alertmanager 须采用本文档 §3 口径 | 本目录 alertmanager-central.yaml 已实现 |
+
+> **remote_write 目标地址一律为占位符**（`REPLACE_WITH_CENTRAL_WRITE_ENDPOINT`），
+> 我方资产中**不写死任何内网地址** —— 两种形态的地址不同，需按客户环境替换。
 
 ## 5. T-4.3 依赖（**他人负责，本目录仅预留配置位**）
 

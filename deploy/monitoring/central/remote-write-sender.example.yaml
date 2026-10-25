@@ -1,5 +1,9 @@
 # 【各集群侧发送配置片段 · 模板 · 不在 kustomization resources 内】
-# P2-4 T-4.4：各集群 Prometheus 的 remote-write **发送侧**配置片段。
+# P2-4 T-4.4 / T-4.3：各集群 Prometheus 的 remote-write **发送侧**配置片段。
+#
+# ⚠️ 权威版本已迁至：deploy/monitoring-overlays/remote-write-mtls/
+#    （prometheus-remote-write-snippet.yml + 证书挂载 overlay + 中央侧形态二选一说明）
+#    本文件保留为**参考副本**（口径一致），后续维护以 overlay 目录为准。
 #
 # 用法：把本片段合并进该集群 prometheus.yml 的 `global`（external_labels）与顶层
 # `remote_write`（既有锚点：deploy/monitoring/prometheus.yaml:36-45 的 global 段），
@@ -30,7 +34,11 @@ data:
       external_labels:
         cluster: REPLACE_WITH_CLUSTER_ID
     remote_write:
-    - url: http://prometheus-central.otpmask.svc.cluster.local:9090/api/v1/write
+    # 【目标地址必须可配置 · 禁止写死内网地址】中央侧落地形态二选一：
+    #   形态 A（客户既有 Prometheus）：https://<客户接收端>/api/v1/write
+    #   形态 B（我方交付的中央栈）：http(s)://prometheus-central.<中央命名空间>.svc.cluster.local:9090/api/v1/write
+    # 两者地址不同 → 一律用占位符，由客户环境确定后替换。
+    - url: "REPLACE_WITH_CENTRAL_WRITE_ENDPOINT"
       # 跨集群写入：放宽队列与批量，容忍网络抖动（按集群规模调整）
       queue_config:
         capacity: 10000
