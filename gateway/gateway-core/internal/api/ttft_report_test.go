@@ -14,6 +14,20 @@ import (
 	"security-ai-gateway/gateway/gateway-core/internal/route"
 )
 
+// ttftRingClockOffsetSec 注入给 TTFT 环的时钟偏移（秒；**仅测试用**）。
+//
+// 背景（用例 flaky 的根因）：环的淘汰线 = ringClock-300，而分片按 **25s 网格**
+// 取整 ⇒ 同一"年龄"的批次，其**分片起点随墙钟秒相位在 25s 宽度内游走**
+// ⇒ "是否越过淘汰线"随相位变化：原用例取 age=299s，相位=24 时分片起点=now-299
+// （未越线）⇒ 旧批次被并入在窗窗口 ⇒ samples 由 10 变 17 ⇒ **约 1/25 概率失败**。
+//
+// 修法：把环时钟前移一个分片（now+25s）⇒ 淘汰线恒为 now-275，早于 age=280s
+// 批次的分片起点上界（now-280）⇒ 旧批次**必被时间淘汰线清掉**，与墙钟相位无关。
+//
+// 注：环级"边界丢片（同索引更旧批次 → Stale 且不破坏在窗数据）"语义由 route 包
+// TestTTFTRing_StaleLandingDoesNotWipe（fakeClock，确定性）覆盖，此处只验 HTTP 契约。
+const ttftRingClockOffsetSec = 25
+
 // ttftTestServer 构造带一条已签名路由（含端点）的控制面实例。
 func ttftTestServer(t *testing.T) *Server {
 	t.Helper()
@@ -65,6 +79,9 @@ func decodeResult(t *testing.T, rec *httptest.ResponseRecorder) string {
 // TestTTFTReport_HappyPathAndDedup：落片/同 batch_id 重复 ACK 丢弃不双计/窗口内旧时间戳可入。
 func TestTTFTReport_HappyPathAndDedup(t *testing.T) {
 	s := ttftTestServer(t)
+	// 注入**相位无关**的环时钟（见 ttftRingClockOffsetSec 注释）：让"边界旧批次"
+	// 必被时间淘汰线清掉 ⇒ 用例不再依赖墙钟秒相位（原实现约 1/25 概率 flaky）。
+	s.ttftRing = route.NewTTFTRing(func() int64 { return time.Now().Unix() + ttftRingClockOffsetSec })
 	nowMs := time.Now().Unix() * 1000
 	keyA := route.TTFTKey{Tenant: "t-001", Model: "qwen-max", Endpoint: "tee-gpu-a", Cache: "miss"}
 
@@ -98,8 +115,11 @@ func TestTTFTReport_HappyPathAndDedup(t *testing.T) {
 		t.Fatalf("重试批次应参与合并，got samples=%d", w3.Samples)
 	}
 
-	// 边界旧批次（now-299s，分片起点已跨淘汰线且与在窗分片索引冲突）：ACK 但不得破坏在窗数据
-	rec = ttftPost(s, ttftBody("envoy-0|2|p3", nowMs-299_000, "t-001", "qwen-max", "tee-gpu-a", "miss",
+	// 边界旧批次（age=280s）：其分片起点已越过淘汰线 ⇒ 必被淘汰线清掉，
+	// **ACK（200 ok）但不得叠加/破坏在窗窗口**（在窗 samples 保持 10）。
+	// 年龄取 280s（非 299s）：给 API 越窗预检留 20s 余量（预检口径
+	// reported_at ≥ now-window，见 route.TTFTReportedAtInWindow）。
+	rec = ttftPost(s, ttftBody("envoy-0|2|p3", nowMs-280_000, "t-001", "qwen-max", "tee-gpu-a", "miss",
 		[]uint64{7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}))
 	if rec.Code != http.StatusOK || decodeResult(t, rec) != "ok" {
 		t.Fatalf("边界旧批次应 ACK（200 ok），got %d %s", rec.Code, rec.Body.String())
