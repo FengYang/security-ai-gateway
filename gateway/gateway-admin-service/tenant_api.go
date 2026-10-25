@@ -984,19 +984,39 @@ func (g *memoryLoginGuard) onSuccess(email string) {
 	g.mu.Unlock()
 }
 
-// intervalGuard 按 key 的最小操作间隔（内存；用于密码重置发信限频）。
+// intervalGuard 按 key 的最小操作间隔（默认进程内；SECURITY_STORE_PG_DSN 配置后
+// 走共享库表 operation_intervals，多副本无按副本放大）。backend 决定存储后端。
 type intervalGuard struct {
+	backend intervalBackend
+}
+
+// intervalBackend 最小操作间隔后端：
+//   - *memoryIntervalGuard：进程内实现（默认，单副本语义，行为不变）；
+//   - *sqlIntervalGuard：共享库实现（security_store.go，多副本共享）。
+type intervalBackend interface {
+	// allow 距上次操作超过间隔则记录并返回 true，否则 false。
+	allow(key string) bool
+}
+
+func newIntervalGuard(min int) *intervalGuard {
+	return &intervalGuard{backend: newMemoryIntervalGuard(min)}
+}
+
+func (g *intervalGuard) allow(key string) bool { return g.backend.allow(key) }
+
+// memoryIntervalGuard 进程内最小操作间隔实现（原 intervalGuard 实现，行为不变）。
+type memoryIntervalGuard struct {
 	mu   sync.Mutex
 	last map[string]time.Time
 	dur  time.Duration
 }
 
-func newIntervalGuard(min int) *intervalGuard {
-	return &intervalGuard{last: make(map[string]time.Time), dur: time.Duration(min) * time.Minute}
+func newMemoryIntervalGuard(min int) *memoryIntervalGuard {
+	return &memoryIntervalGuard{last: make(map[string]time.Time), dur: time.Duration(min) * time.Minute}
 }
 
 // allow 距上次操作超过间隔则记录并返回 true，否则 false。
-func (g *intervalGuard) allow(key string) bool {
+func (g *memoryIntervalGuard) allow(key string) bool {
 	now := time.Now()
 	g.mu.Lock()
 	defer g.mu.Unlock()

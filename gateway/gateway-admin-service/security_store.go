@@ -4,7 +4,13 @@
 // 多副本部署下改存共享 SQL 库（sqlite/PG 双方言，经 sqlutil 适配）实现跨副本原子：
 //   - captcha_rate_limits：同 IP 小时窗口签发计数（单语句原子 upsert 自增，超限拒签）；
 //   - captcha_challenges：验证码答案（SHA-256 哈希、TTL、UPDATE 条件消费 = 原子一次性）；
-//   - login_attempts（T-1.4）：登录失败计数与锁定（单语句原子 upsert，达阈值锁定）。
+//   - login_attempts（T-1.4）：登录失败计数与锁定（单语句原子 upsert，达阈值锁定）；
+//   - operation_intervals（T-1.5）：密码重置发信最小间隔（单语句原子 check-and-set）；
+//   - mfa_states（T-1.5）：管理员 MFA 状态（整条记录 JSON；事务读-改-写跨副本串行）。
+//
+// S1(7) 进程内态清点收尾（C-18）：captcha 签发限流/答案、登录失败锁定、密码重置
+// 发信限频、管理员 MFA 状态**四类组件全部具备共享后端**，统一由
+// SECURITY_STORE_PG_DSN 开关（空 = 原进程内/文件实现，默认行为零变化）。
 //
 // 降级策略（明确选定，非默认可配）：
 //   - PG/共享库操作失败 → 回退到进程内实现（**等价 P2-4 之前的单副本旧行为**，
@@ -58,12 +64,28 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   locked_until BIGINT  NOT NULL DEFAULT 0,
   updated_at   BIGINT  NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS operation_intervals (
+  op_key TEXT   PRIMARY KEY,
+  last_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mfa_states (
+  sub        TEXT   PRIMARY KEY,
+  record     TEXT   NOT NULL,
+  updated_at BIGINT NOT NULL
+);
 `
+
+// securityLockKey 租户安全计数器写临界区的跨副本互斥键（PG advisory xact lock；
+// 供 mfaStore 的读-改-写事务使用；captcha/loginGuard/interval 均为单语句原子
+// 操作（autocommit 行锁），不取该锁）。
+const securityLockKey int64 = 0x53454355 // "SECU"
 
 // openSecurityStore 打开安全计数器共享库并初始化 DDL。
 // dsn 由调用方保证格式（PG 连接串或 sqlite 路径）。
 func openSecurityStore(d sqlutil.Dialect, dsn string) (*sqlutil.DB, error) {
-	db, err := sqlutil.Open(d, dsn, 0)
+	db, err := sqlutil.Open(d, dsn, securityLockKey)
 	if err != nil {
 		return nil, fmt.Errorf("security: open %s: %w", d, err)
 	}
@@ -209,8 +231,9 @@ func (b *sqlCaptchaBackend) verifySQL(id, code string) (bool, error) {
 	return subtle.ConstantTimeCompare([]byte(stored), []byte(captchaCodeHash(code))) == 1, nil
 }
 
-// startGC 启动周期清理协程（复用既有后台 ticker 模式）：
-// 过期挑战与陈旧限流行。已消费但未过期的行保留（verifySQL 消费后还要读哈希）。
+// startGC 启动周期清理协程（复用既有后台 ticker 模式；承载全部安全计数器表的
+// 过期行清理——captcha 挑战/限流行 + 发信限频陈旧行）。
+// 已消费但未过期的挑战行保留（verifySQL 消费后还要读哈希）。
 func (b *sqlCaptchaBackend) startGC(interval time.Duration) {
 	b.gcStop = make(chan struct{})
 	go func() {
@@ -219,18 +242,27 @@ func (b *sqlCaptchaBackend) startGC(interval time.Duration) {
 		for {
 			select {
 			case <-ticker.C:
-				now := time.Now().Unix()
-				if _, err := b.db.Exec(`DELETE FROM captcha_challenges WHERE expires_at <= ?`, now); err != nil {
-					b.alarm.logf("captcha-gc", "captcha 过期挑战清理失败：%v", err)
-				}
-				if _, err := b.db.Exec(`DELETE FROM captcha_rate_limits WHERE window_hour < ?`, now/3600-1); err != nil {
-					b.alarm.logf("captcha-gc", "captcha 陈旧限流行清理失败：%v", err)
-				}
+				securityGCOnce(b.db, &b.alarm)
 			case <-b.gcStop:
 				return
 			}
 		}
 	}()
+}
+
+// securityGCOnce 一轮安全计数器过期行清理（mfa_states 为长期状态，不清理）。
+func securityGCOnce(db *sqlutil.DB, alarm *securityAlarm) {
+	now := time.Now().Unix()
+	if _, err := db.Exec(`DELETE FROM captcha_challenges WHERE expires_at <= ?`, now); err != nil {
+		alarm.logf("captcha-gc", "captcha 过期挑战清理失败：%v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM captcha_rate_limits WHERE window_hour < ?`, now/3600-1); err != nil {
+		alarm.logf("captcha-gc", "captcha 陈旧限流行清理失败：%v", err)
+	}
+	// 发信限频行：超过 24h 未再触发即清理（避免按邮箱无限增长）。
+	if _, err := db.Exec(`DELETE FROM operation_intervals WHERE last_at < ?`, now-86400); err != nil {
+		alarm.logf("interval-gc", "发信限频陈旧行清理失败：%v", err)
+	}
 }
 
 // stopGC 停止周期清理协程（测试用；生产随进程退出）。
@@ -262,14 +294,22 @@ func (a *securityAlarm) logf(op, format string, args ...any) {
 	log.Printf("[security-store] "+format, args...)
 }
 
+// securitySharedDB 已启用的安全计数器共享库句柄（useSecurityPGStore 注入）；
+// 供 mfaStore 等在自身初始化点读取开关（nil = 未启用，各组件走原进程内/文件实现）。
+var securitySharedDB *sqlutil.DB
+
 // useSecurityPGStore 将 handler 的安全计数器切换到共享库后端（main.go 接线用，
 // 仅在 SECURITY_STORE_PG_DSN 配置时调用；缺省保持进程内实现，行为不变）。
 func (h *tenantHandler) useSecurityPGStore(db *sqlutil.DB) {
+	securitySharedDB = db
 	if h.cfg.captchaEnabled {
 		h.captcha = newSQLCaptchaBackend(db, h.cfg.captchaTTLMin, h.cfg.captchaIPRatePerHour)
 	}
 	// T-1.4：登录失败锁定同库切换（阈值/窗口沿用既有 loginGuard 配置，语义不变）。
 	h.loginGuard = newSQLLoginGuard(db, h.cfg.loginMaxFail, h.cfg.loginLockMin)
+	// T-1.5：密码重置发信限频同库切换（最小间隔沿用既有配置，语义不变）。
+	h.resetGuard = newSQLIntervalGuard(db, h.cfg.passwordResetIntervalMin)
+	// T-1.5：mfaStore 经 securitySharedDB 开关注入（loadMFAStore 读取，见 mfa.go）。
 }
 
 // ---------- 登录失败锁定共享库后端（P2-4 T-1.4，S1(7) login_attempts）----------
@@ -349,4 +389,44 @@ func (g *sqlLoginGuardBackend) onSuccess(identity string) {
 		g.alarm.logf("login-onSuccess", "登录成功清零共享库删除失败，回退进程内（降级）：%v", err)
 		g.fallback.onSuccess(identity)
 	}
+}
+
+// ---------- 发信限频共享库后端（P2-4 T-1.5，operation_intervals）----------
+
+// sqlIntervalGuard 最小操作间隔的共享库后端（双方言；多副本共享计数，
+// 无按副本放大——同邮箱重置发信在各副本共用一个计数）。
+// 共享库失败 → 回退进程内实现（等价单副本旧行为）并告警。
+type sqlIntervalGuard struct {
+	db       *sqlutil.DB
+	dur      time.Duration
+	fallback *memoryIntervalGuard
+	alarm    securityAlarm
+}
+
+// newSQLIntervalGuard 构造共享库发信限频门禁（min 为最小间隔分钟数）。
+func newSQLIntervalGuard(db *sqlutil.DB, min int) *intervalGuard {
+	return &intervalGuard{backend: &sqlIntervalGuard{
+		db:       db,
+		dur:      time.Duration(min) * time.Minute,
+		fallback: newMemoryIntervalGuard(min),
+	}}
+}
+
+// allow 距上次操作超过间隔则记录并返回 true，否则 false。
+// 单语句原子 check-and-set：首次（INSERT）或间隔已过（ON CONFLICT DO UPDATE
+// ... WHERE 满足）会返回一行 = 放行；间隔未到 → 无返回行 = 拒发（原子跨副本）。
+// 注：库内按秒记时间，与内存实现的 time.Time 精度差 ≤1s，语义等价。
+func (g *sqlIntervalGuard) allow(key string) bool {
+	now := time.Now().Unix()
+	rows, err := g.db.Query(`INSERT INTO operation_intervals (op_key, last_at) VALUES (?, ?)
+		ON CONFLICT (op_key) DO UPDATE SET last_at = excluded.last_at
+		WHERE operation_intervals.last_at <= ?
+		RETURNING 1`, key, now, now-int64(g.dur/time.Second))
+	if err != nil {
+		g.alarm.logf("interval-allow", "发信限频共享库访问失败，回退进程内（降级）：%v", err)
+		return g.fallback.allow(key)
+	}
+	allowed := rows.Next()
+	_ = rows.Close()
+	return allowed
 }

@@ -20,12 +20,19 @@
 //
 // 配置：ADMIN_MFA_STATE_FILE（状态文件路径，未配置 = MFA 特性关闭，端点 503）；
 // ADMIN_MFA_MASTER_KEY（信封主密钥 hex 32B，缺省派生自 JWT 共享密钥 + 告警）。
+//
+// P2-4 T-1.5（S1(7) 进程内态清点收尾）：状态存储增加**共享库后端**（表 mfa_states，
+// sqlite/PG 双方言），与 captcha/loginGuard/intervalGuard 共用 SECURITY_STORE_PG_DSN
+// 开关；DSN 为空 = 原 JSON 文件实现，行为不变。至此 S1(7) 四类进程内态全部具备
+// 共享后端（C-18 解除口径，详见 security_store.go 文件头清点注记）。
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha1" //nolint:gosec // RFC 6238 互操作例外（见文件头），非存储保护 MAC
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base32"
 	"encoding/binary"
 	"encoding/hex"
@@ -41,6 +48,8 @@ import (
 
 	"security-ai-gateway/gateway/cryptop"
 	"security-ai-gateway/protocol/go" // framing 复用 EnvelopeNonce/PutUint64 风格手写
+
+	"security-ai-gateway/gateway/gateway-admin-service/sqlutil"
 )
 
 // MFA 端点路径（详设 §6.1 表；映射表 A 类已登记，authz.go epMFA）。
@@ -89,12 +98,24 @@ type mfaRecord struct {
 	Emergency    []mfaEmergencyCode `json:"emergency,omitempty"`
 }
 
-// mfaStore MFA 状态存储（JSON 文件 0600，内存互斥；进程内单实例）。
+// mfaStore MFA 状态存储。两种后端（P2-4 T-1.5，S1(7) 清点收尾）：
+//   - 文件后端（默认，db==nil）：JSON 文件 0600 + 进程内互斥，行为零变化；
+//   - 共享库后端（db!=nil）：表 mfa_states（sqlite/PG 双方言），多副本共享 + 持久化，
+//     读-改-写经事务（PG 下另加 advisory xact lock）跨副本串行，等价文件后端的
+//     进程锁 + 原子 rename 语义。
+//
+// 口径注记：共享库后端的 record 列是**整条 mfaRecord 的 JSON**，字段与文件序列化
+// 格式逐字段等价（同 mfaRecord 的 json tag）。切换到共享库不读取/迁移旧 JSON 文件
+// （历史文件不自动导入）——切换后已绑定账号须重新 enroll（或由 T-1.6 迁移工具对账
+// 导入）。后端不可达时的取向：MFA 是等保强制的 step-up 控制，enrolled 判定取
+// **fail-closed**（视为已绑定 → 要求 MFA 声明），与 captcha 的可用性优先相反。
 type mfaStore struct {
 	mu        sync.Mutex
-	path      string
-	masterKey []byte // 信封主密钥（32B）
-	recs      map[string]*mfaRecord
+	path      string                // 文件后端路径（共享库后端时保留作审计线索，不读写）
+	db        *sqlutil.DB           // 共享库后端（nil = 文件后端）
+	masterKey []byte                // 信封主密钥（32B）
+	recs      map[string]*mfaRecord // 文件后端工作集；共享库后端不使用
+	alarm     securityAlarm
 }
 
 // mfaState 全局 MFA 存储；nil = 特性未配置（mfaSatisfied 过渡期放行，端点 503）。
@@ -169,17 +190,35 @@ func openMFASecret(key, blob []byte) ([]byte, error) {
 
 // ---- 存储 ----
 
-// loadMFAStore 加载/初始化 MFA 状态文件（fail-closed：文件存在但非法 → 拒绝启用）。
-// masterKey 缺省派生自 JWT 共享密钥（启动告警；生产应显式配置 ADMIN_MFA_MASTER_KEY）。
-func loadMFAStore(path string, jwtSecret []byte) (*mfaStore, error) {
-	if path == "" {
-		return nil, nil
-	}
+// deriveMFAMasterKey 信封主密钥：ADMIN_MFA_MASTER_KEY（hex 32B）或派生自 JWT 共享密钥
+// （启动告警；生产应显式配置独立主密钥）。文件/共享库两后端共用。
+func deriveMFAMasterKey(jwtSecret []byte) []byte {
 	mk, err := hex.DecodeString(os.Getenv("ADMIN_MFA_MASTER_KEY"))
 	if err != nil || len(mk) != 32 {
 		mk = cryptoProvider.Hash(append([]byte("otpmask/mfa-master/v1\x00"), jwtSecret...))[:32]
 		log.Printf("[mfa] 警告：ADMIN_MFA_MASTER_KEY 未配置/非法，主密钥已派生自 JWT 共享密钥（生产应显式配置独立主密钥）")
 	}
+	return mk
+}
+
+// newSQLMFAStore 构造共享库 MFA 存储（表 mfa_states；不读取旧状态文件，见类型注记）。
+func newSQLMFAStore(db *sqlutil.DB, jwtSecret []byte) *mfaStore {
+	return &mfaStore{db: db, masterKey: deriveMFAMasterKey(jwtSecret)}
+}
+
+// loadMFAStore 加载/初始化 MFA 状态存储（fail-closed：文件存在但非法 → 拒绝启用）。
+// masterKey 缺省派生自 JWT 共享密钥（启动告警；生产应显式配置 ADMIN_MFA_MASTER_KEY）。
+// 安全计数器共享库已启用（SECURITY_STORE_PG_DSN，useSecurityPGStore 注入
+// securitySharedDB）时改走共享库后端；否则保持原文件实现，行为不变。
+func loadMFAStore(path string, jwtSecret []byte) (*mfaStore, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if securitySharedDB != nil {
+		log.Printf("[mfa] 安全计数器共享库已启用：MFA 状态改存 mfa_states 表（多副本共享；旧状态文件 %s 不自动迁移，已绑定账号须重新 enroll）", path)
+		return newSQLMFAStore(securitySharedDB, jwtSecret), nil
+	}
+	mk := deriveMFAMasterKey(jwtSecret)
 	s := &mfaStore{path: path, masterKey: mk, recs: map[string]*mfaRecord{}}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -197,7 +236,7 @@ func loadMFAStore(path string, jwtSecret []byte) (*mfaStore, error) {
 	return s, nil
 }
 
-// saveLocked 落盘（0600 + 原子 rename；调用方须持锁）。
+// saveLocked 落盘（0600 + 原子 rename；调用方须持锁）。仅文件后端使用。
 func (s *mfaStore) saveLocked() error {
 	raw, err := json.Marshal(s.recs)
 	if err != nil {
@@ -210,13 +249,108 @@ func (s *mfaStore) saveLocked() error {
 	return os.Rename(tmp, s.path)
 }
 
+// ---- 存储临界区（文件后端 = 进程锁；共享库后端 = DB 事务 + advisory lock）----
+
+// mfaTx MFA 存储的读-改-写临界区：commit/rollback 必须各调用一次（defer 兜底）。
+type mfaTx struct {
+	s   *mfaStore
+	raw *sqlutil.Tx // 共享库后端事务；nil = 文件后端
+}
+
+// begin 开临界区（文件后端取进程锁；共享库后端开事务，PG 下自动取 advisory
+// xact lock 使跨副本读-改-写串行，等价文件后端的进程锁语义）。
+func (s *mfaStore) begin() (*mfaTx, error) {
+	s.mu.Lock()
+	if s.db == nil {
+		return &mfaTx{s: s}, nil
+	}
+	raw, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	return &mfaTx{s: s, raw: raw}, nil
+}
+
+// get 读账号记录（共享库后端实时读库反序列化；不存在返回 nil,false）。
+func (tx *mfaTx) get(sub string) (*mfaRecord, bool, error) {
+	if tx.raw == nil {
+		r, ok := tx.s.recs[sub]
+		return r, ok, nil
+	}
+	var blob string
+	if err := tx.raw.QueryRow(`SELECT record FROM mfa_states WHERE sub = ?`, sub).Scan(&blob); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	var r mfaRecord
+	if err := json.Unmarshal([]byte(blob), &r); err != nil {
+		return nil, false, fmt.Errorf("mfa: 状态记录反序列化失败: %w", err)
+	}
+	return &r, true, nil
+}
+
+// put 写账号记录：文件后端先落盘后更新缓存（失败即回滚内存态，与磁盘一致）；
+// 共享库后端 upsert，提交时生效。
+func (tx *mfaTx) put(sub string, rec *mfaRecord) error {
+	if tx.raw == nil {
+		tx.s.recs[sub] = rec
+		if err := tx.s.saveLocked(); err != nil {
+			delete(tx.s.recs, sub) // 回滚内存态，避免与磁盘不一致
+			return err
+		}
+		return nil
+	}
+	blob, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	_, err = tx.raw.Exec(`INSERT INTO mfa_states (sub, record, updated_at) VALUES (?, ?, ?)
+		ON CONFLICT (sub) DO UPDATE SET record = excluded.record, updated_at = excluded.updated_at`,
+		sub, string(blob), time.Now().Unix())
+	return err
+}
+
+// commit 提交临界区（文件后端 = 释放进程锁）。
+func (tx *mfaTx) commit() error {
+	if tx.raw == nil {
+		tx.s.mu.Unlock()
+		return nil
+	}
+	err := tx.raw.Commit()
+	tx.s.mu.Unlock()
+	return err
+}
+
+// rollback 回滚临界区（文件后端 = 释放进程锁；put 失败已自回滚内存态）。
+func (tx *mfaTx) rollback() {
+	if tx.raw != nil {
+		_ = tx.raw.Rollback()
+	}
+	tx.s.mu.Unlock()
+}
+
 // enrolled 账号是否已绑定 MFA（特性关闭时恒 false）。
+// 共享库后端查询失败 → 视为已绑定（fail-closed，等保 step-up 不降级，见类型注记）。
 func (s *mfaStore) enrolled(sub string) bool {
 	if s == nil {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.db != nil {
+		var one int
+		if err := s.db.QueryRow(`SELECT 1 FROM mfa_states WHERE sub = ?`, sub).Scan(&one); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return false // 确未绑定（非故障；灰度期放行）
+			}
+			s.alarm.logf("mfa-enrolled", "MFA 绑定状态查询失败（fail-closed 视为已绑定）: %v", err)
+			return true
+		}
+		return true
+	}
 	_, ok := s.recs[sub]
 	return ok
 }
@@ -228,6 +362,20 @@ func (s *mfaStore) locked(sub string) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.db != nil {
+		var blob string
+		if err := s.db.QueryRow(`SELECT record FROM mfa_states WHERE sub = ?`, sub).Scan(&blob); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				s.alarm.logf("mfa-locked", "MFA 锁定状态查询失败: %v", err)
+			}
+			return false
+		}
+		var r mfaRecord
+		if err := json.Unmarshal([]byte(blob), &r); err != nil {
+			return false
+		}
+		return r.LockedUntil > time.Now().Unix()
+	}
 	r, ok := s.recs[sub]
 	return ok && r.LockedUntil > time.Now().Unix()
 }
@@ -329,9 +477,22 @@ func (h *mfaHandler) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.store.mu.Lock()
-	defer h.store.mu.Unlock()
-	rec, already := h.store.recs[c.Sub]
+	mtx, err := h.store.begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "MFA 状态存储不可用")
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			mtx.rollback()
+		}
+	}()
+	rec, already, gerr := mtx.get(c.Sub)
+	if gerr != nil {
+		writeError(w, http.StatusInternalServerError, "MFA 状态读取失败")
+		return
+	}
 	if already {
 		// 换绑须再认证：当前有效 TOTP（或应急码）之一通过才允许（R2-04）。
 		opened, oerr := openMFASecret(h.store.masterKey, mustDecodeHex(rec.SecretSealed))
@@ -350,17 +511,20 @@ func (h *mfaHandler) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := auditActionMFAEnroll
-	h.store.recs[c.Sub] = &mfaRecord{
+	if err := mtx.put(c.Sub, &mfaRecord{
 		SecretSealed: hex.EncodeToString(sealed),
 		KeyVersion:   1,
 		EnrolledAt:   time.Now().Unix(),
 		Emergency:    emergRecs,
-	}
-	if err := h.store.saveLocked(); err != nil {
-		delete(h.store.recs, c.Sub) // 回滚内存态，避免与磁盘不一致
+	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "MFA 状态落盘失败")
 		return
 	}
+	if err := mtx.commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "MFA 状态提交失败")
+		return
+	}
+	committed = true
 	h.appendAudit(c, r, action, c.Sub, "ok")
 
 	b32 := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(secret)
@@ -420,23 +584,34 @@ func (h *mfaHandler) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.store.mu.Lock()
-	rec, ok := h.store.recs[c.Sub]
+	mtx, err := h.store.begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "MFA 状态存储不可用")
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			mtx.rollback()
+		}
+	}()
+	rec, ok, gerr := mtx.get(c.Sub)
+	if gerr != nil {
+		writeError(w, http.StatusInternalServerError, "MFA 状态读取失败")
+		return
+	}
 	if !ok {
-		h.store.mu.Unlock()
 		writeError(w, http.StatusNotFound, "当前账号未绑定 MFA（先 enroll）")
 		return
 	}
 	now := time.Now().Unix()
 	if rec.LockedUntil > now {
 		until := rec.LockedUntil
-		h.store.mu.Unlock()
 		writeError(w, http.StatusForbidden, fmt.Sprintf("账号已锁定至 %s（连续失败超阈值）", time.Unix(until, 0).Format(time.RFC3339)))
 		return
 	}
 	secret, err := openMFASecret(h.store.masterKey, mustDecodeHex(rec.SecretSealed))
 	if err != nil {
-		h.store.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, "MFA 密钥解封失败")
 		return
 	}
@@ -446,24 +621,33 @@ func (h *mfaHandler) handleVerify(w http.ResponseWriter, r *http.Request) {
 		if rec.FailCount >= mfaMaxFails {
 			rec.LockedUntil = now + mfaLockSeconds
 			rec.FailCount = 0
-			_ = h.store.saveLocked()
-			h.store.mu.Unlock()
+			if perr := mtx.put(c.Sub, rec); perr != nil {
+				h.store.alarm.logf("mfa-verify", "MFA 锁定状态写入失败（锁定仍会拒绝本次校验）: %v", perr)
+			}
+			_ = mtx.commit()
+			committed = true
 			h.appendAudit(c, r, auditActionMFALocked, c.Sub, "ok")
 			log.Printf("[mfa] ALERT 账号锁定：sub=%s locked_until=%s rid=%s", c.Sub, time.Unix(rec.LockedUntil, 0).Format(time.RFC3339), r.Header.Get("X-Request-ID"))
 			writeError(w, http.StatusForbidden, "连续失败超阈值，账号锁定 30 分钟")
 			return
 		}
-		_ = h.store.saveLocked()
-		h.store.mu.Unlock()
+		if perr := mtx.put(c.Sub, rec); perr != nil {
+			h.store.alarm.logf("mfa-verify", "MFA 失败计数写入失败（计数可能丢失）: %v", perr)
+		}
+		_ = mtx.commit()
+		committed = true
 		writeError(w, http.StatusUnauthorized, "口令校验失败")
 		return
 	}
-	if err := h.store.saveLocked(); err != nil {
-		h.store.mu.Unlock()
+	if perr := mtx.put(c.Sub, rec); perr != nil {
 		writeError(w, http.StatusInternalServerError, "MFA 状态落盘失败")
 		return
 	}
-	h.store.mu.Unlock()
+	if cerr := mtx.commit(); cerr != nil {
+		writeError(w, http.StatusInternalServerError, "MFA 状态提交失败")
+		return
+	}
+	committed = true
 
 	if emergency {
 		h.appendAudit(c, r, auditActionMFAEmergencyUsed, c.Sub, "ok")
