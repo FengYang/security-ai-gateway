@@ -31,6 +31,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"security-ai-gateway/gateway/cryptop"
@@ -97,6 +98,9 @@ func loadAuditSettings() *auditSettings {
 }
 
 // adminAuditEvent 管理面审计事件（只记指纹与变更结果，绝不含 Key 明文）。
+// auditEventSeq 审计事件 ID 的进程内单调序号（保证 EventID 全局唯一）。
+var auditEventSeq atomic.Uint64
+
 type adminAuditEvent struct {
 	EventID        string `json:"event_id"`
 	Timestamp      int64  `json:"timestamp"` // UTC 纳秒
@@ -121,8 +125,11 @@ type adminAuditEvent struct {
 	HashAlg string `json:"hash_alg,omitempty"`
 	// Detail M5（策略/模型变更摘要，附录 D）：**证据字段，不进 hash()**（与 HashAlg 同法），
 	// 保持既有链格式不变；空 = 不写。
-	Detail   string `json:"detail,omitempty"`
-	PrevHash string `json:"prev_hash"`
+	Detail string `json:"detail,omitempty"`
+	// DualApprovalIDs P2-4 §6.1 集群注册/摘除双签引用：**证据字段，不进 hash()**
+	// （与 Detail/HashAlg 同法），故旧链逐字节不变；仅 cluster_registry_changed 使用。
+	DualApprovalIDs [2]string `json:"dual_approval_ids,omitempty"`
+	PrevHash        string    `json:"prev_hash"`
 }
 
 // ---- 算法分派（P0-4 §5.2.2）：与进程 profile 解耦 ----
@@ -294,7 +301,10 @@ func (c *adminAuditChain) append(e adminAuditEvent) error {
 	e.PrevHash = c.lastHex
 	e.Timestamp = time.Now().UnixNano()
 	if e.EventID == "" {
-		e.EventID = fmt.Sprintf("evt-%d", e.Timestamp)
+		// EventID 必须**全局唯一**：UnixNano 在部分平台（Windows 时钟分辨率约 ms）会取到相同值，
+		// 同一毫秒内的两条事件将得到相同 ID —— 这会直接破坏双签受理（两条审批 ID 相同被判 fail-closed）
+		// 与审计事件的唯一可引用性。故追加进程内单调序号。
+		e.EventID = fmt.Sprintf("evt-%d-%d", e.Timestamp, auditEventSeq.Add(1))
 	}
 	// §5.2.2 写入端打标：按本进程 profile（intl → ""（缺省=SHA-256），sm-* → "sm3"）。
 	// 注：`KeyFingerprint` 恒 SHA-256（标识类），故 sm 档该字段与链哈希算法不同档——见 §5.2.2 例外条。
@@ -321,6 +331,22 @@ func (c *adminAuditChain) append(e adminAuditEvent) error {
 		c.writeAnchorLocked()
 	}
 	return nil
+}
+
+// eventByID 按事件 ID 查找事件（集群双签受理校验用；线性扫描，审批量级小）。
+// 未找到返回 ok=false。
+func (c *adminAuditChain) eventByID(id string) (adminAuditEvent, bool) {
+	if c == nil || id == "" {
+		return adminAuditEvent{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, e := range c.events {
+		if e.EventID == id {
+			return e, true
+		}
+	}
+	return adminAuditEvent{}, false
 }
 
 // list 返回事件分页副本（**倒序：最新在前**）与总数（M3-B 安全中心审计链查询）。

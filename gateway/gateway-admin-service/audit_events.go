@@ -34,6 +34,9 @@ const (
 	auditActionAccountLocked   = "account_locked"
 	auditActionAccountUnlocked = "account_unlocked"
 	auditActionSessionKicked   = "session_kicked"
+	// P2-4 §6.1 集群注册/摘除（含双签审批）；与 account_* 同级，白名单扩展段。
+	auditActionClusterRegistryApproval = "cluster_registry_approval"
+	auditActionClusterRegistryChanged  = "cluster_registry_changed"
 )
 
 // auditEventActions 投递端点接受的 action 集合。
@@ -42,12 +45,12 @@ var auditEventActions = map[string]struct{}{
 	auditActionAccountUpdate:        {},
 	auditActionAccountPasswordReset: {},
 	auditActionAccountDelete:        {},
-	auditActionLoginSuccess:    {},
-	auditActionLoginFailure:    {},
-	auditActionLogout:          {},
-	auditActionAccountLocked:   {},
-	auditActionAccountUnlocked: {},
-	auditActionSessionKicked:   {},
+	auditActionLoginSuccess:         {},
+	auditActionLoginFailure:         {},
+	auditActionLogout:               {},
+	auditActionAccountLocked:        {},
+	auditActionAccountUnlocked:      {},
+	auditActionSessionKicked:        {},
 }
 
 // maxTargetLen 目标资源名上限（账号名 ≤32，放宽到 64 防御性上限）。
