@@ -49,6 +49,12 @@ func (d Dialect) IsPostgres() bool { return d == Postgres }
 
 // Rebind 把 `?` 占位符转换为方言占位符（PG `$1..$n`；SQLite 原样）。
 // 单引号字符串、双引号标识符、`--`/`/* */` 注释内的 `?` 不转换。
+//
+// 使用约束（调用方 SQL 须遵守，防静默踩坑）：
+//   - 禁用 PG E-string（E'...\'...'）与 dollar-quote（$$...$$）字符串——
+//     重绑状态机不识别其引号形态，内部的 `?` 会被误改；
+//   - 禁用 PG jsonb 的 `?`/`?&`/`?|` 操作符——会被当作占位符改写；
+//   - 不支持 lib/pq 的 `??` 转义写法（本仓库统一走本重绑，无需该写法）。
 func (d Dialect) Rebind(query string) string {
 	if d != Postgres || !strings.Contains(query, "?") {
 		return query

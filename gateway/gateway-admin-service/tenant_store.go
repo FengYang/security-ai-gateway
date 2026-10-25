@@ -25,6 +25,15 @@ import (
 	"security-ai-gateway/gateway/gateway-admin-service/sqlutil"
 )
 
+// boolToInt64 bool → 0/1（INTEGER 列的统一存储形态）。PG 下 pgx 不能把 Go bool
+// 编码进 int4/int8 列（QA P1-1），写入参数须显式转换；读路径 Scan 进 *bool 不受影响。
+func boolToInt64(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // ---------- 常量 ----------
 
 const (
@@ -1230,6 +1239,8 @@ func (s *sqliteTenantStore) UpsertProvisioning(tx TenantTx, p *TenantProvisionin
 	if p.PluginSetJSON == "" {
 		p.PluginSetJSON = "[]"
 	}
+	// Segment1Enabled 显式转 0/1（QA P1-1）：pgx 不能把 Go bool 编码进 int4 列
+	// （PG 亦无 boolean→integer 隐式转换），sqlite 不受影响；统一存 0/1。
 	_, err := tx.tx().Exec(`INSERT INTO tenant_provisionings
 		(tenant_id, scenario, trust_tier, access_mode, plugin_set, segment1_enabled,
 		 segment2_mode, template_version, provider_cred_refs, provisioned_at, updated_at)
@@ -1244,7 +1255,7 @@ func (s *sqliteTenantStore) UpsertProvisioning(tx TenantTx, p *TenantProvisionin
 			template_version = excluded.template_version,
 			provider_cred_refs = excluded.provider_cred_refs,
 			updated_at = excluded.updated_at`,
-		p.TenantID, p.Scenario, p.TrustTier, p.AccessMode, p.PluginSetJSON, p.Segment1Enabled,
+		p.TenantID, p.Scenario, p.TrustTier, p.AccessMode, p.PluginSetJSON, boolToInt64(p.Segment1Enabled),
 		p.Segment2Mode, p.TemplateVersion, p.ProviderCredRefsJSON, p.ProvisionedAt, p.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("tenant: upsert provisioning: %w", err)
