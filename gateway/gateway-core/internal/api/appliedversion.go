@@ -14,6 +14,28 @@
 //
 // ⚠️ 插件侧改动（携带该请求头）属 **P1-8 归属**（gateway/wasm/otpmask-plugin/**），
 // 本任务不触碰插件代码；此处仅登记接口契约。
+//
+// ── 与管理面 sync-status 的字段契约（P2-4 T-3.3）──
+//
+// GET /v1/internal/applied-config-version 是 T-3.3「收敛核对 API sync-status」的
+// **core 侧数据源**（实现无需改动，此处仅登记契约）。管理面聚合侧按下列口径消费：
+//
+//	字段                       含义                             聚合侧处置
+//	applied_config_version     最近一次被采纳的上报版本           known=true 时参与"期望 vs 实际"比较
+//	known                      是否有有效上报（false = unknown）   false ⇒ 该集群该维度标 **unknown**
+//	last_reported_version      最近一次**收到的**上报值（含被拒）   仅排障用，**不参与**比较
+//	seq                        采纳计数（单调）                    仅观测
+//	reported_at/last_seen_at   采纳时间 / 最近见到上报的时间         仅观测
+//
+// ⚠️ **unknown 口径（硬约束，聚合侧必须遵守）**：读到 `known=false` 时——
+//  1) 必须把该集群该维度标记为 **unknown**（**不是**"一致"、**不是**"无差异"）；
+//  2) **禁止**以「未见差异」默认收敛（"没看到上报" ≠ "已收敛"）；
+//  3) 必须触发告警（unknown 是可观测缺口，不是静默通过）。
+//  理由：core 侧只如实记录插件上报了什么；"插件从未上报"与"插件已应用同一版本"
+//  在数据上不可区分，若默认收敛，则插件拉取失败/未拉取会被静默掩盖。
+//
+// 心跳侧口径一致：core 心跳上报体为 {"applied_config_version": "<版本>"}，
+// 从未上报时为空串；admin-service 侧对空串**不覆盖**既有值（unknown 语义一致）。
 package api
 
 import (
