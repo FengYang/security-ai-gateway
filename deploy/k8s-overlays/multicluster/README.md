@@ -32,7 +32,7 @@ kubectl apply -k deploy/k8s-overlays/multicluster
 |------|------|--------|----------------|
 | `kustomization.yaml` | 新增 overlay 入口（bases=基础清单 + patches） | 把 2 副本形态与默认形态隔离 | **无**（`deploy/k8s/kustomization.yaml` 未引用本目录） |
 | `patch-admin-replicas.yaml` | `replicas: 1 → 2`；`strategy.maxSurge=0 / maxUnavailable=1` | 多副本是 P2 多集群/高可用的目标形态；`maxSurge=0` 保证滚动升级时**新旧 Pod 不并存**，杜绝共享库切换窗口内的双写者 | **无**（仅在本 overlay 生效） |
-| `patch-admin-pdb.json.yaml` | PDB `maxUnavailable: 0` → `minAvailable: 1`（RFC6902 先删后加） | 基础清单的 `maxUnavailable=0` 语义是「驱逐须运维显式介入」（单副本下正确）。2 副本下保留会**永久阻断**节点 drain / 滚动升级（allowedDisruptions=0）；改 `minAvailable=1` 后 2 副本允许 1 个自愿干扰，**正常驱逐不被阻断**，同时保底 1 副本承载写入 | **无**（未改基础文件，patch 只在 overlay 内应用） |
+| `patch-admin-pdb.json.yaml` | **仅** `gateway-admin-service` 这一个 PDB：`maxUnavailable: 0` → `minAvailable: 1`（RFC6902 先删后加，目标按 kind/name/namespace 精确定位） | 基础清单中 admin PDB 位于 `deploy/k8s/gateway-admin-service.yaml:375-385`（**不在 `pdb.yaml`**），语义是「驱逐须运维显式介入」（单副本下正确）。2 副本下保留会**永久阻断**节点 drain / 滚动升级（allowedDisruptions=0）；改 `minAvailable=1` 后 2 副本允许 1 个自愿干扰，**正常驱逐不被阻断**，同时保底 1 副本承载写入 | **无**（基础文件未改；patch 只在 overlay 内应用。语义对照见 §2.1） |
 | `patch-admin-security-pg-env.yaml` | 注入 `SECURITY_STORE_PG_DSN`（Secret 引用）；显式写 `TENANT_CAPTCHA_IP_RATE_PER_HOUR=30`、`LOGIN_MAX_FAIL=5`、`LOGIN_LOCK_MIN=15`（均为代码默认值，仅作口径留档） | 共享库是多副本下 captcha 限流 / 登录锁定 / MFA / 发信限频一致性的前提；空值 = 原进程内实现（默认零变化） | **无**（基础清单不含该 env，默认仍为进程内实现） |
 | `patch-core-snapshot.yaml` | `GATEWAY_CORE_STORE_SNAPSHOT_PATH=/var/lib/otpmask-core/store-snapshot.json`；审计卷 `emptyDir → PVC`；新增快照卷 | 落实基础清单自身 TODO「生产须改为持久卷（WORM）」；T-1.7 快照持久化开关默认关闭（空=纯内存） | **无**（基础清单该 env 不存在） |
 | `pvc-core-store.yaml` | 新增 PVC `gateway-core-audit-worm`、`gateway-core-store-snapshot`（各 1Gi，RWO，不写死 storageClassName） | 判据 7 审计链持久性 + T-1.7 快照持久性；不绑死环境专有 SC | **无**（新增资源，不进基础 kustomization） |
@@ -41,6 +41,39 @@ kubectl apply -k deploy/k8s-overlays/multicluster
 
 **对默认部署的净影响：0。** 已用 `kubectl kustomize` 对基础目录与 overlay 分别构建比对，
 基础清单文件本次提交**零改动**（`git diff --stat deploy/k8s` 为空）。
+
+### 2.1 PDB 语义与适用边界（核实结论）
+
+**先纠正一处口径**：基础清单里有**两处** PDB，二者性质不同，本次**均未改动**：
+
+| 位置 | 对象 | 语义 | 本次改动 |
+|------|------|------|----------|
+| `deploy/k8s/pdb.yaml` | `embedding-service-pdb` / `tee-infer-service-pdb` / `envoy-gateway-pdb` | 三个均为 `minAvailable: 1`（常规保底，与副本数无关） | **未改动**（本 overlay 的 PDB patch 不涉及它们） |
+| `deploy/k8s/gateway-admin-service.yaml:375-385` | `gateway-admin-service` | `maxUnavailable: 0`（C-18 单副本硬约束配套：驱逐须运维显式介入） | **未改动**；本 overlay 用 RFC6902 **仅在 overlay 内**改这一条 |
+
+因此「基础 `pdb.yaml` 已同步调整为 `minAvailable: 1`」这一说法**不成立**：
+`pdb.yaml` 本来就是 `minAvailable: 1`（无需调整），而 admin PDB 位于
+`gateway-admin-service.yaml` 且**仍为 `maxUnavailable: 0`**——这是**有意保持**的，
+因为基础形态是单副本，`maxUnavailable: 0` 正是「驱逐须显式介入」的表达，
+若在基础清单改成 `minAvailable: 1`，反而会**悄悄放宽**默认部署的干扰预算。
+
+**基础与 overlay 的语义是否等价？**（按 allowedDisruptions = max(0, minAvailable - 期望可用数) 推算）
+
+| 形态 | 基础（未应用 overlay） | overlay 应用后 | 是否等价 |
+|------|------------------------|----------------|----------|
+| 单副本（默认部署） | `maxUnavailable: 0` → disruptions = 0 | `minAvailable: 1` + replicas=1 → disruptions = max(0, 1-1) = 0 | ✅ **行为等价**（都阻止自愿驱逐，均不会放开写者独占） |
+| 2 副本（overlay 目标形态） | `maxUnavailable: 0` → disruptions = 0（**永久阻断 drain/滚动**） | `minAvailable: 1` → disruptions = 1（正常驱逐可进行） | ❌ 不等价（这正是 overlay 必须改 PDB 的原因） |
+
+**适用边界（重要）**：
+
+- 默认部署（未 apply overlay）：仍为 `maxUnavailable: 0` + 单副本 → 自愿驱逐被阻断，
+  节点 drain 必须运维显式介入（C-18 原意，**未被本次提交改变**）。
+- 本 overlay：replicas=2 + `minAvailable: 1` → 允许 1 个自愿干扰，**正常驱逐不被阻断**。
+- ⚠️ **单副本 + `minAvailable: 1` 同样会阻止自愿驱逐**（disruptions = 0）。
+  即：把本 overlay 误用到 1 副本环境，**不会**放宽干扰预算，但会因同一 overlay 的
+  `replicas=2` patch 一并变成 2 副本 —— 故本 overlay 必须与 §1 的前置条件
+  （T-1.6 迁移完成、PG 就绪、tenant store PG 装配接通）**成套使用**，
+  且**不得**在未完成前置的单副本环境单独应用。
 
 ## 3. 口径留档
 
