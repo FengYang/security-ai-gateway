@@ -37,6 +37,13 @@ type config struct {
 	tenantStorePGDSN string // PostgreSQL 连接串（非空 = 走共享库；P2-4 T-1.2b）
 	tenantPepper     []byte // 邮件令牌哈希 pepper（启用时必填）
 
+	// 集群注册表存储（P2-4 T-2）：独立表集合（clusters / cluster_heartbeats /
+	// cluster_credentials），不混入租户库表集合（避免影响租户库迁移与既有备份口径）。
+	// 取值：PG DSN 非空时与租户库同库（多集群共享）；否则用 SQLite 路径；
+	// 都为空 → 集群注册 API 不启用（默认行为零变化）。
+	clusterStorePath  string // SQLite 存储路径
+	clusterStorePGDSN string // PostgreSQL 连接串（非空 = 与租户库同库）
+
 	// 令牌 TTL / 限流 / 锁定（§10.3 B）
 	emailVerifyTTLHours         int
 	passwordResetTTLHours       int
@@ -215,6 +222,14 @@ func loadTenantConfig(cfg *config) error {
 	cfg.tenantStorePath = storePath
 	cfg.tenantStorePGDSN = pgDSN
 	cfg.tenantPepper = []byte(pepper)
+
+	// 集群注册表存储（P2-4 T-2）：与租户库同方言；PG 时同库，SQLite 时独立文件。
+	cfg.clusterStorePGDSN = pgDSN
+	cfg.clusterStorePath = os.Getenv("ADMIN_CLUSTER_STORE_PATH")
+	if cfg.clusterStorePGDSN == "" && cfg.clusterStorePath == "" && storePath != "" {
+		// 未显式配置时，SQLite 部署沿用租户库所在目录（独立文件，避免污染租户库表集合）。
+		cfg.clusterStorePath = storePath + ".clusters"
+	}
 
 	// B. 令牌 TTL / 限流 / 锁定（§10.3 B）
 	cfg.emailVerifyTTLHours = envInt("EMAIL_VERIFY_TTL_HOURS", defaultEmailVerifyTTLHours)

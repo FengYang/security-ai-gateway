@@ -292,6 +292,27 @@ func main() {
 	}
 	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, ah, sch, cs, bih, bs.legacyPort)
 
+	// P2-4 T-2：集群注册 API（注册/列表/心跳/审批/摘除）。
+	// 存储：PG 时与租户库同库（多集群共享），SQLite 时独立文件；两者都未配置 → 不启用（默认零变化）。
+	// fail-closed：注册表打开失败即拒启动（集群状态与凭证不可静默丢失）。
+	if cfg.clusterStorePGDSN != "" || cfg.clusterStorePath != "" {
+		dialect := sqlutil.SQLite
+		dsn := cfg.clusterStorePath
+		if cfg.clusterStorePGDSN != "" {
+			dialect = sqlutil.Postgres
+			dsn = cfg.clusterStorePGDSN
+		}
+		cstore, cerr := OpenClusterStore(dialect, dsn)
+		if cerr != nil {
+			log.Fatalf("集群注册表初始化失败（fail-closed）：%v", cerr)
+		}
+		defer cstore.Close()
+		registerClusterRoutes(adminMux, cfg, newClusterAPI(cstore, newClusterApprovalRegistry(auditChain)))
+		log.Printf("集群注册 API 已启用（dialect=%s）", dialect)
+	} else {
+		log.Printf("集群注册 API 未启用（TENANT_STORE_PG_DSN / ADMIN_CLUSTER_STORE_PATH 均未配置）")
+	}
+
 	// 租户自助门户（可选启用）：独立 tenantMux 承载 /v1/tenant/* 与 /v1/adminext/tenant/*
 	// （双 mux 隔离，C-16）；验证码签发为 Console 内部端点，挂管理面（authMiddleware）。
 	var tenantStore TenantStore

@@ -83,6 +83,13 @@ var (
 	// 归 audit_admin——以表为准（规则②），矩阵差异登记于此。
 	epAuditEvents = endpointRule{domAudit, actWrite, []string{roleSystemAdmin}, mfaSessionFreshness}
 
+	// P2-4 §6.1 集群注册 API：
+	//   - 写（注册/审批/摘除）：admin 写 + 会话级 MFA（受控变更，step-up 口径与审计投递一致）；
+	//   - 读（列表）：admin/审计角色可读（auditor 需看集群状态与版本，R-5 举证依赖）。
+	epClusterWrite = endpointRule{domConfig, actWrite, []string{roleSystemAdmin}, mfaSessionFreshness}
+	epClusterRead  = endpointRule{domConfig, actRead,
+		[]string{roleSystemAdmin, roleSecAdmin, roleAuditAdmin, roleAuditor}, 0}
+
 	// /v1/adminext/sec-status GET（sec:read；全部管理角色 + auditor）。
 	epSecStatus = endpointRule{domSec, actRead,
 		[]string{roleSystemAdmin, roleSecAdmin, roleAuditAdmin, roleAuditor}, 0}
