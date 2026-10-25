@@ -281,6 +281,100 @@ func TestSnapshotAntiRollbackByRevision(t *testing.T) {
 	}
 }
 
+// TestSnapshotRollbackRejectAdvancesBaseline **QA P2-新：防回退拒绝不得造成
+// 永久停滞**：拒绝后本地基线推进到磁盘 revision ⇒ 下一次写入以 diskRev+1 成功；
+// 且拒绝必须计入失败指标（PersistFailures>0 / LastPersistError 非 nil /
+// RollbackRejects>0），杜绝"静默失去持久化"。
+func TestSnapshotRollbackRejectAdvancesBaseline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.json")
+	ss := NewSnapshotStore(NewMemory(), path, nil)
+	ss.SetFlushInterval(0) // 同步写：立即暴露拒绝
+
+	// 本进程先落一版，建立基线 revision=5。
+	if err := ss.writeSnapshotAt(5, 1000); err != nil {
+		t.Fatalf("写入 revision=5 失败: %v", err)
+	}
+
+	// 模拟"另一写者"（多写者窗口）：把磁盘推进到 revision=9。
+	other := NewSnapshotStore(NewMemory(), path, nil)
+	if err := other.writeSnapshotAt(9, 2000); err != nil {
+		t.Fatalf("外部写者写入 revision=9 失败: %v", err)
+	}
+
+	// 本进程（陈旧，基线仍为 5）写入 ⇒ 被拒。
+	err := ss.Persist()
+	if err == nil {
+		t.Fatalf("陈旧进程写入应被防回退拒绝")
+	}
+	if !strings.Contains(err.Error(), "防回退") {
+		t.Fatalf("错误信息应说明防回退: %v", err)
+	}
+	// 拒绝必须计入失败指标（否则"失去持久化"不可观测）。
+	if ss.PersistFailures() == 0 {
+		t.Fatalf("防回退拒绝应计入失败指标")
+	}
+	if ss.LastPersistError() == nil {
+		t.Fatalf("应记录最近一次写失败原因")
+	}
+	if ss.RollbackRejects() == 0 {
+		t.Fatalf("防回退拒绝次数应可观测")
+	}
+	// 拒绝期间磁盘快照不被陈旧进程改写。
+	if got := readPayload(t, path).Revision; got != 9 {
+		t.Fatalf("拒绝期间磁盘快照应保持 revision=9: got %d", got)
+	}
+
+	// 基线已推进 ⇒ 下一次写入以 diskRev+1(=10) 成功（不再永久停滞）。
+	if err := ss.Persist(); err != nil {
+		t.Fatalf("基线推进后下一次写入应成功: %v", err)
+	}
+	if got := readPayload(t, path).Revision; got != 10 {
+		t.Fatalf("下一次写入应使用 diskRev+1=10: got %d", got)
+	}
+}
+
+// TestSnapshotRollbackRejectAutoRetry **自动路径**：变更触发落盘被拒后，
+// 基线推进 + 有界自动重试 ⇒ 待写状态最终落盘（不必等到下一次变更）。
+func TestSnapshotRollbackRejectAutoRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.json")
+	ss := NewSnapshotStore(NewMemory(), path, nil)
+	ss.SetFlushInterval(10 * time.Millisecond)
+
+	// 先落一版，建立基线。
+	if err := ss.Persist(); err != nil {
+		t.Fatalf("首次落盘失败: %v", err)
+	}
+	// 外部写者把磁盘推进到 revision=9。
+	other := NewSnapshotStore(NewMemory(), path, nil)
+	if err := other.writeSnapshotAt(9, 2000); err != nil {
+		t.Fatalf("外部写者写入失败: %v", err)
+	}
+
+	// 本进程变更 → 落盘被拒 → 自动重试 → 以 diskRev+1 落盘成功。
+	_ = ss.Save(&route.RoutePrescription{PrescriptionID: "rx-1", Tenant: "t"})
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		p, err := readPayloadSoft(path)
+		if err == nil && p.Revision == 10 && len(p.Prescriptions) == 1 {
+			if ss.PersistFailures() == 0 {
+				t.Fatalf("拒绝应计入失败指标")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("防回退拒绝后应自动重试并以 diskRev+1 落盘")
+}
+
+// readPayloadSoft 读盘并解码快照载荷；失败返回错误（轮询场景容忍瞬时失败）。
+func readPayloadSoft(path string) (*snapshotPayload, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSnapshot(b)
+}
+
 // TestSnapshotClockIsAuxiliaryOnly **时钟仅辅助**：磁盘 saved_at 更新但 revision
 // 更旧 ⇒ 告警但仍以 revision 为准（允许写入），不因时钟回拨误拒。
 func TestSnapshotClockIsAuxiliaryOnly(t *testing.T) {

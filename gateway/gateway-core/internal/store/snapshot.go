@@ -13,6 +13,9 @@
 //     （磁盘更新 ⇒ 本进程状态陈旧，回写即回退）；时钟 saved_at **仅作辅助判据**
 //     （时钟异常只告警，不作为拒绝依据，避免时钟回拨/漂移造成误拒）；
 //     schema 版本号不识别 → 拒绝加载；
+//   - **防回退拒绝不造成永久停滞（QA P2-新）**：拒绝时把本地基线推进到磁盘
+//     revision（下一写用 diskRev+1 > 磁盘 ⇒ 不再被同一判据反复拒绝），
+//     并把拒绝计入失败指标 + 升级告警（"失去持久化"必须可观测）；
 //   - fail-open：损坏快照拒绝加载后回退空内存启动并明确告警——理由：core
 //     重启可用性优先，策略/路由配置可由管理面重新下发；若因快照损坏拒绝启动，
 //     整个网关控制面失联，代价远大于短暂回退空态。
@@ -58,7 +61,25 @@ const (
 	DefaultFlushInterval = 200 * time.Millisecond
 	// persistWarnThreshold 连续写失败达到该次数后告警升级（错误级措辞 + 计数）。
 	persistWarnThreshold = 3
+	// maxRollbackAutoRetries 防回退拒绝后的**自动重试上限**（QA P2-新）：
+	// 拒绝时基线已推进到磁盘 revision（下一写必然 > 磁盘），自动重试通常一次即成；
+	// 设上限避免与"持续推进的写者"无限对撞（忙循环）。
+	maxRollbackAutoRetries = 3
+	// rollbackRetryDelay 防回退拒绝后的自动重试延迟（错开重试，避免紧贴磁盘抖动）。
+	rollbackRetryDelay = 50 * time.Millisecond
 )
+
+// rollbackRejectError 防回退拒绝错误（QA P2-新）。
+//
+// 携带"基线推进后的下一 revision"，供上层做**有界自动重试**；
+// 用类型而非字符串匹配判定（避免脆弱的错误文案耦合）。
+type rollbackRejectError struct {
+	msg     string // 面向运维的错误文案（含磁盘/待写 revision）
+	nextRev int64  // 基线推进后的下一 revision（= 磁盘 revision + 1）
+}
+
+// Error 实现 error 接口。
+func (e *rollbackRejectError) Error() string { return e.msg }
 
 // snapshotPayload 快照业务载荷：store 全部状态域 + 元数据。
 type snapshotPayload struct {
@@ -121,6 +142,10 @@ type SnapshotStore struct {
 	closed      bool
 	// flushInterval 合并写窗口（0 = 每次变更同步落盘）。
 	flushInterval time.Duration
+	// rollbackRejects 防回退拒绝累计次数（可观测；>0 ⇒ 出现过多写者窗口）。
+	rollbackRejects uint64
+	// autoRetries 防回退拒绝后的自动重试次数（有界；成功落盘后归零）。
+	autoRetries int
 
 	writeMu sync.Mutex // 串行化快照写盘（防回退检查 + rename）
 }
@@ -345,7 +370,40 @@ func (s *SnapshotStore) flushNow() {
 			s.dirty = true
 		}
 		s.mu.Unlock()
+		// 防回退拒绝：基线已推进 ⇒ 自动重试（有界）以尽快把待写状态落盘。
+		s.scheduleRollbackRetry(err)
 	}
+}
+
+// scheduleRollbackRetry 防回退拒绝后的**有界自动重试**（QA P2-新）。
+//
+// 基线已在拒绝分支推进到磁盘 revision ⇒ 下一次写用 diskRev+1（> 磁盘）⇒
+// 通常一次即成功；此处做有限次自动重试，避免"被拒后必须等下一次变更才落盘"
+// 的空窗（窗口内变更本就该在退出前补写）。
+//
+// 非防回退错误（I/O 故障、编码失败等）**不自动重试**：重试无意义且会放大故障。
+// 重试次数有上限（maxRollbackAutoRetries），避免与"持续推进的写者"无限对撞。
+func (s *SnapshotStore) scheduleRollbackRetry(cause error) {
+	var rre *rollbackRejectError
+	if !errors.As(cause, &rre) {
+		return // 非防回退错误：不自动重试
+	}
+	s.mu.Lock()
+	if s.closed || s.disabled || !s.dirty {
+		s.mu.Unlock()
+		return
+	}
+	if s.autoRetries >= maxRollbackAutoRetries {
+		s.mu.Unlock()
+		s.logf("警告: 防回退自动重试已达上限（%d 次），待下次变更/显式刷盘/优雅退出再试", maxRollbackAutoRetries)
+		return
+	}
+	s.autoRetries++
+	attempt := s.autoRetries
+	s.flushTimer = time.AfterFunc(rollbackRetryDelay, s.flushNow)
+	s.mu.Unlock()
+	s.logf("警告: 防回退拒绝后自动重试落盘（第 %d 次，延迟 %s）：下一次写入使用 revision=%d",
+		attempt, rollbackRetryDelay, rre.nextRev)
 }
 
 // persistAt 组装并原子写盘（revision 自增 + 内容级防回退比对）。
@@ -401,10 +459,46 @@ func (s *SnapshotStore) writeSnapshotAt(revision int64, savedAt int64) error {
 	}
 	if diskReadable && diskRev >= revision {
 		// 防回退拒绝：磁盘快照更新或持平 ⇒ 本进程状态陈旧，回写即回退。
-		// **不算写失败**（不是 I/O 故障），仅告警一次；不重试（重试也无意义，
-		// 磁盘不会自己变旧）。
-		err := fmt.Errorf("拒绝覆盖更新的快照（防回退）：磁盘 revision=%d ≥ 待写 revision=%d", diskRev, revision)
-		s.logf("警告: %v", err)
+		//
+		// —— 多写者语义（QA P2-新）——
+		// 触发场景：**两个进程共享同一快照路径**（K8s 滚动更新 maxSurge>1 且同节点
+		// RWO PVC 仍可双挂；或旧实例未退净即起新实例）。此时"磁盘 revision ≥ 待写
+		// revision"是**必须发生**的安全行为：陈旧进程不得用旧状态覆盖他人已推进的快照。
+		//
+		// 早期实现的两处缺陷（QA P2-新，本分支修复）：
+		//  1) 本地基线不推进 ⇒ nextRevision() 恒返回同一值 ⇒ 每次写都被拒 ⇒
+		//     进程**永久失去持久化能力**（直到重启才恢复）；
+		//  2) 拒绝分支不走 recordFailure ⇒ PersistFailures() 恒 0、
+		//     LastPersistError() 恒 nil ⇒ "失去持久化"完全不可观测（静默降级）。
+		//
+		// 本期修复口径（**推进基线 + 计入失败指标 + 告警升级**）：
+		//  - 本地基线推进到 diskRev ⇒ 下一次写用 diskRev+1（> 磁盘）⇒ 消除永久停滞；
+		//  - 走 recordFailure ⇒ 失败计数 + 最近错误可查 + 连续 ≥3 次升级为错误级告警；
+		//  - 内存态不回滚（内存为准），本进程后续变更仍会尝试落盘。
+		//
+		// 残余风险（**明确记录，避免误读为"绝对安全"**）：基线推进后本进程确实能再次
+		// 写入，但其内存内容可能落后于磁盘上**他人**写入的新内容 ⇒ 下一次成功写入
+		// 是"较旧内容 + 更大 revision"：revision 单调性成立，**内容新旧性不保证**。
+		// 根治需下列演进之一（**本期不做**）：
+		//  - 显式 Rebase()/Reload()：拒绝后由运维显式触发"以磁盘为准重载"，
+		//    彻底消除内容覆盖（需新增 API 与状态同步语义）；
+		//  - lockfile 串行化（O_EXCL 锁文件）：单写者语义，从根上排除多写者窗口；
+		//  - 部署侧保证单写者（replicas=1 + RWO PVC + 旧实例退净后再起新实例）。
+		err := &rollbackRejectError{
+			msg: fmt.Sprintf("拒绝覆盖更新的快照（防回退）：磁盘 revision=%d ≥ 待写 revision=%d", diskRev, revision),
+			// 基线推进后下一写用的 revision（> 磁盘 ⇒ 必然被接受）。
+			nextRev: diskRev + 1,
+		}
+		s.mu.Lock()
+		if diskRev > s.revision {
+			s.revision = diskRev // 基线推进：下一写用 diskRev+1，消除永久停滞
+		}
+		s.rollbackRejects++
+		s.mu.Unlock()
+		// 计入失败指标 + 告警升级（复用既有通道）⇒ "失去持久化"可观测。
+		s.recordFailure(err)
+		s.logf("警告: 防回退拒绝回写（多写者窗口）：磁盘 revision=%d ≥ 待写 revision=%d；本地基线已推进至 revision=%d，下一次写入将使用 revision=%d",
+			diskRev, revision, diskRev, diskRev+1)
 		return err
 	}
 	if diskReadable && diskSavedAt > savedAt {
@@ -437,8 +531,19 @@ func (s *SnapshotStore) writeSnapshotAt(revision int64, savedAt int64) error {
 		s.revision = revision
 	}
 	s.consecFails = 0
+	s.autoRetries = 0 // 落盘成功：防回退自动重试计数归零
 	s.mu.Unlock()
 	return nil
+}
+
+// RollbackRejects 返回防回退拒绝的累计次数（可观测）。
+//
+// >0 表示曾因"磁盘快照 revision ≥ 待写 revision"而拒绝回写，通常意味着
+// 出现了多写者窗口（两进程共享同一快照路径），需运维核查部署形态。
+func (s *SnapshotStore) RollbackRejects() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rollbackRejects
 }
 
 // recordFailure 记录写失败并升级告警（连续失败达阈值 → 错误级措辞）。
