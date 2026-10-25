@@ -168,6 +168,11 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_active_key_name ON api_keys(tenant_id, name) WHERE status='active';
 CREATE INDEX IF NOT EXISTS idx_apikey_revoked ON api_keys(revoked_at) WHERE status='revoked';
 CREATE INDEX IF NOT EXISTS idx_apikey_tenant ON api_keys(tenant_id);
+-- P2-4 T-1.9（S3 共享库多集群租户隔离）：租户面查询一律以 tenant_id 打头，
+-- 使共享库下的租户查询能按前缀裁剪、不退化为跨租户全表扫描——
+-- 既是性能要求，也是"应用层行级隔离"能真正落地的存储前提。
+CREATE INDEX IF NOT EXISTS idx_apikey_tenant_created ON api_keys(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_apikey_tenant_status ON api_keys(tenant_id, status);
 
 CREATE TABLE IF NOT EXISTS policy_overlays (
   tenant_id        TEXT   PRIMARY KEY,
@@ -225,6 +230,9 @@ CREATE TABLE IF NOT EXISTS tenant_statements (
   created_at       BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_statements_tenant ON tenant_statements(tenant_id, created_at DESC);
+-- P2-4 T-1.9（S3）：GetCurrentStatement 的重签链子查询按 (tenant_id, supersedes_id) 定位，
+-- 保证"取当前声明"在共享库下只扫本租户行。
+CREATE INDEX IF NOT EXISTS idx_statements_supersedes ON tenant_statements(tenant_id, supersedes_id) WHERE supersedes_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS tenant_dispatch_state (
   tenant_id       TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
@@ -236,6 +244,9 @@ CREATE TABLE IF NOT EXISTS tenant_dispatch_state (
   updated_at      BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dispatch_status ON tenant_dispatch_state(status);
+-- P2-4 T-1.9（S3）：重启重放扫描按 status 过滤并按 updated_at 排序，
+-- 复合索引避免共享库下排序退化为全表排序。
+CREATE INDEX IF NOT EXISTS idx_dispatch_status_updated ON tenant_dispatch_state(status, updated_at);
 `
 
 // ---------- 实体 ----------
@@ -268,6 +279,44 @@ type MailActionToken struct {
 	ConsumedAt   int64
 }
 
+// ---------- S3 复核结论（P2-4 T-1.9） ----------
+//
+// 口径来源：《GA-AI 网关能力补齐方案 · P2-4 多集群管理》§T-1 ⑦：
+// "租户表以 tenant_id（+cluster_id 可选）复合主键/索引；所有查询强制 tenant 作用域过滤
+// （应用层行级隔离），禁止跨租户/跨集群直读；测试覆盖跨集群泄露用例。"
+//
+// 一、租户面查询（**SQL 层强制 tenant 作用域**，共享库多集群下同样成立）：
+//
+//	api_keys             GetAPIKeyByIDForTenant / GetActiveAPIKeyByName / ListAPIKeysByTenant
+//	policy_overlays      GetPolicyOverlay / UpsertPolicyOverlay（tenant_id 为主键）
+//	model_configs        GetModelConfig / UpsertModelConfig（tenant_id 为主键）
+//	tenant_provisionings GetProvisioning / UpsertProvisioning（tenant_id 为主键）
+//	tenant_statements    GetCurrentStatement / GetStatement / ListStatementsByTenant
+//	tenant_dispatch_state GetDispatchState / Bump·Mark*Dispatch（均按 tenant_id）
+//	subscription_requests ListSubscriptionRequests（按 tenant_id）
+//
+// 二、管理面/后台全局口径查询（**非租户数据面路径**，刻意跨租户，逐条登记调用点与鉴权）：
+//
+//	ListRevokedAPIKeysSince   数据面吊销增量拉取（内部 Bearer 令牌，§6.11）
+//	ListProvisionedTenants    运维批量重签发枚举（admin 端点）
+//	ListDispatchStatesByStatus 重启重放扫描 pending/applying（后台 worker）
+//	ListTenantsByStatus       补偿任务扫描（后台 worker）
+//	GetUserByEmail/GetUserByID 登录与用户主键定位（email 全局唯一，无歧义）
+//	GetToken/ConsumeToken      邮件动作令牌（token_hash 全局唯一且不可枚举）
+//	IncRegisterRate            按 IP 的注册频次计数（反滥用；同 IP 跨租户共享同一计数口径）
+//	GetAPIKeyByID/RevokeAPIKey 全局按 key_id（管理面/后台）——**租户面禁用**，见 ForTenant 变体
+//	GetSubscriptionRequest      管理面按 request_id（当前无租户面调用点）
+//
+// 三、集群维度索引登记（T-3.2 落地 cluster_id 时**必须**同步追加，勿遗漏）：
+//
+//	tenant_dispatch_state: (cluster_id, status)、(tenant_id, cluster_id)
+//	tenant_statements:    (tenant_id, cluster_id, created_at DESC)（若声明按集群分册）
+//
+// 说明：当前租户表**尚无 cluster_id 列**——S3 口径为"+cluster_id 可选"，列本身与
+// "每租户×每集群单飞"语义由 T-3.2 引入；本清单先行登记，避免 T-3.2 漏建索引。
+// 集群维度落地前，跨集群隔离由 tenant 作用域承担：共享库内不同租户的数据不得互相直读
+// （负向用例见 tenant_isolation_s3_test.go）。
+
 // ---------- Store 接口 ----------
 
 // TenantStore 租户存储聚合根。
@@ -293,10 +342,18 @@ type TenantStore interface {
 
 	// API Key（M3）
 	CreateAPIKey(tx TenantTx, k *APIKey) error
+	// GetAPIKeyByID 全局口径直查（按 key_id，**不带** tenant 作用域）：
+	// 仅限管理面/后台路径；租户数据面路径必须用 GetAPIKeyByIDForTenant
+	// （P2-4 T-1.9 S3：共享库多集群下禁止跨租户直读）。
 	GetAPIKeyByID(keyID string) (*APIKey, error)
+	// GetAPIKeyByIDForTenant 租户口径：SQL 层强制 tenant_id 过滤，跨租户返回 nil。
+	GetAPIKeyByIDForTenant(tenantID, keyID string) (*APIKey, error)
 	GetActiveAPIKeyByName(tenantID, name string) (*APIKey, error)
 	ListAPIKeysByTenant(tenantID string) ([]*APIKey, error)
+	// RevokeAPIKey 全局口径吊销（不带 tenant 作用域）：仅限管理面/后台路径。
 	RevokeAPIKey(tx TenantTx, keyID string, revokedAt int64) error
+	// RevokeAPIKeyForTenant 租户口径吊销：SQL 层强制 tenant_id 过滤，跨租户不生效。
+	RevokeAPIKeyForTenant(tx TenantTx, tenantID, keyID string, revokedAt int64) error
 	ListRevokedAPIKeysSince(since int64) ([]*APIKey, error)
 
 	// 策略 overlay / 模型配置（M5）
@@ -328,6 +385,10 @@ type TenantStore interface {
 	// 套餐升级/降级待确认单（M7）
 	CreateSubscriptionRequest(tx TenantTx, r *SubscriptionRequest) error
 	ListSubscriptionRequests(tenantID string, limit int) ([]*SubscriptionRequest, error)
+	// GetSubscriptionRequest 全局口径（按 request_id，**不带** tenant 作用域）：
+	// 管理面运维查询用；当前无租户面调用点（租户面统一走 ListSubscriptionRequests(tenantID)）。
+	// 若后续开放租户面按 id 查，必须改用 ListSubscriptionRequests 或新增 ForTenant 变体
+	// （P2-4 T-1.9 S3）。
 	GetSubscriptionRequest(requestID string) (*SubscriptionRequest, error)
 
 	// 注册限流
@@ -734,6 +795,11 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_active_key_name ON api_keys(tenant_id, name) WHERE status='active';
 CREATE INDEX IF NOT EXISTS idx_apikey_revoked ON api_keys(revoked_at) WHERE status='revoked';
 CREATE INDEX IF NOT EXISTS idx_apikey_tenant ON api_keys(tenant_id);
+-- P2-4 T-1.9（S3 共享库多集群租户隔离）：租户面查询一律以 tenant_id 打头，
+-- 使共享库下的租户查询能按前缀裁剪、不退化为跨租户全表扫描——
+-- 既是性能要求，也是"应用层行级隔离"能真正落地的存储前提。
+CREATE INDEX IF NOT EXISTS idx_apikey_tenant_created ON api_keys(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_apikey_tenant_status ON api_keys(tenant_id, status);
 `
 
 // APIKey API Key 元数据（不含明文；fingerprint 为 SHA-256 全量 hex，展示取前 8 位）。
@@ -821,6 +887,10 @@ func (s *sqliteTenantStore) CreateAPIKey(tx TenantTx, k *APIKey) error {
 	return nil
 }
 
+// GetAPIKeyByID 全局口径直查（按 key_id，不带 tenant 作用域）。
+//
+// P2-4 T-1.9（S3）：共享库多集群下这是**跨租户直读**的口子，仅限管理面/后台路径；
+// 租户数据面路径必须用 GetAPIKeyByIDForTenant。
 func (s *sqliteTenantStore) GetAPIKeyByID(keyID string) (*APIKey, error) {
 	k, err := scanAPIKey(s.db.QueryRow(`SELECT `+apiKeyColumns+` FROM api_keys WHERE key_id = ?`, keyID))
 	if err == sql.ErrNoRows {
@@ -828,6 +898,25 @@ func (s *sqliteTenantStore) GetAPIKeyByID(keyID string) (*APIKey, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("tenant: get api key: %w", err)
+	}
+	return k, nil
+}
+
+// GetAPIKeyByIDForTenant 租户口径取 Key：SQL 层强制 tenant_id 过滤。
+//
+// 跨租户（或不存在的 key_id）一律返回 (nil, nil)，与"不存在"不可区分——
+// 不泄露 key 是否存在（P2-4 T-1.9 S3 应用层行级隔离）。
+func (s *sqliteTenantStore) GetAPIKeyByIDForTenant(tenantID, keyID string) (*APIKey, error) {
+	if tenantID == "" || keyID == "" {
+		return nil, nil
+	}
+	k, err := scanAPIKey(s.db.QueryRow(`SELECT `+apiKeyColumns+
+		` FROM api_keys WHERE tenant_id = ? AND key_id = ?`, tenantID, keyID))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant: get api key for tenant: %w", err)
 	}
 	return k, nil
 }
@@ -871,11 +960,34 @@ func (s *sqliteTenantStore) queryAPIKeys(query string, args ...any) ([]*APIKey, 
 	return out, rows.Err()
 }
 
+// RevokeAPIKey 全局口径吊销（按 key_id，不带 tenant 作用域）：仅限管理面/后台路径。
+//
+// P2-4 T-1.9（S3）：租户数据面路径必须用 RevokeAPIKeyForTenant，
+// 否则共享库下存在"按 key_id 跨租户吊销"的口子。
 func (s *sqliteTenantStore) RevokeAPIKey(tx TenantTx, keyID string, revokedAt int64) error {
 	res, err := tx.tx().Exec(`UPDATE api_keys SET status = 'revoked', revoked_at = ? WHERE key_id = ? AND status = 'active'`,
 		revokedAt, keyID)
 	if err != nil {
 		return fmt.Errorf("tenant: revoke api key: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("tenant: api key %s not found or already revoked", keyID)
+	}
+	return nil
+}
+
+// RevokeAPIKeyForTenant 租户口径吊销：SQL 层强制 tenant_id 过滤。
+//
+// 跨租户（或不存在/已吊销）一律返回错误且**不改任何行**，
+// 保证共享库下不能凭 key_id 跨租户吊销（P2-4 T-1.9 S3）。
+func (s *sqliteTenantStore) RevokeAPIKeyForTenant(tx TenantTx, tenantID, keyID string, revokedAt int64) error {
+	if tenantID == "" || keyID == "" {
+		return errors.New("tenant: revoke api key: tenant_id/key_id are required")
+	}
+	res, err := tx.tx().Exec(`UPDATE api_keys SET status = 'revoked', revoked_at = ?
+		WHERE tenant_id = ? AND key_id = ? AND status = 'active'`, revokedAt, tenantID, keyID)
+	if err != nil {
+		return fmt.Errorf("tenant: revoke api key for tenant: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("tenant: api key %s not found or already revoked", keyID)
@@ -1282,6 +1394,9 @@ CREATE TABLE IF NOT EXISTS tenant_statements (
   created_at       INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_statements_tenant ON tenant_statements(tenant_id, created_at DESC);
+-- P2-4 T-1.9（S3）：GetCurrentStatement 的重签链子查询按 (tenant_id, supersedes_id) 定位，
+-- 保证"取当前声明"在共享库下只扫本租户行。
+CREATE INDEX IF NOT EXISTS idx_statements_supersedes ON tenant_statements(tenant_id, supersedes_id) WHERE supersedes_id IS NOT NULL;
 `
 
 // TenantStatement 承诺边界声明存证行（N4）。
@@ -1434,6 +1549,9 @@ CREATE TABLE IF NOT EXISTS tenant_dispatch_state (
   updated_at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dispatch_status ON tenant_dispatch_state(status);
+-- P2-4 T-1.9（S3）：重启重放扫描按 status 过滤并按 updated_at 排序，
+-- 复合索引避免共享库下排序退化为全表排序。
+CREATE INDEX IF NOT EXISTS idx_dispatch_status_updated ON tenant_dispatch_state(status, updated_at);
 `
 
 // TenantDispatchState 下发状态机行（每租户一行）。

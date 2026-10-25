@@ -369,7 +369,7 @@ func (h *tenantHandler) handleKeyRotate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := h.store.RevokeAPIKey(tx, old.KeyID, now); err != nil {
+	if err := h.store.RevokeAPIKeyForTenant(tx, tenantID, old.KeyID, now); err != nil {
 		log.Printf("[tenant-key] 轮换吊销旧 Key 失败 key=%s: %v", old.KeyID, err)
 		tenantWriteError(w, http.StatusConflict, "Key 轮换失败")
 		return
@@ -434,7 +434,7 @@ func (h *tenantHandler) handleKeyRevoke(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := h.store.RevokeAPIKey(tx, key.KeyID, now); err != nil {
+	if err := h.store.RevokeAPIKeyForTenant(tx, tenantID, key.KeyID, now); err != nil {
 		log.Printf("[tenant-key] 吊销失败 key=%s: %v", key.KeyID, err)
 		tenantWriteError(w, http.StatusServiceUnavailable, "Key 吊销失败")
 		return
@@ -457,19 +457,23 @@ func (h *tenantHandler) handleKeyRevoke(w http.ResponseWriter, r *http.Request) 
 
 // loadTenantKey 取路径 {id} 的 Key 并校验归属（跨租户 → 404，不泄露存在性）。
 // 失败时已写响应，返回 ok=false。
+//
+// P2-4 T-1.9（S3）：走租户口径存储查询（SQL 层强制 tenant_id 过滤），
+// 跨租户 key 在存储层就查不到，与"不存在"不可区分——共享库多集群下的
+// 应用层行级隔离不再依赖调用方自觉。
 func (h *tenantHandler) loadTenantKey(w http.ResponseWriter, r *http.Request, tenantID string) (*APIKey, bool) {
 	id := r.PathValue("id")
 	if id == "" {
 		tenantWriteError(w, http.StatusBadRequest, "缺少 Key id")
 		return nil, false
 	}
-	key, err := h.store.GetAPIKeyByID(id)
+	key, err := h.store.GetAPIKeyByIDForTenant(tenantID, id)
 	if err != nil {
 		log.Printf("[tenant-key] 查询失败 key=%s: %v", id, err)
 		tenantWriteError(w, http.StatusInternalServerError, "internal error")
 		return nil, false
 	}
-	if key == nil || key.TenantID != tenantID {
+	if key == nil {
 		tenantWriteError(w, http.StatusNotFound, "Key 不存在")
 		return nil, false
 	}
