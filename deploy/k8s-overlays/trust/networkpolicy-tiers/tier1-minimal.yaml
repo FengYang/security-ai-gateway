@@ -1,0 +1,86 @@
+# P2-4 网络边界的**三档**模板：按"要放开谁"分档
+#
+# ⚠️ 三档**默认都不启用**：本目录不在 `deploy/k8s-overlays/trust/kustomization.yaml` 的 resources 内，
+#    需显式 `kubectl apply -f` 单档。**同一工作负载只应用一档**——K8s NetworkPolicy 是**加性**的
+#    （多策略取并集），叠加两档等于取较宽的那档，"档位"语义就失效了。
+#
+# ⚠️ 为什么不是"按 URL 路径放行"：导出端点与业务端点**同端口**
+#    （gateway-core 8085、tee-infer 19090），NetworkPolicy 属 L3/L4 → 只能整体收敛来源。
+#    路径级边界由**应用层**负责（T-4.2：CIDR 白名单 + Bearer 令牌，空即 deny）。
+#
+# 档位选择：见同目录 README.md（含端口矩阵与选择判据）
+#   档 1 minimal    —— 单集群、无跨集群采集
+#   档 2 standard   —— 多集群 + 中央聚合（推荐）
+#   档 3 permissive —— 中央采集器无 pod 标签 / 在集群外 / 跨网段
+#
+# 本文件 = 档 1（minimal）：只放行**同命名空间内**的必要调用，不放行任何跨命名空间来源。
+---
+# ① gateway-core（8085）
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gw-core-ingress-tier1-minimal
+  namespace: otpmask
+  labels:
+    otpmask.io/netpol-tier: "1-minimal"
+spec:
+  podSelector:
+    matchLabels:
+      app: gateway-core
+  policyTypes: ["Ingress"]
+  ingress:
+  # Prometheus 抓取 /metrics
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 8085
+  # 管理面 → 控制面（策略/处方下发）
+  - from:
+    - podSelector:
+        matchLabels:
+          app: gateway-admin-service
+    ports:
+    - protocol: TCP
+      port: 8085
+---
+# ② tee-infer-service（19090）
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tee-infer-ingress-tier1-minimal
+  namespace: otpmask
+  labels:
+    otpmask.io/netpol-tier: "1-minimal"
+spec:
+  podSelector:
+    matchLabels:
+      app: tee-infer-service
+  policyTypes: ["Ingress"]
+  ingress:
+  # Prometheus 抓取 /metrics
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 19090
+  # 网关数据面 → TEE 推理
+  - from:
+    - podSelector:
+        matchLabels:
+          app: envoy-gateway
+    ports:
+    - protocol: TCP
+      port: 19090
+  # 控制面 → TEE 配额下发
+  - from:
+    - podSelector:
+        matchLabels:
+          app: gateway-core
+    ports:
+    - protocol: TCP
+      port: 19090

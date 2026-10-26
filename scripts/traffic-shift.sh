@@ -25,6 +25,7 @@
 # 用法：
 #   scripts/traffic-shift.sh --action switch --from cluster-a --to cluster-b \
 #       [--config <调度配置.yaml>] [--from-weight 0] [--to-weight 100] \
+#       [--gray-tier 5|25|50|100] [--critical-path] [--dns-ttl 60] \
 #       [--dry-run] [--out <证据目录>]
 #   scripts/traffic-shift.sh --action failback --from cluster-b --to cluster-a
 #
@@ -37,7 +38,18 @@
 #   SWITCH_POLICY      manual（默认，D-5）| semi-auto
 #   CONFIRM=1          跳过交互确认（已由操作员在带外确认；仅限有审计记录的场合）
 #   IMPACT_WINDOW_SEC  标称业务影响窗口（秒，默认 30；观测窗口据此设定）
-#   DNS_TTL_SEC        客户 DNS TTL（秒，默认 60；仅记录，用于评估 TTL 收敛影响）
+#   DNS_TTL_SEC        业务域名**当前实际** TTL（秒，默认 60）——**硬前置**：超过上限即拒绝切流
+#   DNS_TTL_MAX_SEC    业务域名 TTL 上限（秒，默认 60；产品规格：业务域名 ≤60s）
+#   CRITICAL_TTL_MAX_SEC 关键链路（登录/鉴权）TTL 上限（秒，默认 30）
+#   CRITICAL_PATH      1=按关键链路口径校验 TTL（等价于 --critical-path）
+#
+# ★ TTL 硬前置（2026-10-26 新增）：切流前**必须**已把 DNS TTL 降到上限内，否则拒绝执行（退出码 3）。
+#   原因：权重变更后，旧 TTL 未过期的客户端仍解析到旧集群 → 业务影响窗口不可控，
+#   且"切流成功"的观测结论会被缓存流量污染。收敛时间 ≈ 旧 TTL（不是新 TTL）。
+#   本脚本不替你改 TTL（北向 DNS 属客户执行点），只**校验**已填的实际值。
+#
+# ★ 灰度档位（2026-10-26 新增）：--gray-tier 按 5→25→50→100 逐档推进，脚本据档位推导
+#   from/to 权重（不再要求手填两个数，避免"手填不一致"）。回切（failback）不支持灰度。
 
 set -uo pipefail
 
@@ -51,6 +63,8 @@ TO_CLUSTER=""
 CONFIG_FILE=""
 FROM_WEIGHT="0"
 TO_WEIGHT="100"
+GRAY_TIER=""
+CRITICAL_PATH="${CRITICAL_PATH:-0}"
 CLUSTER_IDS=""
 
 usage() {
@@ -67,9 +81,17 @@ usage() {
   --config <file>             §6.4 调度配置文件（clusters/switch_policy）
   --from-weight <n>           源集群权重（默认 0）
   --to-weight <n>             目标集群权重（默认 100）
+  --gray-tier <5|25|50|100>   灰度档位：按档位推导 from/to 权重（5→25→50→100，逐档推进）
+                              回切（failback）不支持灰度
+  --critical-path             关键链路（登录/鉴权）口径：TTL 上限降为 30s
+  --dns-ttl <n>               业务域名当前实际 TTL（秒，覆盖 DNS_TTL_SEC；硬前置校验用）
   --dry-run                   只读预演，不执行任何变更
   --out <dir>                 证据输出目录
   -h|--help                   本帮助
+
+硬前置（不满足即退出码 3，不执行任何变更）：
+  * NB_SET_WEIGHT_CMD 未注入（北向执行点未知）
+  * DNS_TTL_SEC 超过上限（业务域名默认 ≤60s；--critical-path 时 ≤30s）
 EOF
 }
 
@@ -81,6 +103,11 @@ while [ $# -gt 0 ]; do
     --config) CONFIG_FILE="${2:-}"; shift 2 ;;
     --from-weight) FROM_WEIGHT="${2:-}"; shift 2 ;;
     --to-weight) TO_WEIGHT="${2:-}"; shift 2 ;;
+    --gray-tier) GRAY_TIER="${2:-}"; shift 2 ;;
+    --gray-tier=*) GRAY_TIER="${1#*=}"; shift ;;
+    --critical-path) CRITICAL_PATH=1; shift ;;
+    --dns-ttl) DNS_TTL_SEC="${2:-}"; shift 2 ;;
+    --dns-ttl=*) DNS_TTL_SEC="${1#*=}"; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --out) DRILL_OUT="${2:-}"; shift 2 ;;
     --out=*) DRILL_OUT="${1#*=}"; shift ;;
@@ -101,15 +128,32 @@ esac
 [ "$TO_WEIGHT" -le 100 ] && [ "$FROM_WEIGHT" -le 100 ] || {
   echo "权重必须在 0..100（§6.4 归一化口径）" >&2; exit "$DR_EXIT_ARGS"; }
 
+# 灰度档位：由档位推导权重（避免手填 from/to 不一致）；回切不走灰度
+GRAY_TIERS="5 25 50 100"
+if [ -n "$GRAY_TIER" ]; then
+  case " $GRAY_TIERS " in
+    *" $GRAY_TIER "*) ;;
+    *) echo "--gray-tier 必须是 5/25/50/100 之一（收到 '$GRAY_TIER'）" >&2; exit "$DR_EXIT_ARGS" ;;
+  esac
+  if [ "$ACTION" = "failback" ]; then
+    echo "--gray-tier 仅用于切流（switch）；回切（failback）是直接恢复，不做灰度" >&2
+    exit "$DR_EXIT_ARGS"
+  fi
+  TO_WEIGHT="$GRAY_TIER"
+  FROM_WEIGHT=$((100 - GRAY_TIER))
+fi
+
 # 回切语义：failback 时目标权重 = 原源集群权重，源权重 = 原目标权重
 if [ "$ACTION" = "failback" ]; then
   tmp="$FROM_WEIGHT"; FROM_WEIGHT="$TO_WEIGHT"; TO_WEIGHT="$tmp"
 fi
 
 DRILL_ID="t5.2-traffic-shift"
-DRILL_TITLE="切流/回切（T-5.2，action=$ACTION，$FROM_CLUSTER → $TO_CLUSTER）"
+DRILL_TITLE="切流/回切（T-5.2，action=$ACTION，$FROM_CLUSTER → $TO_CLUSTER${GRAY_TIER:+，灰度 ${GRAY_TIER}%}）"
 IMPACT_WINDOW_SEC="${IMPACT_WINDOW_SEC:-30}"
 DNS_TTL_SEC="${DNS_TTL_SEC:-60}"
+DNS_TTL_MAX_SEC="${DNS_TTL_MAX_SEC:-60}"
+CRITICAL_TTL_MAX_SEC="${CRITICAL_TTL_MAX_SEC:-30}"
 SWITCH_POLICY="${SWITCH_POLICY:-manual}"
 
 dr_init
@@ -226,6 +270,53 @@ else
   dr_skip "1.4-curw" "当前权重快照" "未注入 NB_GET_WEIGHT_CMD（只读钩子可选）"
 fi
 
+# 1.5 DNS TTL 硬前置（切流前必须已降 TTL；未降即拒，退出 3）
+#   · 权重变更后旧 TTL 未过期的客户端仍解析到旧集群 → 影响窗口不可控
+#   · 收敛时间 ≈ **旧** TTL（不是新 TTL），故必须在切流前就降好并等其过期
+case "$DNS_TTL_SEC" in
+  '' | *[!0-9]*) echo "DNS_TTL_SEC 必须是正整数秒（收到 '$DNS_TTL_SEC'）" >&2; exit "$DR_EXIT_ARGS" ;;
+esac
+TTL_MAX="$DNS_TTL_MAX_SEC"
+TTL_SCOPE="业务域名"
+if [ "$CRITICAL_PATH" = "1" ]; then
+  TTL_MAX="$CRITICAL_TTL_MAX_SEC"
+  TTL_SCOPE="关键链路（登录/鉴权）"
+fi
+case "$TTL_MAX" in
+  '' | *[!0-9]*) echo "TTL 上限必须是正整数秒（DNS_TTL_MAX_SEC=$DNS_TTL_MAX_SEC / CRITICAL_TTL_MAX_SEC=$CRITICAL_TTL_MAX_SEC）" >&2; exit "$DR_EXIT_ARGS" ;;
+esac
+if [ "$DNS_TTL_SEC" -gt "$TTL_MAX" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    dr_skip "1.5-ttl" "DNS TTL 前置（${TTL_SCOPE} ≤${TTL_MAX}s）" \
+      "dry-run：当前 DNS_TTL_SEC=${DNS_TTL_SEC}s 超上限 ${TTL_MAX}s；**实跑将拒绝（exit 3）**——切流前须先降 TTL 并等旧 TTL 过期"
+  else
+    dr_fail "1.5-ttl" "DNS TTL 前置（${TTL_SCOPE} ≤${TTL_MAX}s）" \
+      "当前 DNS_TTL_SEC=${DNS_TTL_SEC}s > 上限 ${TTL_MAX}s —— 拒绝切流。请先把 ${TTL_SCOPE} TTL 降到 ≤${TTL_MAX}s，并等待一个旧 TTL 周期使其收敛，再重跑本脚本"
+    dr_write_report
+    dr_write_evidence_md "- DNS TTL 现状与降 TTL 时间：TODO(人工)
+- 旧 TTL 过期确认时间：TODO(人工)"
+    exit "$DR_EXIT_ENV"
+  fi
+else
+  dr_pass "1.5-ttl" "DNS TTL 前置（${TTL_SCOPE} ≤${TTL_MAX}s）" \
+    "DNS_TTL_SEC=${DNS_TTL_SEC}s ≤ ${TTL_MAX}s（已降 TTL；切流收敛时间≈旧 TTL）"
+fi
+
+# 1.6 灰度档位（仅 --gray-tier 时；档序 5→25→50→100，逐档观测后再推进）
+if [ -n "$GRAY_TIER" ]; then
+  case "$GRAY_TIER" in
+    5) _tier_no=1 ;;
+    25) _tier_no=2 ;;
+    50) _tier_no=3 ;;
+    100) _tier_no=4 ;;
+    *) _tier_no="?" ;;
+  esac
+  dr_pass "1.6-gray" "灰度档位" \
+    "第 ${_tier_no}/4 档：${GRAY_TIER}%（from=$FROM_CLUSTER weight=$FROM_WEIGHT → to=$TO_CLUSTER weight=$TO_WEIGHT）；每档观测通过后再推进下一档"
+else
+  dr_skip "1.6-gray" "灰度档位" "未指定 --gray-tier（按 --from-weight/--to-weight 直接切；建议正式切流走灰度 5→25→50→100）"
+fi
+
 dr_step "1-precheck" "预检（模型/健康/依赖）" pass "预检完成"
 
 # ---------- 阶段 2：执行 ----------
@@ -280,7 +371,7 @@ else
   dr_skip "3.2-observe" "业务观测" "未注入 OBSERVE_CMD / PROM_URL（观测项 skip，不计失败）"
 fi
 # 3.3 影响窗口登记
-dr_pass "3.3-window" "业务影响窗口" "标称 ${IMPACT_WINDOW_SEC}s（DNS TTL=${DNS_TTL_SEC}s，权重生效与 TTL 收敛取大者）"
+dr_pass "3.3-window" "业务影响窗口" "标称 ${IMPACT_WINDOW_SEC}s（DNS TTL=${DNS_TTL_SEC}s${GRAY_TIER:+，灰度 ${GRAY_TIER}%}；权重生效与 TTL 收敛取大者）"
 
 # 若观测失败 ⇒ 回退
 if grep -q '"result":"fail"' "$DR_STEPS_FILE" 2>/dev/null && [ "$DR_FAILED" -eq 1 ]; then
@@ -312,6 +403,8 @@ dr_write_report
 dr_write_evidence_md "- 人工确认记录（操作员/时间/工单号）：TODO(人工)
 - 北向实际权重（切后）：TODO(人工)从客户 DNS/GSLB/云 LB 控制台核对
 - 业务影响窗口实测：TODO(人工)
+- DNS TTL：${DNS_TTL_SEC}s（上限 ${TTL_MAX}s，口径=${TTL_SCOPE}）；降 TTL 时间：TODO(人工)
+- 灰度档位：${GRAY_TIER:-未使用灰度}
 - 回切预案是否演练：TODO(人工)（回切＝本脚本 --action failback）"
 printf '报告：%s\n' "$DR_EVIDENCE_DIR/report.json"
 # 退出码由主流程一处决定（★ EXIT trap 只做收尾写报告，不改变已决定的退出状态）。

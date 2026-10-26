@@ -1,0 +1,55 @@
+# P2-4 中央侧接收端 ①：原生 Prometheus（`--web.enable-remote-write-receiver`）
+#
+# 【本文件不在 kustomization.yaml 内】→ 不会被 `kubectl apply -k` 应用，只是片段库。
+# 适用：我方 central 栈（形态 B 默认，见 deploy/monitoring/central/prometheus-central.yaml）
+#       客户已有单实例 Prometheus（形态 A 的一种）
+#
+# 【接收端要求】
+#   1. 启动参数必须含 `--web.enable-remote-write-receiver`（未开启 → 写入端点 404）
+#   2. Prometheus 原生**不校验客户端证书**、也**没有内置鉴权** ⇒
+#      跨公网（或任何非受信网段）必须前置 mTLS 终止代理（nginx/envoy），否则等于开放匿名写入。
+#   3. 无租户概念：来源区分**只靠** `external_labels.cluster`。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rw-target-native-prometheus-example
+  namespace: otpmask
+data:
+  # 合并进目标集群 prometheus.yml 的片段（非完整配置）
+  remote-write.snippet.yml: |
+    global:
+      external_labels:
+        # 每集群唯一；建议 = registry 的 cluster_id。缺失 → 中央侧 cluster="" 分组
+        cluster: REPLACE_WITH_CLUSTER_ID
+
+    remote_write:
+    - url: "REPLACE_WITH_CENTRAL_WRITE_ENDPOINT"   # 形如 https://prometheus-central.otpmask.svc.cluster.local:9090/api/v1/write
+      remote_timeout: 30s
+      queue_config:
+        capacity: 10000
+        max_shards: 50
+        max_samples_per_send: 2000
+        batch_send_deadline: 10s
+        min_backoff: 1s
+        max_backoff: 60s
+      # 只发需要的序列，控制跨集群带宽（按实际白名单调整）
+      write_relabel_configs:
+      - source_labels: [__name__]
+        regex: "(otpmask_.*|up|gateway_core_.*)"
+        action: keep
+      # 【mTLS】证书由 deploy/monitoring-overlays/remote-write-mtls/ 的 overlay 挂载到
+      # /etc/prometheus/mtls（Secret otpmask-remote-write-mtls 三键）。
+      # server_name 必须与接收端证书 SAN 一致；insecure_skip_verify 固定 false。
+      tls_config:
+        ca_file: /etc/prometheus/mtls/ca.crt
+        cert_file: /etc/prometheus/mtls/tls.crt
+        key_file: /etc/prometheus/mtls/tls.key
+        server_name: REPLACE_WITH_CENTRAL_SERVER_NAME
+        insecure_skip_verify: false
+      # 【鉴权】二选一（原生 Prometheus 无内置认证，若前置代理要求令牌则启用）
+      authorization:
+        type: Bearer
+        credentials_file: /etc/prometheus/mtls/token
+      # basic_auth:
+      #   username: REPLACE_USER
+      #   password_file: /etc/prometheus/mtls/password

@@ -1,0 +1,53 @@
+# P2-4 中央侧接收端 ③：Grafana Mimir
+#
+# 【本文件不在 kustomization.yaml 内】→ 不会被 `kubectl apply -k` 应用，只是片段库。
+# 适用：客户用 Grafana 栈（Mimir 做指标长期存储，常与 Loki/Tempo 并列）。
+#
+# 【接收端要求】
+#   1. 路径为 `/api/v1/push`（distributor 写入端点，**不是** `/api/v1/write`）
+#   2. **多租户启用时**（默认 `-multitenancy_enabled=true`）请求头 `X-Scope-OrgID` **必须**存在，
+#      缺失 → 401（日志含 "no org id"）。这是**路由/隔离**头，**不是认证**，可被伪造。
+#   3. Mimir 自身不做认证 ⇒ 生产通常在 distributor 前挂 gateway（nginx/oauth2-proxy），
+#      由网关注入 `X-Scope-OrgID` 并终止 mTLS。**不要把租户头当鉴权用**。
+#   4. 若客户关闭多租户（`-multitenancy_enabled=false`），可删除 headers 段，但代理鉴权不可省。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rw-target-mimir-example
+  namespace: otpmask
+data:
+  remote-write.snippet.yml: |
+    global:
+      external_labels:
+        cluster: REPLACE_WITH_CLUSTER_ID
+
+    remote_write:
+    - url: "REPLACE_WITH_CENTRAL_WRITE_ENDPOINT"   # 形如 https://mimir.example.com/api/v1/push
+      remote_timeout: 30s
+      # 【Mimir 特有 · 必须】租户头；值须在 Mimir 侧已创建（或允许自动创建）
+      headers:
+        X-Scope-OrgID: REPLACE_WITH_TENANT
+      queue_config:
+        capacity: 10000
+        max_shards: 50
+        max_samples_per_send: 2000
+        batch_send_deadline: 10s
+        min_backoff: 1s
+        max_backoff: 60s
+      write_relabel_configs:
+      - source_labels: [__name__]
+        regex: "(otpmask_.*|up|gateway_core_.*)"
+        action: keep
+      tls_config:
+        ca_file: /etc/prometheus/mtls/ca.crt
+        cert_file: /etc/prometheus/mtls/tls.crt
+        key_file: /etc/prometheus/mtls/tls.key
+        server_name: REPLACE_WITH_CENTRAL_SERVER_NAME
+        insecure_skip_verify: false
+      # 若 Mimir 前置网关注入租户头，则本段可留空；若要求令牌，用下面二选一
+      authorization:
+        type: Bearer
+        credentials_file: /etc/prometheus/mtls/token
+      # basic_auth:
+      #   username: REPLACE_USER
+      #   password_file: /etc/prometheus/mtls/password

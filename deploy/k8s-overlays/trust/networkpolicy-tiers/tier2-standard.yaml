@@ -1,0 +1,100 @@
+# P2-4 网络边界 · 档 2（standard）：同命名空间必要调用 + 数据面插件 + 中央采集器
+#
+# 适用：**多集群 + 中央审计聚合**（默认推荐档）。
+# ⚠️ 默认不启用（不在 kustomization resources 内）；**同一工作负载只用一档**。
+# ⚠️ 启用前必须核对两项（缺一不得 apply）：
+#    1. 数据面插件（经 Higress McpBridge DNS registry 拉取路由/限流表）的**真实命名空间**；
+#       属 P1-8 域，本任务不得改动 deploy/higress/** → **不臆造 pod 标签**，用命名空间级放行。
+#    2. 中央采集器的 pod 标签 `otpmask.io/role=central-collector`
+#       是否与中央侧部署实际一致（中央栈清单见 deploy/monitoring/central/trust/）。
+---
+# ① gateway-core（8085）：抓取 + 插件拉表 + 管理面下发 + 中央采集器
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gw-core-ingress-tier2-standard
+  namespace: otpmask
+  labels:
+    otpmask.io/netpol-tier: "2-standard"
+spec:
+  podSelector:
+    matchLabels:
+      app: gateway-core
+  policyTypes: ["Ingress"]
+  ingress:
+  # Prometheus 抓取 /metrics
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 8085
+  # 数据面插件拉表（命名空间级；真实命名空间须核对后替换）
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: REPLACE_WITH_HIGRESS_NAMESPACE
+    ports:
+    - protocol: TCP
+      port: 8085
+  # 管理面 → 控制面（策略/处方下发）
+  - from:
+    - podSelector:
+        matchLabels:
+          app: gateway-admin-service
+    ports:
+    - protocol: TCP
+      port: 8085
+  # 中央审计采集器（拉 /v1/internal/audit/chain/export）
+  - from:
+    - podSelector:
+        matchLabels:
+          otpmask.io/role: central-collector
+    ports:
+    - protocol: TCP
+      port: 8085
+---
+# ② tee-infer-service（19090）：抓取 + 推理转发 + 配额下发 + 中央采集器
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tee-infer-ingress-tier2-standard
+  namespace: otpmask
+  labels:
+    otpmask.io/netpol-tier: "2-standard"
+spec:
+  podSelector:
+    matchLabels:
+      app: tee-infer-service
+  policyTypes: ["Ingress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 19090
+  - from:
+    - podSelector:
+        matchLabels:
+          app: envoy-gateway
+    ports:
+    - protocol: TCP
+      port: 19090
+  - from:
+    - podSelector:
+        matchLabels:
+          app: gateway-core
+    ports:
+    - protocol: TCP
+      port: 19090
+  # 中央审计采集器（拉 export?schema=tee）
+  - from:
+    - podSelector:
+        matchLabels:
+          otpmask.io/role: central-collector
+    ports:
+    - protocol: TCP
+      port: 19090

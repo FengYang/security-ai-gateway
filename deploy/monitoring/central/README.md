@@ -14,7 +14,8 @@
 | `grafana-central-dashboards.yaml` | 统一看板：① 跨集群总览 overview ② 单集群下钻 per-cluster（`cluster` 变量） |
 | `grafana-central-datasources.yaml` | Grafana 中央数据源 `Prometheus-Central`（uid 同名，看板按 uid 引用） |
 | `remote-write-sender.example.yaml` | **各集群侧** remote-write 发送片段模板（含 mTLS 配置位），不在 kustomization 内（权威版本见 `deploy/monitoring-overlays/remote-write-mtls/`） |
-| `trust/` | **T-4.3 通道信任**子目录：中央侧证书引用示例 + 采集器出站默认拒绝策略 + 落地形态二选一说明 |
+| `receivers/` | **四种接收端的发送片段库**（原生 Prometheus / Thanos Receive / Grafana Mimir / VictoriaMetrics）＋选型矩阵；不在 kustomization 内，按中央侧实际形态取一份 |
+| `trust/` | **T-4.3 通道信任**子目录：中央侧证书引用示例 + 采集器出站默认拒绝策略 + 落地形态说明 |
 
 ## 2. `cluster` 标签口径（统一口径，勿另起别名）
 
@@ -69,20 +70,35 @@ kubectl -n otpmask rollout restart deployment/grafana
 #    必须设置唯一的 external_labels.cluster，然后重启该集群 Prometheus
 ```
 
-## 4.1 中央侧落地形态（由客户环境决定，二选一）
+## 4.1 中央侧接收端：**默认形态 B ＋ 四种受支持目标**（不是"二选一"）
 
-本项目**不自建**中央接收端（GSLB / 自研采集均不采用）。中央侧只有两种落地形态，
-**启用步骤差异**与证书/mTLS 口径详见 `trust/README.md` 第 1 节：
+> **口径修正（2026-10-26）**：原表述「形态 A / 形态 B **二选一**」把"换接收端"说成了
+> "产品路线分叉"。实际**发送端是同一个**（Prometheus remote-write），差异只在
+> 目标地址 / 路径 / 认证头 / 租户头 —— 因此改为：**默认形态 B，形态 A 为受支持拓扑**，
+> 客户已有监控栈时按对应片段替换三个值即可，**不存在选边，也不需要改我方资产**。
 
-| | 形态 A：客户既有 Prometheus | 形态 B：我方交付的中央栈（本目录） |
+本项目**不自建**中央接收端（GSLB / 自研采集均不采用）。
+
+| | **形态 B（默认）**：我方交付 central 栈 | **形态 A**：客户既有监控栈（四种之一） |
 |---|---|---|
-| 部署动作 | 不部署我方 central 资产，只需对接看板/告警配置 | `kubectl apply -k deploy/monitoring/central` + Grafana 挂载数据源 + 导入看板 |
-| remote_write 目标地址 | `https://<客户接收端>/api/v1/write` | `http(s)://prometheus-central.<中央命名空间>.svc.cluster.local:9090/api/v1/write` |
-| mTLS 终止 | 由客户接收端或其前置网关承担 | Prometheus 原生不校验客户端证书 → 须前置 mTLS 代理 |
-| 告警去重 | 客户侧 Alertmanager 须采用本文档 §3 口径 | 本目录 alertmanager-central.yaml 已实现 |
+| 部署动作 | `kubectl apply -k deploy/monitoring/central` + Grafana 挂载数据源 + 导入看板 | 不部署我方 central 资产，只合并发送片段 |
+| remote_write 目标 | `http(s)://prometheus-central.<ns>.svc.cluster.local:9090/api/v1/write` | 按接收端取片段（见下） |
+| 片段来源 | `remote-write-sender.example.yaml` | `receivers/remote-write-target-<target>.example.yaml` |
+| mTLS 终止 | Prometheus 原生不校验客户端证书 → 须前置 mTLS 代理 | 同左（客户侧或其网关承担） |
+| 告警去重 | 本目录 `alertmanager-central.yaml` 已实现 §3 口径 | 客户 Alertmanager 须采用本文档 §3 口径（否则 N 集群重复轰炸） |
+
+**四种受支持接收端**（`receivers/` 目录，差异见其 README 选型矩阵）：
+
+| 接收端 | 路径 | 必须的额外配置 |
+|---|---|---|
+| 原生 Prometheus | `/api/v1/write` | 启动须带 `--web.enable-remote-write-receiver` |
+| Thanos Receive | `/api/v1/receive` | 请求头 `THANOS-TENANT`（头名随 `--receive.tenant-header`） |
+| Grafana Mimir | `/api/v1/push` | 请求头 `X-Scope-OrgID`（多租户启用时**必填**，缺失即拒） |
+| VictoriaMetrics | `/api/v1/write`（单机）／`/insert/<accountID>/prometheus/api/v1/write`（集群版） | 成功码为 **204**；`extra_label` 与 `external_labels` 二选一，勿重复 |
 
 > **remote_write 目标地址一律为占位符**（`REPLACE_WITH_CENTRAL_WRITE_ENDPOINT`），
-> 我方资产中**不写死任何内网地址** —— 两种形态的地址不同，需按客户环境替换。
+> 我方资产中**不写死任何内网地址**。占位符未替换时，Prometheus 配置校验会**拒绝启动**
+> （`promtool check config` 报错），不会静默丢指标。
 
 ## 5. T-4.3 依赖（**他人负责，本目录仅预留配置位**）
 

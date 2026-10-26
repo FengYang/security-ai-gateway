@@ -1,0 +1,118 @@
+# P2-4 网络边界 · 档 3（permissive）：档 2 + 来源网段白名单（按 CIDR 放行）
+#
+# 适用：中央采集器**没有** `otpmask.io/role=central-collector` 标签、或在集群外、
+#       或经 SNAT 后来源为固定网段（客户侧只肯给网段而非标签时）。
+#
+# ⚠️ 本档比档 2 宽：ipBlock 是 **L3 网段**，不区分 pod 身份，同网段内任何主机都可连。
+#    能选档 2 就不要选档 3。
+#
+# ⚠️ **CIDR 必须替换**：ipBlock.cidr 由 K8s API 校验格式，故此处给**示例值**
+#    `10.20.0.0/16`（与 configmap-audit-export-cidrs.yaml 示例一致）。
+#    未替换就 apply = 放行了 10.20.0.0/16 这个**你可能并不拥有**的网段 → 既可能过宽、
+#    也可能误伤（真实来源不在该段则连不上）。替换前先问一句：**采集器的 SNAT 后出口 IP 是哪几个？**
+#    原则：**尽量给 /32 或最小网段**，不要照抄 /16。
+---
+# ① gateway-core（8085）
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gw-core-ingress-tier3-permissive
+  namespace: otpmask
+  labels:
+    otpmask.io/netpol-tier: "3-permissive"
+spec:
+  podSelector:
+    matchLabels:
+      app: gateway-core
+  policyTypes: ["Ingress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 8085
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: REPLACE_WITH_HIGRESS_NAMESPACE
+    ports:
+    - protocol: TCP
+      port: 8085
+  - from:
+    - podSelector:
+        matchLabels:
+          app: gateway-admin-service
+    ports:
+    - protocol: TCP
+      port: 8085
+  # 中央采集器：标签放行（若已有标签，本段即可满足，无需下面的 ipBlock）
+  - from:
+    - podSelector:
+        matchLabels:
+          otpmask.io/role: central-collector
+    ports:
+    - protocol: TCP
+      port: 8085
+  # 中央采集器：来源网段放行（无标签/集群外/经 SNAT 时用）
+  # ⚠️ 替换为采集器实际出口 CIDR；优先 /32
+  - from:
+    - ipBlock:
+        cidr: 10.20.0.0/16
+        # 若已知具体主机，用 except 收窄（示例：排除同段内的其他用途网段）
+        # except:
+        # - 10.20.128.0/17
+    ports:
+    - protocol: TCP
+      port: 8085
+---
+# ② tee-infer-service（19090）
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tee-infer-ingress-tier3-permissive
+  namespace: otpmask
+  labels:
+    otpmask.io/netpol-tier: "3-permissive"
+spec:
+  podSelector:
+    matchLabels:
+      app: tee-infer-service
+  policyTypes: ["Ingress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 19090
+  - from:
+    - podSelector:
+        matchLabels:
+          app: envoy-gateway
+    ports:
+    - protocol: TCP
+      port: 19090
+  - from:
+    - podSelector:
+        matchLabels:
+          app: gateway-core
+    ports:
+    - protocol: TCP
+      port: 19090
+  - from:
+    - podSelector:
+        matchLabels:
+          otpmask.io/role: central-collector
+    ports:
+    - protocol: TCP
+      port: 19090
+  # ⚠️ 同上：替换为采集器实际出口 CIDR，优先 /32
+  - from:
+    - ipBlock:
+        cidr: 10.20.0.0/16
+    ports:
+    - protocol: TCP
+      port: 19090
