@@ -318,6 +318,14 @@ func main() {
 		log.Printf("集群注册 API 未启用（TENANT_STORE_PG_DSN / ADMIN_CLUSTER_STORE_PATH 均未配置）")
 	}
 
+	// P2-4 T-4.1：审计跨集群聚合查询端点注入（安全中心 handler 复用同一集群注册表句柄，
+	// 不另开连接）；注册表未启用时 clusterStore 保持 nil ⇒ core/tee 卷如实标 disabled。
+	if cstore != nil {
+		sch.setClusterStore(cstore)
+	}
+	sch.setDispatchToken(cfg.gatewayCoreToken)
+	sch.registerAuditChainQuery(adminMux, cfg)
+
 	// 租户自助门户（可选启用）：独立 tenantMux 承载 /v1/tenant/* 与 /v1/adminext/tenant/*
 	// （双 mux 隔离，C-16）；验证码签发为 Console 内部端点，挂管理面（authMiddleware）。
 	var tenantStore TenantStore
