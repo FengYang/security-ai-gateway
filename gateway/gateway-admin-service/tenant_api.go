@@ -65,6 +65,10 @@ type tenantHandler struct {
 	scopeLazy clusterScopeChecker
 	// scopeLazyOnce scopeLazy 的懒加载同步原语。
 	scopeLazyOnce sync.Once
+
+	// clusterStore 集群注册表句柄（P2-4 T-3.3：收敛核对取 actual 版本）。
+	// nil = 注册表未启用 ⇒ 所有集群 actual 标记 unknown（fail-closed）。
+	clusterStore ClusterStore
 }
 
 // newTenantHandler 构造租户 handler（captcha 仅在启用时创建）。

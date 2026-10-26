@@ -342,6 +342,8 @@ func main() {
 		if cstore != nil {
 			tenantH.setScopeResolver(cstore)
 		}
+		// P2-4 T-3.3：收敛核对端点取集群注册表 actual 版本（复用同一句柄，不另开连接）。
+		tenantH.setClusterStore(cstore)
 		// P2-4 T-1.3/T-1.4：安全计数器共享库（captcha 签发限流/答案存储 + 登录失败锁定）。
 		// 显式配置 SECURITY_STORE_PG_DSN 才启用；缺省进程内实现（默认行为零变化）。
 		// 开库/建表失败 → fail-closed 拒启动（多副本共享语义不可静默丢失）。
@@ -359,6 +361,8 @@ func main() {
 		tenantH.registerTenantDirectory(adminMux, cfg)
 		// N4 运维批量重签发承诺边界声明（触发③；管理面内部端点，admin）。
 		tenantH.registerAdminStatementOps(adminMux, cfg)
+		// P2-4 T-3.3：收敛核对端点（GET /v1/adminext/clusters/sync-status，admin-only）。
+		tenantH.registerSyncStatus(adminMux, cfg)
 		defer func() { _ = ts.Close() }()
 		tenantH.startQuotaCompensator(context.Background(),
 			time.Duration(cfg.tenantCompensateIntervalMin)*time.Minute)

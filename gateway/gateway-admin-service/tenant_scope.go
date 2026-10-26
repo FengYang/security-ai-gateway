@@ -317,6 +317,12 @@ func (h *tenantHandler) setScopeResolver(c clusterScopeChecker) {
 	h.scopeResolver = c
 }
 
+// setClusterStore 注入集群注册表句柄（P2-4 T-3.3：收敛核对取 actual 版本）。
+// nil = 未启用注册表（所有集群 actual 标记 unknown，fail-closed）。
+func (h *tenantHandler) setClusterStore(cs ClusterStore) {
+	h.clusterStore = cs
+}
+
 // scopeChecker 返回集群注册表校验器（nil = 注册表未启用 ⇒ 只允许 global）。
 func (h *tenantHandler) scopeChecker() clusterScopeChecker {
 	if h.scopeResolver != nil {

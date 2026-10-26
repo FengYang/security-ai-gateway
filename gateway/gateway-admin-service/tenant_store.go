@@ -347,6 +347,8 @@ type TenantStore interface {
 	UpdateTenantStatus(tx TenantTx, id, status string) error
 	// ListTenantsByStatus 按状态枚举租户（补偿任务扫描 quota_pending 用）。
 	ListTenantsByStatus(status string) ([]*Tenant, error)
+	// ListAllTenants 枚举全部租户（不限状态；P2-4 T-3.3 收敛核对枚举用）。
+	ListAllTenants() ([]*Tenant, error)
 
 	// 用户
 	CreateUser(tx TenantTx, u *TenantUser) (int64, error)
@@ -410,6 +412,8 @@ type TenantStore interface {
 	MarkDispatchAppliedForCluster(tx TenantTx, tenantID, clusterID string, appliedVersion, now int64) error
 	MarkDispatchFailedForCluster(tx TenantTx, tenantID, clusterID, lastError string, retryCount, now int64) error
 	ListDispatchStatesByStatus(statuses ...string) ([]*TenantDispatchState, error)
+	// ListDispatchStatesByTenant 枚举某租户的全部下发状态行（跨集群；P2-4 T-3.3 收敛核对用）。
+	ListDispatchStatesByTenant(tenantID string) ([]*TenantDispatchState, error)
 
 	// 套餐升级/降级待确认单（M7）
 	CreateSubscriptionRequest(tx TenantTx, r *SubscriptionRequest) error
@@ -733,6 +737,24 @@ func (s *sqliteTenantStore) ListTenantsByStatus(status string) ([]*Tenant, error
 	rows, err := s.db.Query(`SELECT id, name, status, plan_id, created_at FROM tenants WHERE status = ?`, status)
 	if err != nil {
 		return nil, fmt.Errorf("tenant: list tenants by status: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*Tenant
+	for rows.Next() {
+		var t Tenant
+		if err := rows.Scan(&t.ID, &t.Name, &t.Status, &t.PlanID, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("tenant: scan tenant: %w", err)
+		}
+		out = append(out, &t)
+	}
+	return out, rows.Err()
+}
+
+// ListAllTenants 枚举全部租户（不限状态；P2-4 T-3.3 收敛核对枚举用）。
+func (s *sqliteTenantStore) ListAllTenants() ([]*Tenant, error) {
+	rows, err := s.db.Query(`SELECT id, name, status, plan_id, created_at FROM tenants`)
+	if err != nil {
+		return nil, fmt.Errorf("tenant: list all tenants: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []*Tenant
@@ -2032,6 +2054,24 @@ func (s *sqliteTenantStore) ListDispatchStatesByStatus(statuses ...string) ([]*T
 		placeholders+`) ORDER BY updated_at ASC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("tenant: list dispatch states: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*TenantDispatchState
+	for rows.Next() {
+		d, err := scanDispatchState(rows)
+		if err != nil {
+			return nil, fmt.Errorf("tenant: scan dispatch state: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ListDispatchStatesByTenant 枚举某租户的全部下发状态行（跨集群；P2-4 T-3.3 收敛核对用）。
+func (s *sqliteTenantStore) ListDispatchStatesByTenant(tenantID string) ([]*TenantDispatchState, error) {
+	rows, err := s.db.Query(`SELECT `+dispatchColumns+` FROM tenant_dispatch_state WHERE tenant_id = ? ORDER BY cluster_id`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("tenant: list dispatch states by tenant: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []*TenantDispatchState
