@@ -243,7 +243,10 @@ func (v *VendorAdmin) Revoke(member, partition string) error {
 }
 
 // ---------------------------------------------------------------------------
-// RTO 口径（G-2 / G-0②：RTO≤30s，RPO=0）
+// RTO 口径（两档并存，不得互相套用）
+//   - 单集群主备/故障注入切换：RTO ≤ 30s、RPO = 0（P1-5 V-7 判据；G-0② → 见
+//     P1《G0-2》Q5；`.248` 真机实测 6–20s 已达成）
+//   - 跨中心灾备切换：按产品基线 IndustryRTO*（T-6.3 C-1，详见 dr_baseline.go）
 // ---------------------------------------------------------------------------
 
 // RTOBudget 跨机房切换的 RTO 口径与实测记录。
@@ -251,34 +254,47 @@ func (v *VendorAdmin) Revoke(member, partition string) error {
 // **边界**：骨架只提供计时与判据；RTO **实测值须由真机演练（T-7/Wave B）登记**，
 // 未取得真实演练数据前 `WithinRTO()` 恒为 false——不得宣称达标。
 //
-// **占位符口径（U-4 / S-32）**：`MaxRTO` 在客户书面确认前是**占位值**（见
-// `PlaceholderMaxRTO`），仅用于让代码可运行、判据可计算；占位值**不得作为验收
-// 通过判据**——`Confirmed=false` 时 `WithinRTO()` 恒为 false，`Verdict()` 报
-// "pending"，绝不输出 pass。客户书面确认后调 `ConfirmMaxRTO` 方可将占位值转为判据。
+// **占位符口径（U-4 / S-32）**：`MaxRTO` 在产品基线（`SetIndustryBaseline`）或客户
+// 合同覆盖（`ConfirmMaxRTO`）设置前是**占位值**（见 `PlaceholderMaxRTO`），仅用于让
+// 代码可运行、判据可计算；占位值**不得作为验收通过判据**——`Source=BaselineUnset`
+// 时 `WithinRTO()` 恒为 false，`Verdict()` 报 "pending"，绝不输出 pass。
+//
+// **判据资格口径（T-6.3 C-1，产品口径）**：本系统是标准化产品，`Source` 显式区分
+// 「产品基线（按行业标准制定）」与「客户合同覆盖（可选）」两种来源（见
+// `BaselineSource`）。**产品基线本身即正式判据**，可直接出 pass/fail；客户合同 SLA
+// 属可选覆盖，不是资格开关。报告层判据资格统一用 `Source.IsVerdictEligible()`，
+// 对外输出须用 `VerdictWithSource()` 一并标注来源，**不得**把产品基线写成客户确认。
 type RTOBudget struct {
 	MaxRTO     time.Duration
 	Measured   time.Duration
 	HasMeasure bool
-	// Confirmed 标记 MaxRTO 是否已由客户书面确认（U-4）。
-	// false = 仍是占位值，不得据此判达标。
+	// Confirmed **客户合同覆盖标记（可选）**；**不是**判据资格开关——判据资格由
+	// `Source.IsVerdictEligible()` 白名单决定。`SetIndustryBaseline` 会把它清零
+	// （产品基线不等于客户覆盖）。
 	Confirmed bool
+	// Source MaxRTO 的来源（T-6.3 C-1）。零值 = 未定值（仅占位）。
+	Source BaselineSource
 }
 
-// PlaceholderMaxRTO RTO 占位阈值（U-4 提议基线）。
+// PlaceholderMaxRTO 跨中心 RTO 占位阈值（U-4 提议基线）。
 //
-// **这是占位符，不是验收判据**：客户书面确认（S-32）前，它只保证代码有值可算；
-// 确认后应由客户给出的目标值替换（`ConfirmMaxRTO`）。
+// **这是占位符，不是判据**：产品基线（`SetIndustryBaseline`）或客户合同覆盖
+// （`ConfirmMaxRTO`）设置前，它只保证代码有值可算；设置后即被替换。
 //
-// 与旧硬编码 30s 的差异：30s 未标注来源且与 U-4 提议基线（≤5min）不一致，
-// 易被误当成已确认判据，故改为显式占位常量。
+// 与单集群档 30s（P1-5 V-7）的关系：30s 属"单集群主备/故障注入切换"档
+// （`.248` 真机实测 6–20s 已达成），**不得**复用为跨中心档——两档口径不得互相套用，
+// 故跨中心占位值用独立显式常量表达，不复用 30s。
 const PlaceholderMaxRTO = 5 * time.Minute
 
-// DefaultRTOBudget 返回**占位** RTO 预算（未确认状态）。
+// DefaultRTOBudget 返回**占位** RTO 预算（未定基线状态）。
 func DefaultRTOBudget() RTOBudget {
 	return RTOBudget{MaxRTO: PlaceholderMaxRTO, Confirmed: false}
 }
 
-// ConfirmMaxRTO 客户书面确认后调用，把占位阈值转为正式判据。
+// ConfirmMaxRTO 按**客户合同 SLA 覆盖** RTO 目标值（可选，非资格开关）。
+//
+// 用于客户合同与产品基线不一致时改写阈值；`Source` 置为
+// `BaselineCustomerOverride` 以便报告层标注"已被合同覆盖"。
 //
 // d<=0 视为无效确认（保持未确认状态），避免用空值把判据清掉。
 func (b *RTOBudget) ConfirmMaxRTO(d time.Duration) {
@@ -287,27 +303,71 @@ func (b *RTOBudget) ConfirmMaxRTO(d time.Duration) {
 	}
 	b.MaxRTO = d
 	b.Confirmed = true
+	b.Source = BaselineCustomerOverride
+}
+
+// SetIndustryBaseline 按**产品基线**设定 RTO 目标（T-6.3 C-1）。
+//
+// **关键语义**：产品基线是**我方**按行业标准制定的标准产品承诺值，**本身即判据**
+// ——因此置 `Source=BaselineIndustry` 后报告层可直接出 pass/fail。
+//
+// **同时清除 `Confirmed`**：该字段只表示"是否客户合同覆盖"，**不是**资格开关。
+// 若此前已被 `ConfirmMaxRTO` 置 true，再回落产品基线时必须显式清零，否则会留下
+// "来源=产品基线 但 标记=客户覆盖" 的自相矛盾元数据（P3-1）。
+//
+// d<=0 视为无效（产品基线必须为正时长），保持原状不变。
+func (b *RTOBudget) SetIndustryBaseline(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	b.MaxRTO = d
+	b.Source = BaselineIndustry
+	b.Confirmed = false // 产品基线不是客户合同覆盖（P3-1：清理矛盾元数据）
 }
 
 // Record 记录一次切换的实测耗时。
+//
+// **零或负耗时一律视为无效测量**：`end-start <= 0`（含 `end` 早于 `start` 的
+// 时钟回拨/参数写反，以及 `end == start`）直接返回，保持原有状态且**不置
+// `HasMeasure`**。理由：
+//   - 负耗时会被当成"远小于阈值"的假通过（P3-2）；
+//   - 切换耗时不可能为 0，与 `ConfirmMaxRTO` 用 `d <= 0` 拒绝零阈值保持同一口径
+//     （阈值侧拒 0、实测侧也拒 0，避免"0 秒切换"被判 pass，P3-新2）。
+//
+// 与 `RPOBudget.Record` 拒绝负值同构（注意 RPO 侧 0 **合法**——零丢失是有效测量，
+// 两侧不可互相照抄）。
 func (b *RTOBudget) Record(start, end time.Time) {
+	if d := end.Sub(start); d <= 0 {
+		return
+	}
 	b.Measured = end.Sub(start)
 	b.HasMeasure = true
 }
 
-// WithinRTO 判定实测是否达标；**未确认或未实测一律返回 false**（不得宣称达标）。
+// WithinRTO 判定实测是否达标；**无判据资格或未实测一律返回 false**（不得宣称达标）。
+//
+// 判定口径（T-6.3 C-1 + P3-3）：资格判断统一走 `Source.IsVerdictEligible()`
+// （白名单：产品基线 / 客户合同覆盖）。产品基线可判实测达标；`Source` 为未定值
+// **或任何非法字符串**时恒为 false——**占位值不是判据**（U-4 / S-32 不变），
+// `Confirmed` 标记也不参与判定（它不是资格开关）。
 func (b RTOBudget) WithinRTO() bool {
-	return b.Confirmed && b.HasMeasure && b.Measured <= b.MaxRTO
+	return b.Source.IsVerdictEligible() && b.HasMeasure && b.Measured <= b.MaxRTO
 }
 
 // Verdict RTO 判据三态（供审计/报告输出，避免把占位值说成"达标"）。
 //
-//	pending = 阈值未确认或未实测（占位期间只能报这个）
-//	pass    = 已确认且实测达标
-//	fail    = 已确认但实测超阈值
+//	pending = 无判据资格（未定值/非法来源），或未实测（占位期间只能报这个）
+//	pass    = 有资格（产品基线或客户合同覆盖）且实测达标
+//	fail    = 有资格但实测超阈值
+//
+// 资格判断只用 `Source.IsVerdictEligible()`（白名单），**不看 `Confirmed`**——
+// 否则"客户覆盖标记"会被误当成资格开关（P2-2 红线）。
+//
+// **禁止**把 `BaselineIndustry` 输出成"客户已确认/客户要求"：需要来源信息的报告层
+// 请用 `VerdictWithSource()`，不要只看 Verdict 字符串。
 func (b RTOBudget) Verdict() string {
-	if !b.Confirmed {
-		return "pending" // 占位阈值不是判据
+	if !b.Source.IsVerdictEligible() {
+		return "pending" // 占位阈值/非法来源不是判据
 	}
 	if !b.HasMeasure {
 		return "pending" // 无实测数据
@@ -316,4 +376,12 @@ func (b RTOBudget) Verdict() string {
 		return "pass"
 	}
 	return "fail"
+}
+
+// VerdictWithSource 同时返回判据与**基线来源**，供报告/审计层使用（T-6.3 C-1）。
+//
+// 这是报告层的推荐入口：`(verdict, source)` 一起输出，读者可立刻分辨该 pass 是
+// 基于"产品基线"还是"客户合同覆盖"，避免把产品基线伪装成客户确认。
+func (b RTOBudget) VerdictWithSource() (verdict string, source BaselineSource) {
+	return b.Verdict(), b.Source
 }
