@@ -404,6 +404,8 @@ type TenantStore interface {
 	// 与上方无 cluster 参数的方法等价（存量语义不变）。
 	GetDispatchStateForCluster(tenantID, clusterID string) (*TenantDispatchState, error)
 	BumpDispatchVersionForCluster(tx TenantTx, tenantID, clusterID string, now int64) (int64, error)
+	// MarkDispatchPendingForCluster 把租户级目标版本投影到集群行（**不递增**版本号）。
+	MarkDispatchPendingForCluster(tx TenantTx, tenantID, clusterID string, version int64, now int64) error
 	MarkDispatchApplyingForCluster(tx TenantTx, tenantID, clusterID string, now int64) error
 	MarkDispatchAppliedForCluster(tx TenantTx, tenantID, clusterID string, appliedVersion, now int64) error
 	MarkDispatchFailedForCluster(tx TenantTx, tenantID, clusterID, lastError string, retryCount, now int64) error
@@ -1714,7 +1716,7 @@ type TenantDispatchState struct {
 // （见 §3.5 tenants 表），故此处按真实列名写 `REFERENCES tenants(id)`（与表 ⑧ FK 同法），
 // 否则 SQLite 开启 foreign_keys 后写入报 "foreign key mismatch"。
 //
-// cluster_id 语义：'' = 全局（未定向）行——存量行迁移后落在该行，行为与迁移前一致；
+// cluster_id 语义：” = 全局（未定向）行——存量行迁移后落在该行，行为与迁移前一致；
 // 其余取值 = 具体集群 ID（T-3.2b 的"每租户×每集群单飞"目标行）。
 const dispatchTableDDL = `
 CREATE TABLE IF NOT EXISTS tenant_dispatch_state (
@@ -1762,7 +1764,7 @@ func ensureDispatchSchema(db *sql.DB) error {
 // migrateDispatchStatePKSQLite 把 tenant_dispatch_state 的主键迁移为 (tenant_id, cluster_id)。
 //
 // sqlite 不支持 ALTER TABLE ... DROP/ADD PRIMARY KEY ⇒ **整表重建**：
-// 建新表 → 拷贝存量行（cluster_id 置 ''，即"全局行"）→ 删旧表 → 改名。
+// 建新表 → 拷贝存量行（cluster_id 置 ”，即"全局行"）→ 删旧表 → 改名。
 // 幂等可重入：已是目标结构（列齐 + 复合主键）时直接返回，重复启动不重复重建。
 func migrateDispatchStatePKSQLite(db *sql.DB) error {
 	hasClusterID, need, err := dispatchStateSchemaState(db)
@@ -1852,7 +1854,7 @@ func dispatchStateSchemaState(db *sql.DB) (bool, bool, error) {
 
 // dispatchClusterGlobal 全局（未定向）行的 cluster_id 取值。
 //
-// 存量行在 T-3.2a 主键迁移后落在该行（cluster_id=''），既有"每租户单行"语义
+// 存量行在 T-3.2a 主键迁移后落在该行（cluster_id=”），既有"每租户单行"语义
 // 与行为完全不变；T-3.2b 的定向集群行使用真实集群 ID。
 const dispatchClusterGlobal = ""
 
@@ -1869,7 +1871,7 @@ func scanDispatchState(sc rowScanner) (*TenantDispatchState, error) {
 	return &d, nil
 }
 
-// GetDispatchState 取**全局行**（cluster_id=''）——既有语义不变（T-3.2a 前只有这一行）。
+// GetDispatchState 取**全局行**（cluster_id=”）——既有语义不变（T-3.2a 前只有这一行）。
 func (s *sqliteTenantStore) GetDispatchState(tenantID string) (*TenantDispatchState, error) {
 	return s.GetDispatchStateForCluster(tenantID, dispatchClusterGlobal)
 }
@@ -1925,6 +1927,27 @@ func (s *sqliteTenantStore) BumpDispatchVersionForCluster(tx TenantTx, tenantID,
 		return 0, fmt.Errorf("tenant: read bumped dispatch version: %w", err)
 	}
 	return v, nil
+}
+
+// MarkDispatchPendingForCluster 标记某租户×集群的待下发版本。
+//
+// 与 BumpDispatchVersionForCluster 的区别：**不递增**版本号——版本号由租户级
+// 全局行承载（写路径 bump），下发时把该目标版本**投影**到集群行。
+// 不存在则建行（config_version = version，status='pending'）。
+func (s *sqliteTenantStore) MarkDispatchPendingForCluster(tx TenantTx, tenantID, clusterID string, version int64, now int64) error {
+	_, err := tx.tx().Exec(`INSERT INTO tenant_dispatch_state
+		(tenant_id, cluster_id, config_version, status, applied_version, last_error, retry_count, updated_at)
+		VALUES (?, ?, ?, 'pending', 0, NULL, 0, ?)
+		ON CONFLICT(tenant_id, cluster_id) DO UPDATE SET
+			config_version = excluded.config_version,
+			status = 'pending',
+			last_error = NULL,
+			retry_count = 0,
+			updated_at = excluded.updated_at`, tenantID, clusterID, version, now)
+	if err != nil {
+		return fmt.Errorf("tenant: mark dispatch pending: %w", err)
+	}
+	return nil
 }
 
 // MarkDispatchApplying 置**全局行** status='applying'（不改版本）。
