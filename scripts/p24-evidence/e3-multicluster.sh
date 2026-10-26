@@ -49,7 +49,12 @@ while [ $# -gt 0 ]; do
   esac
   NEW_ARGS+=("$1"); shift
 done
+_BEFORE_PARSE_OUT="$DRILL_OUT"
 if [ ${#NEW_ARGS[@]} -gt 0 ]; then dr_parse_common "${NEW_ARGS[@]}"; else dr_parse_common; fi
+# dry-run 绝不写 docs 证据目录：否则"预演"会被后任误当"证据"归档（DRILL_OUT 只有 --out 会改）
+if [ "$DRY_RUN" = "1" ] && [ "$DRILL_OUT" = "$_BEFORE_PARSE_OUT" ]; then
+  DRILL_OUT="$(dr_default_out_dir)/p24-evidence"
+fi
 
 KC_ARGS=""
 [ -n "$KCFG" ] && KC_ARGS="--kubeconfig '$KCFG'"

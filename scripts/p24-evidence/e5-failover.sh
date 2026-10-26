@@ -47,6 +47,10 @@ while [ $# -gt 0 ]; do
 done
 
 DRILL_D5="$HERE/../drills/d5-admin-geo-failover.sh"
+# dry-run 绝不写 docs 证据目录：否则"预演"会被后任误当"证据"归档
+if [ "$DRY_RUN" = "1" ] && [ -z "${_PRE_OUT:-}" ]; then
+  DRILL_OUT="$(dr_default_out_dir)/p24-evidence"
+fi
 dr_init
 printf '== %s ==\n证据目录：%s\n委派：%s\n\n' "$DRILL_TITLE" "$DR_EVIDENCE_DIR" "$DRILL_D5"
 

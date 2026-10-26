@@ -47,11 +47,15 @@
 
 ## 4. 证据归位
 
-- 默认输出 `<repo>/docs/verify/multicluster/evidence/<PRE 编号>/<时间戳>/`，内含
+- **真实执行**默认输出 `<repo>/docs/verify/multicluster/evidence/<PRE 编号>/<时间戳>/`，内含
   `steps.jsonl`（逐步记录，机器可读）、`report.json`（结论 + 退出码 + 耗时）、`evidence.md`（人工补填骨架）。
 - **脚本只写文件不提交**。归档由执行人决定：`cd docs && git add verify/multicluster/evidence/<...>`。
-- ⚠️ **`--dry-run` 的产物不是证据**：其 `report.json` 里 `executed=false`，`evidence.md` 首行也标注
-  「dry-run 不得作为验收证据」。清理：`rm -rf docs/verify/multicluster/evidence/<PRE 编号>`。
+- ⚠️ **`--dry-run` 产物自动改道到 `scripts/drills/.runs/ga-multicluster-drills/p24-evidence/`（不进库）**，
+  不会污染 docs 证据目录 —— 这是刻意的：预演结果一旦落进 `evidence/`，后任极易误当"已取证"。
+  其 `report.json` 里 `executed=false`。
+- ⚠️ **`exit 3`（环境未就绪）会正常写 docs**（它记录了一次"当时环境不具备"）。这类目录
+  `report.json` 为 `"result":"env_unmet","exit_code":3`，**归档前应删除**，否则会被误读为证据：
+  `rm -rf docs/verify/multicluster/evidence/<PRE 编号>`。
 
 ## 5. 与 `scripts/drills/` 的关系
 
