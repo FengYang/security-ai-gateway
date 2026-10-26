@@ -5,9 +5,14 @@
 # 不改动默认监控栈（`kubectl apply -k deploy/monitoring` 产物不变）。
 #
 # 用法：
-#   1) 签发并注入证书（禁止入库）：
-#        kubectl -n otpmask create secret tls otpmask-remote-write-mtls \
-#          --cert=/path/client.crt --key=/path/client.key --ca-file=/path/ca.crt
+#   1) 注入并挂载证书（禁止入库）：
+#        kubectl -n otpmask create secret generic otpmask-remote-write-mtls \
+#          --from-file=tls.crt=/path/client.crt \
+#          --from-file=tls.key=/path/client.key \
+#          --from-file=ca.crt=/path/ca.crt \
+#          --dry-run=client -o yaml | kubectl apply -f -
+#      ⚠️ 不能用 `create secret tls`（只收两键，装不下 ca.crt），
+#         也不能给 `create secret generic` 传 --cert/--key/--ca-file（它没有这些 flag）。
 #      （模板见 secret-remote-write-mtls.example.yaml，**不在 resources 内，勿 apply**）
 #   2) 应用 overlay（挂载证书卷）：
 #        kubectl apply -k deploy/monitoring-overlays/remote-write-mtls

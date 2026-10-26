@@ -14,22 +14,30 @@
 |---|---|---|---|---|
 | **8085** | `gateway-core`（`OTP_CORE_ADDR`，默认 `:8085`） | 业务 API、策略拉取、**审计链导出** `/v1/internal/audit/chain/export`、`/metrics` | 入站 | ✅ 中央采集器 |
 | **19090** | `tee-infer-service`（helm `port`，默认 `19090`） | 推理转发、TEE 配额下发、**审计链导出（tee）**、`/metrics` | 入站 | ✅ 中央采集器 |
-| **9090** | `prometheus-central` | **remote-write 接收** `/api/v1/write`、查询 API、Grafana 数据源 | 入站 | ✅ 各集群 Prometheus |
-| **9090** | per-cluster `prometheus` | 本地抓取与查询 | 本地 | ❌ **不跨集群**（写入中央是**出站**到中央 9090） |
+| **9443** | `remote-write-mtls-gateway`（中央） | **remote-write 唯一跨集群写入入口**：双向 TLS + 客户端证书强制校验，仅 `/api/v1/write` | 入站 | ✅ **各集群 Prometheus**（唯一对公网可开的口） |
+| **9090** | `prometheus-central`（中央） | remote-write 接收（**收紧后仅代理可直连**）、查询 API（Grafana） | 入站 | ❌ **不再直接跨集群**（一律经 9443） |
+| **9090** | per-cluster `prometheus` | 本地抓取与查询 | 本地 | ❌ **不跨集群**（写入中央是**出站**到中央 9443） |
+| **8080** | `remote-write-mtls-gateway`（中央） | 代理自身 `/healthz`、`/stub_status` | 入站 | ❌ 仅 kubelet / 同命名空间 |
 | 19099 | `alert-relay`（示例占位） | 告警 webhook 转发 | 出站 | 可选 |
 
 **流量方向（谁连谁）**
 
 | 源 | 目标 | 端口 / 路径 | 说明 |
 |---|---|---|---|
-| 各集群 Prometheus | 中央 `prometheus-central` | `9090/api/v1/write`（或客户接收端：Thanos `9090/api/v1/receive`、Mimir `8080/api/v1/push`、VM `8481/insert/…`） | 出站；mTLS + 客户端证书 |
+| 各集群 Prometheus | 中央 `remote-write-mtls-gateway` | `9443/api/v1/write` | 出站；**双向 TLS**（发送侧带客户端证书）；形态 A 客户接收端见 `central/receivers/` |
+| 中央 `remote-write-mtls-gateway` | 中央 `prometheus-central` | `9090/api/v1/write` | 集群内明文回环（TLS 已在前一跳终止）；由收紧后的 NP 限定为**仅代理可入** |
 | 中央采集器 | 各集群 `gateway-core` | `8085/v1/internal/audit/chain/export?schema=admin|core` | 入站到被采集集群；Bearer + 来源 CIDR 白名单 |
 | 中央采集器 | 各集群 `tee-infer-service` | `19090/…?schema=tee` | 同上 |
-| Grafana（中央） | 中央 `prometheus-central` | `9090/api/v1/query` | 集群内 |
+| Grafana（中央） | 中央 `prometheus-central` | `9090/api/v1/query` | 集群内（收紧 NP 时必须保留这条，否则看板断） |
 | Prometheus（各集群） | 本地 `gateway-core` / `tee-infer` | `8085/metrics`、`19090/metrics` | 集群内抓取 |
 
 > **注意**：`8085`/`19090` 的**业务流量与导出流量同端口**——这就是为什么网段放行会连带放行业务面。
 > 应用层的路径级边界在 T-4.2（来源 CIDR 白名单 + Bearer 令牌，**空即 deny**），网络策略只是第二道网。
+
+> **`9443` 为什么不在这三个文件里**：9443 属**中央集群侧**的入站边界
+> （`deploy/monitoring-overlays/remote-write-mtls-server/networkpolicy-mtls-gateway-ingress.yaml`），
+> 而本目录三档管的是**各集群侧数据面入站**（8085/19090）。两处职责不重叠，
+> 不要为了"统一"把 9443 塞进三档模板，否则会在每个集群上留一条指向不存在端口的空放行。
 
 ## 2. 三档对比
 

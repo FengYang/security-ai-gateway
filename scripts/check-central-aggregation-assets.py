@@ -60,6 +60,10 @@ PLACEHOLDER_RE = re.compile(r"(REPLACE_[A-Z_]+|<user>|<pass>|<password>|\$\(|xxx
 DEFAULT_DIRS = [
     os.path.join("deploy", "monitoring", "central"),
     os.path.join("deploy", "monitoring-overlays", "remote-write-mtls"),
+    # PRE-A-4：mTLS 终止代理（接收侧）。YAML 解析与凭据扫描在此一并覆盖；
+    # 代理特有的安全断言（ssl_verify_client / 端口 / 非 root）由
+    # scripts/check-mtls-proxy-assets.py 专管。
+    os.path.join("deploy", "monitoring-overlays", "remote-write-mtls-server"),
     os.path.join("deploy", "k8s-overlays", "multicluster"),
     os.path.join("deploy", "k8s-overlays", "trust"),
 ]

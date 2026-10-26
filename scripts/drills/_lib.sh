@@ -259,7 +259,10 @@ dr_exec() {
     return 0
   fi
   local rc output
-  output="$(bash -c "$cmd" 2>&1)"
+  # ★ 必须带 -o pipefail：否则 `kubectl ... | head -3` 这类命令的退出码由**管道末段**
+  #   （head/grep 总是 0）决定 —— 前段明明失败也会判 pass，等于把"没连上"记成"通过"。
+  #   调用方脚本里的 `set -o pipefail` 不会继承到 `bash -c` 子进程，只能在这里给。
+  output="$(bash -o pipefail -c "$cmd" 2>&1)"
   rc=$?
   if [ $rc -eq 0 ]; then
     dr_pass "$id" "$name" "$output"
@@ -273,7 +276,8 @@ dr_exec() {
 dr_exec_ro() {
   local id="$1" name="$2" cmd="$3"
   local rc output
-  output="$(bash -c "$cmd" 2>&1)"
+  # 只读动作同样要 pipefail（同 dr_exec 的理由）：`| head` / `| grep -c` 会掩盖前段失败。
+  output="$(bash -o pipefail -c "$cmd" 2>&1)"
   rc=$?
   if [ $rc -eq 0 ]; then
     dr_pass "$id" "$name" "$output"

@@ -6,6 +6,16 @@
 #
 # 挂载路径与 snippet 中的 tls_config 路径严格一致：
 #   /etc/prometheus/mtls/{ca.crt,tls.crt,tls.key}
+#
+# 【权限口径（PRE-A-11 的坑，编码层先消掉）】
+#   Prometheus 以 nobody(65534) 运行（deploy/monitoring/prometheus.yaml:321），
+#   而 K8s Secret 卷默认属主 root:root、不设 fsGroup 就不会 chgrp。
+#   若沿用 defaultMode 0400 → 属主 root 可读、65534 **读不到** → Prometheus 加载证书失败、
+#   启动直接报错（表现为 CrashLoopBackOff，而不是"降级为不加密"）。
+#   正确组合：defaultMode 0440 ＋ pod 级 fsGroup: 65534
+#     → 卷内文件属组变为 65534，组位可读；容器以 65534 运行即能读。
+#   ⚠️ 该组合**仍未在真集群实测**（本机无 K8s）→ 登记 PRE-A-11 / PRE-B-9，
+#      实测若不符（如 CSI Secret Store 或只读根差异），按现场调整并记最终取值，不得默认成立。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,6 +24,8 @@ metadata:
 spec:
   template:
     spec:
+      securityContext:
+        fsGroup: 65534          # 让 Secret 卷属组对 nobody 可读（配合下面 0440）
       containers:
       - name: prometheus
         volumeMounts:
@@ -24,4 +36,8 @@ spec:
       - name: remote-write-mtls
         secret:
           secretName: otpmask-remote-write-mtls
-          defaultMode: 0400
+          # 0440 而非 0400：0440 = root 读写 + 属组(fsGroup=65534)只读
+          # 不写 items：snippet 的 authorization.credentials_file 还要读同目录的 `token`，
+          # 用 items 白名单会把 token 排除；而列上 token 又会在「只用 mTLS 不用 Bearer」时
+          # 因密钥缺失导致卷挂载失败 → 整卷挂载最稳（Secret 里有什么就挂什么）。
+          defaultMode: 0440

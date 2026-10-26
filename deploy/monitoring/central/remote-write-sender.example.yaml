@@ -37,7 +37,10 @@ data:
     # 【目标地址必须可配置 · 禁止写死内网地址】默认形态 B；形态 A 的四种接收端见 receivers/：
     #   形态 A（客户既有监控栈）：按接收端取片段 —— 原生 Prometheus /api/v1/write、
     #     Thanos Receive /api/v1/receive、Mimir /api/v1/push（需 X-Scope-OrgID）、VM /api/v1/write
-    #   形态 B（我方交付的中央栈）：http(s)://prometheus-central.<中央命名空间>.svc.cluster.local:9090/api/v1/write
+    #   形态 B（我方交付的中央栈）：**必须经 mTLS 终止代理**，端口 9443（不是 9090）：
+    #     https://remote-write-mtls-gateway.<中央命名空间>.svc.cluster.local:9443/api/v1/write
+    #     代理只放行精确路径 /api/v1/write，且强制客户端证书 → 下面的 tls_config 必须启用。
+    #     直连 9090 只在「尚未收紧 NP 的内网/专线临时态」成立，不得作为交付形态。
     # 两者地址不同 → 一律用占位符，由客户环境确定后替换。
     - url: "REPLACE_WITH_CENTRAL_WRITE_ENDPOINT"
       # 跨集群写入：放宽队列与批量，容忍网络抖动（按集群规模调整）
@@ -54,11 +57,12 @@ data:
         regex: "(otpmask_.*|up|gateway_core_.*)"
         action: keep
       # ---- T-4.3 落点（mTLS）：取消注释并按证书下发路径调整 ----
+      # server_name 必须与接收端证书 SAN 一致：经代理写 9443 → 用 remote-write-mtls-gateway.*
       # tls_config:
       #   ca_file: /etc/prometheus/mtls/ca.crt
       #   cert_file: /etc/prometheus/mtls/tls.crt
       #   key_file: /etc/prometheus/mtls/tls.key
-      #   server_name: prometheus-central.otpmask.svc.cluster.local
+      #   server_name: remote-write-mtls-gateway.otpmask.svc.cluster.local
       # ---- T-4.3 落点（鉴权，三选一）----
       # authorization:
       #   type: Bearer

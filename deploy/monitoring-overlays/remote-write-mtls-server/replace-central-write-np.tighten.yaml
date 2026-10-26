@@ -1,0 +1,57 @@
+# P2-4 PRE-A-4 配套：**收紧**中央 Prometheus 的入站（代理就绪后再执行）
+#
+# ── 为什么是「整对象替换」而不是「再加一条策略」─────────────────────────────────
+#   Kubernetes NetworkPolicy 是**加性**的：同一 Pod 命中多条策略时，允许集取**并集**
+#   （= 越加越宽）。因此**无法**用「再 apply 一个更严格的 NP」来收紧既有宽泛放行。
+#   唯一可行的做法是**同名替换**原对象（本文件 name 与 central 基座完全一致：
+#   `prometheus-central-write` / namespace `otpmask`），apply 后旧定义被覆盖。
+#
+# ── 替换前后差异 ──────────────────────────────────────────────────────────────
+#   替换前（deploy/monitoring/central/prometheus-central.yaml 尾部）：
+#     入站 9090 ← namespaceSelector(kubernetes.io/metadata.name=otpmask)
+#     ⇒ **同命名空间任意 Pod 都能直接写入中央 Prometheus**，绕过 mTLS（等于代理没装）
+#   替换后（本文件）：
+#     入站 9090 ← 仅 ① 代理 Pod(app=remote-write-mtls-gateway) ② 中央 Grafana(app=grafana)
+#     ⇒ 写入路径被强制收敛到 9443 的 mTLS 入口，9090 不再对外可见
+#
+# ── 执行前提（缺一不得 apply）─────────────────────────────────────────────────
+#   1. 代理已 Running 且 readiness 通过：`kubectl -n otpmask get pod -l app=remote-write-mtls-gateway`
+#   2. 至少一个集群已通过 9443 写入成功（否则收紧后无法判断是"策略拦了"还是"代理没通"）
+#   3. **中央 Grafana 的真实 Pod 标签已核对**：本文件按 `app: grafana`
+#      （deploy/monitoring/grafana.yaml:545）。若中央集群的 Grafana 用别的标签，
+#      必须先改本文件，否则看板查询会被自己的策略掐断。
+#
+# ── 回滚 ─────────────────────────────────────────────────────────────────────
+#   恢复宽泛放行（仅在代理不可用、需要应急直连时用，用完须立刻改回）：
+#     kubectl apply -f deploy/monitoring/central/prometheus-central.yaml
+#   ⚠️ 回滚后 9090 重新对同命名空间全开 —— 属于**安全边界退化**，须记入变更记录。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-central-write
+  namespace: otpmask
+  labels:
+    app: prometheus-central
+    otpmask.io/netpol-role: tightened-by-mtls-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: prometheus-central
+  policyTypes: ["Ingress"]
+  ingress:
+  # ① 唯一写入来源：mTLS 终止代理（客户端证书已在该层校验完毕）
+  - from:
+    - podSelector:
+        matchLabels:
+          app: remote-write-mtls-gateway
+    ports:
+    - protocol: TCP
+      port: 9090
+  # ② 中央 Grafana 查询（只读语义，但 NP 是 L3/L4，无法区分 GET/POST）
+  - from:
+    - podSelector:
+        matchLabels:
+          app: grafana
+    ports:
+    - protocol: TCP
+      port: 9090

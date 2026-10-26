@@ -1,0 +1,46 @@
+# P2-4 PRE-A-4 配套：代理 9443 的跨集群来源放行
+#
+# 【必须先替换占位再 apply】ipBlock.cidr 写的是各集群的**实际出口 IP**
+# （Pod 源 IP 未必落在集群网段内，取决于 CNI 的 SNAT 策略）。
+# 与 deploy/monitoring/central/trust/networkpolicy-central-collector-egress.yaml 同一口径：
+# 一律「按单个/一组出口 IP + 前缀长度」写，**不按大网段**，避免把整个办公网放进写入口。
+#
+# 取值方法（现场核对）：
+#   在任一台各集群节点上，用该集群 Prometheus Pod 访问中央端口，看中央侧看到的源 IP：
+#     kubectl -n otpmask logs deploy/remote-write-mtls-gateway | grep -o '^[0-9.]*' | sort -u
+#   日志首列即 `$remote_addr`（= SNAT 后的真实来源 IP）。
+#   每个集群通常 1~2 个出口 IP，逐个列成独立 ipBlock 条目（不要合并成大网段）。
+#
+# 【默认不启用】本文件不在 kustomization 的 resources 内：未替换占位符就 apply 没有任何意义，
+# 反而可能因为 YAML 里留了假 CIDR 让人误以为"已放行"。
+# 未启用时的实际效果：代理 9443 只能被**同集群内**来源访问
+# （中央集群 NP 默认不限制入站，但跨集群仍在防火墙/安全组一侧被拦）——
+# 即「没配就没人能跨集群写」，属 **fail-closed**，不会静默全开。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: remote-write-mtls-gateway-ingress
+  namespace: otpmask
+  labels:
+    app: remote-write-mtls-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: remote-write-mtls-gateway
+  policyTypes: ["Ingress"]
+  ingress:
+  # ① 各集群 Prometheus 的 9443 写入（来源 = 各集群 SNAT 后的出口 IP）
+  - from:
+    - ipBlock:
+        cidr: REPLACE_WITH_CLUSTER_A_EGRESS_IP/32      # 集群 A 出口 IP
+    - ipBlock:
+        cidr: REPLACE_WITH_CLUSTER_B_EGRESS_IP/32      # 集群 B 出口 IP（无多集群可删本条）
+    ports:
+    - protocol: TCP
+      port: 9443
+  # ② 健康/状态口：只允许同命名空间（kubelet 探测不受 NP 约束，无需放行节点网段）
+  - from:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 8080

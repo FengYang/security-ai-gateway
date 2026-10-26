@@ -30,7 +30,11 @@ umask 077
 
 OUT_DIR=""
 MODE="self-signed"
-SERVER_SAN="prometheus-central.otpmask.svc.cluster.local,prometheus-central.otpmask.svc,localhost"
+# 默认 SAN 覆盖**两种访问名**：
+#   * remote-write-mtls-gateway.* —— 经 mTLS 终止代理写入（9443，交付形态，见 §PRE-A-4）
+#   * prometheus-central.*        —— 直连中央 Prometheus（9090，仅内网/专线临时态）
+# 一张证书同时覆盖两者，避免换访问形态时必须重签（SAN 不匹配 = 握手必失败）。
+SERVER_SAN="remote-write-mtls-gateway.otpmask.svc.cluster.local,remote-write-mtls-gateway.otpmask.svc,prometheus-central.otpmask.svc.cluster.local,prometheus-central.otpmask.svc,localhost"
 DAYS=90
 FORCE=0
 KEY_TYPE="ecdsa"
@@ -45,8 +49,11 @@ usage() {
 可选：
   --mode self-signed|csr   默认 self-signed（内置自签 CA）；csr＝只生成 CSR 交企业 CA 签发
   --server-san <list>      服务端证书 SAN，逗号分隔
-                           默认 prometheus-central.otpmask.svc.cluster.local,
+                           默认 remote-write-mtls-gateway.otpmask.svc.cluster.local,
+                                remote-write-mtls-gateway.otpmask.svc,
+                                prometheus-central.otpmask.svc.cluster.local,
                                 prometheus-central.otpmask.svc,localhost
+                           （代理 9443 用前者；直连 9090 用后者）
   --days <n>               证书有效期天数（默认 90；>90 会告警）
   --key-type ecdsa|rsa     私钥类型（默认 ecdsa P-256；rsa＝2048）
   --force                  覆盖已有产物（先把旧文件移到 .bak-<时间戳>）
@@ -314,8 +321,12 @@ cat <<EOF
 
 == 装配（人工执行；私钥禁止入库）==
   # ① 发送侧（各集群 Prometheus）客户端证书 Secret：
+  #    必须用 --from-file 三键：`create secret tls` 只收 tls.crt/tls.key，装不下 ca.crt；
+  #    `create secret generic` 也**不支持** --cert/--key/--ca-file（那是 tls 子命令的 flag）。
   kubectl -n otpmask create secret generic otpmask-remote-write-mtls \\
-    --cert=$OUT_DIR/client.crt --key=$OUT_DIR/client.key --ca-file=$OUT_DIR/ca.crt \\
+    --from-file=tls.crt=$OUT_DIR/client.crt \\
+    --from-file=tls.key=$OUT_DIR/client.key \\
+    --from-file=ca.crt=$OUT_DIR/ca.crt \\
     --dry-run=client -o yaml | kubectl apply -f -
 
   # ② 接收侧 mTLS 终止代理：需要 ca.crt（校验客户端）+ server.crt/server.key

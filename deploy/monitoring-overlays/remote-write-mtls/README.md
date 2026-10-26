@@ -34,8 +34,12 @@
 #        openssl verify -CAfile ./certs/ca.crt ./certs/server.crt ./certs/client.crt
 
 # ② 注入客户端证书 Secret（禁止入库）
+#    必须三键 `--from-file`：`create secret tls` 装不下 ca.crt，
+#    `create secret generic` 又没有 --cert/--key/--ca-file 这些 flag
 kubectl -n otpmask create secret generic otpmask-remote-write-mtls \
-  --cert=./certs/client.crt --key=./certs/client.key --ca-file=./certs/ca.crt \
+  --from-file=tls.crt=./certs/client.crt \
+  --from-file=tls.key=./certs/client.key \
+  --from-file=ca.crt=./certs/ca.crt \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # ③ 挂载证书卷
@@ -50,8 +54,13 @@ kubectl apply -k deploy/monitoring-overlays/remote-write-mtls
 ## 3. 关键口径
 
 - **目标地址可配置**：snippet 中 `url: REPLACE_WITH_CENTRAL_WRITE_ENDPOINT` 为占位符，
-  **不写死任何内网地址**；中央侧**默认形态 B**，形态 A 的四种接收端（原生 Prometheus /
-  Thanos / Mimir / VM）见 [`deploy/monitoring/central/receivers/`](../../monitoring/central/receivers/README.md)。
+  **不写死任何内网地址**。形态 B（我方中央栈）**必须指向 mTLS 终止代理 9443**：
+  `https://remote-write-mtls-gateway.<ns>.svc.cluster.local:9443/api/v1/write`，
+  代理只放行精确路径 `/api/v1/write` 并强制客户端证书；直连 `prometheus-central:9090` 仅限
+  「尚未收紧 NP 的内网/专线临时态」，不得作为交付形态。
+  代理侧资产见 [`../remote-write-mtls-server/`](../remote-write-mtls-server/README.md)。
+  形态 A 的四种接收端（原生 Prometheus / Thanos / Mimir / VM）见
+  [`deploy/monitoring/central/receivers/`](../../monitoring/central/receivers/README.md)。
 - **cluster 标签口径**：`external_labels.cluster` 是中央侧 `by (cluster)`、看板变量、
   Alertmanager `equal: [cluster]` 的唯一来源，每集群必须唯一（建议 = registry cluster_id）。
 - **mTLS 校验**：`server_name` 必须与接收端证书 SAN 一致，`insecure_skip_verify: false` 固定。

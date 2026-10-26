@@ -1,0 +1,278 @@
+# P2-4 T-4.3（接收侧）/ PRE-A-4：中央 remote-write 的 **mTLS 终止代理**
+#
+# ── 为什么必须有这一层 ──────────────────────────────────────────────────────────
+#   Prometheus **原生不校验客户端证书**：`--web.config.file` 只能做「服务端 TLS + basic_auth」，
+#   没有 `ssl_verify_client` 语义。因此「各集群 Prometheus 用客户端证书证明自己是谁」这件事，
+#   只能由前置代理完成 TLS 终止 + 客户端证书强制校验（`ssl_verify_client on`）。
+#   代理通过校验后，以明文 HTTP 回环转发到中央 Prometheus:9090（同命名空间，不出节点网络）。
+#
+# ── 与发送侧的配对关系 ─────────────────────────────────────────────────────────
+#   发送侧：deploy/monitoring-overlays/remote-write-mtls/（挂客户端证书 + url 指向本代理 9443）
+#   证书：  deploy/monitoring-overlays/remote-write-mtls/gen-ca.sh 生成 CA + 服务端 + 客户端
+#           两端必须用**同一 CA**：本代理的 ssl_client_certificate 就是该 CA。
+#
+# ── 默认零影响 ────────────────────────────────────────────────────────────────
+#   本目录**不是** deploy/monitoring 或 deploy/monitoring/central 的 kustomization 成员，
+#   `kubectl apply -k deploy/monitoring` 产物与本次交付前完全一致。
+#   只在「承担跨集群聚合、且写入通道需跨不可信网络」的中央集群上按需部署。
+#
+# ── 端口口径（唯一）───────────────────────────────────────────────────────────
+#   9443 = 对外 mTLS 写入入口（本代理，跨集群；NetworkPolicy 需按来源出口 IP 放行）
+#   9090 = 中央 Prometheus 本体（**收紧后仅代理可访问**，见 replace-central-write-np.tighten.yaml）
+#   8080 = 代理自身健康/状态（healthz / stub_status，**不放行外部来源**）
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: remote-write-mtls-gateway-conf
+  namespace: otpmask
+  labels:
+    app: remote-write-mtls-gateway
+data:
+  # 【安全口径】本配置是「只进不出、只写不查」的窄口：
+  #   * 唯一可达路径 = POST /api/v1/write；其余一律 404（查询/管理面不经此口）；
+  #   * 客户端证书强制校验，无证书/证书不合 CA → TLS 握手阶段即拒；
+  #   * 客户端证书主体（DN/序列号）透传为 X-Client-Subject/X-Client-Serial，
+  #     **仅供上游与审计观测，不构成认证**（认证已由握手完成）。
+  # 变更本文件即等于改安全边界 → 任何修改须走评审，不得临时热改。
+  nginx.conf: |
+    worker_processes auto;
+    error_log /dev/stderr warn;
+    pid /tmp/nginx.pid;
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        server_tokens off;
+        default_type application/octet-stream;
+
+        log_format rw '$remote_addr [$time_local] "$request" $status $body_bytes_sent '
+                      'rt=$request_time urt=$upstream_response_time '
+                      'client_dn="$ssl_client_s_dn" verify="$ssl_client_verify" '
+                      'serial="$ssl_client_serial" upstream="$upstream_addr"';
+
+        access_log /dev/stdout rw;
+
+        # 只读根文件系统：全部临时路径落到 emptyDir 挂载的 /tmp
+        client_body_temp_path /tmp/client_body;
+        proxy_temp_path       /tmp/proxy;
+        fastcgi_temp_path     /tmp/fastcgi;
+        uwsgi_temp_path       /tmp/uwsgi;
+        scgi_temp_path        /tmp/scgi;
+
+        # remote_write 单批 2000 samples 的量级，留足余量但设上限（防内存打爆）
+        client_body_buffer_size 1m;
+        client_max_body_size 64m;
+
+        upstream prometheus_central {
+            server prometheus-central.otpmask.svc.cluster.local:9090;
+            keepalive 32;
+        }
+
+        # ① 对外 mTLS 写入入口
+        server {
+            listen 9443 ssl;
+            http2 on;
+            server_name _;
+
+            ssl_certificate         /etc/nginx/tls/tls.crt;
+            ssl_certificate_key     /etc/nginx/tls/tls.key;
+            # 【客户端证书校验的核心三行】缺任一行即退化为单向 TLS
+            ssl_client_certificate  /etc/nginx/tls/ca.crt;
+            ssl_verify_client       on;
+            ssl_verify_depth        2;
+
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
+            ssl_prefer_server_ciphers off;
+            ssl_session_cache shared:mtls:10m;
+            ssl_session_timeout 10m;
+            ssl_session_tickets off;
+
+            # 唯一放行路径（= 精确匹配，不做前缀匹配，避免 /api/v1/write/../admin 之类歧义）
+            location = /api/v1/write {
+                # remote_write 必为 POST；GET/HEAD 等一律 405（不向上游透传）
+                if ($request_method != POST) {
+                    return 405;
+                }
+
+                proxy_pass http://prometheus_central;
+                proxy_http_version 1.1;
+                proxy_set_header Connection "";
+                proxy_set_header Host prometheus-central.otpmask.svc.cluster.local:9090;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto https;
+
+                # 客户端身份透传：仅供上游/审计侧观测与排障，**不作认证依据**
+                proxy_set_header X-Client-Verify  $ssl_client_verify;
+                proxy_set_header X-Client-Subject $ssl_client_s_dn;
+                proxy_set_header X-Client-Serial  $ssl_client_serial;
+
+                proxy_connect_timeout 5s;
+                proxy_send_timeout   30s;
+                proxy_read_timeout   30s;
+                # 写入是流式批量：关响应缓冲，避免大响应堆积在代理
+                proxy_buffering off;
+            }
+
+            # 其余路径一律 404 —— 不暴露查询 API、不暴露 /-/ready 等管理面
+            location / {
+                return 404;
+            }
+        }
+
+        # ② 集群内健康/状态口（NetworkPolicy 不对跨集群来源放行 → 仅 kubelet/同命名空间可及）
+        server {
+            listen 8080;
+            server_name _;
+            access_log off;
+
+            location = /healthz {
+                return 200 "ok\n";
+            }
+            # 代理是否真的在收连接、转发是否成功，用 stub_status 一眼可见（排障用）
+            location = /stub_status {
+                stub_status;
+                allow 10.0.0.0/8;
+                allow 172.16.0.0/12;
+                allow 192.168.0.0/16;
+                deny all;
+            }
+            location / {
+                return 404;
+            }
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remote-write-mtls-gateway
+  namespace: otpmask
+  labels:
+    app: remote-write-mtls-gateway
+spec:
+  # 单副本即可：代理是无状态转发，挂了只会让各集群 remote_write 在队列里重试
+  # （发送侧 queue_config 已放宽 max_backoff=60s、capacity=10000）。
+  # 若写入量极大需水平扩展：直接调大该值即可（upstream 无粘性要求）。
+  replicas: 1
+  selector:
+    matchLabels:
+      app: remote-write-mtls-gateway
+  template:
+    metadata:
+      labels:
+        app: remote-write-mtls-gateway
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101       # nginx 用户；镜像内 UID 固定 101
+        runAsGroup: 101
+        # 【关键】Secret 卷默认属主 root:root。若用 0400，UID 101 读不到私钥 → 代理起不来。
+        # fsGroup 会把卷的属组改为 101 并按 defaultMode 的**组位**放行 ⇒ 用 0440 而非 0400。
+        # （对照 PRE-A-11：Prometheus 侧以 nobody(65534) 运行，同一问题须在真集群单独验证。）
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: nginx
+        # 镜像可由 kustomization 的 images: 改写为内网镜像源；最低需 nginx ≥ 1.25.1（http2 指令）
+        image: nginx:1.27-alpine
+        # 覆盖 entrypoint：跳过镜像内会对 /etc/nginx/conf.d 写入的初始化脚本（只读根下会失败）
+        command: ["/usr/sbin/nginx", "-c", "/etc/nginx/nginx.conf", "-g", "daemon off;"]
+        ports:
+        - name: mtls-write
+          containerPort: 9443
+          protocol: TCP
+        - name: status
+          containerPort: 8080
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: status
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: status
+          initialDelaySeconds: 10
+          periodSeconds: 20
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        # 服务端证书 + 信任的客户端 CA（由 Secret 注入，禁止入库）
+        - name: tls
+          mountPath: /etc/nginx/tls
+          readOnly: true
+        - name: conf
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+          readOnly: true
+        # 只读根：nginx 的 pid / 临时缓冲 / 缓存目录全部落这里
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /var/cache/nginx
+      volumes:
+      - name: tls
+        secret:
+          secretName: otpmask-remote-write-mtls-server
+          # 0440 + fsGroup=101：属主 root、属组 101 可读；比 0400 更适合非 root 进程
+          defaultMode: 0440
+          items:
+          - key: tls.crt
+            path: tls.crt
+          - key: tls.key
+            path: tls.key
+          - key: ca.crt
+            path: ca.crt
+      - name: conf
+        configMap:
+          name: remote-write-mtls-gateway-conf
+          items:
+          - key: nginx.conf
+            path: nginx.conf
+      - name: tmp
+        emptyDir: {}
+      - name: cache
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: remote-write-mtls-gateway
+  namespace: otpmask
+  labels:
+    app: remote-write-mtls-gateway
+spec:
+  # ClusterIP 为默认形态。跨集群访问的暴露方式属**安装期参数**：
+  #   * 同集群/同 VPC：保持 ClusterIP，各集群 Prometheus 经内网 LB 或 DNS 直达 9443；
+  #   * 跨机房/跨云：改 type: LoadBalancer（或加 NodePort 段），并由防火墙只放行各集群出口 IP；
+  #   * 若走 Ingress：必须透传 TCP（L4），不得用 L7 Ingress 终止 TLS（否则客户端证书校验失效）。
+  type: ClusterIP
+  selector:
+    app: remote-write-mtls-gateway
+  ports:
+  - name: mtls-write
+    port: 9443
+    targetPort: mtls-write
+    protocol: TCP
+  - name: status
+    port: 8080
+    targetPort: status
+    protocol: TCP

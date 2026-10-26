@@ -1,0 +1,36 @@
+# P2-4 T-4.3（接收侧）/ PRE-A-4：中央 remote-write 的 mTLS 终止代理 overlay
+#
+# 定位：只服务**中央集群**的写入入口。各集群侧不需要、也不应部署本目录（那边是发送侧，
+# 见 deploy/monitoring-overlays/remote-write-mtls/）。
+#
+# 用法（三步，顺序不可颠倒）：
+#   ① 起代理（证书 Secret 必须先存在，否则 Pod 卡 ContainerCreating）：
+#        kubectl apply -k deploy/monitoring-overlays/remote-write-mtls-server
+#   ② 打通写入后，再收紧中央 Prometheus 的入站（NP 加性 ⇒ 必须整对象替换，不能叠加）：
+#        kubectl apply -f deploy/monitoring-overlays/remote-write-mtls-server/replace-central-write-np.tighten.yaml
+#   ③ 跨集群来源放行（按各集群**实际出口 IP** 填 ipBlock 后，再单独 apply）：
+#        kubectl apply -f deploy/monitoring-overlays/remote-write-mtls-server/networkpolicy-mtls-gateway-ingress.yaml
+#
+# 【默认零影响】本目录不是 deploy/monitoring 或 deploy/monitoring/central 的成员：
+#   `kubectl apply -k deploy/monitoring` / `-k deploy/monitoring/central` 的产物完全不变。
+#   ② ③ 两个文件**刻意不在 resources 内**：它们会收紧/放开真实网络边界，
+#   必须在代理已就绪、且来源 CIDR 已按现场核对后手工执行（与 NP 三档同一口径）。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: otpmask
+
+resources:
+- nginx-mtls-proxy.yaml
+
+# 内网/离线环境改镜像源（不改文件内容，直接在命令行用 overlay 或 kustomization edit 覆盖）：
+#   kubectl apply -k ... --images=nginx=docker.m.daocloud.io/library/nginx:1.27-alpine
+# 或取消下面注释：
+# images:
+# - name: nginx
+#   newName: docker.m.daocloud.io/library/nginx
+#   newTag: 1.27-alpine
+
+commonLabels:
+  app.kubernetes.io/part-of: otpmask-monitoring
+  app.kubernetes.io/component: remote-write-mtls-gateway

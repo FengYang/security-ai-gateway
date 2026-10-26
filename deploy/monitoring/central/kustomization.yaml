@@ -21,9 +21,13 @@
 #     GET /v1/adminext/audit-chain/query?cluster=<id>&schema=<admin|tee|core>）。
 #     两者可组合使用，互不冲突。
 #
-# 【依赖声明】remote-write 通道的 mTLS/鉴权由 **T-4.3** 负责（他人），
-# 本目录仅按 T-4.3 口径**预留配置位与注释**（tls_config / authorization 段，默认注释），
-# 未落地前为明文 HTTP 通道，**禁止跨公网/非可信网络启用**。
+# 【依赖声明】remote-write 通道的 mTLS/鉴权由 **T-4.3** 负责，已拆成两个可选 overlay：
+#   * 接收侧（本目录中央 Prometheus 的前置）：
+#       deploy/monitoring-overlays/remote-write-mtls-server/  ← nginx mTLS 终止代理（9443）
+#   * 发送侧（各集群 Prometheus 的客户端证书）：
+#       deploy/monitoring-overlays/remote-write-mtls/
+# 两者**都不在本 kustomization 内**（默认零影响）：本目录单独 apply 仍是内网明文通道，
+# 仅适合内网/专线；**跨公网启用必须先起代理、打通、再收紧 9090**（步骤见 README §5）。
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
