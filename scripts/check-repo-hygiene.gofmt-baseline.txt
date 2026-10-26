@@ -1,0 +1,28 @@
+# scripts/check-repo-hygiene.gofmt-baseline.txt
+# P2-4 T-6.3：仓库卫生自检（C4 gofmt 干净度）的**已知漂移 baseline**。
+#
+# 【用途】C4 检查把「真实格式漂移」分为两类：
+#   * 本文件内 → **已知漂移**（存量）：只提示、不判 FAIL；
+#   * 不在本文件内 → **新增漂移**：判 FAIL（防复发门禁的真正作用）。
+#
+# 【纪律】① 本文件**不得自动扩充**——每次新增条目必须由对应域责任人确认
+#           （否则会掩盖新增漂移，门禁形同虚设）；
+#        ② 条目被修复后**应从本文件移除**（脚本对「已修复的 baseline 条目」不判 FAIL，
+#           仅提示，便于逐步清零）；
+#        ③ 路径用 **仓库相对路径 + 正斜杠**（跨 Windows/Linux 可比）。
+#
+# 【成因说明】以下均为 Go 1.19+ **文档注释重排**（doc comment list → tab 缩进）
+#   造成的存量漂移，**无语义变更**；清零方式为各域责任人自行 `gofmt -w`。
+#
+# 【生成时点】2026-10-26（HEAD 附近），由 scripts/check-repo-hygiene.sh 实测得出。
+
+gateway/gateway-admin-service/cluster_api.go
+gateway/gateway-admin-service/cluster_registry.go
+gateway/gateway-admin-service/config.go
+gateway/gateway-admin-service/cryptop_profile.go
+gateway/gateway-admin-service/metrics.go
+gateway/gateway-admin-service/partition.go
+gateway/gateway-admin-service/tenant_dispatch.go
+gateway/gateway-admin-service/tenant_dispatch_multicluster_test.go
+gateway/gateway-admin-service/tenant_scope.go
+gateway/gateway-admin-service/tenant_store.go
