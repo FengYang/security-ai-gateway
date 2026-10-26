@@ -14,6 +14,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"security-ai-gateway/gateway/gateway-admin-service/sqlutil"
 )
 
 // config 运行配置（env 注入，带默认值；密钥类无默认，缺失即拒绝启动 = fail-closed）。
@@ -230,7 +232,6 @@ func loadTenantConfig(cfg *config) error {
 		// 未显式配置时，SQLite 部署沿用租户库所在目录（独立文件，避免污染租户库表集合）。
 		cfg.clusterStorePath = storePath + ".clusters"
 	}
-
 	// B. 令牌 TTL / 限流 / 锁定（§10.3 B）
 	cfg.emailVerifyTTLHours = envInt("EMAIL_VERIFY_TTL_HOURS", defaultEmailVerifyTTLHours)
 	cfg.passwordResetTTLHours = envInt("PASSWORD_RESET_TTL_HOURS", defaultPasswordResetTTLHours)
@@ -303,6 +304,25 @@ func loadTenantConfig(cfg *config) error {
 		cfg.attestStatusTimeoutSec = defaultAttestTimeoutSec
 	}
 	return nil
+}
+
+// clusterStoreEnvLocation 按环境变量推导集群注册表位置（与 loadTenantConfig 同口径）。
+//
+// 供**不持有 config** 的组件（如下发调度器）懒加载注册表句柄：只读 env，不写。
+// 返回 ok=false = 集群注册表未启用（此时只允许 global 作用域 / 本地默认下发端点）。
+func clusterStoreEnvLocation() (sqlutil.Dialect, string, bool) {
+	if dsn := os.Getenv("TENANT_STORE_PG_DSN"); dsn != "" {
+		// PG 时集群注册表与租户库同库（同 DSN）。
+		return sqlutil.Postgres, dsn, true
+	}
+	if p := os.Getenv("ADMIN_CLUSTER_STORE_PATH"); p != "" {
+		return sqlutil.SQLite, p, true
+	}
+	if storePath := os.Getenv("TENANT_STORE_PATH"); storePath != "" {
+		// 未显式配置时沿用租户库所在目录（独立文件）。
+		return sqlutil.SQLite, storePath + ".clusters", true
+	}
+	return sqlutil.SQLite, "", false
 }
 
 // parsePolicyLimits 解析 TENANT_POLICY_LIMITS（JSON: {"free":50,...}）；空/非法 → 缺省。

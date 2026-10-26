@@ -23,8 +23,10 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"security-ai-gateway/gateway/gateway-admin-service/sqlutil"
@@ -535,4 +537,61 @@ func unixToTime(v int64) time.Time {
 		return time.Time{}
 	}
 	return time.Unix(v, 0)
+}
+
+// ---------- 进程内共享的集群注册表句柄（P2-4 T-3.1 / T-3.2b）----------
+
+// clusterRegistryHolder 集群注册表句柄持有者（进程内共享，懒加载）。
+//
+// 用途：T-3.1 的 scope 写入校验与 T-3.2b 的下发目标解析都要读注册表，而装配层
+// （main.go）持有的是**同一个**注册表——本持有者让两处共用同一句柄，避免各自
+// 再开一个连接池（PG 下多一套连接，sqlite 下多一个文件句柄）。
+//
+// 装配层可显式注入（setSharedClusterRegistry）；未注入时按环境变量懒加载。
+type clusterRegistryHolder struct {
+	mu       sync.Mutex
+	store    ClusterStore
+	injected bool
+}
+
+// sharedClusterRegistry 进程内共享句柄（admin-service 单进程）。
+var sharedClusterRegistry = &clusterRegistryHolder{}
+
+// setSharedClusterRegistry 注入装配层已打开的注册表句柄（可选；未注入时懒加载）。
+func setSharedClusterRegistry(store ClusterStore) {
+	sharedClusterRegistry.mu.Lock()
+	defer sharedClusterRegistry.mu.Unlock()
+	sharedClusterRegistry.store = store
+	sharedClusterRegistry.injected = true
+}
+
+// sharedClusterRegistryStore 取共享注册表句柄。
+//
+// 未注入时按环境变量推导位置并懒加载；**sqlite 必须先判文件存在再打开**——
+// 打开不存在的路径会新建空库，"registry 未启用"的部署若被凭空造出空注册表，
+// 会把"集群未注册"误判为"校验通过/未校验"（同迁移工具 `-from-cluster` 的口径）。
+func sharedClusterRegistryStore() (ClusterStore, error) {
+	sharedClusterRegistry.mu.Lock()
+	defer sharedClusterRegistry.mu.Unlock()
+	if sharedClusterRegistry.store != nil {
+		return sharedClusterRegistry.store, nil
+	}
+	dialect, dsn, ok := clusterStoreEnvLocation()
+	if !ok {
+		return nil, errScopeNoRegistry
+	}
+	if dialect == sqlutil.SQLite {
+		if _, err := os.Stat(dsn); err != nil {
+			if os.IsNotExist(err) {
+				return nil, errScopeNoRegistry
+			}
+			return nil, fmt.Errorf("cluster_registry: 探测注册表文件失败: %w", err)
+		}
+	}
+	st, err := OpenClusterStore(dialect, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("cluster_registry: 打开共享注册表失败: %w", err)
+	}
+	sharedClusterRegistry.store = st
+	return st, nil
 }

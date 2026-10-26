@@ -352,12 +352,25 @@ func scopePolicyPut(t *testing.T, h *tenantHandler, tid, body, ifMatch string) *
 	return w
 }
 
+// scopePolicyPutAdmin 调用策略 PUT（**管理面接管**会话），返回响应记录器。
+//
+// 用途：cluster[] 作用域**仅管理面可写**（P2-4 主理人裁定），故写 cluster 作用域
+// 的用例必须走管理面会话；租户自助面的拒绝用例见 TestScope_租户面写集群作用域被拒。
+func scopePolicyPutAdmin(t *testing.T, h *tenantHandler, tid, body, ifMatch string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	req := adminTakeoverRequest("PUT", tenantPolicyPath, body, tid, "admin1")
+	req.Header.Set("If-Match", ifMatch)
+	h.handleTenantPolicyPut(w, req)
+	return w
+}
+
 func TestScope_PolicyPut_集群作用域生效并回显(t *testing.T) {
 	h, store, _ := newAPITestHandler(t, testTenantCfg(), nil)
 	h.setScopeResolver(&fakeScopeChecker{recs: scopeClusters([]string{"c1", "c2"}, ClusterStatusActive)})
 	tid, _ := seedTenantUser(t, store, "scope-a@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
 
-	w := scopePolicyPut(t, h, tid,
+	w := scopePolicyPutAdmin(t, h, tid,
 		`{"whitelist":{"entries":[]},"blacklist":{"entries":[]},"category_actions":{},"scope":{"global":false,"clusters":["c2","c1"]}}`,
 		"0")
 	if w.Code != http.StatusOK {
@@ -398,7 +411,6 @@ func TestScope_PolicyPut_拒绝非法作用域(t *testing.T) {
 		name string
 		body string
 	}{
-		{"集群未注册", `{"scope":{"global":false,"clusters":["cX"]}}`},
 		{"显式空数组", `{"scope":{"global":false,"clusters":[]}}`},
 		{"global与clusters并存", `{"scope":{"global":true,"clusters":["c1"]}}`},
 	}
@@ -424,14 +436,94 @@ func TestScope_PolicyPut_拒绝非法作用域(t *testing.T) {
 	}
 }
 
+// TestScope_管理面写集群作用域_未注册集群被拒 注册表校验（管理面路径）。
+func TestScope_管理面写集群作用域_未注册集群被拒(t *testing.T) {
+	h, store, _ := newAPITestHandler(t, testTenantCfg(), nil)
+	h.setScopeResolver(&fakeScopeChecker{recs: scopeClusters([]string{"c1"}, ClusterStatusActive)})
+	tid, _ := seedTenantUser(t, store, "scope-b2@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
+
+	w := scopePolicyPutAdmin(t, h, tid, `{"scope":{"global":false,"clusters":["cX"]}}`, "0")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("未注册集群应 400, got=%d body=%s", w.Code, w.Body.String())
+	}
+	po, err := store.GetPolicyOverlay(tid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if po != nil {
+		t.Errorf("拒绝写入后不应有落库行: %+v", po)
+	}
+}
+
+// TestScope_租户面写集群作用域被拒 P2-4 主理人裁定：cluster[] 作用域**仅管理面可写**。
+//
+// 理由：scope 决定"配置投递到哪些集群"，影响其它集群的数据面；租户自助面写
+// cluster[] = 越权。故租户面写 cluster[] ⇒ 403，且**不落库**；global 两侧皆可写。
+func TestScope_租户面写集群作用域被拒(t *testing.T) {
+	h, store, _ := newAPITestHandler(t, testTenantCfg(), nil)
+	h.setScopeResolver(&fakeScopeChecker{recs: scopeClusters([]string{"c1", "c2"}, ClusterStatusActive)})
+	tid, _ := seedTenantUser(t, store, "scope-b3@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
+
+	// 租户自助面写 cluster[] ⇒ 403。
+	w := scopePolicyPut(t, h, tid, `{"scope":{"global":false,"clusters":["c1"]}}`, "0")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("租户面写 cluster[] 应 403, got=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "仅管理面") {
+		t.Errorf("403 文案应可诊断（含「仅管理面」）, got=%s", w.Body.String())
+	}
+	// 不得落库（fail-closed）。
+	po, err := store.GetPolicyOverlay(tid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if po != nil {
+		t.Errorf("拒绝写入后不应有落库行: %+v", po)
+	}
+
+	// 租户自助面写 global ⇒ 放行。
+	w2 := scopePolicyPut(t, h, tid, `{"scope":{"global":true}}`, "0")
+	if w2.Code != http.StatusOK {
+		t.Fatalf("租户面写 global 应 200, got=%d body=%s", w2.Code, w2.Body.String())
+	}
+	po2, err := store.GetPolicyOverlay(tid)
+	if err != nil || po2 == nil {
+		t.Fatalf("应有落库行: %+v err=%v", po2, err)
+	}
+	sc, err := parseDispatchScope(po2.ScopeJSON)
+	if err != nil || !sc.Global {
+		t.Errorf("应落 global, got=%+v err=%v", sc, err)
+	}
+
+	// 管理面写 cluster[] ⇒ 成功（与租户面同一端点，走 admin 接管会话）。
+	w3 := scopePolicyPutAdmin(t, h, tid, `{"scope":{"global":false,"clusters":["c1"]}}`, "1")
+	if w3.Code != http.StatusOK {
+		t.Fatalf("管理面写 cluster[] 应 200, got=%d body=%s", w3.Code, w3.Body.String())
+	}
+	po3, err := store.GetPolicyOverlay(tid)
+	if err != nil || po3 == nil {
+		t.Fatalf("应有落库行: %+v err=%v", po3, err)
+	}
+	sc3, err := parseDispatchScope(po3.ScopeJSON)
+	if err != nil || sc3.Global || len(sc3.Clusters) != 1 || sc3.Clusters[0] != "c1" {
+		t.Errorf("管理面应写落 [c1], got=%+v err=%v", sc3, err)
+	}
+}
+
 func TestScope_注册表未启用只允许global(t *testing.T) {
 	h, store, _ := newAPITestHandler(t, testTenantCfg(), nil)
 	// 未注入校验器且配置里无注册表路径 ⇒ 注册表未启用。
 	tid, _ := seedTenantUser(t, store, "scope-c@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
 
+	// 管理面写 cluster[]：注册表未启用 ⇒ 无法校验 ⇒ 400（fail-closed，只允许 global）。
+	wAdmin := scopePolicyPutAdmin(t, h, tid, `{"scope":{"global":false,"clusters":["c1"]}}`, "0")
+	if wAdmin.Code != http.StatusBadRequest {
+		t.Fatalf("注册表未启用时集群作用域应 400, got=%d body=%s", wAdmin.Code, wAdmin.Body.String())
+	}
+	// 租户面写 cluster[] ⇒ 403（管理面专属闸门先于注册表校验）。
 	w := scopePolicyPut(t, h, tid, `{"scope":{"global":false,"clusters":["c1"]}}`, "0")
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("注册表未启用时集群作用域应 400, got=%d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("租户面写集群作用域应 403, got=%d body=%s", w.Code, w.Body.String())
 	}
 	// global 放行。
 	w2 := scopePolicyPut(t, h, tid, `{"scope":{"global":true}}`, "0")
@@ -453,8 +545,8 @@ func TestScope_存量数据照旧_PUT不带scope不变更(t *testing.T) {
 	h.setScopeResolver(&fakeScopeChecker{recs: scopeClusters([]string{"c1"}, ClusterStatusActive)})
 	tid, _ := seedTenantUser(t, store, "scope-d@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
 
-	// 先写入集群作用域。
-	w := scopePolicyPut(t, h, tid, `{"scope":{"global":false,"clusters":["c1"]}}`, "0")
+	// 先写入集群作用域（管理面）。
+	w := scopePolicyPutAdmin(t, h, tid, `{"scope":{"global":false,"clusters":["c1"]}}`, "0")
 	if w.Code != http.StatusOK {
 		t.Fatalf("应 200, got=%d body=%s", w.Code, w.Body.String())
 	}
@@ -498,7 +590,7 @@ func TestScope_变更推进config_version(t *testing.T) {
 	}
 
 	// 仅改 scope（内容不变）⇒ config_version 必须推进（决策点⑤）。
-	w2 := scopePolicyPut(t, h, tid, `{"scope":{"global":false,"clusters":["c1"]}}`, "1")
+	w2 := scopePolicyPutAdmin(t, h, tid, `{"scope":{"global":false,"clusters":["c1"]}}`, "1")
 	if w2.Code != http.StatusOK {
 		t.Fatalf("应 200, got=%d body=%s", w2.Code, w2.Body.String())
 	}
@@ -518,8 +610,8 @@ func TestScope_跨租户隔离_同租户不同集群(t *testing.T) {
 	tidA, _ := seedTenantUser(t, store, "scope-a1@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
 	tidB, _ := seedTenantUser(t, store, "scope-b1@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
 
-	// 租户 A 定向 c1。
-	if w := scopePolicyPut(t, h, tidA, `{"scope":{"global":false,"clusters":["c1"]}}`, "0"); w.Code != http.StatusOK {
+	// 租户 A 定向 c1（管理面写 cluster[]：仅管理面可写）。
+	if w := scopePolicyPutAdmin(t, h, tidA, `{"scope":{"global":false,"clusters":["c1"]}}`, "0"); w.Code != http.StatusOK {
 		t.Fatalf("租户 A 写入应 200, got=%d body=%s", w.Code, w.Body.String())
 	}
 	// 租户 B 未写 scope ⇒ 仍为 global（A 的作用域不得串到 B）。
@@ -536,7 +628,7 @@ func TestScope_跨租户隔离_同租户不同集群(t *testing.T) {
 	}
 
 	// 同租户换集群：作用域**替换**而非并集（互斥语义）。
-	if w := scopePolicyPut(t, h, tidA, `{"scope":{"global":false,"clusters":["c2"]}}`, "1"); w.Code != http.StatusOK {
+	if w := scopePolicyPutAdmin(t, h, tidA, `{"scope":{"global":false,"clusters":["c2"]}}`, "1"); w.Code != http.StatusOK {
 		t.Fatalf("租户 A 改作用域应 200, got=%d body=%s", w.Code, w.Body.String())
 	}
 	poA, err := store.GetPolicyOverlay(tidA)
@@ -560,9 +652,21 @@ func TestScope_ProvisioningPut_作用域(t *testing.T) {
 	// 非 active 租户：场景变更不触发"仅管理员"闸门（本用例只验作用域链路）。
 	tid, _ := seedTenantUser(t, store, "scope-f@example.com", "Password123!", tenantUserStatusActive, tenantStatusPending)
 
-	w := httptest.NewRecorder()
-	h.handleTenantProvisioningPut(w, tenantRequest("PUT", tenantProvisioningPath,
+	// 租户自助面写 cluster[] ⇒ 403（cluster[] 仅管理面可写）。
+	wTenant := httptest.NewRecorder()
+	h.handleTenantProvisioningPut(wTenant, tenantRequest("PUT", tenantProvisioningPath,
 		`{"scenario":"s1","trust_tier":"trusted","scope":{"global":false,"clusters":["c1"]}}`, tid, "u1"))
+	if wTenant.Code != http.StatusForbidden {
+		t.Fatalf("租户面写集群作用域应 403, got=%d body=%s", wTenant.Code, wTenant.Body.String())
+	}
+	if pv, _ := store.GetProvisioning(tid); pv != nil {
+		t.Fatalf("拒绝写入后不应有落库行: %+v", pv)
+	}
+
+	// 管理面写 cluster[] ⇒ 成功。
+	w := httptest.NewRecorder()
+	h.handleTenantProvisioningPut(w, adminTakeoverRequest("PUT", tenantProvisioningPath,
+		`{"scenario":"s1","trust_tier":"trusted","scope":{"global":false,"clusters":["c1"]}}`, tid, "admin1"))
 	if w.Code != http.StatusOK {
 		t.Fatalf("应 200, got=%d body=%s", w.Code, w.Body.String())
 	}
@@ -586,10 +690,10 @@ func TestScope_ProvisioningPut_作用域(t *testing.T) {
 	if view.Scope == nil || view.Scope.Global || len(view.Scope.Clusters) != 1 || view.Scope.Clusters[0] != "c1" {
 		t.Errorf("GET 应回显集群作用域, got=%+v", view.Scope)
 	}
-	// 未注册集群 → 拒绝。
+	// 未注册集群 → 拒绝（管理面路径）。
 	w3 := httptest.NewRecorder()
-	h.handleTenantProvisioningPut(w3, tenantRequest("PUT", tenantProvisioningPath,
-		`{"scenario":"s1","trust_tier":"trusted","scope":{"global":false,"clusters":["cX"]}}`, tid, "u1"))
+	h.handleTenantProvisioningPut(w3, adminTakeoverRequest("PUT", tenantProvisioningPath,
+		`{"scenario":"s1","trust_tier":"trusted","scope":{"global":false,"clusters":["cX"]}}`, tid, "admin1"))
 	if w3.Code != http.StatusBadRequest {
 		t.Errorf("未注册集群应 400, got=%d body=%s", w3.Code, w3.Body.String())
 	}
@@ -644,7 +748,7 @@ func TestScope_空交集不下发(t *testing.T) {
 	tid, _ := seedTenantUser(t, store, "scope-g@example.com", "Password123!", tenantUserStatusActive, tenantStatusActive)
 
 	// 策略定向 c1，模型配置定向 c2 ⇒ 交集为空。
-	if w := scopePolicyPut(t, h, tid, `{"scope":{"global":false,"clusters":["c1"]}}`, "0"); w.Code != http.StatusOK {
+	if w := scopePolicyPutAdmin(t, h, tid, `{"scope":{"global":false,"clusters":["c1"]}}`, "0"); w.Code != http.StatusOK {
 		t.Fatalf("应 200, got=%d body=%s", w.Code, w.Body.String())
 	}
 	tx, err := store.Begin()

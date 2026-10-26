@@ -207,9 +207,11 @@ func (h *tenantHandler) handleTenantProvisioningPut(w http.ResponseWriter, r *ht
 	}
 
 	// P2-4 T-3.1：策略作用域（缺省 = 保持既有；非法取值 / 集群未注册 → 拒绝写入）。
-	scope, _, err := h.resolveScopeWrite(r.Context(), req.Scope, scopeRawOfProvisioning(cur))
+	// cluster[] 作用域**仅管理面可写**（P2-4 主理人裁定）：租户自助面写 cluster[]
+	// ⇒ 403；global 两侧皆可写。
+	scope, _, err := h.resolveScopeWrite(r.Context(), req.Scope, scopeRawOfProvisioning(cur), isAdmin)
 	if err != nil {
-		tenantWriteError(w, http.StatusBadRequest, "作用域非法："+err.Error())
+		tenantWriteError(w, scopeWriteStatus(err), scopeWriteMessage(err))
 		return
 	}
 

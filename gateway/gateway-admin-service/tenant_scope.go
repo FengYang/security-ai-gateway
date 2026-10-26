@@ -30,12 +30,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
-
-	"security-ai-gateway/gateway/gateway-admin-service/sqlutil"
 )
 
 // DispatchScope 策略作用域（§6.2）：global 与 clusters 互斥。
@@ -57,6 +55,19 @@ var (
 	errScopeNoRegistry = errors.New("scope: 集群注册表未启用，只允许 global 作用域")
 	// errScopeIncomplete 未给出完整作用域（既非 global 也无 clusters）。
 	errScopeIncomplete = errors.New("scope: 须给 clusters 列表或 global=true")
+	// errScopeEmptyIntersection 三表作用域**交集为空** ⇒ 不下发（fail-closed）。
+	//
+	// 显式报错而非静默返回空集合：空交集是租户级配置错误，必须**可观测**
+	// （告警 + 全局行 failed），不能"无事发生"。
+	errScopeEmptyIntersection = errors.New("scope: 作用域交集为空（不下发）")
+	// errScopeClusterAdminOnly 租户自助面写 cluster[] 被拒（P2-4 主理人裁定）。
+	//
+	// 理由：scope 决定"配置投递到哪些集群"，**影响其它集群的数据面**；租户自助
+	// 门户面向租户自身资源，允许其写 cluster 作用域等于让一个租户影响其它集群的
+	// 配置投递 ⇒ 越权。而"某集群是否已注册/健康"是管理面掌握的事实。
+	// 故：**管理面专属**——只有 admin 会话（内部 admin 令牌 + target_tenant 接管）
+	// 可写 cluster[]；租户面只允许 global（global 两侧皆可写）。
+	errScopeClusterAdminOnly = errors.New("scope: cluster 作用域仅管理面（管理员）可写，租户自助面只允许 global 作用域")
 )
 
 // scopeWriteRequest 作用域写请求（同时用作响应回显）。
@@ -311,11 +322,8 @@ func (h *tenantHandler) scopeChecker() clusterScopeChecker {
 	if h.scopeResolver != nil {
 		return h.scopeResolver
 	}
-	if h.cfg == nil {
-		return nil
-	}
 	h.scopeLazyOnce.Do(func() {
-		h.scopeLazy = newConfigScopeChecker(h.cfg)
+		h.scopeLazy = newConfigScopeChecker()
 	})
 	return h.scopeLazy
 }
@@ -323,11 +331,14 @@ func (h *tenantHandler) scopeChecker() clusterScopeChecker {
 // resolveScopeWrite 解析写请求的作用域并完成校验（决策点③）。
 //
 //   - req == nil（请求未带 scope）→ 保持既有 scope（存量兼容，决策点②）；
-//   - 解析失败 / global 与 clusters 并存 / 显式空数组 / 集群未注册或状态不可用
-//     → 报错（fail-closed，写入一律拒绝）。
+//   - 解析失败 / global 与 clusters 并存 / 显式空数组 → 报错（fail-closed）；
+//   - **cluster[] 作用域仅管理面可写**（P2-4 主理人裁定：scope 影响其它集群的
+//     数据面投递，租户自助面写 cluster[] = 越权）→ isAdmin=false 时报
+//     errScopeClusterAdminOnly（调用方映射为 403）；global 两侧皆可写；
+//   - 集群未注册 / 状态不可用 / registry 未启用 → 报错（fail-closed，写入一律拒绝）。
 //
 // 返回 (待写入作用域, 是否发生变更, error)。
-func (h *tenantHandler) resolveScopeWrite(ctx context.Context, req *scopeWriteRequest, currentRaw string) (DispatchScope, bool, error) {
+func (h *tenantHandler) resolveScopeWrite(ctx context.Context, req *scopeWriteRequest, currentRaw string, isAdmin bool) (DispatchScope, bool, error) {
 	current, err := parseDispatchScope(currentRaw)
 	if err != nil {
 		// 既有数据损坏时不得静默按 global 放行（否则可能误发到全部集群）。
@@ -343,10 +354,32 @@ func (h *tenantHandler) resolveScopeWrite(ctx context.Context, req *scopeWriteRe
 	if next == nil {
 		return current, false, nil
 	}
+	// 管理面专属闸门（先于注册表校验：租户面不应借错误信息探测注册表内容）。
+	if !next.Global && !isAdmin {
+		return DispatchScope{}, false, errScopeClusterAdminOnly
+	}
 	if err := validateDispatchScope(ctx, h.scopeChecker(), *next); err != nil {
 		return DispatchScope{}, false, err
 	}
 	return *next, true, nil
+}
+
+// scopeWriteStatus 把作用域写入错误映射为 HTTP 状态码。
+//
+// 管理面专属闸门 ⇒ 403（权限不足）；其余非法取值 ⇒ 400（请求不合法）。
+func scopeWriteStatus(err error) int {
+	if errors.Is(err, errScopeClusterAdminOnly) {
+		return http.StatusForbidden
+	}
+	return http.StatusBadRequest
+}
+
+// scopeWriteMessage 生成可诊断的写入失败文案。
+func scopeWriteMessage(err error) string {
+	if errors.Is(err, errScopeClusterAdminOnly) {
+		return "作用域写入被拒：" + err.Error()
+	}
+	return "作用域非法：" + err.Error()
 }
 
 // scopeResponseOf 把作用域映射为响应视图（回显用）。
@@ -360,25 +393,25 @@ func scopeResponseOf(sc DispatchScope) *scopeWriteRequest {
 
 // ---------- 按配置懒加载集群注册表（scope 校验用）----------
 
-// configScopeChecker 按配置懒加载集群注册表，作为 scope 写入校验器。
+// configScopeChecker 集群注册表校验器（懒加载 → 进程内共享句柄）。
 //
-// 仅在未显式注入校验器时使用（装配层可调 setScopeResolver 复用同一句柄）。
+// 仅在未显式注入校验器时使用；与 T-3.2b 的下发目标解析**共用同一句柄**
+// （见 sharedClusterRegistryStore），避免各开一个连接池。
 type configScopeChecker struct {
-	cfg   *config
 	once  sync.Once
 	store ClusterStore
 	err   error
 }
 
 // newConfigScopeChecker 构造懒加载校验器。
-func newConfigScopeChecker(cfg *config) *configScopeChecker {
-	return &configScopeChecker{cfg: cfg}
+func newConfigScopeChecker() *configScopeChecker {
+	return &configScopeChecker{}
 }
 
 // List 列出集群（注册表未启用 → errScopeNoRegistry）。
 func (c *configScopeChecker) List(ctx context.Context) ([]*ClusterRecord, error) {
 	c.once.Do(func() {
-		c.store, c.err = openScopeClusterStore(c.cfg)
+		c.store, c.err = sharedClusterRegistryStore()
 	})
 	if c.err != nil {
 		return nil, c.err
@@ -387,36 +420,4 @@ func (c *configScopeChecker) List(ctx context.Context) ([]*ClusterRecord, error)
 		return nil, errScopeNoRegistry
 	}
 	return c.store.List(ctx)
-}
-
-// openScopeClusterStore 打开集群注册表用于 scope 校验。
-//
-// 注意：sqlite 打开不存在的路径会**新建空库**——"registry 未启用"的部署若在此
-// 被凭空造出空注册表，会把"集群未注册"误判为"校验通过/未校验"。故 sqlite 必须
-// 先判文件存在再打开（与迁移工具 `-from-cluster` 的同口径约束一致）。
-func openScopeClusterStore(cfg *config) (ClusterStore, error) {
-	if cfg == nil {
-		return nil, errScopeNoRegistry
-	}
-	if cfg.clusterStorePGDSN != "" {
-		st, err := OpenClusterStore(sqlutil.Postgres, cfg.clusterStorePGDSN)
-		if err != nil {
-			return nil, fmt.Errorf("scope: 打开集群注册表（PG）失败: %w", err)
-		}
-		return st, nil
-	}
-	if cfg.clusterStorePath != "" {
-		if _, err := os.Stat(cfg.clusterStorePath); err != nil {
-			if os.IsNotExist(err) {
-				return nil, errScopeNoRegistry
-			}
-			return nil, fmt.Errorf("scope: 探测集群注册表文件失败: %w", err)
-		}
-		st, err := OpenClusterStore(sqlutil.SQLite, cfg.clusterStorePath)
-		if err != nil {
-			return nil, fmt.Errorf("scope: 打开集群注册表（SQLite）失败: %w", err)
-		}
-		return st, nil
-	}
-	return nil, errScopeNoRegistry
 }

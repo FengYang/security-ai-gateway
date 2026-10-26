@@ -172,6 +172,9 @@ const migrateUsage = `用法：admin-service migrate -action <plan|export|import
   -tables   限定表名（逗号分隔；缺省全部）
 
 双跑/切换 SOP（命令序列）：
+  0) **前置（不可跳过）**：滚动升级源实例到新版本并**至少启动一次**（启动即
+     自动补齐新增表/列，见下"schema 演进"）。未完成本步直接 export 会导出
+     旧 schema 的 dump（缺列），后续 import 会以"schema 漂移"fail-closed 拒绝。
   1) 双跑期：两套库并存、写入仍走 sqlite。
      admin-service migrate -action plan    -from <sqlite> -to <dsn>
   2) 导出 + 试导入（dry-run 看差异，不写库）：
@@ -190,11 +193,20 @@ const migrateUsage = `用法：admin-service migrate -action <plan|export|import
   注：sqlite 部署下集群注册表在独立文件（<sqlite>.clusters），迁移工具会自动
   推导该源；如路径不同，显式加 -from-cluster <path>。
 
-  schema 演进口径：导出前须让**源实例已运行新版本**（新版本启动即补齐新增列，
-  如 T-3.1 的 policy_overlays.scope / model_configs.scope / tenant_provisionings.scope）。
-  源仍是旧 schema 时 import 会以"目标列在 dump 中缺失（schema 漂移）"fail-closed
-  拒绝——这是有意为之：宁可拒绝切换，也不把旧 schema 的行静默写成缺列数据。
-  处理办法：先滚动升级源实例（启动即补列），再重新 export/import/verify。
+  schema 演进（**前置步骤 0 的依据**）：
+  - 新版本启动时会**自动补齐**新增的表与列，无需手工 DDL：
+    · T-3.1：policy_overlays.scope / model_configs.scope / tenant_provisionings.scope
+      （可空列，存量行 = NULL ⇒ 按 global 解释，**不回填**）；
+    · T-3.2a：tenant_dispatch_state 复合主键 (tenant_id, cluster_id)
+      （sqlite 整表重建 / PG DROP PK + ADD 复合 PK，**存量行保留**）。
+  - 源仍是旧 schema 时 import 会以"目标列在 dump 中缺失（schema 漂移）"
+    fail-closed 拒绝——这是有意为之：宁可拒绝切换，也不把旧 schema 的行静默
+    写成缺列数据。
+  - 处理办法：先滚动升级源实例（完成步骤 0，启动即补齐），再重新
+    export/import/verify。
+  - **新增表默认为空**：源实例升级后，新增的列对存量行为 NULL（按 global 解释）、
+    新增的表（如集群注册表相关表）为空表，**不影响既有数据**；升级只是"补结构"，
+    不搬运数据。既有行数与内容在升级前后一致（可用 plan/verify 的行数与校验和核对）。
 `
 
 // runMigrate 迁移命令入口（main.go 分派）；返回进程退出码。
@@ -515,6 +527,12 @@ func migrateRunPlan(opt *migrateOptions, specs []migrateTableSpec) int {
 	defer sources.close()
 	explicit := len(opt.tables) > 0
 	fmt.Printf("迁移计划：源=%s 目标=%s(%s)\n", opt.from, opt.to, opt.toDriver)
+	// 前置步骤 0 的落地检查（help 里"schema 演进"小节的同一条口径）：
+	// 源实例须已用新版本启动过一次（自动补齐新增表/列），否则 export 出的 dump
+	// 缺列，import 会以"schema 漂移"fail-closed 拒绝。此处在 plan 阶段就**可见**。
+	fmt.Println("前置（不可跳过）：源实例须已滚动升级到新版本并至少启动一次（启动即补齐新增表/列）。")
+	fmt.Println("              未升级即 export ⇒ dump 缺列 ⇒ import 以 schema 漂移 fail-closed 拒绝。")
+	fmt.Println("              新增表/列默认为空，不影响既有数据（升级只补结构，不搬数据）。")
 	fmt.Printf("%-24s %8s %8s %-16s %s\n", "表", "源行数", "目标行数", "校验和(前8)", "备注")
 	ok := true
 	for _, spec := range specs {
@@ -539,11 +557,13 @@ func migrateRunPlan(opt *migrateOptions, specs []migrateTableSpec) int {
 		}
 		tgtCount := -1
 		tgtSum := "-"
+		tgtCols := []string(nil)
 		if opt.to != "" {
 			if dst, derr := migrateOpenTarget(opt.to, opt.toDriver); derr == nil {
 				if td, terr := migrateReadTable(dst, spec); terr == nil {
 					tgtCount = td.Count
 					tgtSum = td.Checksum
+					tgtCols = td.Columns
 				}
 				dst.Close()
 			}
@@ -556,11 +576,38 @@ func migrateRunPlan(opt *migrateOptions, specs []migrateTableSpec) int {
 			tgtSum = tgtSum[:8]
 		}
 		fmt.Printf("%-24s %8d %8d %-16s %s\n", spec.name, sd.Count, tgtCount, sum, migrateNote(spec, sum, tgtSum))
+		// schema 漂移可见化：目标有、源没有的列 ⇒ 源实例尚未升级（前置步骤 0 未完成）。
+		if missing := migrateMissingColumns(sd.Columns, tgtCols); len(missing) > 0 {
+			fmt.Printf("%-24s ⚠ 源实例 schema 未升级：源缺列 %v（须先滚动升级源实例再 export）\n", "", missing)
+			ok = false
+		}
 	}
 	if !ok {
 		return 1
 	}
 	return 0
+}
+
+// migrateMissingColumns 返回"目标有、源没有"的列（schema 漂移检测）。
+//
+// 源缺列 ⇒ 源实例尚未升级到新版本 ⇒ export 出的 dump 缺这些列 ⇒ import 会以
+// "目标列在 dump 中缺失（schema 漂移）"fail-closed 拒绝。空 tgtCols（目标未连接
+// 或目标无此表）⇒ 不判定（返回空）。
+func migrateMissingColumns(srcCols, tgtCols []string) []string {
+	if len(tgtCols) == 0 {
+		return nil
+	}
+	have := make(map[string]bool, len(srcCols))
+	for _, c := range srcCols {
+		have[c] = true
+	}
+	var missing []string
+	for _, c := range tgtCols {
+		if !have[c] {
+			missing = append(missing, c)
+		}
+	}
+	return missing
 }
 
 // migrateNote plan 行备注（迁移口径/差异提示）。
