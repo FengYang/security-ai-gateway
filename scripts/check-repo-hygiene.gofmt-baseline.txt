@@ -15,14 +15,18 @@
 #   造成的存量漂移，**无语义变更**；清零方式为各域责任人自行 `gofmt -w`。
 #
 # 【生成时点】2026-10-26（HEAD 附近），由 scripts/check-repo-hygiene.sh 实测得出。
+#
+# 【2026-10-26 清零一轮（10 → 4 项）】
+#   已从本文件移除（实测已无漂移，按纪律②）：
+#     cluster_registry.go / config.go / tenant_dispatch.go /
+#     tenant_dispatch_multicluster_test.go / tenant_scope.go / tenant_store.go
+#   ⚠️ 当次同批修掉两个由脚本自身缺陷掩盖的真实漂移（此前被误判为"已修复"）：
+#     cryptop_drill_script_test.go / cryptop_profile_script_test.go → 已 `gofmt -w`
+#   ★ 缺陷说明：旧版 .sh 版本的分类方向反了（遍历 baseline 判"不在 drift 即新增"），
+#     导致「修好了反而 FAIL、新漂移反而漏报」。已按 .ps1 的正确方向重写；
+#     新旧口径的差异以 .ps1 为准（ps1 一直正确，仅 .sh 有缺陷）。
 
 gateway/gateway-admin-service/cluster_api.go
-gateway/gateway-admin-service/cluster_registry.go
-gateway/gateway-admin-service/config.go
 gateway/gateway-admin-service/cryptop_profile.go
 gateway/gateway-admin-service/metrics.go
 gateway/gateway-admin-service/partition.go
-gateway/gateway-admin-service/tenant_dispatch.go
-gateway/gateway-admin-service/tenant_dispatch_multicluster_test.go
-gateway/gateway-admin-service/tenant_scope.go
-gateway/gateway-admin-service/tenant_store.go

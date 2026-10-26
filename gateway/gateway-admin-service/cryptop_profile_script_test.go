@@ -1,10 +1,11 @@
 // cryptop_profile_script_test.go — §12.6 切换脚本退出码测试（B5-c）。
 //
 // 覆盖附录 C：
-//   T-12.6-1 脚本 from≠current（409 stale_from）→ 退出码 2
-//   T-12.6-2 跨 provider MODE=hot（409 restart_required）→ 退出码 3
-//   T-12.6-3 成功路径 → 退出码 0 + verify 一致性校验通过
-//   T-12.6-4 脚本侧 PRG 透传：admin 收到的请求体含 mask_prg
+//
+//	T-12.6-1 脚本 from≠current（409 stale_from）→ 退出码 2
+//	T-12.6-2 跨 provider MODE=hot（409 restart_required）→ 退出码 3
+//	T-12.6-3 成功路径 → 退出码 0 + verify 一致性校验通过
+//	T-12.6-4 脚本侧 PRG 透传：admin 收到的请求体含 mask_prg
 //
 // Windows 上必须使用 Git for Windows 的 bash：PATH 中的 bash 可能是 WSL，
 // WSL 不继承 Windows 进程环境变量且其 127.0.0.1 不通 Windows 侧 mock。

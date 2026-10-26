@@ -226,6 +226,9 @@ else
   for d in $GOFMT_DIRS; do
     [ -d "$d" ] || continue
     for f in $(gofmt -l "$d" 2>/dev/null); do
+      # 路径必须可读，否则 `tr < "$f"` 拿空输入会产生**假漂移**（gofmt -l 在 Windows 下
+      # 输出反斜杠路径；与 ps1 版 Test-Path 的防护对齐）。
+      [ -f "$f" ] || continue
       # 两侧**对称剥离 CR** 后比较：gofmt 会保留源文件的换行符（CRLF 输入 → CRLF 输出），
       # 故必须两边都归一化，否则「仅换行符差异」会被误判为格式漂移（Windows 假阳性）。
       if ! diff -q <(gofmt "$f" 2>/dev/null | tr -d '\r') <(tr -d '\r' < "$f") >/dev/null 2>&1; then
@@ -235,20 +238,38 @@ else
       fi
     done
   done
+  # 分类方向必须是「按 drift 归类」，不是「按 baseline 归类」：
+  #   drift 中有、baseline 无 → **新增漂移**（判 FAIL，这才是门禁的意义）；
+  #   drift 中有、baseline 有 → 已知漂移（仅提示）；
+  #   baseline 有、drift 无 → **已修复**（仅提示，并应从 baseline 移除）。
+  # 反方向（遍历 baseline 判「不在 drift 即新增」）会把**已修复**的条目误报成新增漂移，
+  # 造成「修好了反而 FAIL」——2026-10-26 实测踩中，此处修正。
   known=""
   new=""
+  fixed=""
   while IFS= read -r line; do
     line="${line%$'\r'}"   # 去尾部 CR（baseline 文件可能是 CRLF，避免匹配失败）
+    line="${line#"${line%%[![:space:]]*}"}"   # 去前导空白
+    line="${line%"${line##*[![:space:]]}"}"   # 去尾部空白
     [ -z "$line" ] && continue
     case "$line" in \#*) continue ;; esac
-    if printf '%s' "$drift" | grep -Fxq "$line"; then
+    if printf '%s\n' "$drift" | grep -Fxq "$line"; then
       known="$known$line
 "
     else
-      new="$new$line
+      fixed="$fixed$line
 "
     fi
   done < "$BASELINE" 2>/dev/null || true
+  # 新增漂移 ＝ drift 中不在 baseline 的条目（与 baseline 的读取方向解耦）
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if [ -f "$BASELINE" ] && grep -Fxq "$f" "$BASELINE" 2>/dev/null; then
+      continue
+    fi
+    new="$new$f
+"
+  done <<< "$drift"
   if [ -z "$drift" ]; then
     verdict_pass "检查域内无格式漂移：$GOFMT_DIRS"
   elif [ -z "$new" ]; then
@@ -260,6 +281,7 @@ else
     verdict_fail "存在**新增**格式漂移（不在 baseline）：$(printf '%s' "$new" | tr '\n' ' ')"
     [ -n "$known" ] && say "  另有已知漂移（baseline 内，不计 FAIL）：$(printf '%s' "$known" | tr '\n' ' ')"
   fi
+  [ -n "$fixed" ] && say "  提示: baseline 中 $(( $(printf '%s' "$fixed" | grep -c . ) )) 项**已修复**（当前无漂移），请从 baseline 删除：$(printf '%s' "$fixed" | tr '\n' ' ')"
 fi
 
 # ================================================================ C5 临时产物未被跟踪

@@ -1,10 +1,11 @@
 // cryptop_drill_script_test.go — §13 切换演练脚本测试（B6#13）。
 //
 // 覆盖：
-//   T-13.1 演练脚本化：bash -n 语法；有状态 mock 全链路（三次切换状态变迁）；
-//          可选钩子缺省 SKIP；失败路径 exit 1
-//   T-13.2 报告模板校验：报告含 §13.4 六段（演练环境/profile 切换记录/
-//          功能·性能·双读·回滚结果/异常与处置/compliance_note/结论）
+//
+//	T-13.1 演练脚本化：bash -n 语法；有状态 mock 全链路（三次切换状态变迁）；
+//	       可选钩子缺省 SKIP；失败路径 exit 1
+//	T-13.2 报告模板校验：报告含 §13.4 六段（演练环境/profile 切换记录/
+//	       功能·性能·双读·回滚结果/异常与处置/compliance_note/结论）
 //
 // Windows 上仅用 Git for Windows bash（同包 bashForScripts 既有口径）。
 package main
