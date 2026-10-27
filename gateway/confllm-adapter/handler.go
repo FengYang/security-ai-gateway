@@ -178,23 +178,18 @@ func (h *ConfllmHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 func (h *ConfllmHandler) HandleModels(w http.ResponseWriter, r *http.Request) {
 	target := r.URL.Query().Get("provider")
 
-	type attestationView struct {
-		Verdict string `json:"verdict"` // R4：占位校验恒 unknown（禁止 omitempty，§7.7）
-	}
+	// wire 结构复用 meta.WireMetadata（匿名嵌入 → JSON 展平），避免两侧各自实现漂移。
+	// 举证要求：attestationVerdict 恒 unknown、verificationStatus 恒 claim-unverified，
+	// 均禁 omitempty，故每条目完整携带 7 个密态字段（PRD P0-3 举证边界）。
 	type providerView struct {
-		Provider             string          `json:"provider"`
-		ConfidentialityClass string          `json:"confidentialityClass"`
-		Attestation          attestationView `json:"attestation"`
-		Verification         string          `json:"verification"`
-		Connectivity         string          `json:"connectivity"`
+		Provider string `json:"provider"`
+		meta.WireMetadata
 	}
 	type modelView struct {
-		Provider             string          `json:"provider"`
-		Model                string          `json:"model"`
-		OwnedBy              string          `json:"ownedBy,omitempty"`
-		ConfidentialityClass string          `json:"confidentialityClass"`
-		Attestation          attestationView `json:"attestation"`
-		Verification         string          `json:"verification"`
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		OwnedBy  string `json:"ownedBy,omitempty"`
+		meta.WireMetadata
 	}
 
 	providersOut := make([]providerView, 0)
@@ -203,14 +198,11 @@ func (h *ConfllmHandler) HandleModels(w http.ResponseWriter, r *http.Request) {
 		if target != "" && p.ID() != target {
 			continue
 		}
-		m := p.Metadata()
-		verification := verificationOf(m)
+		// P0/P1 阶段 connectivity 一律 never-tested：未做真机冒烟，绝不臆测为 smoke-ok（§7.5）。
+		wire := meta.ToWireMetadata(p.Metadata(), meta.ConnNeverTested)
 		providersOut = append(providersOut, providerView{
-			Provider:             p.ID(),
-			ConfidentialityClass: m.ConfidentialityClass,
-			Attestation:          attestationView{Verdict: "unknown"},
-			Verification:         verification,
-			Connectivity:         "never-tested", // P0/P1：仅 -tags=integration + 真实凭据可写 smoke-ok（§7.5）
+			Provider:     p.ID(),
+			WireMetadata: wire,
 		})
 		models, err := p.ListModels(r.Context())
 		if err != nil {
@@ -218,24 +210,14 @@ func (h *ConfllmHandler) HandleModels(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, mi := range models {
 			modelsOut = append(modelsOut, modelView{
-				Provider:             p.ID(),
-				Model:                mi.ID,
-				OwnedBy:              mi.OwnedBy,
-				ConfidentialityClass: m.ConfidentialityClass,
-				Attestation:          attestationView{Verdict: "unknown"},
-				Verification:         verification,
+				Provider:     p.ID(),
+				Model:        mi.ID,
+				OwnedBy:      mi.OwnedBy,
+				WireMetadata: wire,
 			})
 		}
 	}
 	writeJSON(w, map[string]any{"providers": providersOut, "models": modelsOut})
-}
-
-// verificationOf 返回校验状态字符串（空 → unverified）。
-func verificationOf(m ConfidentialityMeta) string {
-	if m.Verification == "" {
-		return string(meta.VerificationUnverified)
-	}
-	return string(m.Verification)
 }
 
 // HandleHealth GET /v1/confllm/health：健康聚合。

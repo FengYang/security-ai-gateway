@@ -2,6 +2,7 @@ package confllm
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 )
@@ -54,6 +55,37 @@ func (b *BufferLogger) Entries() []logEntry {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]logEntry(nil), b.entries...)
+}
+
+// LogField 平坦化后的单条日志字段视图（logEntry 未导出，供外部测试包断言脱敏，§7.2）。
+type LogField struct {
+	Level string // info / error
+	Msg   string // 日志消息
+	Key   string // kv 键（Msg 本身用 key="msg" 表示）
+	Value string // kv 值（字符串化）
+}
+
+// Fields 返回全部日志的平坦化字段视图：每条 kv 键值各一项，另加 msg 一项。
+//
+// 用途：外部测试包无法直接读 logEntry（未导出），借此断言
+// ① 所有 Value 不含凭据明文；② Key 集合 ⊆ 白名单 {provider,model,status,duration,request_id,msg}。
+func (b *BufferLogger) Fields() []LogField {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]LogField, 0, len(b.entries))
+	for _, e := range b.entries {
+		out = append(out, LogField{Level: e.level, Msg: e.msg, Key: "msg", Value: e.msg})
+		kv := e.kv
+		for i := 0; i+1 < len(kv); i += 2 {
+			out = append(out, LogField{
+				Level: e.level,
+				Msg:   e.msg,
+				Key:   fmt.Sprintf("%v", kv[i]),
+				Value: fmt.Sprintf("%v", kv[i+1]),
+			})
+		}
+	}
+	return out
 }
 
 // Contains 判断是否存在包含 substr 的日志消息（用于断言脱敏，绝不用于匹配 token）。

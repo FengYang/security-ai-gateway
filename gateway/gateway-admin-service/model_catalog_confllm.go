@@ -27,6 +27,13 @@ import (
 // 与 CR provider id 对齐（由 confllm_wire.go 的 ADMIN_CONFLLM_PROVIDERS_JSON 装配）。
 func enrichWithConfidentiality(entry *modelRouteEntry) {
 	def := meta.DefaultMeta()
+
+	// wire 举证三字段缺省（PRD P0-3 举证边界）：老 CR / 未匹配也必须出现，且恒为举证值。
+	// 即便后续 managed→A override 提升 Classification，也不得升级这三项 —— 举证边界红线。
+	entry.AttestationVerdict = meta.WireVerdictUnknown
+	entry.VerificationStatus = meta.WireVerificationStatusClaimUnverified
+	entry.Connectivity = meta.ConnNeverTested
+
 	entry.ConfidentialityClass = nzMetaStr(entry.ConfidentialityClass, def.ConfidentialityClass)
 	entry.Attestation = nzMetaStr(entry.Attestation, def.Attestation)
 	entry.DataRetention = nzMetaStr(entry.DataRetention, def.DataRetention)
@@ -35,7 +42,7 @@ func enrichWithConfidentiality(entry *modelRouteEntry) {
 
 	p, ok := confllm.GlobalRegistry.Lookup(entry.Provider)
 	if !ok {
-		return // 老 CR 无密态厂商匹配 → 保持 unknown
+		return // 老 CR 无密态厂商匹配 → 保持 unknown（wire 举证字段已置缺省）
 	}
 	m := p.Metadata()
 	entry.ConfidentialityClass = nzMetaStr(m.ConfidentialityClass, def.ConfidentialityClass)

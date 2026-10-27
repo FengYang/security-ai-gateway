@@ -290,7 +290,16 @@ type modelRouteEntry struct {
 	Attestation          string `json:"attestation"`
 	DataRetention        string `json:"dataRetention"`
 	Deployment           string `json:"deployment"`
-	Verification         string `json:"verification"` // 引用≠已验证（§7.11）
+	// 举证三字段（PRD P0-3 举证边界）：均禁 omitempty —— 不得以「字段缺失」冒充通过。
+	// AttestationVerdict 本期恒 unknown；VerificationStatus 本期恒 claim-unverified（§7.11 裁定：
+	// wire 层一律输出 claim-unverified，内部结构保留中间态用于审计）；
+	// Connectivity 恒 never-tested / pending-credential，无真实 integration 运行不写 smoke-ok。
+	AttestationVerdict string `json:"attestationVerdict"`
+	VerificationStatus string `json:"verificationStatus"`
+	Connectivity       string `json:"connectivity"`
+	// Verification 内部校验状态（审计用，保留 unverified / claim-with-reference-unverified
+	// 中间态；wire 对外请以 VerificationStatus 为准）。
+	Verification string `json:"verification"`
 }
 
 // modelCatalogResponse 模型目录响应。

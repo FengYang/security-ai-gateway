@@ -64,6 +64,64 @@ const (
 	VerificationVerified Verification = "verified"
 )
 
+// Connectivity 连通性举证状态（PRD P0-3 §7.5）。
+type Connectivity = string
+
+const (
+	// ConnNeverTested 从未真机调通（P0/P1 阶段缺省）。
+	ConnNeverTested = "never-tested"
+	// ConnPendingCredential 凭据未配置，未发起过调用。
+	ConnPendingCredential = "pending-credential"
+	// smoke-ok(<date>) 仅由 -tags=integration + 真实凭据的运行写入（本常量不定义该形态，
+	// 以免无 tag 运行时误写出「已冒烟」的假举证）。
+)
+
+// ---------- wire 层统一呈现（PRD P0-3 举证边界）----------
+//
+// 举证要求：/v1/adminext/models 与 /v1/confllm/models 的**每条目**必须完整携带下列字段，
+// 且 attestationVerdict 禁止 omitempty —— 不得以「字段缺失」冒充通过。
+// 故所有字段均无 omitempty，由 ToWireMetadata 统一构造，避免两侧各自实现产生漂移。
+type WireMetadata struct {
+	ConfidentialityClass string `json:"confidentialityClass"`
+	Attestation          string `json:"attestation"`
+	AttestationVerdict   string `json:"attestationVerdict"` // 恒 unknown（R4/举证边界，禁 omitempty）
+	VerificationStatus   string `json:"verificationStatus"` // 恒 claim-unverified（本期）
+	DataRetention        string `json:"dataRetention"`
+	Deployment           string `json:"deployment"`
+	Connectivity         string `json:"connectivity"`
+}
+
+// ToWireMetadata 由内部 meta 生成 wire 呈现（P0/P1 举证边界硬落盘）。
+//
+// 硬规则（违反即举证失败）：
+//   - attestationVerdict 恒 AttestWireUnknown="unknown"（本期唯一允许值）；
+//   - verificationStatus 恒 "claim-unverified"：无论内部 Verification 是 unverified 还是
+//     claim-with-reference-unverified，wire 一律归一为该值（§7.11 裁定），
+//     **绝不输出 "verified"**（P2 真实证明校验通过后才可能变化）；
+//   - connectivity 缺失/空 → never-tested（不得臆测为 smoke-ok）。
+func ToWireMetadata(m ConfidentialityMeta, connectivity string) WireMetadata {
+	m = m.normalize()
+	if connectivity == "" {
+		connectivity = ConnNeverTested
+	}
+	return WireMetadata{
+		ConfidentialityClass: m.ConfidentialityClass,
+		Attestation:          m.Attestation,
+		AttestationVerdict:   WireVerdictUnknown,
+		VerificationStatus:   WireVerificationStatusClaimUnverified,
+		DataRetention:        m.DataRetention,
+		Deployment:           m.Deployment,
+		Connectivity:         connectivity,
+	}
+}
+
+const (
+	// WireVerdictUnknown wire 层证明结论（本期唯一允许值，R4）。
+	WireVerdictUnknown = "unknown"
+	// WireVerificationStatusClaimUnverified wire 层校验状态（本期唯一允许值，§7.11）。
+	WireVerificationStatusClaimUnverified = "claim-unverified"
+)
+
 // ---------- 数据结构 ----------
 
 // ConfidentialityMeta 密态四字段（一等公民，缺省 unknown）+ 校验状态（引用≠已验证）。
