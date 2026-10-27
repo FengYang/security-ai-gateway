@@ -15,7 +15,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -287,5 +286,3 @@ func isTimeoutError(err error) bool {
 	}
 	return false
 }
-
-var _ = fmt.Sprintf

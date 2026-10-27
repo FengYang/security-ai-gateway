@@ -9,11 +9,15 @@ import (
 // HuaweiConfidentialClient 华为云专用密态 SDK 客户端抽象（真实实现见 huaweicloud_client.go）。
 type HuaweiConfidentialClient = confllm.VendorSDKClient
 
-// HuaweiProvider 华为云（managed + vendor-sdk，专用密态服务 = A+K 双信任根机密计算）。
+// HuaweiProvider 华为云密态服务（K1：`huawei-confidential` = `managed` + `vendor-sdk` 传输抽象）。
 //
-// 华为机密推理 = 用户私有 HYOK 密钥端到端加密的机密服务（PRD §1.1 #3）。本期按文档化密态 endpoint
-// 实现真实调用路径（huaweicloud_client.go）+ attestation hook。MaaS OpenAI 兼容网关作为非密态/低保障
-// pending-doc 变体，见 huaweicloud_maas.go（§7.1 R1）。
+// 华为密态推理技术脉络：TEE（Kunpeng/昇腾）+ xEnclave 远程证明 + HYOK 自持密钥（A+K 双信任根）。
+// **2026-10-27 调研结论**：华为密态推理 = 在 ModelArts 托管推理 endpoint 开启 confidential_inference
+// 配置开关，经标准 RESTful + IAM Token 头 `X-Auth-Token` 调用；官方仅 Python SDK，**无 Go SDK、无类
+// pai-cc 的 CLI**。故 K1 的 `vendor-sdk` 传输抽象在华为侧**落地为 HTTP/REST 真实调用**（见
+// huaweicloud_client.go 的 huaweiClientImpl，已含 `X-Auth-Token` 鉴权 + attestation hook），属诚实
+// realization，非"待 SDK 替换的占位"。
+// MaaS OpenAI 兼容网关作为非密态/低保障变体，见 huaweicloud_maas.go（§7.1 R1）。
 type HuaweiProvider struct {
 	id     string
 	region confllm.Region
