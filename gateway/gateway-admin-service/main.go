@@ -290,7 +290,20 @@ func main() {
 	} else {
 		log.Printf("计费域未启用（BILLING_ENABLED!=true），/billing/* 端点不注册")
 	}
+	// 密态推理数据面（T04）：薄接线（§2 confllm_wire.go）。
+	// managed→A override 证明引用（§7.11 B2）与密态上游实例均按 env 可选装配。
+	if err := loadConfllmManagedOverrides(); err != nil {
+		log.Fatalf("confllm managed→A override 加载失败（fail-closed）：%v", err)
+	}
+	confllmH := newConfllmHandler(bh)
+	if err := loadConfllmProviders(bh); err != nil {
+		log.Fatalf("confllm 密态上游装配失败（fail-closed）：%v", err)
+	}
+
 	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, ah, sch, cs, bih, bs.legacyPort)
+
+	// 密态推理数据面端点（T04）：/v1/confllm/*（薄接线，挂鉴权）。
+	registerConfllmRoutes(adminMux, cfg, confllmH)
 
 	// P2-4 T-2：集群注册 API（注册/列表/心跳/审批/摘除）。
 	// 存储：PG 时与租户库同库（多集群共享），SQLite 时独立文件；两者都未配置 → 不启用（默认零变化）。

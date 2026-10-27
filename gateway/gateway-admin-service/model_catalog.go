@@ -285,6 +285,12 @@ type modelRouteEntry struct {
 	ViaBroker         bool              `json:"viaBroker"`         // customUrl 指向 /llm-broker/（密态托管）
 	HasPlaintextToken bool              `json:"hasPlaintextToken"` // CR 仍存明文 apiTokens
 	Weight            int               `json:"weight"`            // 上游权重（多上游 failover）
+	// 密态四字段（一等公民，缺省 unknown；由 confllm 注册表富化，老 CR 缺字段默认 unknown，§7.5）
+	ConfidentialityClass string `json:"confidentialityClass"`
+	Attestation          string `json:"attestation"`
+	DataRetention        string `json:"dataRetention"`
+	Deployment           string `json:"deployment"`
+	Verification         string `json:"verification"` // 引用≠已验证（§7.11）
 }
 
 // modelCatalogResponse 模型目录响应。
@@ -333,6 +339,8 @@ func (h *modelCatalogHandler) handleModels(w http.ResponseWriter, r *http.Reques
 				entry.ViaBroker = strings.Contains(p.OpenaiCustomURL, brokerPathPrefix)
 				entry.HasPlaintextToken = p.HasTokens
 			}
+			// 富化 4 密态字段（缺省 unknown；老 CR 无 confllm 匹配 → unknown，§7.5 / §7.11 B2）
+			enrichWithConfidentiality(&entry)
 			out = append(out, entry)
 		}
 	}

@@ -1,0 +1,14 @@
+{
+  "_comment": "golden request for 火山引擎方舟（managed，OpenAI 兼容 /api/v3）",
+  "docURL": "https://www.volcengine.com/docs/82379",
+  "retrievedAt": "2025-10-27",
+  "version": "api/v3",
+  "method": "POST",
+  "chatPath": "/api/v3/chat/completions",
+  "modelsPath": "/v1/models",
+  "contentType": "application/json",
+  "authorizationScheme": "Bearer",
+  "model": "m",
+  "stream": false,
+  "messages": [{ "role": "user", "content": "hi" }]
+}

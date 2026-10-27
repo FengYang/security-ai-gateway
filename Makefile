@@ -296,3 +296,22 @@ cache-canary:
 	CACHE_CANARY_OUT="$${CACHE_CANARY_OUT:-deploy/cache-canary-runs}" \
 	EXACT_P95_BUDGET_MS="$${EXACT_P95_BUDGET_MS:-1}" \
 	bash scripts/cache-canary.sh $${ARGS:-}
+
+# ---------------------------------------------------------------------------
+# 密态大模型适配器（confllm-adapter）—— 密态大模型接入（T05 / 设计 §7 QA-4、QA-5）
+# 设计约束：库内可独立 go test，零硬依赖 admin-service。
+#   make test-adapters              # 离线契约/单元测试（mock 内核 + fixture，不触外网、不需凭据）
+#   make test-adapters-integration  # 集成测试（需 go 1.26 + 真实凭据/联网，-tags=integration 门控）
+# ---------------------------------------------------------------------------
+CONFLLM_PKG := ./gateway/confllm-adapter/...
+CONFLLM_ADMIN_PKG := ./gateway/gateway-admin-service/...
+
+.PHONY: test-adapters test-adapters-integration
+# 离线契约/单元测试：-count=1 防 (cached) 假绿；-race 抓数据竞争（§7.10 T05）。
+test-adapters:
+	go test -count=1 -race $(CONFLLM_PKG)
+
+# 集成测试：需 go 1.26 + 真实凭据/联网；-tags=integration 门控。
+# 覆盖库内 + admin-service 接线/富化/既有 model_catalog_test.go 3 用例回归（§7.10 QA2-24）。
+test-adapters-integration:
+	go test -count=1 -race -tags=integration -timeout=180s $(CONFLLM_PKG) $(CONFLLM_ADMIN_PKG)

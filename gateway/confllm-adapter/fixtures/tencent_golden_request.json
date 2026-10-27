@@ -1,0 +1,14 @@
+{
+  "_comment": "golden request for 腾讯云 TokenHub（managed，OpenAI 兼容）",
+  "docURL": "https://cloud.tencent.com/document/product/1729",
+  "retrievedAt": "2025-10-27",
+  "version": "v1",
+  "method": "POST",
+  "chatPath": "/v1/chat/completions",
+  "modelsPath": "/v1/models",
+  "contentType": "application/json",
+  "authorizationScheme": "Bearer",
+  "model": "m",
+  "stream": false,
+  "messages": [{ "role": "user", "content": "hi" }]
+}
