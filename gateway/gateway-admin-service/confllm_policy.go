@@ -35,6 +35,14 @@ type confllmJobMeterer interface {
 // confllmModelGuard 模型级 ACL（tenant×model）。nil = 未启用（放行，向后兼容）。
 type confllmModelGuard func(tenant, modelKey string) bool
 
+// confllmAuditChain 推理审计落链抽象（A3）：将 confllm_policy 对 *adminAuditChain 具体类型的
+// 依赖解耦为接口，使审计链可作为可复用中间件在入口/包间传递；调用方传 nil 时得到"真 nil 接口"
+// （防 typed-nil panic：若直接传 *adminAuditChain(nil)，接口判空为 false，内部调用 append 会解引用空指针）。
+// 方法为包内非导出，仅 *adminAuditChain 在本包实现，契约稳定。
+type confllmAuditChain interface {
+	append(event adminAuditEvent) error
+}
+
 // confllm 审计动作常量（D3 parity；只记调用元数据，绝不记请求/响应体）。
 const (
 	auditActionConfllmChat        = "confllm_chat"
@@ -51,7 +59,7 @@ const (
 //
 // 授权复用端点规则表（authz.go requireRule，授权唯一事实源）；配额复用 billing
 // 配额查询（confllmQuotaChecker）；审计复用 adminAuditChain（G1 链）。
-func confllmPolicy(cfg *config, rule endpointRule, action string, audit *adminAuditChain, quota confllmQuotaChecker, jobMeter confllmJobMeterer, guard confllmModelGuard, next http.HandlerFunc) http.HandlerFunc {
+func confllmPolicy(cfg *config, rule endpointRule, action string, audit confllmAuditChain, quota confllmQuotaChecker, jobMeter confllmJobMeterer, guard confllmModelGuard, next http.HandlerFunc) http.HandlerFunc {
 	return authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if !requireRule(w, r, rule) {
 			return
@@ -166,7 +174,7 @@ func tenantOf(r *http.Request) string {
 // 与凭据写路径（G1 fail-closed：审计写失败拒绝变更）不同：推理调用在 handler 返回后
 // 已成既成事实，无法回滚响应，故写失败仅告警留痕（事件本身 Result 恒 "ok" =
 // 链上事件完整，调用结果状态码在 Detail 中如实记录）。
-func confllmAuditWrap(action string, audit *adminAuditChain, jobMeter confllmJobMeterer, next http.HandlerFunc) http.HandlerFunc {
+func confllmAuditWrap(action string, audit confllmAuditChain, jobMeter confllmJobMeterer, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w}
 		// P2-5：注入 job 计量 carrier，业务 handler（graph 提交 202 前）回填后此处读出
@@ -212,7 +220,7 @@ func confllmInferAuditEvent(r *http.Request, action string, status int) adminAud
 }
 
 // confllmAuditAppend 落链推理调用事件；audit 未启用（nil）→ 跳过（与 broker_secret.go 同口径）。
-func confllmAuditAppend(audit *adminAuditChain, e adminAuditEvent) {
+func confllmAuditAppend(audit confllmAuditChain, e adminAuditEvent) {
 	if audit == nil {
 		return
 	}

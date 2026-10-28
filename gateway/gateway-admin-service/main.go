@@ -364,7 +364,27 @@ func main() {
 	}
 	// 模型级 ACL（tenant×model）：从环境变量注入允许清单；未配置 → nil（不启用，向后兼容）。
 	confllmGuard := buildConfllmModelGuard(os.Getenv("ADMIN_CONFLLM_MODEL_ACL_JSON"))
-	registerConfllmRoutes(adminMux, cfg, confllmH, auditChain, confllmQuota, confllmJobMeter, confllmGuard)
+
+	// A3（中间件抽离）：将 *adminAuditChain 适配为 confllmAuditChain 接口；auditChain 为 nil 时
+	// 得到"真 nil 接口"（防 typed-nil panic），confllmAuditAppend 内 if audit == nil 判空可安全跳过。
+	var confllmAudit confllmAuditChain
+	if auditChain != nil {
+		confllmAudit = auditChain
+	}
+
+	// A2（数据面流量隔离）：confllmListen 非空 → 独立 listener 承载 /v1/confllm/*，与管理面端口
+	// 分离，缩小管理面爆炸半径；缺省空 = 维持现状挂 adminMux（fail-safe，零行为变化）。
+	if cfg.confllmListen != "" {
+		if cfg.confllmListen == cfg.listen {
+			log.Fatalf("配置错误：confllm 监听 %s 与管理面监听相同（A2 要求端口分离）", cfg.confllmListen)
+		}
+		confllmMux := http.NewServeMux()
+		registerConfllmRoutes(confllmMux, cfg, confllmH, confllmAudit, confllmQuota, confllmJobMeter, confllmGuard)
+		go serve("confllm", cfg.confllmListen, confllmMux)
+		log.Printf("confllm 数据面独立监听已启用：%s（管理面 %s 隔离，A2）", cfg.confllmListen, cfg.listen)
+	} else {
+		registerConfllmRoutes(adminMux, cfg, confllmH, confllmAudit, confllmQuota, confllmJobMeter, confllmGuard)
+	}
 
 	// P2-4 T-2：集群注册 API（注册/列表/心跳/审批/摘除）。
 	// 存储：PG 时与租户库同库（多集群共享），SQLite 时独立文件；两者都未配置 → 不启用（默认零变化）。

@@ -20,11 +20,12 @@ import (
 
 // config 运行配置（env 注入，带默认值；密钥类无默认，缺失即拒绝启动 = fail-closed）。
 type config struct {
-	listen      string              // 监听地址
-	jwtSecret   []byte              // 内部服务令牌共享密钥（Java 控制台 ↔ Go 服务，来自 Secret）
-	jwtIssuer   string              // 允许的签发方（缺省 higress-console）
-	jwtAudience string              // 本服务 audience（缺省 gateway-admin-service）
-	roleAdmins  map[string]struct{} // 最小角色控制（M2 §2.4）：写权限用户名白名单
+	listen        string              // 监听地址
+	confllmListen string              // 密态推理数据面独立监听地址（A2；缺省空 = 挂 adminMux，fail-safe）
+	jwtSecret     []byte              // 内部服务令牌共享密钥（Java 控制台 ↔ Go 服务，来自 Secret）
+	jwtIssuer     string              // 允许的签发方（缺省 higress-console）
+	jwtAudience   string              // 本服务 audience（缺省 gateway-admin-service）
+	roleAdmins    map[string]struct{} // 最小角色控制（M2 §2.4）：写权限用户名白名单
 
 	// 租户自助门户（可选启用：TENANT_STORE_PATH 与 TENANT_STORE_PG_DSN 均未配置 = 不启用）。
 	// 租户会话令牌复用 cfg.jwtSecret（§6.1：Console 用共享密钥签发 role=tenant_user JWT，
@@ -123,13 +124,16 @@ func loadConfig() (*config, error) {
 	if listen == "" {
 		listen = ":19095"
 	}
+	// A2 密态推理数据面独立监听：缺省空 = 不启用独立 listener，/v1/confllm/* 挂 adminMux（fail-safe，零行为变化）。
+	confllmListen := os.Getenv("ADMIN_SVC_CONFLLM_LISTEN")
 
 	cfg := &config{
-		listen:      listen,
-		jwtSecret:   []byte(secret),
-		jwtIssuer:   issuer,
-		jwtAudience: audience,
-		roleAdmins:  parseRoleAdmins(os.Getenv("ADMIN_SVC_ROLE_ADMINS")),
+		listen:        listen,
+		confllmListen: confllmListen,
+		jwtSecret:     []byte(secret),
+		jwtIssuer:     issuer,
+		jwtAudience:   audience,
+		roleAdmins:    parseRoleAdmins(os.Getenv("ADMIN_SVC_ROLE_ADMINS")),
 	}
 
 	// 租户自助门户（M1+，可选启用）
