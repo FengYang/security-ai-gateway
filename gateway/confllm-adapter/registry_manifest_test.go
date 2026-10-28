@@ -6,9 +6,12 @@
 // 漏注册在编译期静默无声（工厂函数存在即通过编译），只能靠运行期清单测试兜住。
 //
 // 断言（缺一即失败）：
-//  1. 12 个类型键在 confllm.GlobalRegistry 中**已注册**（NewFromConfig 不报「未注册」）；
+//  1. 13 个类型键（12 A 类 + 1 B 类）在 confllm.GlobalRegistry 中**已注册**（NewFromConfig 不报「未注册」）；
 //  2. 每个类型键**可构造**（工厂返回非 nil 实例、无 error、ID() 与 cfg.ID 一致）；
 //  3. 负向：未注册的类型键必须报错（证明清单断言本身有效，非空跑）。
+//
+// 口径：13 = 12 个 A 类（PRD P0-1：10 密态 + 2 非密态百炼/MaaS）+ 1 个 B 类
+// （隐语 SecretFlow，任务式）。与架构设计 §3 类型键常量块一致（第 13 个键）。
 //
 // 全程离线（P0-5 离线纪律）：HTTP 型注入 mock.NewOfflineTransport + 静态凭据，
 // SDK 型注入 *Fake 客户端。
@@ -22,10 +25,14 @@ import (
 	confllm "security-ai-gateway/gateway/confllm-adapter"
 	"security-ai-gateway/gateway/confllm-adapter/mock"
 	"security-ai-gateway/gateway/confllm-adapter/providers"
+	// B 类（隐语 SecretFlow）经 init() 向 GlobalRegistry 注册类型键 secretflow；
+	// 空导入仅触发该注册，使本清单覆盖**全部 13 个**注册键（含 B 类），不留漏注册死角。
+	_ "security-ai-gateway/gateway/confllm-adapter/providers/bclass"
 )
 
-// registeredTypeKeys 必须全部注册的 12 个类型键（装配契约，新增厂商须同步登记）。
+// registeredTypeKeys 必须全部注册的 13 个类型键（装配契约，新增厂商须同步登记）。
 var registeredTypeKeys = []string{
+	// ---- A 类（12，PRD P0-1）----
 	"tencent",
 	"volcengine",
 	"nearai",
@@ -38,6 +45,8 @@ var registeredTypeKeys = []string{
 	"huawei-confidential",
 	"huawei-maas",
 	"mobilecloud",
+	// ---- B 类（1）：任务式语义，chat 式三方法返回 not-implemented（设计如此，非缺陷）----
+	"secretflow",
 }
 
 // offlineProviderOptions 离线构造选项（HTTP 型：离线 Transport + 静态凭据）。
@@ -48,17 +57,18 @@ func offlineProviderOptions() []confllm.ProviderOption {
 	}
 }
 
-// TestProviderTypeRegistryManifest 【防漏注册】12 个类型键全部已注册且可构造。
+// TestProviderTypeRegistryManifest 【防漏注册】13 个类型键（12 A 类 + 1 B 类）全部已注册且可构造。
 func TestProviderTypeRegistryManifest(t *testing.T) {
-	if len(registeredTypeKeys) != 12 {
-		t.Fatalf("清单本身应含 12 个类型键，实际 %d（新增厂商须同步登记）", len(registeredTypeKeys))
+	if len(registeredTypeKeys) != 13 {
+		t.Fatalf("清单本身应含 13 个类型键（12 A 类 + 1 B 类），实际 %d（新增厂商须同步登记）", len(registeredTypeKeys))
 	}
 	for _, typ := range registeredTypeKeys {
 		typ := typ
 		t.Run(typ, func(t *testing.T) {
 			cfg := confllm.ProviderConfig{Type: typ, ID: "manifest-" + typ}
 			opts := offlineProviderOptions()
-			// SDK 型（阿里 CAI / 华为密态 SDK）以 *Fake 注入，绝不触真实 SDK 与网络。
+			// SDK 型（阿里 CAI / 华为密态 SDK）以 *Fake 注入，绝不触真实 SDK 与网络；
+			// B 类 secretflow 构造期无 I/O（桥接未配置仅影响 Health），无需注入。
 			switch typ {
 			case "aliyun-confidential":
 				opts = append(opts, confllm.WithSDKClient(providers.NewAliyunConfidentialClientFake()))
