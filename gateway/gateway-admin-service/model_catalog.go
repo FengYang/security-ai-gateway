@@ -25,6 +25,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"security-ai-gateway/gateway/confllm-adapter/meta"
 )
 
 // modelsAPIBase 模型目录端点（经控制台 AdminExtProxyController 通用转发暴露）。
@@ -285,21 +287,18 @@ type modelRouteEntry struct {
 	ViaBroker         bool              `json:"viaBroker"`         // customUrl 指向 /llm-broker/（密态托管）
 	HasPlaintextToken bool              `json:"hasPlaintextToken"` // CR 仍存明文 apiTokens
 	Weight            int               `json:"weight"`            // 上游权重（多上游 failover）
-	// 密态四字段（一等公民，缺省 unknown；由 confllm 注册表富化，老 CR 缺字段默认 unknown，§7.5）
-	ConfidentialityClass string `json:"confidentialityClass"`
-	Attestation          string `json:"attestation"`
-	DataRetention        string `json:"dataRetention"`
-	Deployment           string `json:"deployment"`
-	// 举证三字段（PRD P0-3 举证边界）：均禁 omitempty —— 不得以「字段缺失」冒充通过。
-	// AttestationVerdict 本期恒 unknown；VerificationStatus 本期恒 claim-unverified（§7.11 裁定：
-	// wire 层一律输出 claim-unverified，内部结构保留中间态用于审计）；
-	// Connectivity 恒 never-tested / pending-credential，无真实 integration 运行不写 smoke-ok。
-	AttestationVerdict string `json:"attestationVerdict"`
-	VerificationStatus string `json:"verificationStatus"`
-	Connectivity       string `json:"connectivity"`
+	// 密态 wire 7 字段（一等公民，缺省 unknown）：匿名嵌入 meta.WireMetadata → JSON 展平，
+	// 与 /v1/confllm/models 的 providerView / modelView 同款做法。
+	//
+	// 单一事实源（§7.5.1）：字段名/json tag 与举证归一规则**只在 meta 包定义一处**，
+	// 由 meta.ToWireMetadata 统一构造（见 model_catalog_confllm.go）；此处不手抄任何密态字段，
+	// 将来 meta 加字段自动跟随，杜绝两边各自实现产生漂移。
+	// 7 字段均禁 omitempty —— 不得以「字段缺失」冒充通过（PRD P0-3 举证边界）。
+	meta.WireMetadata
 	// Verification 内部校验状态（审计用，保留 unverified / claim-with-reference-unverified
-	// 中间态；wire 对外请以 VerificationStatus 为准）。
-	Verification string `json:"verification"`
+	// 中间态，§7.11）。**绝不输出到 wire**：wire 一律以 verificationStatus=claim-unverified
+	// 呈现，输出内部中间态会与 verificationStatus 并存、造成「疑似已验证」的误读。
+	Verification string `json:"-"`
 }
 
 // modelCatalogResponse 模型目录响应。

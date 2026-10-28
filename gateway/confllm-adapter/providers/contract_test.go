@@ -133,9 +133,12 @@ func TestContractMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Chat 失败：%v", err)
 			}
-			if len(resp.Choices) == 0 || resp.Choices[0].Message.Content != "hello from mock" {
-				t.Fatalf("Chat 内容不符：%+v", resp)
-			}
+		if len(resp.Choices) == 0 {
+			t.Fatalf("Chat 内容不符：%+v", resp)
+		}
+		if c, ok := resp.Choices[0].Message.Content.(string); !ok || c != "hello from mock" {
+			t.Fatalf("Chat 内容不符：%v", resp.Choices[0].Message.Content)
+		}
 
 			// 2) Stream（chat_stream）
 			ps := buildProvider(t, pc.factory, k.URL(), "chat_stream", true)

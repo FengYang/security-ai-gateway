@@ -168,9 +168,13 @@ type ProviderConfig struct {
 // ---------- L1 归一化数据类型（OpenAI 兼容语义）----------
 
 // Message 单条对话消息。
+//
+// Content 为 any：纯文本为 string；视觉/多模态请求为结构化 parts（如
+// [{"type":"text",...},{"type":"image_url",...}]）。保持 any 是为了让视觉请求可被
+// 正常解析（而非在 L1 解析阶段即失败），从而能经 P1-3 能力门禁判定，而非静默降级。
 type Message struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content any    `json:"content"`
 }
 
 // Usage token 用量。
@@ -241,6 +245,14 @@ type ChatRequest struct {
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 	// VendorOptions L2 旁路原生参数（由 Provider 白名单裁剪后透传）。
 	VendorOptions map[string]any `json:"-"`
+	// Tools 函数调用声明（L1 标准字段）。非空 ⇒ 请求需要 tools 能力（P1-3 能力门禁）。
+	Tools []any `json:"tools,omitempty"`
+	// Reasoning 显式开启思考（reasoning/thinking/enable_thinking/reasoning_effort）。
+	// true ⇒ 请求需要 thinking 能力（P1-3 能力门禁）。
+	Reasoning bool `json:"reasoning,omitempty"`
+	// Vision 请求隐含需要视觉能力（由 BuildL1ChatRequest 经原始体扫描得出，json:"-" 不入线）。
+	// 直接构造 ChatRequest 的测试可显式置位；经 BuildL1ChatRequest 的路径自动探测。
+	Vision bool `json:"-"`
 }
 
 // BuildL1ChatRequest 从原始 OpenAI 兼容 JSON 解析出 L1 请求（宽松解码，忽略未知字段）。
@@ -252,7 +264,65 @@ func BuildL1ChatRequest(raw []byte) (*ChatRequest, error) {
 	if req.Model == "" {
 		return nil, fmt.Errorf("L1 请求缺少 model 字段")
 	}
+	// 能力探测（P1-3）：视觉（结构化 content parts）+ 思考（多厂商字段别名）。
+	// 这些能力在请求体里不总是单一字段，故在此统一扫描一次，供 RequiredCapabilities 复用。
+	req.Vision = detectVision(raw)
+	if detectReasoning(raw) {
+		req.Reasoning = true
+	}
 	return &req, nil
+}
+
+// RequiredCapabilities 返回请求声明/隐含需要的能力（P1-3）。
+//
+//	tools  ：携带 tools（函数调用）；
+//	vision ：任一消息 content 为结构化图像 parts（非纯文本）；
+//	thinking：显式开启思考（reasoning/thinking/enable_thinking/reasoning_effort）。
+func (r *ChatRequest) RequiredCapabilities() []string {
+	var caps []string
+	if len(r.Tools) > 0 {
+		caps = append(caps, "tools")
+	}
+	if r.Vision {
+		caps = append(caps, "vision")
+	}
+	if r.Reasoning {
+		caps = append(caps, "thinking")
+	}
+	return caps
+}
+
+// detectVision 扫描原始请求体，判定是否含视觉/多模态内容 parts（image_url/image/file 等）。
+// 不依赖 Message.Content 的类型（any），直接对 raw 做结构探测，避免误判文本中的关键字。
+func detectVision(raw []byte) bool {
+	var probe struct {
+		Messages []struct {
+			Content any `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	for _, m := range probe.Messages {
+		if _, ok := m.Content.(string); !ok && m.Content != nil {
+			return true // 结构化内容（图像 parts 等）
+		}
+	}
+	return false
+}
+
+// detectReasoning 扫描原始请求体，判定是否显式开启思考（多厂商字段别名兼容）。
+func detectReasoning(raw []byte) bool {
+	var flat struct {
+		Reasoning       bool `json:"reasoning"`
+		Thinking        bool `json:"thinking"`
+		EnableThinking  bool `json:"enable_thinking"`
+		ReasoningEffort any  `json:"reasoning_effort"`
+	}
+	if err := json.Unmarshal(raw, &flat); err != nil {
+		return false
+	}
+	return flat.Reasoning || flat.Thinking || flat.EnableThinking || flat.ReasoningEffort != nil
 }
 
 // ProviderError 归一化错误（§7.1 错误码映射表）。
@@ -275,6 +345,9 @@ const (
 	CodeInvalidRoutePolicy     = "invalid_route_policy"      // 非法 min_confidentiality_class（§7.6 QA2-20）
 	CodeNoProviderSatisfiesMin = "no_provider_satisfies_min" // 无候选满足 min（§7.6 QA2-21）
 	CodeInvalidSecretLiteral   = "invalid_secret_literal"    // 配置含字面量 key（§7.10 QA2-19）
+
+	// ---- 能力门禁错误码（P1-3）----
+	CodeUnsupportedCapability = "unsupported_capability" // 请求所需能力不被上游支持（如 tools/vision/thinking）
 )
 
 func (e *ProviderError) Error() string {

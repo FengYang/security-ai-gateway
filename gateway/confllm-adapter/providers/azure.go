@@ -93,3 +93,11 @@ func (a *AzureProvider) chatOHTTP(ctx context.Context, req *confllm.ChatRequest)
 }
 
 var _ = fmt.Sprintf
+
+// init 向全局注册表注册 azure 工厂（与其余 11 家同款插件约定）。
+//
+// 缺此注册时 NewFromConfig{Type:"azure"} 报「未注册 provider 类型」，装配必失败；
+// registry_manifest_test.go 以清单测试固化全部 12 个类型键，防再次漏注册。
+func init() {
+	confllm.GlobalRegistry.RegisterType("azure", NewAzureProvider)
+}

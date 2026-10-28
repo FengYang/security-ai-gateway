@@ -71,11 +71,16 @@ func (h *ConfllmHandler) providerIDFromRequest(r *http.Request) string {
 	return ""
 }
 
-// Chat 核心调用逻辑：查表 → Provider.Chat → 证明校验（noop/log）→ 返回。
+// Chat 核心调用逻辑：查表 → 能力门禁 → Provider.Chat → 证明校验（noop/log）→ 返回。
 func (h *ConfllmHandler) Chat(ctx context.Context, providerID string, req *ChatRequest) (*ChatResponse, error) {
 	p, ok := h.reg.Lookup(providerID)
 	if !ok {
 		return nil, NewProviderError(CodeInvalidRequest, http.StatusNotFound, "provider 不存在: "+providerID)
+	}
+	// P1-3 能力门禁：不支持某能力的上游收到该能力请求时，早失败返回 unsupported_capability，
+	// 而非静默降级打到上游才 4xx/5xx（§7.1 错误码映射表）。
+	if pe := h.checkCapabilities(p, req); pe != nil {
+		return nil, pe
 	}
 	resp, err := p.Chat(ctx, req)
 	h.attest(ctx, p)
@@ -83,6 +88,34 @@ func (h *ConfllmHandler) Chat(ctx context.Context, providerID string, req *ChatR
 		return nil, ParseError(err)
 	}
 	return resp, nil
+}
+
+// checkCapabilities P1-3 能力门禁：比对请求所需能力与 provider 声明能力矩阵。
+// 任一所需能力不被支持 ⇒ 返回 unsupported_capability（422），阻断后再转发上游（避免静默降级）。
+func (h *ConfllmHandler) checkCapabilities(p ConfidentialLLMProvider, req *ChatRequest) *ProviderError {
+	caps := p.Capabilities()
+	var missing []string
+	for _, need := range req.RequiredCapabilities() {
+		switch need {
+		case "tools":
+			if !caps.SupportsTools {
+				missing = append(missing, "tools")
+			}
+		case "vision":
+			if !caps.SupportsVision {
+				missing = append(missing, "vision")
+			}
+		case "thinking":
+			if !caps.ThinkingMode {
+				missing = append(missing, "thinking")
+			}
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return NewProviderError(CodeUnsupportedCapability, http.StatusUnprocessableEntity,
+		"provider 不支持所请求的能力: "+strings.Join(missing, ","))
 }
 
 // attest 调用证明校验器（本期 noop/log-only/占位，Verdict=unknown，R4）。
@@ -142,6 +175,11 @@ func (h *ConfllmHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, NewProviderError(CodeInvalidRequest, http.StatusNotFound, "provider 不存在: "+providerID))
 		return
 	}
+	// P1-3 能力门禁：流式路径同样需拦截不支持的能力请求（HandleStream 不经 h.Chat）。
+	if pe := h.checkCapabilities(p, req); pe != nil {
+		writeErr(w, pe)
+		return
+	}
 	sr, err := p.Stream(r.Context(), req)
 	if err != nil {
 		writeErr(w, ParseError(err))
@@ -171,9 +209,11 @@ func (h *ConfllmHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 
 // HandleModels GET /v1/confllm/models：聚合各上游模型 + 每家密态元数据（?provider= 过滤单家）。
 //
-// 响应结构（§7.5/§7.7/§7.11）：
-//   - providers[]：每家必有 attestation.verdict（恒 "unknown"，R4，禁止 omitempty）、
-//     confidentialityClass、verification（未验证="unverified"）、connectivity（P0/P1 恒 never-tested）。
+// 响应结构（§7.5/§7.7/§7.11，wire 键名以 meta.WireMetadata 为准）：
+//   - providers[]：每家必有 7 个密态字段（禁 omitempty）——confidentialityClass、attestation、
+//     attestationVerdict（恒 "unknown"，R4）、verificationStatus（恒 "claim-unverified"，
+//     §7.11 裁定：内部结构即使为 claim-with-reference-unverified，wire 也一律归一为该值）、
+//     dataRetention、deployment、connectivity（never-tested / pending-credential）。
 //   - models[]：每条模型携带同样密态元数据，便于前端按密态等级呈现。
 func (h *ConfllmHandler) HandleModels(w http.ResponseWriter, r *http.Request) {
 	target := r.URL.Query().Get("provider")
@@ -198,8 +238,15 @@ func (h *ConfllmHandler) HandleModels(w http.ResponseWriter, r *http.Request) {
 		if target != "" && p.ID() != target {
 			continue
 		}
-		// P0/P1 阶段 connectivity 一律 never-tested：未做真机冒烟，绝不臆测为 smoke-ok（§7.5）。
-		wire := meta.ToWireMetadata(p.Metadata(), meta.ConnNeverTested)
+		// 连通性举证（§7.5 / PRD P0-3）：凭据未配置（Health().PendingCredential）的 provider
+		// 报 pending-credential —— 若一律报 never-tested，等于把「从未发起过调用」与
+		// 「压根没凭据」混为一谈（如移动云骨架）；其余报 never-tested。
+		// P0/P1 绝不臆测 smoke-ok（smoke-ok 仅由 -tags=integration + 真实凭据的运行写入）。
+		conn := meta.ConnNeverTested
+		if p.Health(r.Context()).PendingCredential {
+			conn = meta.ConnPendingCredential
+		}
+		wire := meta.ToWireMetadata(p.Metadata(), conn)
 		providersOut = append(providersOut, providerView{
 			Provider:     p.ID(),
 			WireMetadata: wire,

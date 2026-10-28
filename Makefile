@@ -308,10 +308,11 @@ CONFLLM_ADMIN_PKG := ./gateway/gateway-admin-service/...
 
 .PHONY: test-adapters test-adapters-integration
 # 离线契约/单元测试：-count=1 防 (cached) 假绿；-race 抓数据竞争（§7.10 T05）。
+# -mod=mod：仓库含 vendor/ 但无 modules.txt，裸 go 会 inconsistent vendoring（CI 同此约束）。
 test-adapters:
-	go test -count=1 -race $(CONFLLM_PKG)
+	go test -count=1 -race -mod=mod $(CONFLLM_PKG)
 
 # 集成测试：需 go 1.26 + 真实凭据/联网；-tags=integration 门控。
 # 覆盖库内 + admin-service 接线/富化/既有 model_catalog_test.go 3 用例回归（§7.10 QA2-24）。
 test-adapters-integration:
-	go test -count=1 -race -tags=integration -timeout=180s $(CONFLLM_PKG) $(CONFLLM_ADMIN_PKG)
+	go test -count=1 -race -mod=mod -tags=integration -timeout=180s $(CONFLLM_PKG) $(CONFLLM_ADMIN_PKG)

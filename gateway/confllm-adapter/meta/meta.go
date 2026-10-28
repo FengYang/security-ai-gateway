@@ -94,7 +94,7 @@ type WireMetadata struct {
 // ToWireMetadata 由内部 meta 生成 wire 呈现（P0/P1 举证边界硬落盘）。
 //
 // 硬规则（违反即举证失败）：
-//   - attestationVerdict 恒 AttestWireUnknown="unknown"（本期唯一允许值）；
+//   - attestationVerdict 恒 WireVerdictUnknown="unknown"（本期唯一允许值）；
 //   - verificationStatus 恒 "claim-unverified"：无论内部 Verification 是 unverified 还是
 //     claim-with-reference-unverified，wire 一律归一为该值（§7.11 裁定），
 //     **绝不输出 "verified"**（P2 真实证明校验通过后才可能变化）；

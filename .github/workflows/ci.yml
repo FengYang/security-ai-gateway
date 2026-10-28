@@ -40,6 +40,19 @@ jobs:
       - name: unit tests
         run: go test -mod=mod ./...
 
+      # 1b. 密态大模型适配器离线契约测试（T05 / PRD P0-3·P0-4 举证）
+      #     - -race 抓数据竞争（§7.10 T05）；
+      #     - 进程级网络隔离（unshare -n + 起 lo）做交叉证据，证明离线契约不触外网
+      #       （库内 TestMain 已替换 transport/resolver 并断言 EgressAttempts()==0，此处再加一层
+      #        进程级兜底；环境不支持 unshare 时退化为普通运行，仍由库内离线守卫把关）。
+      - name: confllm adapter offline contract tests
+        run: |
+          if command -v unshare >/dev/null 2>&1 && command -v ip >/dev/null 2>&1 && unshare -n true 2>/dev/null; then
+            unshare -n bash -c 'ip link set lo up; exec make test-adapters'
+          else
+            make test-adapters
+          fi
+
       # 2. 供应链漏洞扫描（TH-12 缓解）
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

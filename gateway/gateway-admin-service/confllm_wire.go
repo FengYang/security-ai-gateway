@@ -25,6 +25,10 @@ import (
 
 	// 副作用导入：触发各厂商 init() 向 confllm.GlobalRegistry 注册工厂。
 	_ "security-ai-gateway/gateway/confllm-adapter/providers"
+	// B 类（隐语 SecretFlow）任务式适配器：同样靠 init() 注册类型键 secretflow。
+	// 之前它未实现统一契约 → 进不了注册表 → 已声明的 class=B 在 /v1/adminext/models
+	// 被富化「未匹配」分支降级为 unknown（B 类声明值被吞）。
+	_ "security-ai-gateway/gateway/confllm-adapter/providers/bclass"
 )
 
 // confllmManagedOverrides managed→A override 证明引用表（启动期从

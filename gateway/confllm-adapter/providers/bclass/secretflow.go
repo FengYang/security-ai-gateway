@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"strings"
 	"time"
 
 	"security-ai-gateway/gateway/confllm-adapter"
@@ -164,6 +165,16 @@ func NewSecretFlowProvider(id string, bridge *SFBridge) *SecretFlowProviderImpl 
 	}
 }
 
+// 编译期断言：SecretFlowProviderImpl 同时满足统一契约 ConfidentialLLMProvider。
+//
+// 背景（B 类声明值被吞缺陷）：此前仅实现任务式的 SecretFlowProvider 接口，缺
+// Chat/Stream/ListModels → 永远进不了 confllm 注册表，/v1/adminext/models 富化时
+// 走「未匹配」分支，把其**已声明的 class=B 降级为 unknown**（比未声明填 unknown 更严重）。
+var (
+	_ confllm.ConfidentialLLMProvider = (*SecretFlowProviderImpl)(nil)
+	_ SecretFlowProvider              = (*SecretFlowProviderImpl)(nil)
+)
+
 func (p *SecretFlowProviderImpl) ID() string                            { return p.id }
 func (p *SecretFlowProviderImpl) Metadata() confllm.ConfidentialityMeta { return p.meta }
 func (p *SecretFlowProviderImpl) SubmitGraph(ctx context.Context, spec *SFFlowSpec) (*SFJob, error) {
@@ -177,4 +188,67 @@ func (p *SecretFlowProviderImpl) Health(ctx context.Context) confllm.HealthStatu
 		return confllm.HealthStatus{Ready: false, PendingCredential: true, Detail: "隐语桥接未配置", MinConfidentialityClass: "B"}
 	}
 	return confllm.HealthStatus{Ready: true, MinConfidentialityClass: "B"}
+}
+
+// ---------- 统一契约（ConfidentialLLMProvider）适配 ----------
+//
+// B 类是**任务式**密态推理（SubmitGraph/PollResult），本就没有 chat/completions 语义。
+// 适配原则：进注册表以保留已声明的 class=B；chat 式三个方法返回**明确的归一化
+// not-implemented 错误**——绝不 panic、绝不伪造成功响应（伪造成功 = 假举证）。
+
+// Region 区域（隐语为国内厂商）。
+func (p *SecretFlowProviderImpl) Region() confllm.Region { return confllm.RegionDomestic }
+
+// Capabilities 能力声明：任务式计算图，不提供 chat/stream 协议。
+func (p *SecretFlowProviderImpl) Capabilities() confllm.Capabilities {
+	return confllm.Capabilities{Protocols: []string{"secretflow-graph"}}
+}
+
+// notSupportedErr 归一化 not-implemented 错误（B 类任务式接口不提供 chat 式语义）。
+func notSupportedErr(kind string) error {
+	return confllm.NewProviderError(confllm.CodeInvalidRequest, http.StatusNotImplemented,
+		fmt.Sprintf("B 类密态推理（隐语 SecretFlow）为任务式语义，不提供 %s：请改用 SubmitGraph/PollResult", kind))
+}
+
+// Chat 不提供 chat/completions 语义（任务式）。
+func (p *SecretFlowProviderImpl) Chat(context.Context, *confllm.ChatRequest) (*confllm.ChatResponse, error) {
+	return nil, notSupportedErr("chat/completions")
+}
+
+// Stream 不提供流式 chat 语义（任务式）。
+func (p *SecretFlowProviderImpl) Stream(context.Context, *confllm.ChatRequest) (confllm.StreamReader, error) {
+	return nil, notSupportedErr("stream/chat/completions")
+}
+
+// ListModels 不提供 OpenAI 式模型目录（任务式：模型由计算图声明）。
+func (p *SecretFlowProviderImpl) ListModels(context.Context) ([]confllm.ModelInfo, error) {
+	return nil, notSupportedErr("models 列表")
+}
+
+// SecretFlowTypeKey B 类在 confllm 注册表中的类型键。
+const SecretFlowTypeKey = "secretflow"
+
+// defaultSecretFlowID 配置未给 id 时的缺省实例 ID。
+const defaultSecretFlowID = "secretflow"
+
+// NewSecretFlowAdapter 按统一装配契约（confllm.ProviderConfig）构造 B 类适配器。
+//
+// endpoint 取 cfg.Endpoint（可为空：桥接未配置 → Health 报 pending-credential，
+// 但 Metadata().ConfidentialityClass 仍为已声明的 B，绝不降级为 unknown）；
+// binary 取 cfg.VendorOptions["binary"]（可选，子进程兜底）。
+func NewSecretFlowAdapter(cfg confllm.ProviderConfig, opts ...confllm.ProviderOption) (confllm.ConfidentialLLMProvider, error) {
+	id := cfg.ID
+	if strings.TrimSpace(id) == "" {
+		id = defaultSecretFlowID
+	}
+	binary := ""
+	if v, ok := cfg.VendorOptions["binary"].(string); ok {
+		binary = v
+	}
+	return NewSecretFlowProvider(id, NewSFBridge(cfg.Endpoint, binary, confllm.ApplyOptions(opts...).Logger())), nil
+}
+
+// init 向全局注册表注册 B 类工厂（与其余 12 家同款插件约定）。
+func init() {
+	confllm.GlobalRegistry.RegisterType(SecretFlowTypeKey, NewSecretFlowAdapter)
 }

@@ -1,11 +1,13 @@
 // Package main — 模型目录密态富化（T04 §2 model_catalog_confllm.go）。
 //
-// 职责：在 model_catalog.go 的 handleModels 中，对每一行 ai-route 上游富化密态四字段
-// （confidentialityClass / attestation / dataRetention / deployment），并应用
-// managed→A override 硬护栏（§7.5 / §7.11 B2）。
+// 职责：在 model_catalog.go 的 handleModels 中，对每一行 ai-route 上游富化密态 wire 7 字段
+// （confidentialityClass / attestation / attestationVerdict / verificationStatus /
+// dataRetention / deployment / connectivity），并应用 managed→A override 硬护栏（§7.5 / §7.11 B2）。
 //
 // 设计要点：
-//   - 密态四字段是一等公民，缺省 unknown（绝不臆测密态等级）；
+//   - 单一事实源（§7.5.1）：wire 7 字段一律由 meta.ToWireMetadata 构造，本文件**不手抄**
+//     任何 json tag 或举证常量，与 /v1/confllm/models 共用同一归一规则，杜绝两侧漂移；
+//   - 密态字段是一等公民，缺省 unknown（绝不臆测密态等级）；
 //   - 富化来源 = confllm 全局注册表中按 entry.Provider 匹配的运行期实例 Metadata()；
 //     老 CR / 未匹配 → unknown（向后兼容，不影响既有 3 个 model_catalog 测试）；
 //   - managed→A override 仅当 deployment=managed 且启动期加载了厂商书面证明引用
@@ -28,48 +30,56 @@ import (
 func enrichWithConfidentiality(entry *modelRouteEntry) {
 	def := meta.DefaultMeta()
 
-	// wire 举证三字段缺省（PRD P0-3 举证边界）：老 CR / 未匹配也必须出现，且恒为举证值。
-	// 即便后续 managed→A override 提升 Classification，也不得升级这三项 —— 举证边界红线。
-	entry.AttestationVerdict = meta.WireVerdictUnknown
-	entry.VerificationStatus = meta.WireVerificationStatusClaimUnverified
-	entry.Connectivity = meta.ConnNeverTested
+	// 内部 meta 起点：老 CR 可能已声明部分字段（如 class=C），未声明的归并为 unknown。
+	cur := meta.ConfidentialityMeta{
+		ConfidentialityClass: nzMetaStr(entry.ConfidentialityClass, def.ConfidentialityClass),
+		Attestation:          nzMetaStr(entry.Attestation, def.Attestation),
+		DataRetention:        nzMetaStr(entry.DataRetention, def.DataRetention),
+		Deployment:           nzMetaStr(entry.Deployment, def.Deployment),
+		Verification:         meta.Verification(nzMetaStr(entry.Verification, string(def.Verification))),
+	}
 
-	entry.ConfidentialityClass = nzMetaStr(entry.ConfidentialityClass, def.ConfidentialityClass)
-	entry.Attestation = nzMetaStr(entry.Attestation, def.Attestation)
-	entry.DataRetention = nzMetaStr(entry.DataRetention, def.DataRetention)
-	entry.Deployment = nzMetaStr(entry.Deployment, def.Deployment)
-	entry.Verification = nzMetaStr(entry.Verification, string(def.Verification))
+	// 连通性举证缺省（PRD P0-3 举证边界）：老 CR / 未匹配也必须出现，恒 never-tested。
+	// 红线：即便后续 managed→A override 提升 class，也不得升级
+	// attestationVerdict / verificationStatus / connectivity 这三项。
+	connectivity := meta.ConnNeverTested
 
 	p, ok := confllm.GlobalRegistry.Lookup(entry.Provider)
 	if !ok {
-		return // 老 CR 无密态厂商匹配 → 保持 unknown（wire 举证字段已置缺省）
+		// 老 CR 无密态厂商匹配 → 保持 unknown（wire 举证字段已置缺省）。
+		entry.WireMetadata = meta.ToWireMetadata(cur, connectivity)
+		entry.Verification = string(cur.Verification)
+		return
 	}
 	m := p.Metadata()
-	entry.ConfidentialityClass = nzMetaStr(m.ConfidentialityClass, def.ConfidentialityClass)
-	entry.Attestation = nzMetaStr(m.Attestation, def.Attestation)
-	entry.DataRetention = nzMetaStr(m.DataRetention, def.DataRetention)
-	entry.Deployment = nzMetaStr(m.Deployment, def.Deployment)
-	entry.Verification = nzMetaStr(string(m.Verification), string(def.Verification))
+	cur.ConfidentialityClass = nzMetaStr(m.ConfidentialityClass, def.ConfidentialityClass)
+	cur.Attestation = nzMetaStr(m.Attestation, def.Attestation)
+	cur.DataRetention = nzMetaStr(m.DataRetention, def.DataRetention)
+	cur.Deployment = nzMetaStr(m.Deployment, def.Deployment)
+	cur.Verification = meta.Verification(nzMetaStr(string(m.Verification), string(def.Verification)))
 
 	// managed→A 硬护栏（§7.11 B2）：仅 managed 形态 + https 书面证明引用方可提升为 A。
-	if m.Deployment != meta.DeployManaged {
-		return
+	if m.Deployment == meta.DeployManaged {
+		if ov, has := confllmManagedOverrides[entry.Provider]; has {
+			upgraded, err := meta.ApplyManagedToAOverride(m, m.Deployment, &ov)
+			if err != nil {
+				// 硬护栏：证明引用缺失/非 https → 拒绝 override，保持 unknown（fail-closed）。
+				log.Printf("[models] confllm provider=%s managed→A override 被拒（§7.11 B2）：%v",
+					entry.Provider, err)
+			} else {
+				cur.ConfidentialityClass = upgraded.ConfidentialityClass
+				cur.Attestation = upgraded.Attestation
+				// 引用≠已验证：目录登记 claim-with-reference-unverified（IsVerified 恒 false）。
+				cur.Verification = upgraded.Verification
+			}
+		}
 	}
-	ov, has := confllmManagedOverrides[entry.Provider]
-	if !has {
-		return
-	}
-	upgraded, err := meta.ApplyManagedToAOverride(m, m.Deployment, &ov)
-	if err != nil {
-		// 硬护栏：证明引用缺失/非 https → 拒绝 override，保持 unknown（fail-closed）。
-		log.Printf("[models] confllm provider=%s managed→A override 被拒（§7.11 B2）：%v",
-			entry.Provider, err)
-		return
-	}
-	entry.ConfidentialityClass = upgraded.ConfidentialityClass
-	entry.Attestation = upgraded.Attestation
-	// 引用≠已验证：目录登记 claim-with-reference-unverified（IsVerified 恒 false）。
-	entry.Verification = string(upgraded.Verification)
+
+	// 单一事实源（§7.5.1）：wire 7 字段一律由 meta.ToWireMetadata 构造 ——
+	// attestationVerdict 恒 unknown、verificationStatus 恒 claim-unverified，
+	// 内部中间态（claim-with-reference-unverified）只留在结构体上、绝不进 wire。
+	entry.WireMetadata = meta.ToWireMetadata(cur, connectivity)
+	entry.Verification = string(cur.Verification)
 }
 
 // nzMetaStr 空字符串归并为 fallback（密态字段缺省 unknown）。
