@@ -53,8 +53,9 @@ func NewConfllmHandler(reg *Registry, opts ...HandlerOption) *ConfllmHandler {
 }
 
 // reservedTail 固定端段（非 provider 标识）：出现即表示「未指定 provider」。
-// 例：/v1/confllm/chat/completions 中的 chat 是动词，不是 providerID。
-var reservedTail = map[string]bool{"chat": true, "models": true, "health": true}
+// 例：/v1/confllm/chat/completions 中的 chat 是动词，不是 providerID；
+// graphs 同理（B 类任务式端点 /v1/confllm/graphs 的动词段）。
+var reservedTail = map[string]bool{"chat": true, "models": true, "health": true, "graphs": true}
 
 // providerIDFromRequest 从 query(?provider=) 或路径(/v1/confllm/{id}/...) 提取 provider 标识。
 func (h *ConfllmHandler) providerIDFromRequest(r *http.Request) string {
@@ -76,6 +77,10 @@ func (h *ConfllmHandler) Chat(ctx context.Context, providerID string, req *ChatR
 	p, ok := h.reg.Lookup(providerID)
 	if !ok {
 		return nil, NewProviderError(CodeInvalidRequest, http.StatusNotFound, "provider 不存在: "+providerID)
+	}
+	// B 类任务式 provider 不进 chat/stream 路由（P1-3 门禁扩展）：显式排除，绝不调用 Chat/Stream。
+	if pe := rejectGraphProvider(p); pe != nil {
+		return nil, pe
 	}
 	// P1-3 能力门禁：不支持某能力的上游收到该能力请求时，早失败返回 unsupported_capability，
 	// 而非静默降级打到上游才 4xx/5xx（§7.1 错误码映射表）。
@@ -116,6 +121,17 @@ func (h *ConfllmHandler) checkCapabilities(p ConfidentialLLMProvider, req *ChatR
 	}
 	return NewProviderError(CodeUnsupportedCapability, http.StatusUnprocessableEntity,
 		"provider 不支持所请求的能力: "+strings.Join(missing, ","))
+}
+
+// rejectGraphProvider B 类任务式 provider 不进 chat/stream 路由（P1-3 门禁扩展）。
+// provider 实现 GraphProvider（任务式 SubmitGraphJSON/PollGraphJSON）⇒ 打到 chat/stream
+// 早失败 422 unsupported_capability，绝不调用其 Chat/Stream（转发即错误路由）。
+func rejectGraphProvider(p ConfidentialLLMProvider) *ProviderError {
+	if _, ok := p.(GraphProvider); ok {
+		return NewProviderError(CodeUnsupportedCapability, http.StatusUnprocessableEntity,
+			"B 类任务式 provider 不提供 chat/stream，请改用 /v1/confllm/graphs")
+	}
+	return nil
 }
 
 // attest 调用证明校验器（本期 noop/log-only/占位，Verdict=unknown，R4）。
@@ -175,6 +191,11 @@ func (h *ConfllmHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, NewProviderError(CodeInvalidRequest, http.StatusNotFound, "provider 不存在: "+providerID))
 		return
 	}
+	// B 类任务式 provider 不进 chat/stream 路由（P1-3 门禁扩展）：与 h.Chat 同款排除。
+	if pe := rejectGraphProvider(p); pe != nil {
+		writeErr(w, pe)
+		return
+	}
 	// P1-3 能力门禁：流式路径同样需拦截不支持的能力请求（HandleStream 不经 h.Chat）。
 	if pe := h.checkCapabilities(p, req); pe != nil {
 		writeErr(w, pe)
@@ -205,6 +226,117 @@ func (h *ConfllmHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	fmt.Fprintf(w, "data: [DONE]\n\n")
+}
+
+// ---------- B 类任务式推理端点（D2）----------
+
+// graphSubmitResp POST graphs 提交响应（202 Accepted）。
+type graphSubmitResp struct {
+	JobID string `json:"job_id"`
+}
+
+// graphResultResp GET graphs/{jobID} 轮询响应（200）。
+// result/error omitempty；status 透传 GraphProvider 返回的归一化状态（pending/running/done/failed）。
+type graphResultResp struct {
+	JobID  string          `json:"job_id"`
+	Status string          `json:"status"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
+// graphProviderOrErr 解析 provider 并断言 GraphProvider（B 类任务式能力）。
+// 与 HandleChat 同款「先解析 provider 再断言」：提取（?provider= 或 /v1/confllm/{id}/...）
+// → 查表 → 类型断言；任一步失败返回对应归一化错误。
+func (h *ConfllmHandler) graphProviderOrErr(r *http.Request) (GraphProvider, *ProviderError) {
+	providerID := h.providerIDFromRequest(r)
+	if providerID == "" {
+		return nil, NewProviderError(CodeInvalidRequest, http.StatusBadRequest,
+			"缺少 provider 标识（query ?provider= 或 /v1/confllm/{id}/graphs）")
+	}
+	p, ok := h.reg.Lookup(providerID)
+	if !ok {
+		return nil, NewProviderError(CodeInvalidRequest, http.StatusNotFound, "provider 不存在: "+providerID)
+	}
+	gp, ok := p.(GraphProvider)
+	if !ok {
+		return nil, NewProviderError(CodeUnsupportedCapability, http.StatusUnprocessableEntity,
+			"B 类任务式端点：该 provider 不支持任务式推理，请改用 chat/completions")
+	}
+	return gp, nil
+}
+
+// HandleGraphSubmit POST /v1/confllm/graphs 或 /v1/confllm/{id}/graphs：
+// B 类任务式推理 · 提交计算图（D2）。body = 图规格 JSON（透传，须为合法 JSON object）。
+// 成功 → 202 + {"job_id":"<id>"}。
+func (h *ConfllmHandler) HandleGraphSubmit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeErr(w, NewProviderError(CodeInvalidRequest, http.StatusMethodNotAllowed, "仅接受 POST"))
+		return
+	}
+	gp, pe := h.graphProviderOrErr(r)
+	if pe != nil {
+		writeErr(w, pe)
+		return
+	}
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, NewProviderError(CodeInvalidRequest, http.StatusBadRequest, "读取请求体失败"))
+		return
+	}
+	// 图规格须为合法 JSON object：空/非法 → invalid_request（null 亦拒：Unmarshal 到 map 得 nil）。
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil || probe == nil {
+		writeErr(w, NewProviderError(CodeInvalidRequest, http.StatusBadRequest, "图规格须为合法 JSON object"))
+		return
+	}
+	jobID, err := gp.SubmitGraphJSON(r.Context(), raw)
+	if err != nil {
+		writeErr(w, ParseError(err))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(graphSubmitResp{JobID: jobID})
+}
+
+// HandleGraphResult GET /v1/confllm/graphs/{jobID} 或 /v1/confllm/{id}/graphs/{jobID}：
+// B 类任务式推理 · 轮询结果（D2）。成功 → 200 + wire 形态（result/error omitempty）。
+//
+// 失败语义（绝不伪造成功）：jobID 任务级失败（status=failed）是**合法轮询结果**，
+// 走 200 + error 字段下发失败详情；仅当轮询调用本身失败（GraphProvider 返回空 status）
+// 才走 writeErr 归一化错误。
+func (h *ConfllmHandler) HandleGraphResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeErr(w, NewProviderError(CodeInvalidRequest, http.StatusMethodNotAllowed, "仅接受 GET"))
+		return
+	}
+	jobID := r.PathValue("jobID")
+	if jobID == "" {
+		writeErr(w, NewProviderError(CodeInvalidRequest, http.StatusBadRequest, "缺少 jobID 路径参数"))
+		return
+	}
+	gp, pe := h.graphProviderOrErr(r)
+	if pe != nil {
+		writeErr(w, pe)
+		return
+	}
+	status, result, err := gp.PollGraphJSON(r.Context(), jobID)
+	if status == "" {
+		// 未取到任务态 ⇒ 轮询调用本身失败（pending-credential / 上游错误等），走归一化错误。
+		writeErr(w, ParseError(err))
+		return
+	}
+	// status 非空 ⇒ 任务态已取到（含 failed）：wire 200 呈现，err 非 nil 为任务级失败详情
+	// 写入 error 字段（failed 不得包装成 done，任务失败不是请求错误）。
+	resp := graphResultResp{JobID: jobID, Status: status, Result: result}
+	if err != nil {
+		if pe := ParseError(err); pe != nil {
+			resp.Error = pe.Message
+		}
+	}
+	writeJSON(w, resp)
 }
 
 // HandleModels GET /v1/confllm/models：聚合各上游模型 + 每家密态元数据（?provider= 过滤单家）。

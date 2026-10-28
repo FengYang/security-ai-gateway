@@ -345,6 +345,7 @@ const (
 	CodeInvalidRoutePolicy     = "invalid_route_policy"      // 非法 min_confidentiality_class（§7.6 QA2-20）
 	CodeNoProviderSatisfiesMin = "no_provider_satisfies_min" // 无候选满足 min（§7.6 QA2-21）
 	CodeInvalidSecretLiteral   = "invalid_secret_literal"    // 配置含字面量 key（§7.10 QA2-19）
+	CodeQuotaExceeded          = "quota_exceeded"            // 配额超限拒绝（策略层/上游共用；429）
 
 	// ---- 能力门禁错误码（P1-3）----
 	CodeUnsupportedCapability = "unsupported_capability" // 请求所需能力不被上游支持（如 tools/vision/thinking）
@@ -388,6 +389,22 @@ type ConfidentialLLMProvider interface {
 	ListModels(ctx context.Context) ([]ModelInfo, error)
 	Health(ctx context.Context) HealthStatus
 }
+
+// GraphProvider B 类任务式推理能力（可选接口，仅任务式 provider 实现）。
+// A 类 chat 式 provider 不实现；调用方经类型断言探测，未实现 → unsupported_capability。
+// 方法名刻意与 bclass 的 typed SubmitGraph/PollResult 区分（Go 同类型不能有同名异参方法）。
+type GraphProvider interface {
+	SubmitGraphJSON(ctx context.Context, spec json.RawMessage) (jobID string, err error)
+	PollGraphJSON(ctx context.Context, jobID string) (status string, result json.RawMessage, err error)
+}
+
+// 任务式状态常量（与 bclass.SFJobStatus 取值一致，wire 直接透传归一化状态）。
+const (
+	GraphStatusPending = "pending"
+	GraphStatusRunning = "running"
+	GraphStatusDone    = "done"
+	GraphStatusFailed  = "failed"
+)
 
 // ---------- Provider 可注入选项（QA-4 可注入抽象）----------
 

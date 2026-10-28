@@ -287,6 +287,10 @@ type modelRouteEntry struct {
 	ViaBroker         bool              `json:"viaBroker"`         // customUrl 指向 /llm-broker/（密态托管）
 	HasPlaintextToken bool              `json:"hasPlaintextToken"` // CR 仍存明文 apiTokens
 	Weight            int               `json:"weight"`            // 上游权重（多上游 failover）
+	// Mode D2 路由呈现：chat（缺省，ai-proxy chat 式）| job（任务式，confllm.GraphProvider）。
+	// mode="job" 的条目**不得进 chat 路由候选集**——chat/stream 侧已有 422 门禁兜底
+	//（rejectGraphProvider），目录标记供路由/前端排除用。推导见 model_catalog_confllm.go。
+	Mode string `json:"mode"`
 	// 密态 wire 7 字段（一等公民，缺省 unknown）：匿名嵌入 meta.WireMetadata → JSON 展平，
 	// 与 /v1/confllm/models 的 providerView / modelView 同款做法。
 	//

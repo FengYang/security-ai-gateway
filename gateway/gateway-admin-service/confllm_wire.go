@@ -121,7 +121,51 @@ func loadConfllmManagedOverrides() error {
 	return nil
 }
 
-// registerConfllmRoutes 注册密态推理数据面端点（薄接线，挂鉴权中间件）。
+// confllmRouteSpec /v1/confllm/* 路由注册表条目（D3 parity：策略链统一收口）。
+type confllmRouteSpec struct {
+	pattern string
+	rule    endpointRule
+	action  string
+	attach  func(h *confllm.ConfllmHandler) http.HandlerFunc
+}
+
+// confllmRouteSpecs /v1/confllm/* 路由注册表（D3 parity：8 条目 / 10 物理路径，全部经
+// confllmPolicy 收口——认证 → 授权 → 配额 → 审计 → 业务 handler，见 confllm_policy.go）。
+//
+// 标识提取：?provider= 与 /v1/confllm/{id}/... 两种（见 handler.go providerIDFromRequest）；
+// 与既有 trace 端点同构：固定路径与带 {id} 通配路径段数不同，ServeMux 不冲突。
+//
+// ⚠️ 路由坑（Go1.22+ ServeMux 注册期 panic）：GET /v1/confllm/graphs/{jobID}（4 段，
+// seg3=字面 graphs）与 POST /v1/confllm/{id}/graphs（4 段，seg4=字面 graphs）在请求
+// /v1/confllm/graphs/graphs 上重叠且互不更具体 → 若都不带方法前缀必 panic。新增 graphs
+// 四条**必须带方法前缀**（"POST /…"、"GET /…"）按方法树隔离；既有条目不带方法前缀照旧。
+// 注册后自查：10 物理路径互不冲突（不同段数 / 不同字面段 / 方法隔离）。
+var confllmRouteSpecs = []confllmRouteSpec{
+	// 既有 6 物理路径（chat×2 / stream×2 / models / health；路径不变，改为 confllmPolicy 包装）。
+	{"/v1/confllm/chat/completions", epConfllmInfer, auditActionConfllmChat,
+		func(h *confllm.ConfllmHandler) http.HandlerFunc { return h.HandleChat }},
+	{"/v1/confllm/{id}/chat/completions", epConfllmInfer, auditActionConfllmChat,
+		func(h *confllm.ConfllmHandler) http.HandlerFunc { return h.HandleChat }},
+	{"/v1/confllm/stream/chat/completions", epConfllmInfer, auditActionConfllmStream,
+		func(h *confllm.ConfllmHandler) http.HandlerFunc { return h.HandleStream }},
+	{"/v1/confllm/{id}/stream/chat/completions", epConfllmInfer, auditActionConfllmStream,
+		func(h *confllm.ConfllmHandler) http.HandlerFunc { return h.HandleStream }},
+	{"/v1/confllm/models", epConfllmRead, auditActionConfllmModels,
+		func(h *confllm.ConfllmHandler) http.HandlerFunc { return h.HandleModels }},
+	{"/v1/confllm/health", epConfllmRead, auditActionConfllmHealth,
+		func(h *confllm.ConfllmHandler) http.HandlerFunc { return h.HandleHealth }},
+	// 新增 4 条（D2 任务式 graphs；必须带方法前缀，见上方路由坑）。
+	{"POST /v1/confllm/graphs", epConfllmInfer, auditActionConfllmGraphSubmit,
+		func(h *confllm.ConfllmHandler) http.HandlerFunc { return h.HandleGraphSubmit }},
+	{"GET /v1/confllm/graphs/{jobID}", epConfllmInfer, auditActionConfllmGraphPoll,
+		func(h *confllm.ConfllmHandler) http.HandlerFunc { return h.HandleGraphResult }},
+	{"POST /v1/confllm/{id}/graphs", epConfllmInfer, auditActionConfllmGraphSubmit,
+		func(h *confllm.ConfllmHandler) http.HandlerFunc { return h.HandleGraphSubmit }},
+	{"GET /v1/confllm/{id}/graphs/{jobID}", epConfllmInfer, auditActionConfllmGraphPoll,
+		func(h *confllm.ConfllmHandler) http.HandlerFunc { return h.HandleGraphResult }},
+}
+
+// registerConfllmRoutes 注册密态推理数据面端点（薄接线；D3 parity 全部经 confllmPolicy 收口）。
 //
 // 路由（支持 ?provider= 与 /v1/confllm/{id}/... 两种标识提取，见 handler.go）：
 //
@@ -129,16 +173,16 @@ func loadConfllmManagedOverrides() error {
 //	POST /v1/confllm/stream/chat/completions    或 /v1/confllm/{id}/stream/chat/completions
 //	GET  /v1/confllm/models
 //	GET  /v1/confllm/health
+//	POST /v1/confllm/graphs                     或 /v1/confllm/{id}/graphs
+//	GET  /v1/confllm/graphs/{jobID}             或 /v1/confllm/{id}/graphs/{jobID}
 //
-// 与既有 trace 端点同构：固定路径与带 {id} 通配路径段数不同，ServeMux 不冲突。
-func registerConfllmRoutes(mux *http.ServeMux, cfg *config, h *confllm.ConfllmHandler) {
+// audit/quota 随策略链注入（adminAuditChain / billing 配额；nil = 对应能力未启用，
+// confllmPolicy 内可观测放行，绝不静默）。
+func registerConfllmRoutes(mux *http.ServeMux, cfg *config, h *confllm.ConfllmHandler, audit *adminAuditChain, quota confllmQuotaChecker) {
 	if h == nil {
 		return
 	}
-	mux.HandleFunc("/v1/confllm/chat/completions", authMiddleware(cfg, h.HandleChat))
-	mux.HandleFunc("/v1/confllm/{id}/chat/completions", authMiddleware(cfg, h.HandleChat))
-	mux.HandleFunc("/v1/confllm/stream/chat/completions", authMiddleware(cfg, h.HandleStream))
-	mux.HandleFunc("/v1/confllm/{id}/stream/chat/completions", authMiddleware(cfg, h.HandleStream))
-	mux.HandleFunc("/v1/confllm/models", authMiddleware(cfg, h.HandleModels))
-	mux.HandleFunc("/v1/confllm/health", authMiddleware(cfg, h.HandleHealth))
+	for _, rt := range confllmRouteSpecs {
+		mux.HandleFunc(rt.pattern, confllmPolicy(cfg, rt.rule, rt.action, audit, quota, rt.attach(h)))
+	}
 }

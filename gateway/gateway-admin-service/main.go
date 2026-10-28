@@ -302,8 +302,15 @@ func main() {
 
 	adminMux := buildAdminMux(cfg, sh, bh, mh, uh, ah, sch, cs, bih, bs.legacyPort)
 
-	// 密态推理数据面端点（T04）：/v1/confllm/*（薄接线，挂鉴权）。
-	registerConfllmRoutes(adminMux, cfg, confllmH)
+	// 密态推理数据面端点（T04 + D3 parity）：/v1/confllm/* 全部经 confllmPolicy 收口
+	//（认证 → 授权 → 配额 → 审计 → 业务 handler，K8 新入口与主链路同策略，见 confllm_policy.go）。
+	// 配额查询器 = billing 检测器（QuotaRemaining）；billing 未启用 / 检测器缺失 → nil
+	//（策略链内可观测放行 quota_unenforced，绝不静默）。
+	var confllmQuota confllmQuotaChecker
+	if bih != nil && bih.anomaly != nil {
+		confllmQuota = bih.anomaly
+	}
+	registerConfllmRoutes(adminMux, cfg, confllmH, auditChain, confllmQuota)
 
 	// P2-4 T-2：集群注册 API（注册/列表/心跳/审批/摘除）。
 	// 存储：PG 时与租户库同库（多集群共享），SQLite 时独立文件；两者都未配置 → 不启用（默认零变化）。

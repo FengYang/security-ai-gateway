@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"security-ai-gateway/gateway/confllm-adapter"
+	"security-ai-gateway/gateway/confllm-adapter/meta"
 )
 
 // SFFlowSpec 隐语计算图定义（任务式输入）。
@@ -156,7 +157,7 @@ func NewSecretFlowProvider(id string, bridge *SFBridge) *SecretFlowProviderImpl 
 	return &SecretFlowProviderImpl{
 		id: id,
 		meta: confllm.ConfidentialityMeta{
-			ConfidentialityClass: "B", // B 类：密码学密态推理（FHE/MPC/ZK）
+			ConfidentialityClass: meta.ClassB, // B 类：密码学密态推理（FHE/MPC/ZK），K7 单一事实源
 			Attestation:          "unknown",
 			DataRetention:        "unknown",
 			Deployment:           "self-hosted-cvm",
@@ -173,6 +174,7 @@ func NewSecretFlowProvider(id string, bridge *SFBridge) *SecretFlowProviderImpl 
 var (
 	_ confllm.ConfidentialLLMProvider = (*SecretFlowProviderImpl)(nil)
 	_ SecretFlowProvider              = (*SecretFlowProviderImpl)(nil)
+	_ confllm.GraphProvider           = (*SecretFlowProviderImpl)(nil)
 )
 
 func (p *SecretFlowProviderImpl) ID() string                            { return p.id }
@@ -183,11 +185,43 @@ func (p *SecretFlowProviderImpl) SubmitGraph(ctx context.Context, spec *SFFlowSp
 func (p *SecretFlowProviderImpl) PollResult(ctx context.Context, jobID string) (*SFResult, error) {
 	return p.bridge.PollResult(ctx, jobID)
 }
+
+// SubmitGraphJSON GraphProvider（JSON 形态）：图规格 JSON → typed SubmitGraph，返回 jobID。
+// 非法 JSON → 归一化 invalid_request（解析失败绝不伪装成上游错误）。
+func (p *SecretFlowProviderImpl) SubmitGraphJSON(ctx context.Context, spec json.RawMessage) (string, error) {
+	var fs SFFlowSpec
+	if err := json.Unmarshal(spec, &fs); err != nil {
+		return "", confllm.NewProviderError(confllm.CodeInvalidRequest, http.StatusBadRequest, "图规格 JSON 非法，无法解析为 SFFlowSpec")
+	}
+	job, err := p.SubmitGraph(ctx, &fs)
+	if err != nil {
+		return "", err
+	}
+	return job.JobID, nil
+}
+
+// PollGraphJSON GraphProvider（JSON 形态）：typed PollResult → (归一化状态, 输出, 失败详情)。
+//
+// 失败语义（绝不伪造成功）：res.Error 非空 ⇒ 状态强制归一为 failed，失败详情经 err
+// （*ProviderError，message=res.Error）返回，Output 仍随 result 返回（部分失败可能有中间输出）；
+// 绝不把失败包装成 done。调用方（handler）据「status 是否为空」区分两类失败：
+//   - status == "" ⇒ 轮询调用本身失败（pending-credential / 上游错误 / 未知 job）→ writeErr 归一化；
+//   - status != "" ⇒ 任务态已取到（含 failed）→ 200 wire，err 非 nil 时其 message 写入 error 字段。
+func (p *SecretFlowProviderImpl) PollGraphJSON(ctx context.Context, jobID string) (string, json.RawMessage, error) {
+	res, err := p.PollResult(ctx, jobID)
+	if err != nil {
+		return "", nil, err
+	}
+	if res.Error != "" {
+		return string(SFJobFailed), res.Output, confllm.NewProviderError(confllm.CodeUpstreamError, http.StatusBadGateway, res.Error)
+	}
+	return string(res.Status), res.Output, nil
+}
 func (p *SecretFlowProviderImpl) Health(ctx context.Context) confllm.HealthStatus {
 	if p.bridge.endpoint == "" && p.bridge.binary == "" {
-		return confllm.HealthStatus{Ready: false, PendingCredential: true, Detail: "隐语桥接未配置", MinConfidentialityClass: "B"}
+		return confllm.HealthStatus{Ready: false, PendingCredential: true, Detail: "隐语桥接未配置", MinConfidentialityClass: meta.ClassB}
 	}
-	return confllm.HealthStatus{Ready: true, MinConfidentialityClass: "B"}
+	return confllm.HealthStatus{Ready: true, MinConfidentialityClass: meta.ClassB}
 }
 
 // ---------- 统一契约（ConfidentialLLMProvider）适配 ----------

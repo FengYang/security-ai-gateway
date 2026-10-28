@@ -55,6 +55,9 @@ type billingHandler struct {
 	quotaApplyBudget time.Duration      // M6 回读确认预算（零值 = m6ApplyWithin；测试可缩短）
 	sched            *billing.Scheduler // nil = 后台调度未启用
 	backfillDays     int                // S-8 回看窗口（日志用）
+	// anomaly S-5 异常检测器（恒建，构造无副作用）：既供调度任务（S-5/S-7），
+	// 也作为 /v1/confllm/* 配额门禁的唯一查询器（D3 parity：confllmQuotaChecker）。
+	anomaly *billing.AnomalyDetector
 }
 
 // StartSchedulers 启动后台任务（S-8 缺口扫描：启动时立即一次 + 每日一次）。
@@ -170,10 +173,14 @@ func newBillingHandler(cfg *billing.BillingConfig, audit *adminAuditChain) (*bil
 	// 说明：S-2「日结」由 S-8 覆盖（缺口扫描每日执行，等价于"确保截至昨日已出账"）。
 	// L2 对账（reconciler）在配置了计量令牌时激活：出账门禁（diff>0 → 不出账，fail-closed）+
 	// S-5 规则②（reconcile_diff）；未配置令牌时降级为 nil（门禁与规则②跳过）。
+	// S-5 检测器恒建（构造无副作用）：既供调度任务（S-5/S-7），也作为
+	// /v1/confllm/* 配额门禁查询器（D3 parity，confllmQuotaChecker = QuotaRemaining）。
+	det := billing.NewAnomalyDetectorForStore(store, priceProvider, rec, cfg.Anomaly,
+		func() int64 { return time.Now().UnixNano() })
+	det.SetFreezeLinker(h.freeze) // S-5 critical 异常 → 冻结（§6.10.1）
+	h.anomaly = det
+
 	if cfg.Schedule.Enabled {
-		det := billing.NewAnomalyDetectorForStore(store, priceProvider, rec, cfg.Anomaly,
-			func() int64 { return time.Now().UnixNano() })
-		det.SetFreezeLinker(h.freeze) // S-5 critical 异常 → 冻结（§6.10.1）
 		// 告警外部交付（Webhook；空 URL → nil 降级）：S-7 余额 + S-9 到期共用
 		alertSink := billing.NewWebhookAlertSink(cfg.Secrets.AlertWebhookURL, 10*time.Second)
 		svc.SetAlertSink(alertSink)

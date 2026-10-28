@@ -26,6 +26,7 @@ const (
 	domBilling    = "billing"    // 账单/套餐/用量
 	domTenant     = "tenant"     // 租户/账号
 	domConfig     = "config"     // 模型目录/密码 profile/系统配置/变更复核
+	domInference  = "inference"  // 密态推理调用（chat/stream/任务式）
 )
 
 // 动作（详设 §6.2）。
@@ -180,6 +181,15 @@ var (
 	// /v1/adminext/mfa/*（sec:write；各管理角色本人第二因素，第一因素已过）。
 	epMFA = endpointRule{domSec, actWrite,
 		[]string{roleSystemAdmin, roleSecAdmin, roleAuditAdmin}, 0}
+
+	// /v1/confllm/* 推理调用（chat/stream/graphs 提交与轮询；D3 parity：策略链统一收口）。
+	// 过渡期语义：调用方身份为控制台会话（issuer=higress-console），故取 admin 族
+	//（legacy admin 经 roleAllowsRule 自动并集）；企业开发者身份模型随 D3 P2 数据面
+	// 迁移升级（见架构设计 §8.7 决策记录）。MFA=0：推理属高频数据面调用，非配置变更。
+	epConfllmInfer = endpointRule{domInference, actWrite, []string{roleSystemAdmin, roleSecAdmin}, 0}
+
+	// /v1/confllm/models、/v1/confllm/health（数据面目录/健康，已认证可读，与 epEcho 同口径）。
+	epConfllmRead = endpointRule{domConfig, actRead, []string{roleAny}, 0}
 )
 
 // roleAllowsRule 端点级角色判定：目标角色列 + 过渡期 admin 兼容并集 + break_glass。
@@ -259,6 +269,8 @@ var authzMatrix = map[string]roleMatrix{
 		domBilling:    {actRead: true, actWrite: true, actExport: true},
 		domTenant:     {actRead: true, actWrite: true, actExport: true},
 		domConfig:     {actRead: true, actWrite: true, actExport: true},
+		// domInference（D3 parity）：write = 推理调用（chat/stream/graphs，epConfllmInfer）。
+		domInference: {actRead: true, actWrite: true},
 	},
 	roleSecAdmin: {
 		domAudit:      {actRead: true},
@@ -267,6 +279,7 @@ var authzMatrix = map[string]roleMatrix{
 		domBilling:    {actRead: true},
 		domTenant:     {actRead: true},
 		domConfig:     {actRead: true}, // 安全项可写（详设 §6.2 角色表注）
+		domInference:  {actRead: true, actWrite: true},
 	},
 	roleAuditAdmin: {
 		domAudit:      {actRead: true, actWrite: true, actExport: true},
@@ -275,6 +288,7 @@ var authzMatrix = map[string]roleMatrix{
 		domBilling:    {actRead: true},
 		domTenant:     {actRead: true},
 		domConfig:     {actRead: true},
+		domInference:  {actRead: true},
 	},
 	roleAuditor: {
 		domAudit:      {actRead: true, actExport: true},
@@ -283,8 +297,9 @@ var authzMatrix = map[string]roleMatrix{
 		// domBilling 不含（2026-10-09 修正 F-1）：按 §6.2 映射表，用量/账单读归
 		// system_admin / audit_admin / billing_reader；原矩阵误含 billing:read，
 		// 与端点规则 epUsageRead 不一致，按改造规则②以表为准回改矩阵。
-		domTenant: {actRead: true},
-		domConfig: {actRead: true},
+		domTenant:    {actRead: true},
+		domConfig:    {actRead: true},
+		domInference: {actRead: true},
 	},
 	roleBillingReader: {
 		domBilling: {actRead: true},

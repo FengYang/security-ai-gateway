@@ -23,12 +23,26 @@ import (
 	"security-ai-gateway/gateway/confllm-adapter/meta"
 )
 
-// enrichWithConfidentiality 富化模型目录行的密态四字段（§7.5 / §7.11 B2）。
+// D2 目录 mode 取值（modelRouteEntry.Mode）。
+const (
+	catalogModeChat = "chat" // 缺省：chat/stream 式（ai-proxy 老 CR 同口径）
+	catalogModeJob  = "job"  // 任务式（confllm.GraphProvider；不得进 chat 路由候选集）
+)
+
+// enrichWithConfidentiality 富化模型目录行的密态四字段（§7.5 / §7.11 B2）与 D2 mode。
 //
 // 纯只读：仅读 confllm 注册表，不触发任何网络调用；匹配依据 = 运行期实例 ID
 // 与 CR provider id 对齐（由 confllm_wire.go 的 ADMIN_CONFLLM_PROVIDERS_JSON 装配）。
+//
+// D2 mode 推导：匹配到的 confllm provider 实现 confllm.GraphProvider（类型断言）
+// → "job"（任务式）；否则 / 未匹配 / 老 CR → "chat"（老 CR 是 ai-proxy chat 式，语义正确）。
+// mode="job" 的条目**不得进 chat 路由候选集**——chat/stream 侧已有 422 门禁兜底
+// （rejectGraphProvider），目录标记供路由/前端排除用。
 func enrichWithConfidentiality(entry *modelRouteEntry) {
 	def := meta.DefaultMeta()
+
+	// D2 mode 缺省 chat（未匹配 / 老 CR 语义正确）。
+	entry.Mode = catalogModeChat
 
 	// 内部 meta 起点：老 CR 可能已声明部分字段（如 class=C），未声明的归并为 unknown。
 	cur := meta.ConfidentialityMeta{
@@ -46,10 +60,14 @@ func enrichWithConfidentiality(entry *modelRouteEntry) {
 
 	p, ok := confllm.GlobalRegistry.Lookup(entry.Provider)
 	if !ok {
-		// 老 CR 无密态厂商匹配 → 保持 unknown（wire 举证字段已置缺省）。
+		// 老 CR 无密态厂商匹配 → 保持 unknown（wire 举证字段已置缺省）；mode 保持 chat。
 		entry.WireMetadata = meta.ToWireMetadata(cur, connectivity)
 		entry.Verification = string(cur.Verification)
 		return
+	}
+	// D2：任务式 provider（B 类 GraphProvider）标记 mode=job。
+	if _, isGraph := p.(confllm.GraphProvider); isGraph {
+		entry.Mode = catalogModeJob
 	}
 	m := p.Metadata()
 	cur.ConfidentialityClass = nzMetaStr(m.ConfidentialityClass, def.ConfidentialityClass)

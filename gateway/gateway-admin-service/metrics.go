@@ -12,10 +12,12 @@
 // gateway_admin_audit_events                        审计链当前事件数（G1）
 // gateway_admin_broker_audit_write_failed_total     审计链写入失败计数（G1；fail-closed 拒绝变更）
 // gateway_cryptop_profile_switch_total{from,to}    密码 profile/mask_prg 切换计数（P0-4 §4.3.10，#12）
+// gateway_admin_confllm_quota_unenforced_total{reason} /v1/confllm/* 配额未强制放行计数（D3 parity）
 //
 // 跨源指标（P0-4 §10.1 双读计数）：
 // cryptop_dualread_total{artifact}  用非主 profile 算法成功解算 wire/hash/signature 次数
-//   artifact ∈ {audit, billing}（本进程发射）；enclave 由 tee-infer 发射
+//
+//	artifact ∈ {audit, billing}（本进程发射）；enclave 由 tee-infer 发射
 package main
 
 import (
@@ -37,12 +39,15 @@ type adminMetrics struct {
 	profileSwitch   map[string]int64 // #12：key = from|to（P0-4 §4.3.10）
 	dualRead        map[string]int64 // 跨源：artifact（audit/billing）
 	partitionOps    map[string]int64 // 分区编排：key = op|result（P2-3 T-4）
+	// confllmQuotaUnenforced D3 parity 配额未强制计数：reason ∈ checker_disabled/
+	// tenant_empty/no_quota_data（有限枚举，无基数爆炸）。
+	confllmQuotaUnenforced map[string]int64
 }
 
 var metrics = newAdminMetrics()
 
 func newAdminMetrics() *adminMetrics {
-	return &adminMetrics{broker: map[string]int64{}, profileSwitch: map[string]int64{}, dualRead: map[string]int64{}, partitionOps: map[string]int64{}}
+	return &adminMetrics{broker: map[string]int64{}, profileSwitch: map[string]int64{}, dualRead: map[string]int64{}, partitionOps: map[string]int64{}, confllmQuotaUnenforced: map[string]int64{}}
 }
 
 func (m *adminMetrics) request() {
@@ -106,6 +111,14 @@ func (m *adminMetrics) incDualRead(artifact string) {
 func (m *adminMetrics) incPartitionOp(op, result string) {
 	m.mu.Lock()
 	m.partitionOps[op+"|"+result]++
+	m.mu.Unlock()
+}
+
+// incConfllmQuotaUnenforced 记录一次 /v1/confllm/* 配额未强制放行（D3 parity 可观测）。
+// reason ∈ {checker_disabled, tenant_empty, no_quota_data}（有限枚举）。
+func (m *adminMetrics) incConfllmQuotaUnenforced(reason string) {
+	m.mu.Lock()
+	m.confllmQuotaUnenforced[reason]++
 	m.mu.Unlock()
 }
 
@@ -173,6 +186,19 @@ func (m *adminMetrics) render(w io.Writer) {
 			parts := strings.SplitN(k, "|", 2)
 			fmt.Fprintf(w, "gateway_admin_partition_ops_total{op=%q,result=%q} %d\n",
 				parts[0], parts[1], m.partitionOps[k])
+		}
+	}
+
+	// confllm 配额未强制：gateway_admin_confllm_quota_unenforced_total{reason}（D3 parity）
+	if len(m.confllmQuotaUnenforced) > 0 {
+		fmt.Fprintf(w, "# HELP gateway_admin_confllm_quota_unenforced_total /v1/confllm/* 配额未强制放行计数（D3 parity 可观测）\n# TYPE gateway_admin_confllm_quota_unenforced_total counter\n")
+		cqKeys := make([]string, 0, len(m.confllmQuotaUnenforced))
+		for k := range m.confllmQuotaUnenforced {
+			cqKeys = append(cqKeys, k)
+		}
+		sort.Strings(cqKeys)
+		for _, k := range cqKeys {
+			fmt.Fprintf(w, "gateway_admin_confllm_quota_unenforced_total{reason=%q} %d\n", k, m.confllmQuotaUnenforced[k])
 		}
 	}
 }

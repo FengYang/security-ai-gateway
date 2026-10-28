@@ -10,6 +10,9 @@ package bclass
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	confllm "security-ai-gateway/gateway/confllm-adapter"
@@ -97,5 +100,110 @@ func TestSecretFlowUnifiedContractKeepsClassB(t *testing.T) {
 	h := unified.Health(ctx)
 	if !h.PendingCredential || h.Ready {
 		t.Fatalf("未配置桥接的 Health 应 pending-credential：%+v", h)
+	}
+}
+
+// TestSecretFlowGraphProviderParity 【D2】GraphProvider JSON 形态与 typed 方法行为一致。
+//
+// 覆盖：
+//   - 桥接未配置（endpoint/binary 皆空）→ SubmitGraphJSON 与 typed SubmitGraph 同为
+//     pending-credential 语义；
+//   - 非法 JSON → 归一化 invalid_request（绝不伪装成上游错误）；
+//   - httptest 桥接（离线 loopback，P0-5 允许）：提交 parity（同 jobID）、done 态
+//     状态/output 与 typed PollResult 一致；
+//   - failed 语义（绝不伪造成功）：res.Error 非空 ⇒ 状态归一 failed、失败详情经 err、
+//     部分输出仍随 result 返回。
+func TestSecretFlowGraphProviderParity(t *testing.T) {
+	ctx := context.Background()
+
+	// ① 桥接未配置：typed 与 JSON 形态同为 pending-credential。
+	p := NewSecretFlowProvider("sf-json", NewSFBridge("", "", nil))
+	var gp confllm.GraphProvider = p
+	spec := json.RawMessage(`{"name":"g","dag":{}}`)
+
+	if _, err := p.SubmitGraph(ctx, &SFFlowSpec{Name: "g", DAG: json.RawMessage(`{}`)}); err == nil {
+		t.Fatal("typed SubmitGraph 未配置桥接应报错")
+	} else if pe := confllm.ParseError(err); pe.Code != confllm.CodePendingCredential {
+		t.Fatalf("typed SubmitGraph 错误码=%q 期望 pending-credential", pe.Code)
+	}
+	_, err := gp.SubmitGraphJSON(ctx, spec)
+	if err == nil {
+		t.Fatal("SubmitGraphJSON 未配置桥接应报错")
+	}
+	if pe := confllm.ParseError(err); pe.Code != confllm.CodePendingCredential {
+		t.Fatalf("SubmitGraphJSON 错误码=%q 期望 pending-credential（与 typed 一致）", pe.Code)
+	}
+
+	// ② 非法 JSON → 归一化 invalid_request。
+	_, err = gp.SubmitGraphJSON(ctx, json.RawMessage(`{invalid`))
+	if err == nil {
+		t.Fatal("非法 JSON 应报错")
+	}
+	if pe := confllm.ParseError(err); pe.Code != confllm.CodeInvalidRequest {
+		t.Fatalf("非法 JSON 错误码=%q 期望 invalid_request", pe.Code)
+	}
+
+	// ③ httptest 桥接：parity + failed 语义（仅 loopback，无真实网络）。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/graphs":
+			_, _ = w.Write([]byte(`{"job_id":"j-77"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/jobs/j-77":
+			_, _ = w.Write([]byte(`{"jobId":"j-77","status":"done","output":{"answer":42}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/jobs/j-fail":
+			_, _ = w.Write([]byte(`{"jobId":"j-fail","status":"failed","output":{"partial":1},"error":"task exploded"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p2 := NewSecretFlowProvider("sf-json2", NewSFBridge(srv.URL, "", nil))
+	var gp2 confllm.GraphProvider = p2
+
+	// 提交 parity：JSON 与 typed 同 jobID。
+	job, err := p2.SubmitGraph(ctx, &SFFlowSpec{Name: "g", DAG: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := gp2.SubmitGraphJSON(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.JobID != "j-77" || jobID != job.JobID {
+		t.Fatalf("SubmitGraphJSON jobID=%q typed=%q 期望同为 j-77", jobID, job.JobID)
+	}
+
+	// done parity：状态与 output 与 typed PollResult 一致。
+	status, out, err := gp2.PollGraphJSON(ctx, "j-77")
+	if err != nil || status != confllm.GraphStatusDone {
+		t.Fatalf("done 态：status=%q err=%v 期望 done/nil", status, err)
+	}
+	res, err := p2.PollResult(ctx, "j-77")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != SFJobDone || string(res.Output) != string(out) {
+		t.Fatalf("PollGraphJSON 与 typed PollResult 不一致：typed=%+v jsonOut=%s", res, out)
+	}
+	var outObj map[string]any
+	_ = json.Unmarshal(out, &outObj)
+	if v, _ := outObj["answer"].(float64); v != 42 {
+		t.Fatalf("done 输出应含 answer=42：%v", outObj)
+	}
+
+	// failed 语义（绝不伪造成功）：status 归一 failed、err 携带 res.Error、部分输出随 result。
+	status, out, err = gp2.PollGraphJSON(ctx, "j-fail")
+	if status != confllm.GraphStatusFailed {
+		t.Fatalf("failed 态 status=%q 期望 failed（绝不伪造成功，不得包装成 done）", status)
+	}
+	if err == nil {
+		t.Fatal("failed 态应携带失败详情 err")
+	}
+	if pe := confllm.ParseError(err); pe.Code != confllm.CodeUpstreamError || pe.Message != "task exploded" {
+		t.Fatalf("failed 详情不符：%+v", pe)
+	}
+	if !strings.Contains(string(out), "partial") {
+		t.Fatalf("failed 态部分输出应随 result 返回：%s", out)
 	}
 }
