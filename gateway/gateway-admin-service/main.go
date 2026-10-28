@@ -69,6 +69,18 @@ func claimsFrom(ctx context.Context) *claims {
 	return c
 }
 
+// auditJobCounter 是 billing.JobAuditCounter 的薄适配器：把 P2-5 job 计量对账计数
+// 委托给 adminAuditChain —— 按 tenant / action=confllm_graph_submit / 时间窗统计 graph
+// 提交事件数，与账本 job 入账数做零容差比对。审计链未启用时不应构造此适配器
+// （main 中已用 auditChain != nil 守卫，避免把对账错误地判定为 0 提交）。
+type auditJobCounter struct {
+	chain *adminAuditChain
+}
+
+func (a *auditJobCounter) CountAction(ctx context.Context, tenant, action string, fromNs, toNs int64) (int64, error) {
+	return a.chain.CountAction(ctx, tenant, action, fromNs, toNs)
+}
+
 // handleHealthz 存活探针。
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -344,10 +356,12 @@ func main() {
 	if bih != nil && bih.svc != nil {
 		confllmJobMeter = bih.svc
 	}
-	// TODO（对账，本任务不阻塞）：billing.JobAuditCounter 适配器（按 tenant/action=confllm_graph_submit/
-	// 时间窗统计 adminAuditChain 事件数，供计量对账）待接入。当前 adminAuditChain 仅提供
-	// list(limit,offset) 全量枚举，无 action/tenant/时间窗计数 API，故本任务不硬造；
-	// 后续需在 audit.go 暴露 CountAction 类接口后，于此处 `bih.svc.SetJobAudit(adapter)`。
+	// P2-5 job 计量对账：审计链计数适配器。
+	// 仅当 billing 与审计链**同时**启用时才注入 —— 任一方未启用 → jobAudit 保持 nil，
+	// billing.ReconcileJobs 跳过对账（fail-safe，不误判 0 提交）。
+	if bih != nil && bih.svc != nil && auditChain != nil {
+		bih.svc.SetJobAudit(&auditJobCounter{chain: auditChain})
+	}
 	// 模型级 ACL（tenant×model）：从环境变量注入允许清单；未配置 → nil（不启用，向后兼容）。
 	confllmGuard := buildConfllmModelGuard(os.Getenv("ADMIN_CONFLLM_MODEL_ACL_JSON"))
 	registerConfllmRoutes(adminMux, cfg, confllmH, auditChain, confllmQuota, confllmJobMeter, confllmGuard)

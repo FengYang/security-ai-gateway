@@ -7,12 +7,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newAuditTestChain 构造指向临时目录的审计链。
@@ -29,6 +31,60 @@ func newAuditTestChain(t *testing.T, anchor bool) *adminAuditChain {
 	}
 	t.Cleanup(func() { _ = c.Close() })
 	return c
+}
+
+// TestAdminAuditChainCountAction 验证 P2-5 job 对账计数：Tenant/Action 精确匹配 +
+// 时间窗闭区间过滤；空 action 不退化成全量；nil 链 fail-safe 返回 (0, nil)。
+func TestAdminAuditChainCountAction(t *testing.T) {
+	c := newAuditTestChain(t, false)
+	now := time.Now().UnixNano()
+	hour := int64(time.Hour)
+
+	append := func(tenant, action string) {
+		t.Helper()
+		if err := c.append(adminAuditEvent{Tenant: tenant, Action: action}); err != nil {
+			t.Fatalf("append(%s,%s): %v", tenant, action, err)
+		}
+	}
+	append("t1", "confllm_graph_submit")
+	append("t1", "confllm_graph_submit")
+	append("t1", "other_action")
+	append("t2", "confllm_graph_submit")
+
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		tenant string
+		action string
+		fromNs int64
+		toNs   int64
+		want   int64
+	}{
+		{"t1 graph_submit 全窗口", "t1", "confllm_graph_submit", now - hour, now + hour, 2},
+		{"t2 graph_submit 全窗口", "t2", "confllm_graph_submit", now - hour, now + hour, 1},
+		{"t1 other_action", "t1", "other_action", now - hour, now + hour, 1},
+		{"空 action 精确匹配（不退化全量）", "t1", "", now - hour, now + hour, 0},
+		{"未来窗口排除（Timestamp<=toNs）", "t1", "confllm_graph_submit", now + hour, now + 2*hour, 0},
+		{"过去窗口排除（Timestamp>=fromNs）", "t1", "confllm_graph_submit", now - 2*hour, now - hour, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := c.CountAction(ctx, tc.tenant, tc.action, tc.fromNs, tc.toNs)
+			if err != nil {
+				t.Fatalf("CountAction: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("tenant=%q action=%q 期望 %d 实得 %d", tc.tenant, tc.action, tc.want, got)
+			}
+		})
+	}
+
+	// nil 链 fail-safe：返回 (0, nil)，使对账跳过而非误判。
+	var nilChain *adminAuditChain
+	n, err := nilChain.CountAction(ctx, "t1", "confllm_graph_submit", 0, 0)
+	if err != nil || n != 0 {
+		t.Fatalf("nil 链应返回 (0, nil)，实得 (%d, %v)", n, err)
+	}
 }
 
 func TestAdminAuditChainUnsetReturnsNil(t *testing.T) {

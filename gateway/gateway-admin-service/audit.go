@@ -24,6 +24,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -380,6 +381,27 @@ func (c *adminAuditChain) list(limit, offset int) ([]adminAuditEvent, int) {
 		out = append(out, c.events[i])
 	}
 	return out, total
+}
+
+// CountAction 统计某租户某动作在 [fromNs, toNs] 时间窗口（UTC 纳秒，闭区间）内的事件数。
+//
+// 用途：P2-5 job 计量对账（零容差）—— 账本 job 入账数 vs 审计链 graph 提交事件数。
+// 匹配规则：Tenant 与 Action 精确相等；时间戳闭区间包含 [fromNs, toNs]。
+// tenant/action 为空串时按"精确等于空串"匹配，不退化成全量，避免误对账。
+// 审计链未启用（nil）→ 返回 (0, nil)：调用方 billing.ReconcileJobs 据此跳过对账。
+func (c *adminAuditChain) CountAction(_ context.Context, tenant, action string, fromNs, toNs int64) (int64, error) {
+	if c == nil {
+		return 0, nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var n int64
+	for _, e := range c.events {
+		if e.Tenant == tenant && e.Action == action && e.Timestamp >= fromNs && e.Timestamp <= toNs {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // lastHash 返回当前链尾哈希（空链 = 空串）。导出/状态视图用。
