@@ -10,9 +10,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	confllm "security-ai-gateway/gateway/confllm-adapter"
@@ -23,6 +25,15 @@ import (
 type confllmQuotaChecker interface {
 	QuotaRemaining(tenant, day string) (float64, bool)
 }
+
+// confllmJobMeterer job 计量入口；*billing.BillingService 实现（IngestJobUsage）。
+// nil = 未启用（跳过计量，可观测，绝不静默）。
+type confllmJobMeterer interface {
+	IngestJobUsage(ctx context.Context, tenant, modelKey, day, clusterID, eventKey string) error
+}
+
+// confllmModelGuard 模型级 ACL（tenant×model）。nil = 未启用（放行，向后兼容）。
+type confllmModelGuard func(tenant, modelKey string) bool
 
 // confllm 审计动作常量（D3 parity；只记调用元数据，绝不记请求/响应体）。
 const (
@@ -40,7 +51,7 @@ const (
 //
 // 授权复用端点规则表（authz.go requireRule，授权唯一事实源）；配额复用 billing
 // 配额查询（confllmQuotaChecker）；审计复用 adminAuditChain（G1 链）。
-func confllmPolicy(cfg *config, rule endpointRule, action string, audit *adminAuditChain, quota confllmQuotaChecker, next http.HandlerFunc) http.HandlerFunc {
+func confllmPolicy(cfg *config, rule endpointRule, action string, audit *adminAuditChain, quota confllmQuotaChecker, jobMeter confllmJobMeterer, guard confllmModelGuard, next http.HandlerFunc) http.HandlerFunc {
 	return authMiddleware(cfg, func(w http.ResponseWriter, r *http.Request) {
 		if !requireRule(w, r, rule) {
 			return
@@ -48,7 +59,11 @@ func confllmPolicy(cfg *config, rule endpointRule, action string, audit *adminAu
 		if !confllmQuotaGate(w, r, quota) {
 			return
 		}
-		confllmAuditWrap(action, audit, next)(w, r)
+		// 模型级 ACL（tenant×model）：先鉴权授权配额，再 ACL，最后审计+业务（fail-closed）。
+		if !confllmModelGuardCheck(w, r, guard) {
+			return
+		}
+		confllmAuditWrap(action, audit, jobMeter, next)(w, r)
 	})
 }
 
@@ -89,6 +104,59 @@ func confllmQuotaGate(w http.ResponseWriter, r *http.Request, quota confllmQuota
 	return true
 }
 
+// confllmReservedTail 固定端段（非 provider 标识）：出现即表示「未指定 provider/model」。
+// 例：/v1/confllm/chat/completions 中的 chat 是动词，不是 model 标识；graphs 同理。
+var confllmReservedTail = map[string]bool{"chat": true, "models": true, "health": true, "graphs": true}
+
+// confllmModelKey 从请求解析模型标识（tenant×model ACL 的 model 维度）。
+// 镜像 handler.go providerIDFromRequest：?provider= 优先；否则 /v1/confllm/{id}/... 取
+// parts[2]，但 reserved tail 段（chat/models/health/graphs）视为未指定 → 返回 ""（健康探测等不拦截）。
+func confllmModelKey(r *http.Request) string {
+	if id := r.URL.Query().Get("provider"); id != "" {
+		return id
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "v1" && parts[1] == "confllm" {
+		if confllmReservedTail[parts[2]] {
+			return ""
+		}
+		return parts[2]
+	}
+	return ""
+}
+
+// confllmModelGuardCheck 模型级 ACL（tenant×model）。guard==nil → 放行（未启用，向后兼容）。
+// 无法解析模型（如 /health）→ 不拦截（健康探测等）；不在允许清单 → 403（fail-closed，
+// 不暴露"存在但无权限"的细节）。
+func confllmModelGuardCheck(w http.ResponseWriter, r *http.Request, guard confllmModelGuard) bool {
+	if guard == nil {
+		return true
+	}
+	tenant := ""
+	if c := claimsFrom(r.Context()); c != nil {
+		tenant = c.Tenant
+	}
+	model := confllmModelKey(r)
+	if model == "" {
+		return true // 无法解析模型（如 /health）→ 不拦截
+	}
+	if !guard(tenant, model) {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": map[string]any{"code": "model_access_denied", "message": "该租户无此模型访问权限"},
+		})
+		return false
+	}
+	return true
+}
+
+// tenantOf 从请求上下文取租户（空串安全）。
+func tenantOf(r *http.Request) string {
+	if c := claimsFrom(r.Context()); c != nil {
+		return c.Tenant
+	}
+	return ""
+}
+
 // confllmAuditWrap 审计包装（D3 parity）：请求完成后向 adminAuditChain 追加一条事件
 // （参照 broker_secret.go 的 auditAppend 模式）。
 //
@@ -98,15 +166,28 @@ func confllmQuotaGate(w http.ResponseWriter, r *http.Request, quota confllmQuota
 // 与凭据写路径（G1 fail-closed：审计写失败拒绝变更）不同：推理调用在 handler 返回后
 // 已成既成事实，无法回滚响应，故写失败仅告警留痕（事件本身 Result 恒 "ok" =
 // 链上事件完整，调用结果状态码在 Detail 中如实记录）。
-func confllmAuditWrap(action string, audit *adminAuditChain, next http.HandlerFunc) http.HandlerFunc {
+func confllmAuditWrap(action string, audit *adminAuditChain, jobMeter confllmJobMeterer, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w}
+		// P2-5：注入 job 计量 carrier，业务 handler（graph 提交 202 前）回填后此处读出
+		//（HTTP 上下文不可变，须用可变载体向上游策略链回传）。
+		r, _ = confllm.WithConfllmJobCarrier(r)
 		next(rec, r)
 		status := rec.status
 		if status == 0 {
 			status = http.StatusOK
 		}
 		confllmAuditAppend(audit, confllmInferAuditEvent(r, action, status))
+		// P2-5 job 计量：graph 提交成功（202）后入账（响应已发出，失败仅告警，不回滚）。
+		if action == auditActionConfllmGraphSubmit && status == http.StatusAccepted {
+			if meta, ok := confllm.ConfllmJobMetaFrom(r); ok && jobMeter != nil {
+				if err := jobMeter.IngestJobUsage(context.Background(), tenantOf(r), meta.ProviderID,
+					time.Now().Format("2006-01-02"), "", "confllm-job-"+meta.JobID); err != nil {
+					log.Printf("[confllm] job 计量入账失败（仅告警，不影响响应）tenant=%s model=%s job=%s: %v",
+						tenantOf(r), meta.ProviderID, meta.JobID, err)
+				}
+			}
+		}
 	}
 }
 

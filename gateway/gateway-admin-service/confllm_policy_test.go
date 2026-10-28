@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -86,7 +87,7 @@ func TestConfllmPolicyParityNoRouteBypasses(t *testing.T) {
 	for i, rt := range confllmRouteSpecs {
 		fk := &fakeConfllmHandler{}
 		fakes[i] = fk
-		mux.HandleFunc(rt.pattern, confllmPolicy(cfg, rt.rule, rt.action, nil, nil, fk.ServeHTTP))
+		mux.HandleFunc(rt.pattern, confllmPolicy(cfg, rt.rule, rt.action, nil, nil, nil, nil, fk.ServeHTTP))
 	}
 
 	for i, rt := range confllmRouteSpecs {
@@ -151,7 +152,7 @@ func TestConfllmAuditRecordsActionWithoutBody(t *testing.T) {
 		method, path := confllmSpecMethodPath(rt)
 		t.Run(rt.action+" "+path, func(t *testing.T) {
 			fk := &fakeConfllmHandler{}
-			h := confllmPolicy(cfg, rt.rule, rt.action, chain, nil, fk.ServeHTTP)
+			h := confllmPolicy(cfg, rt.rule, rt.action, chain, nil, nil, nil, fk.ServeHTTP)
 
 			req := httptest.NewRequest(method, path, strings.NewReader(`{"prompt":"`+canary+`"}`))
 			req.Header.Set("Authorization", "Bearer "+confllmTestToken(t, "bob", roleSystemAdmin, "tenant-audit"))
@@ -210,7 +211,7 @@ func TestConfllmAuditRecordsActionWithoutBody(t *testing.T) {
 func TestRegisterConfllmRoutesWiresPolicy(t *testing.T) {
 	cfg := testCfg()
 	mux := http.NewServeMux()
-	registerConfllmRoutes(mux, cfg, newConfllmHandler(nil), nil, nil) // 注册期不 panic = 无冲突
+	registerConfllmRoutes(mux, cfg, newConfllmHandler(nil), nil, nil, nil, nil) // 注册期不 panic = 无冲突
 
 	for _, rt := range confllmRouteSpecs {
 		method, path := confllmSpecMethodPath(rt)
@@ -250,7 +251,7 @@ func TestConfllmQuotaGateStates(t *testing.T) {
 	call := func(t *testing.T, quota confllmQuotaChecker, tok string) (*httptest.ResponseRecorder, *fakeConfllmHandler) {
 		t.Helper()
 		fk := &fakeConfllmHandler{}
-		h := confllmPolicy(cfg, rt.rule, rt.action, nil, quota, fk.ServeHTTP)
+		h := confllmPolicy(cfg, rt.rule, rt.action, nil, quota, nil, nil, fk.ServeHTTP)
 		req := httptest.NewRequest(method, path, nil)
 		if tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
@@ -337,4 +338,140 @@ func TestConfllmQuotaGateStates(t *testing.T) {
 			t.Fatalf("quota_unenforced(no_quota_data) 应 +1，实际 +%d", got)
 		}
 	})
+}
+
+// fakeGraphProvider 离线假 GraphProvider（仅验证 graph 提交契约，不连真实服务）。
+// 实现 confllm.ConfidentialLLMProvider 全接口 + GraphProvider，供 job 计量测试走通真实
+// HandleGraphSubmit → 202 → job 元数据回填链路（P2-5）。
+type fakeGraphProvider struct{}
+
+func (fakeGraphProvider) ID() string                            { return "g1" }
+func (fakeGraphProvider) Region() confllm.Region                { return confllm.RegionDomestic }
+func (fakeGraphProvider) Metadata() confllm.ConfidentialityMeta { return confllm.ConfidentialityMeta{} }
+func (fakeGraphProvider) Capabilities() confllm.Capabilities    { return confllm.Capabilities{} }
+func (fakeGraphProvider) Chat(_ context.Context, _ *confllm.ChatRequest) (*confllm.ChatResponse, error) {
+	return &confllm.ChatResponse{}, nil
+}
+func (fakeGraphProvider) Stream(_ context.Context, _ *confllm.ChatRequest) (confllm.StreamReader, error) {
+	return nil, nil
+}
+func (fakeGraphProvider) ListModels(_ context.Context) ([]confllm.ModelInfo, error) { return nil, nil }
+func (fakeGraphProvider) Health(_ context.Context) confllm.HealthStatus {
+	return confllm.HealthStatus{Ready: true}
+}
+func (fakeGraphProvider) SubmitGraphJSON(_ context.Context, _ json.RawMessage) (string, error) {
+	return "job-test-123", nil
+}
+func (fakeGraphProvider) PollGraphJSON(_ context.Context, _ string) (string, json.RawMessage, error) {
+	return "done", json.RawMessage(`{}`), nil
+}
+
+// fakeConfllmJobMeterer job 计量桩（记录调用参数）。
+type fakeConfllmJobMeterer struct {
+	calls        int
+	lastTenant   string
+	lastModelKey string
+	lastEventKey string
+}
+
+func (f *fakeConfllmJobMeterer) IngestJobUsage(_ context.Context, tenant, modelKey, day, clusterID, eventKey string) error {
+	f.calls++
+	f.lastTenant, f.lastModelKey, f.lastEventKey = tenant, modelKey, eventKey
+	return nil
+}
+
+// TestConfllmModelACL_Deny 【模型 ACL fail-closed】guard 仅放行 tenant=t-ok：
+// ① tenant=other（合法角色）→ 403 + code=model_access_denied，业务 handler 不被调用；
+// ② tenant=t-ok（合法角色）→ 放行，业务 handler 被调用一次。
+// 注：模型键须可解析（?provider=g1 或 /v1/confllm/{id}/...）；/v1/confllm/chat/completions
+// 不带 provider 时 model 为 ""（reserved tail）→ 不触发 ACL（健康探测等不拦截）。
+func TestConfllmModelACL_Deny(t *testing.T) {
+	cfg := testCfg()
+	guard := func(tenant, modelKey string) bool { return tenant == "t-ok" }
+	fk := &fakeConfllmHandler{}
+	h := confllmPolicy(cfg, epConfllmInfer, auditActionConfllmChat, nil, nil, nil, guard, fk.ServeHTTP)
+
+	// ① tenant=other → 403 model_access_denied，handler 不调用。
+	req := httptest.NewRequest(http.MethodPost, "/v1/confllm/chat/completions?provider=g1", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+confllmTestToken(t, "bob", roleSystemAdmin, "other"))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("tenant=other 期望 403，实际 %d（body=%s）", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("403 响应解析失败：%v", err)
+	}
+	if body.Error.Code != "model_access_denied" {
+		t.Fatalf("错误码=%q 期望 model_access_denied", body.Error.Code)
+	}
+	if fk.calls != 0 {
+		t.Fatalf("被拒请求不得进业务 handler，实际 %d 次", fk.calls)
+	}
+
+	// ② tenant=t-ok → 放行，handler 被调用一次。
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/confllm/chat/completions?provider=g1", strings.NewReader(`{}`))
+	req2.Header.Set("Authorization", "Bearer "+confllmTestToken(t, "bob", roleSystemAdmin, "t-ok"))
+	rec2 := httptest.NewRecorder()
+	h(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("tenant=t-ok 期望 200，实际 %d（body=%s）", rec2.Code, rec2.Body.String())
+	}
+	if fk.calls != 1 {
+		t.Fatalf("放行请求应恰好调用业务 handler 1 次，实际 %d 次", fk.calls)
+	}
+}
+
+// TestConfllmJobMeterOnSubmit 【P2-5 job 计量】graph 提交成功（202）后，策略链调用
+// IngestJobUsage 入账：eventKey 前缀 confllm-job-、modelKey=provider、tenant=令牌租户。
+// 走真实 confllm.Handler（HandleGraphSubmit）→ 202 → job 元数据经 carrier 回传 → 计量。
+func TestConfllmJobMeterOnSubmit(t *testing.T) {
+	cfg := testCfg()
+	reg := confllm.NewRegistry()
+	reg.Register(fakeGraphProvider{})
+	ch := confllm.NewConfllmHandler(reg)
+
+	fm := &fakeConfllmJobMeterer{}
+	h := confllmPolicy(cfg, epConfllmInfer, auditActionConfllmGraphSubmit, nil, nil, fm, nil, ch.HandleGraphSubmit)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/confllm/graphs?provider=g1", strings.NewReader(`{"graph":1}`))
+	req.Header.Set("Authorization", "Bearer "+confllmTestToken(t, "bob", roleSystemAdmin, "tenant-meter"))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("graph 提交期望 202，实际 %d（body=%s）", rec.Code, rec.Body.String())
+	}
+	if fm.calls != 1 {
+		t.Fatalf("期望 IngestJobUsage 调用 1 次，实际 %d 次", fm.calls)
+	}
+	if !strings.HasPrefix(fm.lastEventKey, "confllm-job-") {
+		t.Fatalf("eventKey=%q 期望前缀 confllm-job-", fm.lastEventKey)
+	}
+	if fm.lastModelKey != "g1" {
+		t.Fatalf("modelKey=%q 期望 g1", fm.lastModelKey)
+	}
+	if fm.lastTenant != "tenant-meter" {
+		t.Fatalf("tenant=%q 期望 tenant-meter", fm.lastTenant)
+	}
+}
+
+// TestConfllmModelACL_GuardNilPassthrough 【guard=nil 放行】未配置 ACL → 不拦截，
+// 合法角色正常进业务 handler（向后兼容）。
+func TestConfllmModelACL_GuardNilPassthrough(t *testing.T) {
+	cfg := testCfg()
+	fk := &fakeConfllmHandler{}
+	h := confllmPolicy(cfg, epConfllmInfer, auditActionConfllmChat, nil, nil, nil, nil, fk.ServeHTTP)
+	req := httptest.NewRequest(http.MethodPost, "/v1/confllm/chat/completions?provider=g1", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+confllmTestToken(t, "bob", roleSystemAdmin, "any-tenant"))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK || fk.calls != 1 {
+		t.Fatalf("guard=nil 应放行：status=%d handler=%d", rec.Code, fk.calls)
+	}
 }

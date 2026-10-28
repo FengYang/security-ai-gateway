@@ -203,6 +203,34 @@ func serve(name, addr string, h http.Handler) {
 	}
 }
 
+// buildConfllmModelGuard 从 ADMIN_CONFLLM_MODEL_ACL_JSON 构造模型级 ACL（tenant×model）。
+//
+// 语义：allowlist（fail-closed）——租户不在清单 → 拒绝；清单内该模型不在白名单 → 拒绝；
+// 白名单含 "*" 表示该租户允许全部模型。env 空 / JSON 解析失败 → 返回 nil（不启用 ACL，
+// 向后兼容；解析失败仅记告警，fail-open 不阻断启动）。
+func buildConfllmModelGuard(env string) confllmModelGuard {
+	if env == "" {
+		return nil
+	}
+	var m map[string][]string
+	if err := json.Unmarshal([]byte(env), &m); err != nil {
+		log.Printf("[confllm] ADMIN_CONFLLM_MODEL_ACL_JSON 解析失败（ACL 不启用，fail-open 记录告警）: %v", err)
+		return nil
+	}
+	return func(tenant, modelKey string) bool {
+		allow, ok := m[tenant]
+		if !ok {
+			return false // 租户不在清单 → 拒绝（fail-closed）
+		}
+		for _, a := range allow {
+			if a == "*" || a == modelKey {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 func main() {
 	// P2-4 T-1.6：存储迁移工具（sqlite → 共享库）内建子命令；未调用即零副作用。
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
@@ -310,7 +338,19 @@ func main() {
 	if bih != nil && bih.anomaly != nil {
 		confllmQuota = bih.anomaly
 	}
-	registerConfllmRoutes(adminMux, cfg, confllmH, auditChain, confllmQuota)
+	// P2-5 job 计量：复用 billing 服务（IngestJobUsage）。billing 未启用 → nil（策略链跳过
+	// 计量，可观测，绝不静默）。
+	var confllmJobMeter confllmJobMeterer
+	if bih != nil && bih.svc != nil {
+		confllmJobMeter = bih.svc
+	}
+	// TODO（对账，本任务不阻塞）：billing.JobAuditCounter 适配器（按 tenant/action=confllm_graph_submit/
+	// 时间窗统计 adminAuditChain 事件数，供计量对账）待接入。当前 adminAuditChain 仅提供
+	// list(limit,offset) 全量枚举，无 action/tenant/时间窗计数 API，故本任务不硬造；
+	// 后续需在 audit.go 暴露 CountAction 类接口后，于此处 `bih.svc.SetJobAudit(adapter)`。
+	// 模型级 ACL（tenant×model）：从环境变量注入允许清单；未配置 → nil（不启用，向后兼容）。
+	confllmGuard := buildConfllmModelGuard(os.Getenv("ADMIN_CONFLLM_MODEL_ACL_JSON"))
+	registerConfllmRoutes(adminMux, cfg, confllmH, auditChain, confllmQuota, confllmJobMeter, confllmGuard)
 
 	// P2-4 T-2：集群注册 API（注册/列表/心跳/审批/摘除）。
 	// 存储：PG 时与租户库同库（多集群共享），SQLite 时独立文件；两者都未配置 → 不启用（默认零变化）。

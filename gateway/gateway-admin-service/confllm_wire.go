@@ -178,11 +178,11 @@ var confllmRouteSpecs = []confllmRouteSpec{
 //
 // audit/quota 随策略链注入（adminAuditChain / billing 配额；nil = 对应能力未启用，
 // confllmPolicy 内可观测放行，绝不静默）。
-func registerConfllmRoutes(mux *http.ServeMux, cfg *config, h *confllm.ConfllmHandler, audit *adminAuditChain, quota confllmQuotaChecker) {
+func registerConfllmRoutes(mux *http.ServeMux, cfg *config, h *confllm.ConfllmHandler, audit *adminAuditChain, quota confllmQuotaChecker, jobMeter confllmJobMeterer, guard confllmModelGuard) {
 	if h == nil {
 		return
 	}
 	for _, rt := range confllmRouteSpecs {
-		mux.HandleFunc(rt.pattern, confllmPolicy(cfg, rt.rule, rt.action, audit, quota, rt.attach(h)))
+		mux.HandleFunc(rt.pattern, confllmPolicy(cfg, rt.rule, rt.action, audit, quota, jobMeter, guard, rt.attach(h)))
 	}
 }

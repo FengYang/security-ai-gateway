@@ -52,6 +52,9 @@ type BillItem struct {
 	RetryToks      int64      `json:"retry_toks"` // 展示"平台承担"，不计入 Amount（M9）
 	Amount         Amount     `json:"amount"`
 	TierBreakdown  []TierLine `json:"tier_breakdown,omitempty"`
+	// Unit P2-5：计量口径分列。"token"（默认，A 类 chat 式）| "job"（B 类任务式，按次）。
+	// 空串按 "token" 解释（向后兼容既有账单）。
+	Unit string `json:"unit,omitempty"`
 }
 
 // TierLine 阶梯分解行（可解释性）。

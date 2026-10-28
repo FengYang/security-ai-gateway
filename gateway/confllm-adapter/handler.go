@@ -72,6 +72,60 @@ func (h *ConfllmHandler) providerIDFromRequest(r *http.Request) string {
 	return ""
 }
 
+// ---------- job 计量元信息透传（P2-5）----------
+//
+// 数据面 graph 提交成功（202）后，admin-service 策略链需读出 job 标识做计量入账。
+// HTTP 上下文不可变，故用「可变 carrier」解决「下游业务 handler 产生的数据需向上游
+// 策略链回传」：业务 handler（HandleGraphSubmit）在 202 前调用 withConfllmJobMeta 回填
+// carrier；confllmAuditWrap 在调用业务 handler 前注入 carrier（见 WithConfllmJobCarrier），
+// handler 返回后再读 carrier。ConfllmJobMetaFrom 同时兼容两条取值路径。
+
+type confllmJobCtxKey int
+
+const (
+	confllmJobMetaKey    confllmJobCtxKey = iota // 存 confllmJobMeta（值）
+	confllmJobCarrierKey                         // 存 *confllmJobCarrier（指针，策略链注入）
+)
+
+// confllmJobMeta graph 提交成功后的 job 标识（供计量入账）。
+type confllmJobMeta struct {
+	ProviderID string
+	JobID      string
+}
+
+// confllmJobCarrier 可变载体：由策略链注入，业务 handler 回填，解决上下文不可变导致的
+// 「下游 → 上游」回传问题（同请求内的回传通道）。
+type confllmJobCarrier struct {
+	ProviderID string
+	JobID      string
+	set        bool
+}
+
+// withConfllmJobMeta 在 graph 提交成功后记录 job 标识。若策略链已注入 carrier，则回填
+// carrier（向上游审计 wrap 透传）；同时把值直接存入上下文（供同请求内直接读取）。
+func withConfllmJobMeta(r *http.Request, m confllmJobMeta) *http.Request {
+	if c, ok := r.Context().Value(confllmJobCarrierKey).(*confllmJobCarrier); ok {
+		c.ProviderID, c.JobID, c.set = m.ProviderID, m.JobID, true
+	}
+	return r.WithContext(context.WithValue(r.Context(), confllmJobMetaKey, m))
+}
+
+// WithConfllmJobCarrier 注入可变 carrier（由 admin-service 策略链在调用业务 handler 前
+// 调用），使业务 handler 经 withConfllmJobMeta 回填的 job 标识可被上游读取。
+func WithConfllmJobCarrier(r *http.Request) (*http.Request, *confllmJobCarrier) {
+	c := &confllmJobCarrier{}
+	return r.WithContext(context.WithValue(r.Context(), confllmJobCarrierKey, c)), c
+}
+
+// ConfllmJobMetaFrom 读取业务 handler 回填的 job 标识。
+func ConfllmJobMetaFrom(r *http.Request) (confllmJobMeta, bool) {
+	if c, ok := r.Context().Value(confllmJobCarrierKey).(*confllmJobCarrier); ok && c.set {
+		return confllmJobMeta{ProviderID: c.ProviderID, JobID: c.JobID}, true
+	}
+	m, ok := r.Context().Value(confllmJobMetaKey).(confllmJobMeta)
+	return m, ok
+}
+
 // Chat 核心调用逻辑：查表 → 能力门禁 → Provider.Chat → 证明校验（noop/log）→ 返回。
 func (h *ConfllmHandler) Chat(ctx context.Context, providerID string, req *ChatRequest) (*ChatResponse, error) {
 	p, ok := h.reg.Lookup(providerID)
@@ -295,6 +349,9 @@ func (h *ConfllmHandler) HandleGraphSubmit(w http.ResponseWriter, r *http.Reques
 		writeErr(w, ParseError(err))
 		return
 	}
+	// P2-5：graph 提交成功 → 把 job 元信息写入请求上下文，供 admin-service 策略链在 202
+	// 后读出做计量入账（providerID 复用既有 providerIDFromRequest）。
+	r = withConfllmJobMeta(r, confllmJobMeta{ProviderID: h.providerIDFromRequest(r), JobID: jobID})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(graphSubmitResp{JobID: jobID})

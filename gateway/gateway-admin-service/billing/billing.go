@@ -15,6 +15,23 @@ type PriceTableProvider interface {
 	Current() *PriceTable
 }
 
+// ---------- P2-5 密态计算任务（job）计量口径 ----------
+
+// SourceConfllmJob 第三类账本入账来源（区别于 pull / push / manual）。
+// 由密态推理数据面 /v1/confllm/graphs 提交成功时产生（B 类任务式推理，按次计）。
+const SourceConfllmJob = "confllm-job"
+
+// AuditActionConfllmGraphSubmit 推理审计链中「graph 提交」事件动作（与
+// admin-service confllm_policy.go 的审计常量保持一致，供对账零容差门禁）。
+const AuditActionConfllmGraphSubmit = "confllm_graph_submit"
+
+// JobAuditCounter 审计链事件计数器（供 job 用量对账；由 admin-service 注入
+// adminAuditChain 适配器实现，billing 包不反向依赖 admin-service）。
+type JobAuditCounter interface {
+	// CountAction 统计某租户某动作在 [fromNs,toNs] 时间窗口内的事件数。
+	CountAction(ctx context.Context, tenant, action string, fromNs, toNs int64) (int64, error)
+}
+
 // BillingService 账单生成服务。
 type BillingService struct {
 	store         Store
@@ -43,6 +60,9 @@ type BillingService struct {
 
 	// 审计链校验器（REC-6/B-6.12-4；nil = 不校验，全局停出账标志不变）
 	auditVerifier AuditChainVerifier
+
+	// P2-5：job 用量对账（审计链 × 账本零容差门禁）。nil = 跳过对账（仅账本入账）。
+	jobAudit JobAuditCounter
 }
 
 // SetSigner 注入账单签名器（T7b）。
@@ -53,6 +73,9 @@ func (s *BillingService) SetAlertSink(sink AlertSink) { s.alertSink = sink }
 
 // SetAuditAnchor 注入审计链锚定提供者（T7b）。
 func (s *BillingService) SetAuditAnchor(a AuditAnchorProvider) { s.auditAnchor = a }
+
+// SetJobAudit 注入审计链事件计数器（P2-5 job 对账；nil = 跳过对账）。
+func (s *BillingService) SetJobAudit(c JobAuditCounter) { s.jobAudit = c }
 
 // SetMonthStdCache 注入月累计缓存句柄（A-37：入账补账时据此失效对应月份）。
 func (s *BillingService) SetMonthStdCache(c *CachedMonthStd) { s.monthStdCache = c }
@@ -220,6 +243,85 @@ func (s *BillingService) ConsumePush(ev PushEvent) error {
 		IncPush("ok")
 	}
 	return nil
+}
+
+// IngestJobUsage 记录一次密态计算任务（job）用量（P2-5）。
+//
+// 与 token 拉取/推送通道并列的**第三类**入账来源（Source=SourceConfllmJob）；
+// 账本以 Requests=1 计数，哈希域已含 Requests 字段（§7.6 冻结顺序不变，零改动）。
+//
+// 幂等：eventKey 重复 → Append 的 UNIQUE 兜底静默跳过（补账/重放安全）。
+// 价格表要求：modelKey 必须在价格表中（job 单元亦 fail-closed 可见；缺失 → ErrPricingMissing）。
+// 调用方（admin-service confllm 策略链）须在 graph 提交成功（HTTP 202）后调用，
+// 失败仅告警（响应已发出，无法回滚），不阻断主流程（与推理审计同口径）。
+func (s *BillingService) IngestJobUsage(ctx context.Context, tenant, modelKey, day, clusterID, eventKey string) error {
+	if s.prices == nil {
+		return fmt.Errorf("billing: price table provider is not configured")
+	}
+	if tenant == "" || modelKey == "" || eventKey == "" {
+		return fmt.Errorf("billing: tenant/modelKey/eventKey required for job usage")
+	}
+	// job 单元亦要求价格表配置（fail-closed 可见：未配置 → 计价缺失，账单 Unit=job 但 Amount=0 亦可观测）
+	if _, ok := s.prices.Current().ModelPriceOf(modelKey); !ok {
+		IncPricingMissing(modelKey)
+		return fmt.Errorf("%w: model %q", ErrPricingMissing, modelKey)
+	}
+	dayEff := day
+	if dayEff == "" {
+		dayEff = time.Now().Format("2006-01-02")
+	}
+	e := LedgerEntry{
+		TenantID:  tenant,
+		ModelKey:  modelKey,
+		Day:       dayEff,
+		ClusterID: clusterID,
+		Requests:  1,
+		Source:    SourceConfllmJob,
+		EventKey:  eventKey,
+		CreatedAt: time.Now().UnixNano(),
+	}
+	// 锁定 std（job 无 token → 0）；PriceVer 记录版本（事后追溯系数）
+	e.PriceVer = s.prices.Current().Version
+	e.StdIn, e.StdOut = s.rating.StandardTokens(0, 0, nil)
+
+	tx, err := s.store.Begin()
+	if err != nil {
+		IncLedgerError("begin")
+		return err
+	}
+	if _, _, err := s.store.Ledger().Append(tx, []LedgerEntry{e}); err != nil {
+		_ = tx.Rollback()
+		IncLedgerError("append")
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		IncLedgerError("append")
+		return err
+	}
+	if s.monthStdCache != nil {
+		s.monthStdCache.InvalidateDayIfBackfill(tenant, dayEff)
+	}
+	return nil
+}
+
+// ReconcileJobs 对账某租户某窗口 job 用量：账本 job 条数 vs 审计链 submit 事件数
+// （零容差门禁）。返回 (账本 job 数, 审计 submit 数, 是否不一致, 错误)。
+//
+// 仅当 jobAudit 已注入（admin-service 接好审计链适配器）才做交叉比对；
+// 未注入 → auditSubmits=0 且 mismatch=false（对账未激活，不影响入账）。
+func (s *BillingService) ReconcileJobs(ctx context.Context, tenant string, fromNs, toNs int64) (ledgerJobs, auditSubmits int64, mismatch bool, err error) {
+	ledgerJobs, err = s.store.Ledger().CountSource(ctx, tenant, SourceConfllmJob, fromNs, toNs)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if s.jobAudit == nil {
+		return ledgerJobs, 0, false, nil
+	}
+	auditSubmits, err = s.jobAudit.CountAction(ctx, tenant, AuditActionConfllmGraphSubmit, fromNs, toNs)
+	if err != nil {
+		return ledgerJobs, 0, false, err
+	}
+	return ledgerJobs, auditSubmits, ledgerJobs != auditSubmits, nil
 }
 
 // stamp 为账单锚定审计链尾并签名（T7b）；须在 LedgerHead 设定后调用。
@@ -451,7 +553,8 @@ func (s *BillingService) buildItems(agg *UsageAgg, tbl *PriceTable) ([]BillItem,
 	mode := s.roundingMode() // ★ A4：明细行与总额取整同口径（此前硬编码 half_up）
 	var items []BillItem
 	for mk, mu := range agg.ByModel {
-		if _, ok := tbl.ModelPriceOf(mk); !ok {
+		mp, ok := tbl.ModelPriceOf(mk)
+		if !ok {
 			return nil, 0, fmt.Errorf("%w: model %q", ErrPricingMissing, mk)
 		}
 		// 单模型子聚合：经引擎计价（月累计起点由引擎内部按 period 取，无需外部注入具体类型）
@@ -468,6 +571,7 @@ func (s *BillingService) buildItems(agg *UsageAgg, tbl *PriceTable) ([]BillItem,
 			TokensOut:      mu.TokensOut,
 			RetryToks:      mu.RetryToks, // 展示"平台承担"（不计入 Amount，M9）
 			Amount:         roundAmount(itemMu, mode),
+			Unit:           unitOf(mp),
 		})
 	}
 	total, err := s.rating.RateMonthly(agg, tbl) // 月结权威入口（唯一取整点）
@@ -486,6 +590,14 @@ func (s *BillingService) roundingMode() string {
 		}
 	}
 	return "half_up"
+}
+
+// unitOf 返回账单行项目的计量口径（P2-5 分列）。job 单元显式标 "job"，其余（含空）标 "token"。
+func unitOf(mp *ModelPrice) string {
+	if mp != nil && mp.Unit != "" {
+		return mp.Unit
+	}
+	return "token"
 }
 
 // checkFrozen 冻结判定（§6.10.3）。

@@ -25,6 +25,28 @@ type ModelPrice struct {
 	OutCoef float64 `json:"out_coef" yaml:"out_coef"` // 输出 token 系数，默认 1.0
 	// 阶梯单价（元 / 千标准 token）
 	Tiers []Tier `json:"tiers" yaml:"tiers"`
+
+	// P2-5：任务式（B 类，如蚂蚁隐语 SecretFlow）计价口径。
+	//
+	// Unit="job" 时按「次」计价：金额 = Requests × PerJob（元/次），忽略 token 阶梯
+	// （B 类无 token，token 口径会产出 0 费用假账单，故独立计次口径）。
+	// 空 / "token" = 沿用既有 token 阶梯计价（默认，向后兼容：既有价格表无此字段 → token 口径）。
+	Unit string `json:"unit,omitempty" yaml:"unit,omitempty"` // "" | "token" | "job"
+	// PerJob 单价（元/次），仅 Unit="job" 时生效。0 = 未配置（job 模型漏配单价 →
+	// 账单 Unit=job 但 Amount=0，可观测但计 0；由运营在价格表补全，fail-closed 可见）。
+	PerJob int64 `json:"per_job,omitempty" yaml:"per_job,omitempty"`
+}
+
+// IsJobUnit 是否为任务式（按次）计价单元。
+func (mp *ModelPrice) IsJobUnit() bool { return mp != nil && mp.Unit == "job" }
+
+// JobUnitAmountMu 任务式单元亚分金额（千分之一分）。PerJob 单位：元/次。
+// 元 → 亚分（千分之一分）= ×100（分）×1000 = ×100000。
+func (mp *ModelPrice) JobUnitAmountMu(requests int64) int64 {
+	if !mp.IsJobUnit() || requests <= 0 {
+		return 0
+	}
+	return requests * mp.PerJob * 100000
 }
 
 // Tier 计价阶梯（progressive 累进；UpToTokens=0 视为 +∞，即顶档）。
@@ -56,7 +78,7 @@ func LoadPriceTable(path string) (*PriceTable, error) {
 	if tbl.Models == nil {
 		tbl.Models = map[string]*ModelPrice{}
 	}
-	// 每个模型校验阶梯
+	// 每个模型校验阶梯（P2-5：任务式 job 单元按次计价，不依赖 token 阶梯，跳过）
 	for mk, mp := range tbl.Models {
 		if mp == nil {
 			return nil, fmt.Errorf("billing: price table model %q is nil", mk)
@@ -66,6 +88,9 @@ func LoadPriceTable(path string) (*PriceTable, error) {
 		}
 		if mp.OutCoef <= 0 {
 			mp.OutCoef = 1.0
+		}
+		if mp.IsJobUnit() {
+			continue // job 单元：PerJob 计价，无需 token 阶梯
 		}
 		if err := validateTiers(mp.Tiers); err != nil {
 			return nil, fmt.Errorf("billing: price table model %q: %w", mk, err)
@@ -79,8 +104,10 @@ func LoadPriceTable(path string) (*PriceTable, error) {
 		if tbl.Defaults.OutCoef <= 0 {
 			tbl.Defaults.OutCoef = 1.0
 		}
-		if err := validateTiers(tbl.Defaults.Tiers); err != nil {
-			return nil, fmt.Errorf("billing: price table defaults: %w", err)
+		if !tbl.Defaults.IsJobUnit() {
+			if err := validateTiers(tbl.Defaults.Tiers); err != nil {
+				return nil, fmt.Errorf("billing: price table defaults: %w", err)
+			}
 		}
 	}
 	return &tbl, nil
@@ -145,8 +172,9 @@ func (t *PriceTable) ModelPriceOf(modelKey string) (*ModelPrice, bool) {
 	return nil, false
 }
 
-// HasNonZeroPrice 价格表是否存在**非 0 单价**（任一模型/默认档的任一步梯 in/out 单价非 0）。
-// 供 R-29 交叉约束：`over_quota=charge` 的套餐不得对应"全 0 价"（防免费版产出金额账单）。
+// HasNonZeroPrice 价格表是否存在**非 0 单价**（任一模型/默认档的任一步梯 in/out 单价非 0，
+// 或 job 单元 PerJob 非 0）。供 R-29 交叉约束：`over_quota=charge` 的套餐不得对应"全 0 价"
+// （防免费版产出金额账单）。
 func (t *PriceTable) HasNonZeroPrice() bool {
 	if t == nil {
 		return false
@@ -154,6 +182,9 @@ func (t *PriceTable) HasNonZeroPrice() bool {
 	any := func(mp *ModelPrice) bool {
 		if mp == nil {
 			return false
+		}
+		if mp.IsJobUnit() {
+			return mp.PerJob != 0 // P2-5：任务式按次计价，单价在 PerJob
 		}
 		for _, tr := range mp.Tiers {
 			if tr.InPer1K != 0 || tr.OutPer1K != 0 {

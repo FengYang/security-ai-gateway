@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 )
@@ -14,6 +15,8 @@ type LedgerStore interface {
 	Append(tx Tx, entries []LedgerEntry) (added int, head LedgerHead, err error)
 	// Range 只读查询（按日/租户；金额计算在读取侧，账本只存用量）。
 	Range(q LedgerQuery) ([]LedgerEntry, error)
+	// CountSource 统计某租户某来源在 [fromNs,toNs] 创建时间区间内的条目数（P2-5 job 对账）。
+	CountSource(ctx context.Context, tenant, source string, fromNs, toNs int64) (int64, error)
 	// Verify 校验哈希链完整性；返回首个断链 Seq（-1 = 完好）。
 	Verify() (brokenAt int64, err error)
 	// Head 链尾摘要。
@@ -299,4 +302,17 @@ func (s *sqliteLedgerStore) SetPollWatermark(ns int64) error {
 		return fmt.Errorf("billing: set poll watermark: %w", err)
 	}
 	return nil
+}
+
+// CountSource 统计某租户某来源在 [fromNs,toNs] 创建时间区间内的条目数（P2-5 job 对账）。
+func (s *sqliteLedgerStore) CountSource(ctx context.Context, tenant, source string, fromNs, toNs int64) (int64, error) {
+	if tenant == "" || source == "" {
+		return 0, fmt.Errorf("billing: CountSource requires tenant and source")
+	}
+	q := `SELECT COUNT(*) FROM billing_ledger WHERE tenant_id = ? AND source = ? AND created_at >= ? AND created_at <= ?`
+	var n int64
+	if err := s.db.QueryRowContext(ctx, q, tenant, source, fromNs, toNs).Scan(&n); err != nil {
+		return 0, fmt.Errorf("billing: count source: %w", err)
+	}
+	return n, nil
 }

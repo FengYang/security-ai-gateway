@@ -123,6 +123,11 @@ func (e *ratingEngine) RateMu(u *UsageAgg, tbl *PriceTable) (int64, error) {
 			IncPricingMissing(mk) // 指标 #18（A-46）
 			return 0, fmt.Errorf("%w: model %q", ErrPricingMissing, mk)
 		}
+		// P2-5：任务式（job）单元按次计价，独立于 token 阶梯（B 类无 token）。
+		if mp.IsJobUnit() {
+			totalMu += mp.JobUnitAmountMu(mu.Requests)
+			continue
+		}
 		// 分轴累计起点（A-26）
 		var inBefore, outBefore int64
 		if e.monthStd != nil && period != "" {
