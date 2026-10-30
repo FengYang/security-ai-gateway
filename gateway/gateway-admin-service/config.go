@@ -429,7 +429,7 @@ type brokerSettings struct {
 	publicBase   string // broker 对外基址（生成 customUrl；broker 启用时必填）
 	crFile       string // ai-proxy CR 文件路径（可选；设置后启用漂移检测）
 	brokerListen string // broker 专用监听地址（A-2；缺省 :19096）
-	legacyPort   bool   // 兼容期：管理面端口是否同时暴露 broker（A-2 三步收口第 1 步）
+	legacyPort   bool   // 兼容期：管理面端口是否同时暴露 broker（A-2 三步收口第 1 步）；缺省 false（fail-closed），须显式 ADMIN_SVC_BROKER_LEGACY_PORT=true 才开启
 }
 
 // loadBrokerSettings 解析 broker 配置（env 注入，均带缺省）。
@@ -439,8 +439,9 @@ func loadBrokerSettings() *brokerSettings {
 		publicBase:   strings.TrimRight(os.Getenv("ADMIN_BROKER_PUBLIC_BASE"), "/"),
 		crFile:       os.Getenv("ADMIN_BROKER_CR_FILE"),
 		brokerListen: os.Getenv("ADMIN_SVC_BROKER_LISTEN"),
-		// 兼容期缺省 true（保持 M1 既有链路可用）；收口期显式置 ADMIN_SVC_BROKER_LEGACY_PORT=false
-		legacyPort: os.Getenv("ADMIN_SVC_BROKER_LEGACY_PORT") != "false",
+		// 兼容期缺省 false（fail-closed：管理面端口不默认暴露 broker 中转，避免无鉴权泄露真实厂商 Key）；
+		// 须显式 ADMIN_SVC_BROKER_LEGACY_PORT=true 才开启（仅兼容期过渡，收口后应保持 false）
+		legacyPort: os.Getenv("ADMIN_SVC_BROKER_LEGACY_PORT") == "true",
 	}
 	if s.secretsDir == "" {
 		s.secretsDir = defaultBrokerSecretsDir

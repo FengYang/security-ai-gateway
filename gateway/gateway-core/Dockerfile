@@ -9,7 +9,8 @@
 #     `gateway/cryptop`（策略变更审计的密码运行时）；
 #   - 启动强校验：OTP_CORE_SIG_KEY 缺失或非 ≥32 字节 hex → **拒绝启动**（fail-fast）。
 #     该密钥即插件侧 `route_verify_key`（K_rx），两侧必须一致，否则插件拉表验签失败（保留旧表）；
-#   - OTP_CORE_AUTH_TOKEN 为空 = 关闭鉴权（仅限内部测试）；集群部署必须注入（本目录清单已配）；
+#   - OTP_CORE_AUTH_TOKEN 缺省必须设置，否则**拒绝启动**（fail-closed：控制面必须鉴权）；
+#     仅本地调试可用 OTP_CORE_INSECURE_NOAUTH=true 显式关闭（严禁生产/集群使用；本目录清单已配）；
 #   - 运行镜像装 ca-certificates：OTP_CORE_TEE_URL 若指向 HTTPS 的 tee-infer 需要；
 #   - USER 65532 与清单 runAsUser/runAsGroup 一致（least privilege）；
 #     清单另置 readOnlyRootFilesystem=true → 审计文件目录由 emptyDir/PVC 挂载提供。

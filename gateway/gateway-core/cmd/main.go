@@ -60,7 +60,17 @@ func main() {
 		log.Fatal("OTP_CORE_SIG_KEY 无效：须为 ≥32 字节的 hex")
 	}
 
-	authToken := os.Getenv("OTP_CORE_AUTH_TOKEN") // 内网静态 token；空则禁用鉴权（仅限内部测试）
+	authToken := os.Getenv("OTP_CORE_AUTH_TOKEN")
+	insecureNoAuth := os.Getenv("OTP_CORE_INSECURE_NOAUTH") == "true"
+	if authToken == "" && !insecureNoAuth {
+		log.Fatal("OTP_CORE_AUTH_TOKEN 未设置（fail-closed：控制面必须鉴权）。仅本地调试可用 OTP_CORE_INSECURE_NOAUTH=true 显式关闭")
+	}
+	if authToken != "" && len(authToken) < 32 {
+		log.Fatal("OTP_CORE_AUTH_TOKEN 过短（<32 字符）：请用 openssl rand -hex 32 生成")
+	}
+	if insecureNoAuth {
+		log.Printf("⚠️ OTP_CORE_INSECURE_NOAUTH=true：控制面鉴权已显式关闭，仅限本地调试，严禁生产/集群使用")
+	}
 	addr := os.Getenv("OTP_CORE_ADDR")
 	if addr == "" {
 		addr = ":8085"

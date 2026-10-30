@@ -251,13 +251,23 @@ func TestListenerRouteIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("管理面 listener（兼容期 legacy=true）：同时暴露中转端点", func(t *testing.T) {
+	t.Run("管理面 listener（兼容期 legacy=true）：同时暴露中转端点（须过鉴权，SEC-2 修复后不得裸奔）", func(t *testing.T) {
 		adminMux := buildAdminMux(cfg, sh, bh, nil, nil, nil, nil, nil, nil, true)
 
+		// 无凭据：应被鉴权中间件拦截（修复前此处裸奔直达 broker，泄露真实厂商 Key）
 		rec := httptest.NewRecorder()
 		adminMux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/llm-broker/phala/v1/__probe", nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("兼容期管理面 broker 路径无凭据应 401，实际 %d", rec.Code)
+		}
+
+		// 合法令牌：仍路由到 broker 中转（路径暴露保留，但必须先过鉴权）
+		req := httptest.NewRequest(http.MethodGet, "/llm-broker/phala/v1/__probe", nil)
+		req.Header.Set("Authorization", bearerToken(t))
+		rec = httptest.NewRecorder()
+		adminMux.ServeHTTP(rec, req)
 		if !brokerRouteServed(rec) {
-			t.Fatal("兼容期管理面端口应保留 broker 中转（M1 链路不中断）")
+			t.Fatal("兼容期管理面端口（持合法令牌）应保留 broker 中转（M1 链路不中断）")
 		}
 	})
 
@@ -277,7 +287,7 @@ func TestListenerRouteIsolation(t *testing.T) {
 	})
 }
 
-// brokerListen 缺省与显式配置解析。
+// brokerListen 缺省与显式配置解析；legacyPort 缺省 false（fail-closed）。
 func TestLoadBrokerSettingsListenerDefaults(t *testing.T) {
 	t.Setenv("ADMIN_SVC_BROKER_LISTEN", "")
 	t.Setenv("ADMIN_SVC_BROKER_LEGACY_PORT", "")
@@ -285,8 +295,8 @@ func TestLoadBrokerSettingsListenerDefaults(t *testing.T) {
 	if s.brokerListen != defaultBrokerListen {
 		t.Fatalf("brokerListen 缺省应为 %s，实际 %s", defaultBrokerListen, s.brokerListen)
 	}
-	if !s.legacyPort {
-		t.Fatal("兼容期缺省应为 true（保持 M1 链路可用）")
+	if s.legacyPort {
+		t.Fatal("legacyPort 缺省应为 false（fail-closed：管理面端口不默认暴露 broker）")
 	}
 
 	t.Setenv("ADMIN_SVC_BROKER_LISTEN", ":19999")
@@ -297,5 +307,11 @@ func TestLoadBrokerSettingsListenerDefaults(t *testing.T) {
 	}
 	if s.legacyPort {
 		t.Fatal("显式 ADMIN_SVC_BROKER_LEGACY_PORT=false 应关闭兼容期暴露")
+	}
+
+	t.Setenv("ADMIN_SVC_BROKER_LEGACY_PORT", "true")
+	s = loadBrokerSettings()
+	if !s.legacyPort {
+		t.Fatal("显式 ADMIN_SVC_BROKER_LEGACY_PORT=true 应开启兼容期暴露")
 	}
 }

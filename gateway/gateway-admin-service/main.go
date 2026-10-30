@@ -10,8 +10,9 @@
 //	管理面（缺省 :19095）  /healthz /readyz /metrics /v1/adminext/*（含凭据托管端点）
 //	broker（缺省 :19096）  /llm-broker/{provider}/**（仅数据面可达，见 K8s NetworkPolicy）
 //
-// 兼容期（三步收口第 1 步，ADMIN_SVC_BROKER_LEGACY_PORT 缺省 true）：管理面端口
-// **同时**暴露 broker 中转，保持 M1 既有链路可用；收口期置 false 后仅 :19096 提供服务。
+// 兼容期（三步收口第 1 步，ADMIN_SVC_BROKER_LEGACY_PORT 缺省 false（fail-closed），须显式 true 才开启）：
+// 管理面端口**可选**同时暴露 broker 中转；收口期置 false 后仅 :19096 提供服务。
+// 注意：即便开启，该暴露路径亦须套管理面鉴权（见 buildAdminMux），不得裸奔。
 //
 // API：
 //
@@ -37,7 +38,7 @@
 // 角色控制（M3-A）：授权依据 = JWT role（Java 控制台账号表派生）；
 // ADMIN_SVC_ROLE_ADMINS 仅作运维层强制加成（白名单内恒 admin，未配置 = 不加成）；
 // broker：ADMIN_BROKER_SECRETS_DIR / ADMIN_BROKER_PUBLIC_BASE / ADMIN_BROKER_CR_FILE /
-// ADMIN_SVC_BROKER_LISTEN / ADMIN_SVC_BROKER_LEGACY_PORT（同文件）；
+// ADMIN_SVC_BROKER_LISTEN / ADMIN_SVC_BROKER_LEGACY_PORT（缺省 false（fail-closed），须显式 true 开启；同文件）；
 // 模型目录：ADMIN_BROKER_CR_FILE（与漂移检测同源）/ ADMIN_SVC_AI_ROUTES_DIR（model_catalog.go）；
 // 审计链（G1）：ADMIN_AUDIT_FILE（未配置 = 关闭）/ ADMIN_AUDIT_ANCHOR_FILE（audit.go）；
 // 用量代理（A-2'）：ADMIN_TEE_INFER_URL（未配置 = 端点 503）/ ADMIN_TEE_INFER_TOKEN（usage.go）。
@@ -46,6 +47,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -186,7 +188,7 @@ func buildAdminMux(cfg *config, sh *brokerSecretHandler, bh *brokerHandler, mh *
 	mux.HandleFunc("/readyz", handleReadyz(brokerHealthy))
 
 	if legacyBroker && bh != nil {
-		mux.Handle(brokerPathPrefix, bh)
+		mux.Handle(brokerPathPrefix, authMiddleware(cfg, bh.ServeHTTP))
 	}
 	return mux
 }
@@ -218,16 +220,15 @@ func serve(name, addr string, h http.Handler) {
 // buildConfllmModelGuard 从 ADMIN_CONFLLM_MODEL_ACL_JSON 构造模型级 ACL（tenant×model）。
 //
 // 语义：allowlist（fail-closed）——租户不在清单 → 拒绝；清单内该模型不在白名单 → 拒绝；
-// 白名单含 "*" 表示该租户允许全部模型。env 空 / JSON 解析失败 → 返回 nil（不启用 ACL，
-// 向后兼容；解析失败仅记告警，fail-open 不阻断启动）。
-func buildConfllmModelGuard(env string) confllmModelGuard {
+// 白名单含 "*" 表示该租户允许全部模型。env 为空 → 返回 (nil, nil)（不启用 ACL，向后兼容）；
+// env 非空但 JSON 解析失败 → 返回 error（调用方 fail-closed 拒绝启动，严禁 fail-open 静默放行）。
+func buildConfllmModelGuard(env string) (confllmModelGuard, error) {
 	if env == "" {
-		return nil
+		return nil, nil
 	}
 	var m map[string][]string
 	if err := json.Unmarshal([]byte(env), &m); err != nil {
-		log.Printf("[confllm] ADMIN_CONFLLM_MODEL_ACL_JSON 解析失败（ACL 不启用，fail-open 记录告警）: %v", err)
-		return nil
+		return nil, fmt.Errorf("ADMIN_CONFLLM_MODEL_ACL_JSON 解析失败（ACL 配置错误，fail-closed 拒绝启动）: %w", err)
 	}
 	return func(tenant, modelKey string) bool {
 		allow, ok := m[tenant]
@@ -240,7 +241,7 @@ func buildConfllmModelGuard(env string) confllmModelGuard {
 			}
 		}
 		return false
-	}
+	}, nil
 }
 
 func main() {
@@ -362,8 +363,12 @@ func main() {
 	if bih != nil && bih.svc != nil && auditChain != nil {
 		bih.svc.SetJobAudit(&auditJobCounter{chain: auditChain})
 	}
-	// 模型级 ACL（tenant×model）：从环境变量注入允许清单；未配置 → nil（不启用，向后兼容）。
-	confllmGuard := buildConfllmModelGuard(os.Getenv("ADMIN_CONFLLM_MODEL_ACL_JSON"))
+	// 模型级 ACL（tenant×model）：从环境变量注入允许清单；未配置 → nil（不启用，向后兼容）；
+	// 配置非空但解析失败 → fail-closed 拒绝启动（不得 fail-open 静默放行）。
+	confllmGuard, loadErr := buildConfllmModelGuard(os.Getenv("ADMIN_CONFLLM_MODEL_ACL_JSON"))
+	if loadErr != nil {
+		log.Fatalf("confllm 模型级 ACL 配置加载失败（fail-closed）: %v", loadErr)
+	}
 
 	// A3（中间件抽离）：将 *adminAuditChain 适配为 confllmAuditChain 接口；auditChain 为 nil 时
 	// 得到"真 nil 接口"（防 typed-nil panic），confllmAuditAppend 内 if audit == nil 判空可安全跳过。

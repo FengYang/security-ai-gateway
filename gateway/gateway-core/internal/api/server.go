@@ -3,6 +3,7 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -410,12 +411,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// withAuth 内网静态 token 鉴权。
+// withAuth 内网静态 token 鉴权（恒定时间比较，避免计时侧信道）。
 func (s *Server) withAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.token != "" {
 			got := r.Header.Get("Authorization")
-			if got != "Bearer "+s.token {
+			want := "Bearer " + s.token
+			if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 				writeError(w, http.StatusUnauthorized, "unauthorized", "未授权")
 				return
 			}
