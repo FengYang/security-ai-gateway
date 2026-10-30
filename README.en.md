@@ -1,6 +1,6 @@
 > English ｜ [中文](./README.md)
 
-# OTP-Mask Security AI Gateway (security-ai-gateway)
+# Confidential AI Gateway (security-ai-gateway)
 
 **A unified multi-engine confidential-inference gateway.** Its core mission is **confidential inference**: built on **OTP-Mask vector encryption + the Higress Wasm plugin + TEE confidential inference**, it delivers an AI inference service where *the gateway link never touches plaintext*. Client text is encrypted before entering the TEE enclave; decryption, inference, sampling, and re-encryption all happen inside the trusted environment, with the entire link **fail-closed**. **The Higress plugin ecosystem is the core functional backbone** — the gateway's full feature surface (auth via key-auth/OAuth/OIDC, security via WAF/IP/Bot, rate limiting/canary/WasmPlugin hot-reload, multi-model proxying/MCP, etc.) is all carried by the Higress plugin system. **Security alone (an encryption tunnel) does not make an AI gateway** — security and the plugin feature surface together make a complete AI gateway.
 
