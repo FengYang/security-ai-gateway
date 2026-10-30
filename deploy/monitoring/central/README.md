@@ -1,3 +1,5 @@
+> 中文版 ｜ [English](./README.en.md)
+
 # P2-4 T-4.4：中央聚合部署资产
 
 > **只在承担跨集群聚合的中央集群部署**，与 per-集群栈（`deploy/monitoring/**`）并列、互不干扰。

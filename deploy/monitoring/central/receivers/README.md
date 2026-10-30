@@ -1,3 +1,5 @@
+> 中文版 ｜ [English](./README.en.md)
+
 # 中央侧接收端：四种目标形态的发送片段
 
 > **本目录不在 `kustomization.yaml` 的 `resources` 内** → 对默认部署**零影响**，

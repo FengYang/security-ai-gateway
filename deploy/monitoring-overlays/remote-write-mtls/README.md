@@ -1,3 +1,5 @@
+> 中文版 ｜ [English](./README.en.md)
+
 # P2-4 T-4.3：remote-write mTLS 发送侧（per-cluster Prometheus）
 
 > 与 `deploy/monitoring/central/trust/README.md`（中央侧）配套。

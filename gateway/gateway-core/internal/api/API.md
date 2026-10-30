@@ -1,3 +1,5 @@
+> 中文版 ｜ [English](./API.en.md)
+
 # 路由配置管理 API 文档
 
 > **模块**：`gateway-core/internal/api` — 路由配置管理 REST API

@@ -1,3 +1,5 @@
+> 中文版 ｜ [English](./README.en.md)
+
 # P2-4 T-4.3：中央侧通道信任资产（**中央集群**）
 
 > 与 `deploy/monitoring/central/`（中央聚合栈）配套。本目录提供**跨集群通道**的信任资产，

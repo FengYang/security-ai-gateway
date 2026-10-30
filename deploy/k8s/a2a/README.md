@@ -1,3 +1,5 @@
+> 中文版 ｜ [English](./README.en.md)
+
 # A2A K3S 部署（L1 Guardrail + a2aproxy + testagent）
 
 本目录提供 P2-2 A2A 的 K3S 局域网验证清单。**不依赖本机 Docker**：静态交叉编译后生成 Docker-save tar，再通过临时特权 Pod 导入 K3S containerd。

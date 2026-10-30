@@ -1,3 +1,5 @@
+> 中文版 ｜ [English](./README.en.md)
+
 # hello-plugin — Higress Wasm 插件（M1 里程碑）
 
 验证 Go Wasm 插件在 Higress 中的完整生命周期：加载、配置读取、请求/响应拦截、日志。

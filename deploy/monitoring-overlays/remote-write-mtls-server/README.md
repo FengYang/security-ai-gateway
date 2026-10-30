@@ -1,3 +1,5 @@
+> 中文版 ｜ [English](./README.en.md)
+
 # P2-4 T-4.3（接收侧）· PRE-A-4：中央 remote-write 的 mTLS 终止代理
 
 > 配套：发送侧 [`../remote-write-mtls/`](../remote-write-mtls/README.md)（各集群 Prometheus 挂客户端证书）。

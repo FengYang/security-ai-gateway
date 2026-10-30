@@ -1,3 +1,5 @@
+> 中文版 ｜ [English](./README.en.md)
+
 # 跨集群网络边界：三档 NetworkPolicy ＋ 端口矩阵
 
 > **默认不启用**。本目录不在 `deploy/k8s-overlays/trust/kustomization.yaml` 的 `resources` 内，
