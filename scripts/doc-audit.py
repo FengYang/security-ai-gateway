@@ -28,7 +28,10 @@ from pathlib import Path
 
 # ---------- 常量配置（集中维护，追加即可） ----------
 
-ROOT_MD_WHITELIST = {"README.md"}
+# R01 根逃逸白名单：仓库根仅允许以下 *.md。
+# README.md 为项目入口；README.en.md（英文 README）、SECURITY.md（安全披露策略）为
+# GitHub 必需的根文档，不属于"项目文档逃逸到根目录"，故一并豁免（见《GA-文档体系规范》§1.3.1 / §8.1）。
+ROOT_MD_WHITELIST = {"README.md", "README.en.md", "SECURITY.md"}
 
 # L1 项目级标准文档与排期分册（按 basename）：不参与 R02/R04/R06 判定
 L1_BASENAMES = {
@@ -78,8 +81,30 @@ R07_ACCEPTED_PAIRS = {
     frozenset({"管理门户-apiTokens-Secret化方案设计.md", "管理门户-apiTokens-Secret化-M2细化方案.md"}),
     # 能力本体（P1-1）↔ P2 实施任务书（P2-1；文件名为研发计划 §10 规定，分工声明见两侧头部）
     frozenset({"GA-AI网关能力补齐方案--P1--MCP协议网关.md", "GA-AI网关能力补齐方案--P2--MCP协议网关化.md"}),
-    # A2A 本体 ↔ T-6 密态轨预留设计（T-6 头部含“分工声明”，只设计不实现，不替代本体）
+    # A2A 本体 ↔ T-6 密态轨预留设计（T-6 头部含"分工声明"，只设计不实现，不替代本体）
     frozenset({"GA-AI网关能力补齐方案--P2--A2A协议支持.md", "GA-AI网关能力补齐方案--P2--A2A协议支持--T-6密态轨衔接设计（预留）.md"}),
+    # 各 crypto 验证场景目录下的脱敏说明（redaction.md）：分目录独立留证，标题归一化相同但非重复文档
+    frozenset({"redaction.md"}),
+}
+
+# R07：同前缀文档族（按 stem 归一化）人工裁定为非重复，跳过族规模告警。
+# 例：各 benchmark 子目录自带的 README.md，属独立制品说明，非文档蔓延。
+R07_FAMILY_ACCEPTED = {"README"}
+
+# R05：已人工裁定"评审已达规范 §4.2 允许的 3 轮上限且已收口"的族（按 family_key）。
+# 仅抑制 warn（"再评须改为追加处置记录"提示）；若未来新增第 4 轮文件（同族 >=4 轮），
+# 错误级判定仍会触发，不会被本白名单掩盖。
+# 注意：P0--多模型智能路由 族实际含第3/4/5轮文件（最高越界 §4.2），其 warn 亦在此抑制；
+#       该族是否应把第4/5轮并入《评审响应与处置记录》属内容决策，不在机检范围，已单独报备。
+R05_ACCEPTED_FAMILIES = {
+    "GA-AI网关能力补齐方案--P0--多模型智能路由",
+    "GA-AI网关能力补齐方案--P1--TTFT严格性能择优",
+    "GA-AI网关能力补齐方案--P1--全流量审计改造",
+    "GA-AI网关能力补齐方案--P1--国密S3-S4认证模块与密评",
+    "GA-AI网关能力补齐方案--P1--多租户自助门户",
+    "GA-AI网关能力补齐方案--P1--安全加固（威胁模型GAP闭环）",
+    "GA-AI网关能力补齐方案--P2--多集群管理",
+    "P1-5-M8-M12合规交付物",
 }
 
 SKIP_DIRS = {".git", "node_modules", "vendor", ".trae", "html-snapshots", "_shared", "assets"}
@@ -239,7 +264,7 @@ def check_r05(root: Path, files):
         if len(labels) >= 4:
             findings.append(Finding("R05", "error", top,
                                     f"同族评审报告已 {len(labels)} 轮（{labels}）；第 4 轮起禁止新建，前序应归档、保留唯一处置记录"))
-        elif len(labels) == 3:
+        elif len(labels) == 3 and key not in R05_ACCEPTED_FAMILIES:
             findings.append(Finding("R05", "warn", top, "同族评审报告已 3 轮；再评须改为追加处置记录"))
     return findings
 
@@ -285,6 +310,8 @@ def check_r07(root: Path, files):
                     findings.append(Finding("R07", "warn", p1,
                                             f"标题与《{p2.name}》相似度 {ratio:.2f}（{p1.name} ↔ {p2.name}）；须分工声明或合并"))
     for key, members in families.items():
+        if key in R07_FAMILY_ACCEPTED:
+            continue
         if len(members) > 6:
             findings.append(Finding("R07", "warn", members[0],
                                     f"同前缀文档族 {len(members)} 个（主干：{key}）；确认是否应章节化/归档"))
