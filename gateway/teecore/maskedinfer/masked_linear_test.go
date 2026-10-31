@@ -1,5 +1,5 @@
 // 密文线性内核与明文对照。
-// 单层：随机输入，密文内核 vs 明文内核 → 逐位一致（整数域）或量化误差 < 1%。
+// 单层：随机输入，密文内核 vs 明文内核 → 量化误差在容忍范围内（M0 修正后）。
 package maskedinfer
 
 import (
@@ -8,67 +8,117 @@ import (
 	"testing"
 )
 
+// randMatrix 生成 N(0, sigma) 权重矩阵（与 exp2 同分布）。
+func randMatrix(rng *rand.Rand, rows, cols int, sigma float64) [][]float64 {
+	w := make([][]float64, rows)
+	for i := range w {
+		w[i] = make([]float64, cols)
+		for j := range w[i] {
+			w[i][j] = rng.NormFloat64() * sigma
+		}
+	}
+	return w
+}
+
+// randVecF 生成 N(0, sigma) 浮点向量。
+func randVecF(rng *rand.Rand, n int, sigma float64) []float64 {
+	x := make([]float64, n)
+	for i := range x {
+		x[i] = rng.NormFloat64() * sigma
+	}
+	return x
+}
+
+// randMask 生成 [0, R) 掩码向量（Mod64 用全 64 位，Mod32 用低 32 位）。
+func randMask(rng *rand.Rand, n int, mod MaskModulusBits) []uint64 {
+	out := make([]uint64, n)
+	if mod == Mod32 {
+		for i := range out {
+			out[i] = rng.Uint64() % (1 << 32)
+		}
+	} else {
+		for i := range out {
+			out[i] = rng.Uint64()
+		}
+	}
+	return out
+}
+
+// addMod 掩码相加 v = (a + b) mod R（uint64 在 Mod64 下自然环绕）。
+func addMod(a, b []uint64, mod MaskModulusBits) []uint64 {
+	out := make([]uint64, len(a))
+	if mod == Mod32 {
+		M := uint64(1 << 32)
+		for i := range out {
+			out[i] = (a[i] + b[i]) % M
+		}
+	} else {
+		for i := range out {
+			out[i] = a[i] + b[i]
+		}
+	}
+	return out
+}
+
+// runPipeline 跑一遍完整掩码链路，返回 Decode 结果与明文基准。
+func runPipeline(m *QuantizedMatrix, x []float64) (got, ref []float64) {
+	xMask := m.ToMaskDomain(x)
+	r := randMask(rand.New(rand.NewSource(7)), len(x), m.ModBits)
+	v := addMod(xMask, r, m.ModBits)
+	yC, _ := m.CipherLinear([][]uint64{v})
+	img, _ := m.MaskImage(r)
+	y, _ := m.Unmask(yC[0], img)
+	return m.Decode(y), m.PlainLinear([][]float64{x})[0]
+}
+
+// maxRelErr 返回单样例最大相对误差（分母取 max(1, |ref|)）。
+func maxRelErr(m *QuantizedMatrix, x []float64) float64 {
+	got, ref := runPipeline(m, x)
+	var e float64
+	for i := range got {
+		d := math.Abs(got[i] - ref[i])
+		rel := d / math.Max(1.0, math.Abs(ref[i]))
+		if rel > e {
+			e = rel
+		}
+	}
+	return e
+}
+
 // TestCipherLinearParity B1：密文内核 = 明文内核（整数域无损对照）。
-// 流程：明文 x → 掩码 r → 密文 v = x + r → GPU 密文线性 y_cipher = W·v
-// → TEE 脱掩码 y = y_cipher - W·r → 与明文线性 W·x 一致。
 func TestCipherLinearParity(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
 	rows, cols := 16, 8
-
-	// 随机权重 + 量化（INT8）
-	weights := make([][]float64, rows)
-	for i := range weights {
-		weights[i] = make([]float64, cols)
-		for j := range weights[i] {
-			weights[i][j] = rng.Float64()*2 - 1
-		}
-	}
+	weights := randMatrix(rng, rows, cols, 1.0)
 	m, err := NewQuantizedMatrix(weights, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.WithBias(make([]float64, rows))
 
-	// 明文输入（量化到掩码域：×1e6 定点）
-	x := make([]float64, cols)
-	for j := range x {
-		x[j] = rng.Float64()*10 - 5
-	}
-	xMask := FloatToMaskDomain(x)
+	x := randVecF(rng, cols, 5)
+	xMask := m.ToMaskDomain(x)
+	r := randMask(rng, cols, m.ModBits)
+	v := addMod(xMask, r, m.ModBits)
 
-	// 掩码 + 密文
-	r := make([]uint64, cols)
-	for j := range r {
-		r[j] = uint64(rng.Int63n(int64(maskModulus)))
-	}
-	v := make([]uint64, cols)
-	for j := range v {
-		v[j] = (xMask[j] + r[j]) % maskModulus
-	}
-
-	// GPU 密文线性
-	yCipher, err := m.CipherLinear([][]uint64{v})
+	yC, err := m.CipherLinear([][]uint64{v})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// TEE 掩码像 + 脱掩码
 	maskImage, err := m.MaskImage(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	y, err := Unmask(yCipher[0], maskImage)
+	y, err := m.Unmask(yC[0], maskImage)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 明文对照（浮点域 ×1e6 归一）
-	plainRef := m.PlainLinear([][]float64{x})[0]
-	for i := range y {
-		want := uint64(int64(plainRef[i]*1e6)) % maskModulus
-		// 量化误差容忍：<1% 相对误差
-		got := float64(y[i])
-		diff := math.Abs(got - float64(want))
-		if diff > float64(want)*0.01 && want > 1000 {
-			t.Fatalf("y[%d] 偏差超限: got=%d want=%d", i, y[i], want)
+	// 修正后：用 Decode 还原真值，应与明文 W·x 一致（量化误差 < 1%）
+	got := m.Decode(y)
+	ref := m.PlainLinear([][]float64{x})[0]
+	for i := range got {
+		if math.Abs(got[i]-ref[i]) > 0.01*math.Max(1.0, math.Abs(ref[i])) {
+			t.Fatalf("B1 y[%d] 偏差超限: got=%.4f ref=%.4f", i, got[i], ref[i])
 		}
 	}
 }
@@ -77,13 +127,8 @@ func TestCipherLinearParity(t *testing.T) {
 func TestUnmaskRemaskRoundtrip(t *testing.T) {
 	rng := rand.New(rand.NewSource(7))
 	n := 32
-	yCipher := make([]uint64, n)
-	rNext := make([]uint64, n)
-	for i := range yCipher {
-		yCipher[i] = uint64(rng.Int63n(int64(maskModulus)))
-		rNext[i] = uint64(rng.Int63n(int64(maskModulus)))
-	}
-	// 掩码像全零（无线性层，模拟非线性补算）：y = y_cipher
+	yCipher := randMask(rng, n, Mod32)
+	rNext := randMask(rng, n, Mod32)
 	zero := make([]uint64, n)
 	y, err := Unmask(yCipher, zero)
 	if err != nil {
@@ -93,9 +138,8 @@ func TestUnmaskRemaskRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 验证 remasked = yCipher + rNext
 	for i := range remasked {
-		want := (yCipher[i] + rNext[i]) % maskModulus
+		want := (yCipher[i] + rNext[i]) % (1 << 32)
 		if remasked[i] != want {
 			t.Fatalf("remasked[%d] = %d, want %d", i, remasked[i], want)
 		}
@@ -106,13 +150,7 @@ func TestUnmaskRemaskRoundtrip(t *testing.T) {
 func TestQuantizeINT16(t *testing.T) {
 	rng := rand.New(rand.NewSource(99))
 	rows, cols := 4, 4
-	weights := make([][]float64, rows)
-	for i := range weights {
-		weights[i] = make([]float64, cols)
-		for j := range weights[i] {
-			weights[i][j] = rng.Float64()*2 - 1
-		}
-	}
+	weights := randMatrix(rng, rows, cols, 1.0)
 	m8, _ := NewQuantizedMatrix(weights, 8)
 	m16, _ := NewQuantizedMatrix(weights, 16)
 	x := []float64{0.5, -0.25, 1.0, -0.75}
@@ -129,25 +167,15 @@ func TestQuantizeINT16(t *testing.T) {
 }
 
 // TestB3NoPlaintextVisibleToGPU 密文输入与明文统计无关（GPU 只见密文）。
-// 同一明文配不同掩码 → 密文分布不同；密文分量无明文特征。
 func TestB3NoPlaintextVisibleToGPU(t *testing.T) {
 	rng := rand.New(rand.NewSource(1234))
 	dim := 64
-	x := make([]float64, dim)
-	for i := range x {
-		x[i] = rng.Float64()*10 - 5
-	}
-	xMask := FloatToMaskDomain(x)
-
-	// 两次不同掩码 → 密文完全不同（一次一密）
-	mask1 := randVec(rng, dim)
-	mask2 := randVec(rng, dim)
-	c1 := make([]uint64, dim)
-	c2 := make([]uint64, dim)
-	for i := range c1 {
-		c1[i] = (xMask[i] + mask1[i]) % maskModulus
-		c2[i] = (xMask[i] + mask2[i]) % maskModulus
-	}
+	x := randVecF(rng, dim, 5)
+	xMask := ToMaskDomain(x)
+	mask1 := randMask(rng, dim, Mod32)
+	mask2 := randMask(rng, dim, Mod32)
+	c1 := addMod(xMask, mask1, Mod32)
+	c2 := addMod(xMask, mask2, Mod32)
 	same := 0
 	for i := range c1 {
 		if c1[i] == c2[i] {
@@ -157,7 +185,6 @@ func TestB3NoPlaintextVisibleToGPU(t *testing.T) {
 	if same > dim/10 {
 		t.Fatalf("不同掩码下密文过于相似（%d/%d 相同）", same, dim)
 	}
-	// 密文分量与明文相关性：任一密文分量 ≠ 明文分量（掩码化后明文不可直接观测）
 	for i := range c1 {
 		if c1[i] == xMask[i] {
 			t.Fatalf("密文分量 %d 与明文相同（掩码为 0 概率不可忽略）", i)
@@ -166,70 +193,104 @@ func TestB3NoPlaintextVisibleToGPU(t *testing.T) {
 }
 
 // TestB2EndToEndAccuracy 端到端精度——密文链路 vs 明文推理（误差 < 1%）。
-// 完整链路：明文 x → 掩码 r → 密文 v → 密文线性 y_cipher → TEE 脱掩码+非线性
-// → 重掩码 → GPU 解密 → 与明文推理（W·x + GELU）对照。
 func TestB2EndToEndAccuracy(t *testing.T) {
 	rng := rand.New(rand.NewSource(2026))
 	rows, cols := 32, 16
-
-	weights := make([][]float64, rows)
-	for i := range weights {
-		weights[i] = make([]float64, cols)
-		for j := range weights[i] {
-			weights[i][j] = rng.Float64()*2 - 1
-		}
-	}
-	m, err := NewQuantizedMatrix(weights, 8)
+	weights := randMatrix(rng, rows, cols, 1.0)
+	// B2 验证生产安全路径（Mod64 + int128 累加）；Mod32 在真实量级下会回绕崩坏（见 TestM0ModChoice）。
+	m, err := NewQuantizedMatrixMod(weights, 8, Mod64)
 	if err != nil {
 		t.Fatal(err)
 	}
+	x := randVecF(rng, cols, 5)
+	xMask := m.ToMaskDomain(x)
+	r := randMask(rng, cols, m.ModBits)
+	v := addMod(xMask, r, m.ModBits)
 
-	x := make([]float64, cols)
-	for j := range x {
-		x[j] = rng.Float64()*10 - 5
-	}
-	xMask := FloatToMaskDomain(x)
-	r := randVec(rng, cols)
-	v := make([]uint64, cols)
-	for j := range v {
-		v[j] = (xMask[j] + r[j]) % maskModulus
-	}
-
-	// GPU：密文线性
-	yCipher, _ := m.CipherLinear([][]uint64{v})
-	// TEE：掩码像 + 脱掩码 + 符号还原 + GELU
+	yC, _ := m.CipherLinear([][]uint64{v})
 	maskImage, _ := m.MaskImage(r)
-	y, _ := Unmask(yCipher[0], maskImage)
-	signed := SignedVector(y)
+	y, _ := m.Unmask(yC[0], maskImage)
+	// 修正后：Decode 还原 + TEE 非线性 GELU
+	signed := m.Decode(y)
 	yFloat := make([]float64, rows)
 	for i := range signed {
-		yFloat[i] = geluRef(float64(signed[i]) / 1e6) // 反定点 + TEE 非线性
+		yFloat[i] = geluRef(signed[i])
 	}
-	// 明文参照：W·x + GELU
 	plainRef := m.PlainLinear([][]float64{x})[0]
 	for i := range plainRef {
 		plainRef[i] = geluRef(plainRef[i])
 	}
-	// 精度对照（相对误差 < 1%）
 	for i := range yFloat {
 		want := plainRef[i]
 		diff := math.Abs(yFloat[i] - want)
-		if diff > math.Abs(want)*0.01+1e-3 {
-			t.Fatalf("yFloat[%d]=%.4f want=%.4f 偏差超 1%%", i, yFloat[i], want)
+		if diff > 0.01*math.Max(1.0, math.Abs(want))+1e-3 {
+			t.Fatalf("B2 yFloat[%d]=%.4f want=%.4f 偏差超 1%%", i, yFloat[i], want)
 		}
+	}
+}
+
+// TestM0RegressionGate M0 核心：随机化崩坏回归门禁。
+// 覆盖 Mod64（生产首选）× bit{8,16} × dim{512..4096} × 多 seed，
+// 任一失配（偶发/不可复现数值崩坏）即 fail。
+func TestM0RegressionGate(t *testing.T) {
+	rng := rand.New(rand.NewSource(20261031))
+	dims := []int{512, 1024, 2048, 3072, 4096}
+	bits := []int{8, 16}
+	seeds := 4
+	const tol = 0.05 // 5% 相对容差，远小于崩坏量级（信号的数倍~数百倍）
+	for _, bit := range bits {
+		for _, dim := range dims {
+			for s := 0; s < seeds; s++ {
+				weights := randMatrix(rng, dim, dim, 0.02)
+				m, err := NewQuantizedMatrixMod(weights, bit, Mod64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				x := randVecF(rng, dim, 1.0)
+				got, ref := runPipeline(m, x)
+				for i := range got {
+					if math.Abs(got[i]-ref[i]) > tol*math.Max(1.0, math.Abs(ref[i])) {
+						t.Fatalf("M0 gate FAIL bit=%d dim=%d seed=%d [%d]: got=%.4f ref=%.4f (rel=%.3f > %.2f)",
+							bit, dim, s, i, got[i], ref[i],
+							math.Abs(got[i]-ref[i])/math.Max(1.0, math.Abs(ref[i])), tol)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestM0ModChoice 锁定 §7.7 决策：同 dim=4096，Mod64 误差 << Mod32（exp2 结论）。
+// Mod64 必须干净通过；Mod32+S=1e6 必须仍崩坏（否则 exp2 结论被推翻）。
+func TestM0ModChoice(t *testing.T) {
+	rng := rand.New(rand.NewSource(777))
+	dim := 4096
+	bit := 16
+	var err64, err32 float64
+	for s := 0; s < 4; s++ {
+		weights := randMatrix(rng, dim, dim, 0.02)
+		m64, _ := NewQuantizedMatrixMod(weights, bit, Mod64)
+		m32, _ := NewQuantizedMatrixMod(weights, bit, Mod32)
+		x := randVecF(rng, dim, 1.0)
+		e64 := maxRelErr(m64, x)
+		e32 := maxRelErr(m32, x)
+		if e64 > err64 {
+			err64 = e64
+		}
+		if e32 > err32 {
+			err32 = e32
+		}
+	}
+	t.Logf("Mod64 maxRelErr=%.3e  Mod32 maxRelErr=%.3e", err64, err32)
+	if err64 > 0.05 {
+		t.Fatalf("Mod64 不应崩坏: maxRelErr=%.3e", err64)
+	}
+	if err32 < 0.05 {
+		t.Fatalf("Mod32+S=1e6 应仍崩坏(预期): maxRelErr=%.3e 过小，exp2 结论被推翻", err32)
 	}
 }
 
 // geluRef GELU 参照实现。
 func geluRef(x float64) float64 {
 	return 0.5 * x * (1 + math.Erf(x/math.Sqrt2))
-}
-
-// randVec 随机掩码向量（[0, 2^32) 域）。
-func randVec(rng *rand.Rand, n int) []uint64 {
-	out := make([]uint64, n)
-	for i := range out {
-		out[i] = uint64(rng.Int63n(int64(maskModulus)))
-	}
-	return out
 }

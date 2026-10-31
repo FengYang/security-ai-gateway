@@ -210,12 +210,9 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("脱掩码失败: %v", err), http.StatusInternalServerError)
 			return
 		}
-		// 符号还原 + 浮点化
-		signed := maskedinfer.SignedVector(y)
-		yFloat := make([]float64, len(signed))
-		for i, v := range signed {
-			yFloat[i] = float64(v) / 1e6
-		}
+		// 脱掩码后整数域先还原符号，再按 scale 与输入定点缩放还原为浮点真值
+		// （M0 修正：内核改为整数域先脱掩码、后缩放，故此处用 Decode 而非裸除 1e6）
+		yFloat := weights.Decode(y)
 		// 非线性
 		switch req.Op {
 		case "gelu":
