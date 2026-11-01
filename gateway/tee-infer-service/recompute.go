@@ -32,6 +32,13 @@ type recomputeRequest struct {
 // recomputeBatchLimit 单请求 batch 上限（vLLM 连续批处理对齐，防超长请求）
 const recomputeBatchLimit = 4096
 
+// route2MaskModulus 路线2 掩码模 R（M1 接线，技术方案 §7.7 定案）。
+// 取 2^64-1 (=^uint64(0)) 作为 2^64 的等价代表：掩码流拒绝采样在 r=2^64-1 时
+// 近 100% 接受且返回值落在 [0, 2^64-1)，统计上与完整 2^64 等价；内核 Mod64 累积器
+// 以 mod 2^64（uint64 自然回绕）归约，故无需改动 cipher/mask 包。
+// 注意：本常量仅用于路线2 非线性补算路径，与 legacy OTP 的 route2MaskModulus(=2^32) 互不干扰。
+const route2MaskModulus uint64 = ^uint64(0)
+
 type recomputeResponse struct {
 	RequestID string     `json:"request_id"`
 	Result    [][]uint64 `json:"result"`
@@ -109,7 +116,8 @@ func (p *mockWeightProvider) LayerWeight(layer int) (*maskedinfer.QuantizedMatri
 			weights[i][j] = (float64(int16(h[0])|int16(h[1])<<8)/32768.0)*0.5 - 0.25
 		}
 	}
-	m, err := maskedinfer.NewQuantizedMatrix(weights, 8)
+	// M1：路线2 生产路径启用 Mod64（int128 累加），与 §7.7 定案一致。
+	m, err := maskedinfer.NewQuantizedMatrixMod(weights, 8, maskedinfer.Mod64)
 	if err != nil {
 		return nil, err
 	}
@@ -169,13 +177,13 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 	}
 	defer wipe(seed)
 	layerDomain := fmt.Sprintf("otpmask/layer/%d/v1", req.Layer)
-	stream, err := newLayerStream(seed, maskModulus, []byte(layerDomain))
+	stream, err := newLayerStream(seed, route2MaskModulus, []byte(layerDomain))
 	if err != nil {
 		s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_layer_stream_failed", "", http.StatusInternalServerError)
 		http.Error(w, fmt.Sprintf("掩码流派生失败: %v", err), http.StatusInternalServerError)
 		return
 	}
-	nextStream, err := newLayerStream(seed, maskModulus, []byte(fmt.Sprintf("otpmask/layer/%d/v1", req.Layer+1)))
+	nextStream, err := newLayerStream(seed, route2MaskModulus, []byte(fmt.Sprintf("otpmask/layer/%d/v1", req.Layer+1)))
 	if err != nil {
 		s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_next_stream_failed", "", http.StatusInternalServerError)
 		http.Error(w, fmt.Sprintf("下一层掩码流派生失败: %v", err), http.StatusInternalServerError)
@@ -194,7 +202,7 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 	// 掩码 r_l 和掩码像 W_l·r_l
 	rMask := make([]uint64, dim)
 	for i := range rMask {
-		rMask[i] = stream.Next() % maskModulus
+		rMask[i] = stream.Next() % route2MaskModulus
 	}
 	maskImage, err := weights.MaskImage(rMask)
 	if err != nil {
@@ -203,8 +211,8 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for b, yCipher := range req.Batch {
-		// 脱掩码
-		y, err := maskedinfer.Unmask(yCipher, maskImage)
+		// 脱掩码（M1：改用权重矩阵自身的 Mod 方法，尊重 ModBits=Mod64）
+		y, err := weights.Unmask(yCipher, maskImage)
 		if err != nil {
 			s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_unmask_failed", "", http.StatusInternalServerError)
 			http.Error(w, fmt.Sprintf("脱掩码失败: %v", err), http.StatusInternalServerError)
@@ -236,13 +244,13 @@ func (s *teeServer) handleRecompute(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("未知算子 %q（gelu|softmax|layernorm|rmsnorm|argmax）", req.Op), http.StatusBadRequest)
 			return
 		}
-		// 定点化 + 重掩码
-		fY := maskedinfer.FloatToMaskDomain(yFloat)
+		// 定点化 + 重掩码（M1：改用权重矩阵自身的 Mod 方法）
+		fY := weights.ToMaskDomain(yFloat)
 		rNext := make([]uint64, dim)
 		for i := range rNext {
-			rNext[i] = nextStream.Next() % maskModulus
+			rNext[i] = nextStream.Next() % route2MaskModulus
 		}
-		remasked, err := maskedinfer.Remask(fY, rNext)
+		remasked, err := weights.Remask(fY, rNext)
 		if err != nil {
 			s.auditDenyExitReq(r, tenantOf(r), req.RequestID, "recompute_remask_failed", "", http.StatusInternalServerError)
 			http.Error(w, fmt.Sprintf("重掩码失败: %v", err), http.StatusInternalServerError)
