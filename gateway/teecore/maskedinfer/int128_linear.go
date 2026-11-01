@@ -43,8 +43,14 @@ func (m *QuantizedMatrix) CipherLinearInt128(V [][]uint64) ([][]uint64, error) {
 				blo, bhi := signed128(int64(m.Bias[i]))
 				lo, hi = add128(lo, hi, blo, bhi)
 			}
-			// 低 64 位即 mod 2^64 结果（128 位和未溢出，低 64 位精确）
-			row[i] = lo
+			// 低 64 位即 mod 2^64 结果（128 位和未溢出，低 64 位精确）；
+			// 若矩阵为 Mod32，再按 2^32 归约，使本函数对任意 ModBits 均与
+			// CipherLinear(math/big) 逐位一致（2^32 | 2^64，低 32 位即精确 mod 2^32）。
+			if m.ModBits == Mod32 {
+				row[i] = lo & 0xFFFFFFFF
+			} else {
+				row[i] = lo
+			}
 		}
 		out[b] = row
 	}

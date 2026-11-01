@@ -1,0 +1,33 @@
+# 路线2 单机云测编排：tee-infer-service（TEE 补算，含 /v1/recompute）+ route2-client（端到端冒烟）
+# 用法（在 packaging/route2/ 目录）：
+#   docker compose build
+#   docker compose up -d tee-infer
+#   docker compose run --rm route2-client
+services:
+  tee-infer:
+    build:
+      context: ../..
+      dockerfile: gateway/tee-infer-service/Dockerfile
+    image: tee-infer-service:route2
+    # -dev-mode + -enclave mock：单机云测无 TDX 硬件时的最小可运行形态；
+    # 生产改为 -enclave tdx 且去掉 -dev-mode（并注入 -admin-token）。
+    command: ["-listen", ":19090", "-dev-mode", "-enclave", "mock"]
+    ports:
+      - "19090:19090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:19090/healthz/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  route2-client:
+    build:
+      context: ../..
+      dockerfile: packaging/route2/Dockerfile.client
+    image: route2-client:route2
+    depends_on:
+      tee-infer:
+        condition: service_healthy
+    command: ["-server", "http://tee-infer:19090", "-dim", "32", "-layers", "4"]
+    restart: "no"

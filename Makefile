@@ -316,3 +316,21 @@ test-adapters:
 # 覆盖库内 + admin-service 接线/富化/既有 model_catalog_test.go 3 用例回归（§7.10 QA2-24）。
 test-adapters-integration:
 	go test -count=1 -race -mod=mod -tags=integration -timeout=180s $(CONFLLM_PKG) $(CONFLLM_ADMIN_PKG)
+
+# ---------------------------------------------------------------------------
+# 路线2（掩码像推理）打包 —— 详见 packaging/route2/README.md
+#   make route2-build   构建 dist/tee-infer-service + dist/route2-client（纯 CPU）
+#   make route2-image   构建 docker compose 镜像
+#   make route2-smoke   对已运行的 tee-infer 跑端到端冒烟
+# ---------------------------------------------------------------------------
+.PHONY: route2-build
+route2-build:
+	bash packaging/route2/build.sh
+
+.PHONY: route2-image
+route2-image:
+	docker compose -f packaging/route2/docker-compose.yaml build
+
+.PHONY: route2-smoke
+route2-smoke:
+	bash packaging/route2/smoke.sh

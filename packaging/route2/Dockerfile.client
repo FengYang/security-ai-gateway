@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+# route2-client 镜像 —— 路线2 端到端客户端编排器（纯 CPU，CGO=0）。
+# 线性层默认走 CPU 128 位内核 CipherLinearInt128；若需加速后端，改用 CGO=1 构建并注入
+# ACCEL_BACKEND_LIB（见 packaging/route2/README.md）。
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+ENV GOPROXY=https://goproxy.cn,direct
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cipher ./cipher
+COPY protocol ./protocol
+COPY internal ./internal
+COPY gateway/teecore ./gateway/teecore
+COPY gateway/cryptop ./gateway/cryptop
+COPY cmd/route2-client ./cmd/route2-client
+RUN CGO_ENABLED=0 go build -mod=mod -trimpath -o /out/route2-client ./cmd/route2-client
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=build /out/route2-client /usr/local/bin/route2-client
+# 非 root 运行
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/route2-client"]

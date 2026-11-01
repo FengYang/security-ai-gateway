@@ -80,3 +80,8 @@ int accel_cipher_linear_int128(const int8_t* W, const int64_t* bias,
   CL_CHECK(cudaDeviceSynchronize());
   return 0;
 }
+
+// ABI 版本握手符号（见 accel_linear_int128.h）。
+int accel_cipher_linear_int128_abi_version(void) {
+  return ACCEL_LINEAR_INT128_ABI_VERSION;
+}

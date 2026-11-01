@@ -3,7 +3,6 @@ package main
 
 import (
 	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,6 +15,7 @@ import (
 	"security-ai-gateway/cipher/mask"
 	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/gateway/teecore/maskedinfer"
+	"security-ai-gateway/gateway/teecore/route2demo"
 )
 
 type recomputeRequest struct {
@@ -106,22 +106,11 @@ func NewMockWeightProvider(dim int) *mockWeightProvider {
 	return &mockWeightProvider{dim: dim}
 }
 
-// LayerWeight mock：基于层号哈希生成确定性权重
+// LayerWeight mock：基于层号哈希生成确定性权重。
+// 算法已抽取到 route2demo（客户端编排器 cmd/route2-client 共享同一实现，
+// 保证双方对同一 (layer,dim) 得到逐位一致的权重，无需经线路传输）。
 func (p *mockWeightProvider) LayerWeight(layer int) (*maskedinfer.QuantizedMatrix, error) {
-	weights := make([][]float64, p.dim)
-	for i := range weights {
-		weights[i] = make([]float64, p.dim)
-		for j := range weights[i] {
-			h := sha256.Sum256([]byte(fmt.Sprintf("layer-%d-%d-%d", layer, i, j)))
-			weights[i][j] = (float64(int16(h[0])|int16(h[1])<<8)/32768.0)*0.5 - 0.25
-		}
-	}
-	// M1：路线2 生产路径启用 Mod64（int128 累加），与 §7.7 定案一致。
-	m, err := maskedinfer.NewQuantizedMatrixMod(weights, 8, maskedinfer.Mod64)
-	if err != nil {
-		return nil, err
-	}
-	return m, nil
+	return route2demo.LayerWeights(layer, p.dim)
 }
 
 // handleRecompute /v1/recompute

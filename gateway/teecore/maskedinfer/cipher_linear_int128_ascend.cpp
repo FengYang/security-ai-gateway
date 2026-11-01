@@ -58,6 +58,11 @@ extern "C" int accel_cipher_linear_int128(const int8_t* W, const int64_t* bias,
   return 0;
 }
 
+// ABI 版本握手符号（见 accel_linear_int128.h）。
+extern "C" int accel_cipher_linear_int128_abi_version(void) {
+  return ACCEL_LINEAR_INT128_ABI_VERSION;
+}
+
 // ----------------------------------------------------------------------------
 // (2) 目标 NPU 路径骨架（Ascend C 算子 + AscendCL 启动封装）
 //     默认以 #if 0 包裹：此处是"打上昇腾 NPU"的真实落点，需 CANN 工具链编译，

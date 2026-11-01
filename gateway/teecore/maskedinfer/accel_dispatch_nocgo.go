@@ -25,3 +25,6 @@ func InitAccelBackend(paths ...string) error {
 func (m *QuantizedMatrix) AccelLinearInt128(V [][]uint64) ([][]uint64, error) {
 	return nil, ErrAccelUnavailable
 }
+
+// resetAccelStateForTest 无 CGO 时无一次性加载状态，空操作（与 cgo 版同签名，供测试共用）。
+func resetAccelStateForTest() {}

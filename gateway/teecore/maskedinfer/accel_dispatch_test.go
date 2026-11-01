@@ -17,6 +17,10 @@ func TestAccelDispatch(t *testing.T) {
 	lib := os.Getenv("TEST_ACCEL_LIB")
 	if lib == "" {
 		// —— 回退路径：未配置任何加速后端 ——
+		// 抹除可能由外层环境带入的 ACCEL_BACKEND_LIB，并重置惰性加载 Once，
+		// 确保本分支不受全局环境 / 其它测试副作用影响（测试确定性，QA-H1）。
+		os.Unsetenv("ACCEL_BACKEND_LIB")
+		resetAccelStateForTest()
 		w := [][]float64{{0.1, -0.2, 0.3}, {-0.4, 0.5, -0.6}}
 		m, err := NewQuantizedMatrixMod(w, 8, Mod64)
 		if err != nil {

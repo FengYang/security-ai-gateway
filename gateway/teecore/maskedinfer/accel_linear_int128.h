@@ -36,6 +36,16 @@
 #ifndef ACCEL_LINEAR_INT128_H
 #define ACCEL_LINEAR_INT128_H
 
+// 注意（网关加载侧必读）：
+//   - 后端按 mod 2^64 计算并写入 out（低 64 位）；Go 侧 AccelLinearInt128 会再按矩阵
+//     ModBits（Mod32→低 32 位 / Mod64→低 64 位）归约，从而与 CipherLinear(math/big) 逐位一致。
+//   - 加载须为受信绝对路径：网关仅从受信安装目录 dlopen，并校验文件为普通文件、group/other 不可写、
+//     且 ABI 版本匹配（见 accel_cipher_linear_int128_abi_version），拒绝任意 env 路径以防范代码注入。
+
+// 加速后端 ABI 版本号：网关加载侧（accel_dispatch.go 的 accelLinearInt128ABIVersion）
+// 与后端实现（accel_cipher_linear_int128_abi_version()）必须一致，否则拒绝加载并回退 CPU。
+#define ACCEL_LINEAR_INT128_ABI_VERSION 1
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -50,6 +60,10 @@ extern "C" {
 int accel_cipher_linear_int128(const int8_t* W, const int64_t* bias,
                                const uint64_t* V, int rows, int cols,
                                uint64_t* out, int batch);
+
+// ABI 版本握手符号：返回本后端实现的 ABI 版本（见 ACCEL_LINEAR_INT128_ABI_VERSION）。
+// 网关加载侧据此校验版本，不匹配则拒绝加载、回退 CPU 路径。
+int accel_cipher_linear_int128_abi_version(void);
 
 #ifdef __cplusplus
 }

@@ -10,7 +10,11 @@ COPY internal ./internal
 COPY gateway/teecore ./gateway/teecore
 COPY gateway/cryptop ./gateway/cryptop
 COPY gateway/tee-infer-service ./gateway/tee-infer-service
-RUN CGO_ENABLED=0 go build -trimpath -o /out/tee-infer-service ./gateway/tee-infer-service
+# 补全导入树：main.go/audit_export.go 依赖 auditexport（审计导出），mcp_config.go 等依赖
+# mcpsec（MCP 安全）。缺这两处 COPY 会导致 go build 直接失败（历史 Dockerfile 失效点）。
+COPY gateway/auditexport ./gateway/auditexport
+COPY gateway/mcpsec ./gateway/mcpsec
+RUN CGO_ENABLED=0 go build -mod=mod -trimpath -o /out/tee-infer-service ./gateway/tee-infer-service
 
 FROM alpine:3.20
 COPY --from=build /out/tee-infer-service /usr/local/bin/tee-infer-service
