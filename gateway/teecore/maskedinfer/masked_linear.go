@@ -90,10 +90,13 @@ func newQuantizedMatrix(weights [][]float64, bitWidth int, modBits MaskModulusBi
 }
 
 // WithBias 附加量化 bias。
+// 偏置在整数累加器中的正确单位应为 b·S/scale：Decode 以 ×scale/S 还原，
+// bias_int·scale/S = (b·S/scale)·scale/S = b，偏置方可无损还原。
+// （早期实现用 b/scale，会使偏置在 Decode 后被缩小 S 倍而失真；此修正与 M0 整数域先脱掩码一致。）
 func (m *QuantizedMatrix) WithBias(bias []float64) *QuantizedMatrix {
 	m.Bias = make([]int32, len(bias))
 	for i, b := range bias {
-		m.Bias[i] = int32(math.Round(b / m.Scale))
+		m.Bias[i] = int32(math.Round(b * m.InputScale / m.Scale))
 	}
 	return m
 }
@@ -134,9 +137,8 @@ func (m *QuantizedMatrix) MaskImage(r []uint64) ([]uint64, error) {
 			term.Mul(term, big.NewInt(0).SetUint64(r[j]))
 			acc.Add(acc, term)
 		}
-		if m.Bias != nil {
-			acc.Add(acc, big.NewInt(int64(m.Bias[i])))
-		}
+		// 注意：偏置仅由 CipherLinear（不可信加速器侧）加入一次，此处掩码像不含偏置，
+		// 以保证 Unmask(yCipher, maskImage) = W·xMask（+ 偏置在 yCipher 中仅出现一次）。
 		out[i] = m.reduce(acc, R)
 	}
 	return out, nil
@@ -183,7 +185,7 @@ func (m *QuantizedMatrix) PlainLinear(x [][]float64) [][]float64 {
 				acc += float64(m.Data[i*m.Cols+j]) * m.Scale * vec[j]
 			}
 			if m.Bias != nil {
-				acc += float64(m.Bias[i]) * m.Scale
+				acc += float64(m.Bias[i]) * m.Scale / m.InputScale
 			}
 			row[i] = acc
 		}
