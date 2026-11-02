@@ -3,6 +3,7 @@ package route2qwen
 import (
 	"fmt"
 	"math"
+	"math/rand"
 
 	"security-ai-gateway/gateway/teecore/maskedinfer"
 )
@@ -41,7 +42,7 @@ func (r *Runner) Reset() {
 }
 
 // Step 处理一个 batch（prefill 多行或 decode 单行），返回每行 logits。
-// fn 决定线性层走掩码像还是参照路径。
+// fn 决定线性层走掩码像还是参照路径。形态B：词表（Embed/LMHead）在后端。
 func (r *Runner) Step(fn linearFn, tokens []int) ([][]float64, error) {
 	cfg := r.w.Cfg
 	if len(tokens) == 0 {
@@ -50,71 +51,199 @@ func (r *Runner) Step(fn linearFn, tokens []int) ([][]float64, error) {
 	if r.pos+len(tokens) > cfg.MaxTokens {
 		return nil, fmt.Errorf("route2qwen: 位置 %d + batch %d 超出 MaxTokens=%d", r.pos, len(tokens), cfg.MaxTokens)
 	}
-	base := r.pos
 	h, err := r.w.embedRows(tokens)
 	if err != nil {
 		return nil, err
 	}
+	if h, err = r.runLayers(h, fn); err != nil {
+		return nil, err
+	}
+	hn := rmsNormRows(h, r.w.LNFinal, cfg.NormEps)
+	logits := mustBatch(fn(r.w.LMHead, hn))
+	r.pos += len(tokens)
+	return logits, nil
+}
 
+// runLayers 在明文 h 上跑全部 L 层（含 KV 缓存追加与位置推进），返回末层明文 hidden（不含 final RMSNorm）。
+// fn 决定线性层走掩码像还是参照路径；形态A 的内部线性层亦走掩码像（每线性层独立 fresh 掩码，TEE 内脱掩后做非线性）。
+func (r *Runner) runLayers(h [][]float64, fn linearFn) ([][]float64, error) {
+	cfg := r.w.Cfg
+	base := r.pos
+	var err error
 	for L := 0; L < cfg.Layers; L++ {
-		// attention 前 RMSNorm
-		hn := make([][]float64, len(tokens))
-		for i := range h {
-			hn[i] = RMSNorm(h[i], r.w.LNIn[L], cfg.NormEps)
-		}
+		hn := rmsNormRows(h, r.w.LNIn[L], cfg.NormEps)
 		q := mustBatch(fn(r.w.AttnQ[L][0], hn))
 		k := mustBatch(fn(r.w.AttnK[L][0], hn))
 		vv := mustBatch(fn(r.w.AttnV[L][0], hn))
 
 		// RoPE 只作用于 Q/K（V 不旋转），且必须在 KV 追加之前完成（Qwen/LLaMA 约定）
 		for i := range q {
-			if err := applyRoPEQwen(q[i], base+i, cfg.HeadDim, cfg.RopeTheta); err != nil {
+			if err = applyRoPEQwen(q[i], base+i, cfg.HeadDim, cfg.RopeTheta); err != nil {
 				return nil, err
 			}
-			if err := applyRoPEQwen(k[i], base+i, cfg.HeadDim, cfg.RopeTheta); err != nil {
+			if err = applyRoPEQwen(k[i], base+i, cfg.HeadDim, cfg.RopeTheta); err != nil {
 				return nil, err
 			}
 		}
 		r.k[L] = append(r.k[L], k...)
 		r.v[L] = append(r.v[L], vv...)
 
-		h2 := make([][]float64, len(tokens))
+		h2 := make([][]float64, len(h))
 		for i := range q {
-			o, err := attentionQwen(q[i], r.k[L], r.v[L], cfg, base+i)
-			if err != nil {
+			var o []float64
+			if o, err = attentionQwen(q[i], r.k[L], r.v[L], cfg, base+i); err != nil {
 				return nil, fmt.Errorf("route2qwen: 层 %d 注意力失败: %w", L, err)
 			}
 			ao := mustOne(fn(r.w.AttnO[L][0], [][]float64{o}))
-			h2[i], err = addVec(h[i], ao)
-			if err != nil {
+			if h2[i], err = addVec(h[i], ao); err != nil {
 				return nil, err
 			}
 		}
 
 		// FFN 前 RMSNorm + SwiGLU
-		hn2 := make([][]float64, len(tokens))
-		for i := range h2 {
-			hn2[i] = RMSNorm(h2[i], r.w.LNPost[L], cfg.NormEps)
-		}
+		hn2 := rmsNormRows(h2, r.w.LNPost[L], cfg.NormEps)
 		gate := mustBatch(fn(r.w.Gate[L][0], hn2))
 		up := mustBatch(fn(r.w.Up[L][0], hn2))
 		act := siluMul(gate, up)
 		down := mustBatch(fn(r.w.Down[L][0], act))
 		for i := range h {
-			h[i], err = addVec(h2[i], down[i])
-			if err != nil {
+			if h[i], err = addVec(h2[i], down[i]); err != nil {
 				return nil, err
 			}
 		}
 	}
+	return h, nil
+}
 
-	hn := make([][]float64, len(h))
+// rmsNormRows 对 batch 内每行做 RMSNorm。
+func rmsNormRows(h [][]float64, gamma []float64, eps float64) [][]float64 {
+	out := make([][]float64, len(h))
 	for i := range h {
-		hn[i] = RMSNorm(h[i], r.w.LNFinal, cfg.NormEps)
+		out[i] = RMSNorm(h[i], gamma, eps)
 	}
-	logits := mustBatch(fn(r.w.LMHead, hn))
-	r.pos += len(tokens)
-	return logits, nil
+	return out
+}
+
+// StepEmb 形态A 入口：输入网关侧 OTP 加掩的嵌入，输出重新加掩的末层 hidden。
+// 后端不含 Embed/LMHead/argmax——词表 I/O 全部留在网关侧（图5 / INV-1）。
+// 输入掩码与输出掩码使用同一 OTP rGW（一次一密，网关与后端 TEE 共享）。
+func (r *Runner) StepEmb(maskedEmb [][]uint64, rGW []uint64) ([][]uint64, error) {
+	cfg := r.w.Cfg
+	if len(maskedEmb) == 0 {
+		return nil, fmt.Errorf("route2qwen: 空 batch")
+	}
+	if r.pos+len(maskedEmb) > cfg.MaxTokens {
+		return nil, fmt.Errorf("route2qwen: 位置 %d + batch %d 超出 MaxTokens=%d", r.pos, len(maskedEmb), cfg.MaxTokens)
+	}
+	// 1. 用 OTP rGW 元素级脱掩码，恢复明文嵌入（Embed 仅作定点缩放中介，不持有明文）。
+	// 注意：ToMaskDomain/Decode 这对内核操作实际是「×Scale / ÷Scale」，Decode(ToMaskDomain(x))=x·Scale；
+	// 而 embedRows 返回的已是含 Scale 缩放的去量化嵌入，故须再 ÷Embed.Scale 还原回缩放域，
+	// 才能与形态B 的 maskedLinear 输入（同处缩放域）逐位一致。
+	h := make([][]float64, len(maskedEmb))
+	for i, v := range maskedEmb {
+		if len(v) != len(rGW) {
+			return nil, fmt.Errorf("route2qwen: 掩码嵌入长度 %d != OTP 长度 %d", len(v), len(rGW))
+		}
+		hu, err := r.w.Embed.Unmask(v, rGW)
+		if err != nil {
+			return nil, err
+		}
+		// Decode(ToMaskDomain(x)) = x·Scale；需逐元素 ÷Scale 还原回缩放域（与形态B 输入同域）
+		dec := r.w.Embed.Decode(hu)
+		for j := range dec {
+			dec[j] /= r.w.Embed.Scale
+		}
+		h[i] = dec
+	}
+	// 2. 逐层计算（与形态B 同，内部线性层走掩码像 fresh 掩码）
+	var err error
+	if h, err = r.runLayers(h, maskedLinear); err != nil {
+		return nil, err
+	}
+	// 3. final RMSNorm 后用同一 OTP 重新加掩码输出，供网关侧 LMHead
+	hn := rmsNormRows(h, r.w.LNFinal, cfg.NormEps)
+	out := make([][]uint64, len(hn))
+	for i, row := range hn {
+		rm, err := r.w.LMHead.Remask(r.w.LMHead.ToMaskDomain(row), rGW)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = rm
+	}
+	r.pos += len(maskedEmb)
+	return out, nil
+}
+
+// ForwardMaskedEmb 形态A 无状态入口：吃网关加掩嵌入、吐网关加掩末层 hidden。
+func ForwardMaskedEmb(w *Weights, maskedEmb [][]uint64, rGW []uint64) ([][]uint64, error) {
+	r := NewRunner(w)
+	return r.StepEmb(maskedEmb, rGW)
+}
+
+// GenOTP 生成一次一密掩码 rGW（长度 = Dim）。网关与后端共享同一 rGW 用于输入/输出边界。
+func GenOTP(dim int, modBits maskedinfer.MaskModulusBits) []uint64 {
+	r := make([]uint64, dim)
+	if modBits == maskedinfer.Mod64 {
+		for i := range r {
+			r[i] = rand.Uint64()
+		}
+	} else {
+		for i := range r {
+			r[i] = uint64(rand.Uint32())
+		}
+	}
+	return r
+}
+
+// MaskEmbedding 网关侧：对明文嵌入逐行加 OTP 掩码（ToMaskDomain(x) + rGW）。
+func MaskEmbedding(w *Weights, embRows [][]float64, rGW []uint64) [][]uint64 {
+	out := make([][]uint64, len(embRows))
+	for i, row := range embRows {
+		rm, err := w.Embed.Remask(w.Embed.ToMaskDomain(row), rGW)
+		if err != nil {
+			// Remask 报错仅当维度不符，属编程错误；用 panic 暴露以符合包内 must* 约定
+			panic(fmt.Sprintf("route2qwen: MaskEmbedding Remask 失败: %v", err))
+		}
+		out[i] = rm
+	}
+	return out
+}
+
+// GatewayLMHead 形态A 网关侧：对后端返回的掩码 hidden 做 LMHead 线性（可仍在 GPU 掩码盲算），
+// 用 OTP rGW 脱掩码得明文 logits，随后由网关做 argmax/采样。LMHead 是线性层，无需 TEE 明文 matmul。
+func GatewayLMHead(lmHead *maskedinfer.QuantizedMatrix, maskedHidden [][]uint64, rGW []uint64) ([][]float64, error) {
+	out := make([][]float64, len(maskedHidden))
+	for b, v := range maskedHidden {
+		yc, err := lmHead.CipherLinear([][]uint64{v})
+		if err != nil {
+			return nil, err
+		}
+		mi, err := lmHead.MaskImage(rGW)
+		if err != nil {
+			return nil, err
+		}
+		yu, err := lmHead.Unmask(yc[0], mi)
+		if err != nil {
+			return nil, err
+		}
+		out[b] = lmHead.Decode(yu)
+	}
+	return out, nil
+}
+
+// ForwardMaskedFormA 形态A 便捷入口：在包内模拟「网关加掩嵌入 → 后端 → 网关 LMHead」三段。
+// 真实部署中三段由网关(①)与路线2(②)分别执行；此处合在一起仅为对拍验证。
+func ForwardMaskedFormA(w *Weights, tokens []int, rGW []uint64) ([][]float64, error) {
+	emb, err := w.embedRows(tokens)
+	if err != nil {
+		return nil, err
+	}
+	maskedEmb := MaskEmbedding(w, emb, rGW)
+	maskedHidden, err := ForwardMaskedEmb(w, maskedEmb, rGW)
+	if err != nil {
+		return nil, err
+	}
+	return GatewayLMHead(w.LMHead, maskedHidden, rGW)
 }
 
 // applyRoPEQwen Qwen/LLaMA 风格 RoPE：**前后半劈开**旋转（旋转 (i, i+headDim/2)）。
