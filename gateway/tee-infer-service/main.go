@@ -903,6 +903,11 @@ func (s *teeServer) sessionCleanup() {
 			if !sess.Completed || now.Sub(sess.CreatedAt) > sessionTTL {
 				sess.destroy() // 会话密钥零化（best-effort，威胁模型如实声明）
 				delete(s.sessions, id)
+				// G5 处方（设计 §6.2）：补算状态与 KV 随会话一并清扫，否则 KV 上身后
+				// recomputeStates 只增不减。锁序 s.mu → rs.mu → st.mu → kv.mu，与
+				// handleRecompute 同向（无反转）；被清会话必为 !Completed 或超 TTL，
+				// sessionByID 对两者均返回 nil ⇒ 后续请求必 401，不存在 TOCTOU。
+				s.recomputeStates.evict(id)
 			}
 		}
 		s.mu.Unlock()

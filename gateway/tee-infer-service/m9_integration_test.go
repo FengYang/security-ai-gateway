@@ -5,8 +5,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,6 +18,7 @@ import (
 	"security-ai-gateway/cipher/mask"
 	"security-ai-gateway/gateway/tee-infer-service/model"
 	"security-ai-gateway/gateway/teecore"
+	"security-ai-gateway/gateway/teecore/route2plan"
 	"security-ai-gateway/protocol/go"
 	"security-ai-gateway/protocol/go/cryptoops"
 )
@@ -283,30 +282,21 @@ func setupTestSession(t *testing.T, ts *httptest.Server) (string, []byte, []byte
 	return ar.SessionID, ksig, kenc
 }
 
-// buildRecomputeReq 构造补算请求（带会话签名）。
-func buildRecomputeReq(fullURL, sessionID string, kSig []byte, req *recomputeRequest) *http.Request {
-	canonical := recomputeCanonical(req)
-	mac := hmac.New(sha256.New, kSig)
-	mac.Write(canonical)
-	req.Signature = hex.EncodeToString(mac.Sum(nil))
-	body, _ := json.Marshal(req)
-	hr, _ := http.NewRequest("POST", fullURL, bytes.NewReader(body))
-	hr.Header.Set("X-Session-ID", sessionID)
-	return hr
-}
-
 // TestRecomputeE2E
-// 未证明会话 401；合法会话 gelu 补算成功（返回 result + mask_next）；层序乱序拒绝。
+// 未证明会话 401；合法步 200（result + next_coord/mask_next）；乱序 seq 拒绝且状态不被
+// 推进；签名错误 401；错误请求后会话状态机不被破坏。
+// proto=2 迁移说明：旧用例走 proto=1 请求（layer/mask_version 语义），已被版本门禁
+// 拒绝（400 recompute_proto_v1_unsupported），同一覆盖维度用 v2Harness 重表达。
 func TestRecomputeE2E(t *testing.T) {
-	srv, ts := newM9Server(t)
-	sessionID, ksig, _ := setupTestSession(t, ts)
+	h := newV2Harness(t)
 
-	// B4：无会话 → 401
-	noSessReq := buildRecomputeReq(ts.URL+"/v1/recompute", "", ksig, &recomputeRequest{
-		RequestID: "rc-1", Layer: 0, Op: "gelu",
-		Batch: [][]uint64{{1, 2, 3, 4, 5, 6, 7, 8}}, MaskVersion: 0,
-	})
-	noSessResp, err := http.DefaultClient.Do(noSessReq)
+	// B4：无会话 → 401（session 检查在验签之前，带不带签名都一样）
+	noSess := h.mkReq(route2plan.OpRMSNorm, 0, h.nextCoord, [][]uint64{{1, 2, 3, 4}})
+	h.sign(noSess)
+	noSessBody, _ := json.Marshal(noSess)
+	noSessHTTP, _ := http.NewRequest("POST", h.ts.URL+"/v1/recompute", bytes.NewReader(noSessBody))
+	// 故意不带 X-Session-ID
+	noSessResp, err := http.DefaultClient.Do(noSessHTTP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,66 +305,57 @@ func TestRecomputeE2E(t *testing.T) {
 		t.Fatalf("未证明会话应 401, got %d", noSessResp.StatusCode)
 	}
 
-	// 合法会话：layer 0 gelu
-	req0 := &recomputeRequest{
-		RequestID: "rc-2", Layer: 0, Op: "gelu",
-		Batch: [][]uint64{{100, 200, 300, 400, 500, 600, 700, 800}}, MaskVersion: 0,
+	// 合法会话：seq0 rmsnorm 一步成功，响应字段齐全
+	x := make([]float64, h.cfg.Dim)
+	for i := range x {
+		x[i] = (float64(i) - float64(h.cfg.Dim)/2) * 0.05
 	}
-	hr0 := buildRecomputeReq(ts.URL+"/v1/recompute", sessionID, ksig, req0)
-	resp0, err := http.DefaultClient.Do(hr0)
-	if err != nil {
-		t.Fatal(err)
+	rc := h.step([][]uint64{h.inject(x)})
+	if rc.RequestID == "" || rc.MaskNext == "" || rc.NextCoord == "" {
+		t.Fatalf("响应字段缺失: %+v", rc)
 	}
-	var rc recomputeResponse
-	if err := json.NewDecoder(resp0.Body).Decode(&rc); err != nil {
-		t.Fatalf("recompute 解析失败: %v", err)
+	if len(rc.Result) != 1 || len(rc.Result[0]) != h.cfg.Dim {
+		t.Fatalf("结果形状错误: %d x %d", len(rc.Result), len(rc.Result[0]))
 	}
-	resp0.Body.Close()
-	if rc.RequestID != "rc-2" || len(rc.Result) != 1 || rc.MaskNext == "" {
-		t.Fatalf("recompute 响应异常: %+v", rc)
-	}
-	if len(rc.Result[0]) != 8 {
-		t.Fatalf("补算结果维度错误: %d", len(rc.Result[0]))
+	if rc.Token != -1 {
+		t.Fatalf("非 argmax 步 token 应为哨兵 -1, got %d", rc.Token)
 	}
 
-	// B5：层序乱序（跳层：0 → 2）→ 400 拒绝
-	req2 := &recomputeRequest{
-		RequestID: "rc-3", Layer: 2, Op: "gelu",
-		Batch: [][]uint64{{1, 2, 3, 4, 5, 6, 7, 8}}, MaskVersion: 2,
-	}
-	hr2 := buildRecomputeReq(ts.URL+"/v1/recompute", sessionID, ksig, req2)
-	resp2, err := http.DefaultClient.Do(hr2)
+	// 加速器：K 投影（seq1 kv_append_k 的合法输入）
+	k := h.offload(route2plan.TensorKey{Block: 0, Tensor: route2plan.TensorAttnK}, rc.Result)
+
+	// B5：乱序（seq 超前于服务端 pos）→ 409 拒绝，且状态不被推进
+	spec1, err := h.plan.At(1)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("plan.At(1): %v", err)
 	}
-	resp2.Body.Close()
-	if resp2.StatusCode != 400 {
-		t.Fatalf("层序乱序应 400, got %d", resp2.StatusCode)
+	skip := h.mkReq(spec1.Op, 2, spec1.Coord.Wire(), k)
+	respSkip, _ := h.post(skip)
+	if respSkip.StatusCode != 409 {
+		t.Fatalf("乱序 seq 应 409, got %d", respSkip.StatusCode)
+	}
+	st := h.state()
+	st.mu.Lock()
+	pos := st.pos
+	st.mu.Unlock()
+	if pos != 1 {
+		t.Fatalf("乱序拒绝后服务端 pos=%d want=1（状态不得被推进）", pos)
 	}
 
-	// 签名错误 → 401
-	badReq := &recomputeRequest{
-		RequestID: "rc-4", Layer: 1, Op: "gelu",
-		Batch: [][]uint64{{1, 2, 3, 4, 5, 6, 7, 8}}, MaskVersion: 1,
-	}
-	badCanonical := recomputeCanonical(badReq)
-	mac := hmac.New(sha256.New, bytes.Repeat([]byte{0x11}, 32))
-	mac.Write(badCanonical)
-	badReq.Signature = hex.EncodeToString(mac.Sum(nil))
-	badBody, _ := json.Marshal(badReq)
-	badHTTP, _ := http.NewRequest("POST", ts.URL+"/v1/recompute", bytes.NewReader(badBody))
-	badHTTP.Header.Set("X-Session-ID", sessionID)
-	badResp, err := http.DefaultClient.Do(badHTTP)
-	if err != nil {
-		t.Fatal(err)
-	}
-	badResp.Body.Close()
-	if badResp.StatusCode != 401 {
-		t.Fatalf("错误签名应 401, got %d", badResp.StatusCode)
+	// 签名错误 → 401（篡改 batch 后不重签）
+	bad := h.mkReq(spec1.Op, 1, spec1.Coord.Wire(), k)
+	h.sign(bad)
+	bad.Batch[0][0] ^= 0xFF
+	respBad, _ := h.postRaw(bad)
+	if respBad.StatusCode != 401 {
+		t.Fatalf("错误签名应 401, got %d", respBad.StatusCode)
 	}
 
-	// 会话仍有效（错误请求未破坏状态机）
-	_ = srv
+	// 会话仍有效（错误请求未破坏状态机）：pos=1 的步照常成功
+	rc1 := h.step(k)
+	if len(rc1.Result) != 0 {
+		t.Fatalf("kv_append_k 应返回空 result, got %d 行", len(rc1.Result))
+	}
 }
 
 // newM9Server 构造测试服务（固定 K_sig/attest，启用 M9 全量能力）。
