@@ -24,6 +24,15 @@ func GELU(x float64) float64 {
 
 // Softmax 稳定 softmax：概率和为 1。
 // 减去最大值防止指数溢出。
+//
+// 【调用方约定 · D9】本算子**要求输入全部为有限值**：传入 `-Inf` 会在形如
+// `v[i] - maxV` 的步骤上得到 `-Inf - (-Inf) = NaN`，并把 NaN 顺着算子链放大到全链路。
+// 因此因果掩码一律使用**有限哨兵** `-1e30`（teecore.CausalMaskValue）而非 `-Inf`；
+// 需要"屏蔽"的分数请写成 -1e30，本算子会自动给出 0 概率，不会发生 NaN。
+//
+// 【共用纪律】本文件与 attention.go 的算子是 `route2ref` 参照前向与 TEE 服务端
+// 共用的同一份实现：任何一处语义改动都会同时改变两条基线，故不得在其中任一侧
+// 另起炉灶地"优化"。
 func Softmax(v []float64) []float64 {
 	out := make([]float64, len(v))
 	maxV := math.Inf(-1)
