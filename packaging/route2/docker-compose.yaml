@@ -29,5 +29,5 @@ services:
     depends_on:
       tee-infer:
         condition: service_healthy
-    command: ["-server", "http://tee-infer:19090", "-dim", "32", "-layers", "4"]
+    command: ["-server", "http://tee-infer:19090", "-model", "route2-demo-tiny", "-prompt-len", "4", "-gen", "2"]
     restart: "no"
