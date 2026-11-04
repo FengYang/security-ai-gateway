@@ -11,8 +11,47 @@ linters:
     - ineffassign
     - unused
     - misspell
+    # depguard：四层架构依赖方向门禁（《路线2-架构理清与包级重构方案》§6.3）
+    # 与 gateway/archtest 的 Go 单测同源；单测是 CI 的必过闸，本处是本地更早反馈。
+    - depguard
   disable:
     - exhaustruct
+
+linters-settings:
+  depguard:
+    # rules.<name>.files 是"该规则作用于哪些文件"，deny 是"这些文件不得 import 什么"。
+    # pkg 按前缀匹配（含子包），故不需要逐子包罗列。
+    rules:
+      engine-no-trust-anchor:
+        files:
+          - "**/gateway/teecore/trustedops/**"
+          - "**/gateway/teecore/maskedinfer/**"
+          - "**/gateway/teecore/route2plan/**"
+          - "**/gateway/teecore/route2ref/**"
+          - "**/gateway/tee-infer-service/route2step/**"
+        deny:
+          - pkg: "security-ai-gateway/gateway/cryptop"
+            desc: "engine 层须零 cryptop（§6.3①：这些包要随新库外发，不得缠信任锚）"
+      adapters-no-orchestrator:
+        files:
+          - "**/gateway/teecore/adapters/**"
+        deny:
+          - pkg: "security-ai-gateway/gateway/route2/orchestrator"
+            desc: "适配层只实现契约，不得反向依赖编排层（§6.3②）"
+      vllm-adapter-no-host:
+        files:
+          - "**/gateway/vllm-adapter/**"
+        deny:
+          - pkg: "security-ai-gateway/gateway/tee-infer-service"
+            desc: "§8.2④ vllm-adapter 是独立进程，只许依赖 gateway/modelengine"
+      cryptop-no-upper-layer:
+        files:
+          - "**/gateway/cryptop/**"
+        deny:
+          - pkg: "security-ai-gateway/gateway/teecore"
+            desc: "信任锚不得反向上依赖（§6.3④：保无环）"
+          - pkg: "security-ai-gateway/gateway/tee-infer-service"
+            desc: "信任锚不得反向上依赖宿主（§6.3④）"
 
 issues:
   exclude-rules:
