@@ -14,7 +14,7 @@
 //  3. 锁序硬约束（禁止任何反向取锁）：
 //
 //     teeServer.mu → recomputeStates.mu → recomputeState.mu → KVCache.mu
-package main
+package route2step
 
 import (
 	"errors"
@@ -32,7 +32,7 @@ var (
 	// ErrBlockOutOfRange block 号越界（须落在 0..Blocks-1）。
 	ErrBlockOutOfRange = errors.New("kvcache: block 越界")
 	// ErrVecLength 追加向量的长度不等于 Heads*HeadDim（== Dim）。
-	ErrVecLength = errors.New("kvcache: 向量长度不等于 Heads*HeadDim")
+	ErrVecLength = errors.New("kvcache: 向量长度不等于 KVHeads*HeadDim（即 KVDim）")
 	// ErrKVCacheFull 行数已达 cfg.MaxTokens 上限。
 	ErrKVCacheFull = errors.New("kvcache: 行数已达 MaxTokens 上限")
 	// ErrKVCacheBytesExceeded 字节占用已达 kvMaxBytes 上限。
@@ -109,7 +109,7 @@ type KVCache struct {
 	mu sync.Mutex
 
 	cfg     route2plan.ModelConfig
-	attnDim int // == cfg.Heads*cfg.HeadDim == cfg.Dim（Validate 已保证）
+	attnDim int // == cfg.KVDim()（GQA 下为 KVHeads*HeadDim，<= Dim）
 	// layers 按 block 预分配；行切片（内层 []float64）按需增长。
 	layers []kvLayer
 
@@ -143,7 +143,7 @@ func NewKVCache(cfg route2plan.ModelConfig) (*KVCache, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("kvcache: 模型配置非法: %w", err)
 	}
-	attnDim := cfg.AttnDim()
+	attnDim := cfg.KVDim()
 	rowsCap := kvPreallocRows(cfg, attnDim)
 	c := &KVCache{
 		cfg:          cfg,
@@ -175,7 +175,7 @@ func kvPreallocRows(cfg route2plan.ModelConfig, attnDim int) int {
 
 // ---- 写入 ----
 
-// AppendK 向 block 层追加一行 K。vec 长度必须等于 Heads*HeadDim。
+// AppendK 向 block 层追加一行 K。vec 长度必须等于 KVHeads*HeadDim（即 KVDim）。
 func (c *KVCache) AppendK(block int, vec []float64) error {
 	return c.appendRow(block, vec, true)
 }
@@ -214,7 +214,7 @@ func (c *KVCache) appendRow(block int, vec []float64, isK bool) error {
 		return fmt.Errorf("%w: block=%d 不在 0..%d 内", ErrBlockOutOfRange, block, len(c.layers)-1)
 	}
 	if len(vec) != c.attnDim {
-		return fmt.Errorf("%w: got=%d want=%d(Heads*HeadDim)", ErrVecLength, len(vec), c.attnDim)
+		return fmt.Errorf("%w: got=%d want=%d(KVHeads*HeadDim)", ErrVecLength, len(vec), c.attnDim)
 	}
 	if isK {
 		if c.pending && c.pendingBlock != block {
@@ -293,7 +293,7 @@ func (c *KVCache) Rows(block int) (int, error) {
 	return len(c.layers[block].v), nil
 }
 
-// Bytes 当前 KV 占用的字节数（算式）：2 · Blocks · tokens · (Heads*HeadDim) · 8。
+// Bytes 当前 KV 占用的字节数（算式）：2 · Blocks · tokens · (KVHeads*HeadDim) · 8。
 //
 // 这是**名义**占用：扫描途中少数 block 尚未写入本行时，实际占用略小于该值；
 // 容量上限的判定（appendRow）另取「追加后最大行数」计算，故不会因为这里偏小
@@ -309,7 +309,7 @@ func (c *KVCache) bytesLocked(tokens int) int64 {
 	return int64(2) * int64(len(c.layers)) * int64(tokens) * int64(c.attnDim) * int64(kvFloat64Bytes)
 }
 
-// ReadK 返回 block 层 K 的**快照**：[rows][Heads*HeadDim] 深拷贝。
+// ReadK 返回 block 层 K 的**快照**：[rows][KVHeads*HeadDim]（即 KVDim）深拷贝。
 //
 // 返回快照而非内部切片的两个理由：
 //  1. 调用方改写返回值不应污染 cache（K/V 是可信域明文，被污染等于注意力结果被投毒）；
