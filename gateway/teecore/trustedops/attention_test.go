@@ -1,5 +1,5 @@
 // attention_test.go - 可信域 attention 算子测试（T02 验收项 3、4）
-package teecore
+package trustedops
 
 import (
 	"math"
@@ -310,7 +310,7 @@ func TestSoftmaxNoNaNAllMasked(t *testing.T) {
 		}
 	}
 
-	// 对照组：用 -Inf 直接喂 teecore.Softmax 必须真的产生 NaN——这是 D9 的存在理由，
+	// 对照组：用 -Inf 直接喂 trustedops.Softmax 必须真的产生 NaN——这是 D9 的存在理由，
 	// 若哪天这个断言失败（Softmax 变了），说明 -1e30 约定可以重新评估。
 	raw := Softmax([]float64{math.Inf(-1), math.Inf(-1)})
 	hasNaN := false

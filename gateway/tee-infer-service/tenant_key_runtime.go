@@ -3,9 +3,9 @@ package main
 // tenant_key_runtime.go —— 二级租户 KEK 的进程装配（P0-4 §6，B6 子任务 #9）。
 //
 // 组成：
-//   - cryptoRootWrapper：一级根（Enclave seal key）→ KEK 的 WrapKey/UnwrapKey（teecore.RootWrapper）
-//   - tenantKeyAudit：KEK 生命周期事件落审计哈希链（teecore.AuditSink）
-//   - tenantKeyPersist：变更后 Snapshot→Enclave.Seal 原子落盘（teecore.ChangeHook；重启经 Unseal 恢复）
+//   - cryptoRootWrapper：一级根（Enclave seal key）→ KEK 的 WrapKey/UnwrapKey（keymgmt.RootWrapper）
+//   - tenantKeyAudit：KEK 生命周期事件落审计哈希链（keymgmt.AuditSink）
+//   - tenantKeyPersist：变更后 Snapshot→Enclave.Seal 原子落盘（keymgmt.ChangeHook；重启经 Unseal 恢复）
 //   - runTenantKeyScanner：周期扫描 last_rotated_at 超 90 天的 KEK 并轮换（扫描间隔默认 24h）
 
 import (
@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"security-ai-gateway/gateway/cryptop"
-	"security-ai-gateway/gateway/teecore"
+	"security-ai-gateway/gateway/cryptop/keymgmt"
 )
 
 const (
@@ -58,12 +58,12 @@ func (a *tenantKeyAudit) KeyLifecycle(tenant, action string, epoch uint64) {
 		return
 	}
 	a.chain.append(AuditEvent{
-		TenantID:  tenant,
-		RequestID: "-",
-		Action:    action,
-		Result:    "ok",
+		TenantID:   tenant,
+		RequestID:  "-",
+		Action:     action,
+		Result:     "ok",
 		PayloadSHA: sha,
-		HashAlg:   hashAlgTag(),
+		HashAlg:    hashAlgTag(),
 	})
 }
 
@@ -74,15 +74,15 @@ func (a *tenantKeyAudit) KeyLifecycle(tenant, action string, epoch uint64) {
 type tenantKeyPersist struct {
 	path string
 	encl Enclave
-	root teecore.RootWrapper
-	tkm  *teecore.TenantKeyManager
+	root keymgmt.RootWrapper
+	tkm  *keymgmt.TenantKeyManager
 
 	mu     sync.Mutex
 	saving bool
 	dirty  bool
 }
 
-// KeysChanged 实现 teecore.ChangeHook。
+// KeysChanged 实现 keymgmt.ChangeHook。
 func (p *tenantKeyPersist) KeysChanged() {
 	p.mu.Lock()
 	if p.saving {
@@ -129,7 +129,7 @@ func (p *tenantKeyPersist) saveOnce() error {
 }
 
 // loadTenantKeyFile 读取并解封 KEK 状态；文件不存在返回 (nil,nil)。
-func loadTenantKeyFile(path string, encl Enclave) ([]teecore.TenantSnapshot, error) {
+func loadTenantKeyFile(path string, encl Enclave) ([]keymgmt.TenantSnapshot, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -147,19 +147,19 @@ func loadTenantKeyFile(path string, encl Enclave) ([]teecore.TenantSnapshot, err
 // ---- 文件 JSON 结构 ----
 
 type tenantKeyFileDTO struct {
-	Version int                  `json:"version"`
-	Tenants []tenantKeyEntryDTO  `json:"tenants"`
+	Version int                 `json:"version"`
+	Tenants []tenantKeyEntryDTO `json:"tenants"`
 }
 
 type tenantKeyEntryDTO struct {
-	Tenant          string     `json:"tenant"`
-	Epoch           uint64     `json:"epoch"`
-	LastRotate      time.Time  `json:"last_rotate"`
-	WrappedKEK      []byte     `json:"wrapped_kek"`
-	WrappedHistory  [][]byte   `json:"wrapped_history,omitempty"`
+	Tenant         string    `json:"tenant"`
+	Epoch          uint64    `json:"epoch"`
+	LastRotate     time.Time `json:"last_rotate"`
+	WrappedKEK     []byte    `json:"wrapped_kek"`
+	WrappedHistory [][]byte  `json:"wrapped_history,omitempty"`
 }
 
-func encodeTenantKeyFile(snaps []teecore.TenantSnapshot) ([]byte, error) {
+func encodeTenantKeyFile(snaps []keymgmt.TenantSnapshot) ([]byte, error) {
 	dto := tenantKeyFileDTO{Version: 1, Tenants: make([]tenantKeyEntryDTO, 0, len(snaps))}
 	for _, sn := range snaps {
 		dto.Tenants = append(dto.Tenants, tenantKeyEntryDTO{
@@ -173,7 +173,7 @@ func encodeTenantKeyFile(snaps []teecore.TenantSnapshot) ([]byte, error) {
 	return json.Marshal(&dto)
 }
 
-func decodeTenantKeyFile(data []byte) ([]teecore.TenantSnapshot, error) {
+func decodeTenantKeyFile(data []byte) ([]keymgmt.TenantSnapshot, error) {
 	var dto tenantKeyFileDTO
 	if err := json.Unmarshal(data, &dto); err != nil {
 		return nil, fmt.Errorf("tenant-key 文件 JSON 解析失败: %w", err)
@@ -181,9 +181,9 @@ func decodeTenantKeyFile(data []byte) ([]teecore.TenantSnapshot, error) {
 	if dto.Version != 1 {
 		return nil, fmt.Errorf("tenant-key 文件版本 %d 不支持", dto.Version)
 	}
-	out := make([]teecore.TenantSnapshot, 0, len(dto.Tenants))
+	out := make([]keymgmt.TenantSnapshot, 0, len(dto.Tenants))
 	for _, e := range dto.Tenants {
-		out = append(out, teecore.TenantSnapshot{
+		out = append(out, keymgmt.TenantSnapshot{
 			Tenant:         e.Tenant,
 			Epoch:          e.Epoch,
 			LastRotate:     e.LastRotate,
@@ -198,7 +198,7 @@ func decodeTenantKeyFile(data []byte) ([]teecore.TenantSnapshot, error) {
 
 // runTenantKeyScanner 启动后立即扫描一次，随后每 interval 扫描到期租户并轮换。
 // 失败逐个隔离，不影响其它租户；属进程级 goroutine（随进程退出终止）。
-func runTenantKeyScanner(tkm *teecore.TenantKeyManager, interval time.Duration) {
+func runTenantKeyScanner(tkm *keymgmt.TenantKeyManager, interval time.Duration) {
 	scan := func() {
 		defer func() {
 			if r := recover(); r != nil {

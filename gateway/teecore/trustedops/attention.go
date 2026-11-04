@@ -1,4 +1,4 @@
-// Package teecore 的 attention 算子文件（T02 · G7）。
+// Package trustedops 的 attention 算子文件（T02 · G7）。
 //
 // ============================ 可信边界声明（务必先读） ============================
 //
@@ -39,7 +39,7 @@
 //  2. 失败一律显式 error（fail-closed）：维度不匹配、含 NaN/Inf、非法 head 配置，
 //     一律报错而不是返回半截结果——让一个 NaN 溜进 Softmax，会顺着算子链污染整条链路，
 //     静默产出整链路 NaN，而上线后才暴露的 NaN，排查成本是灾难级的。
-package teecore
+package trustedops
 
 import (
 	"errors"
@@ -185,7 +185,7 @@ func CausalMask(scores [][]float64, qPos, kvStart int) [][]float64 {
 	return scores
 }
 
-// SoftmaxScores 逐头 softmax（包装 teecore.Softmax），并加一层有限性护栏。
+// SoftmaxScores 逐头 softmax（包装 trustedops.Softmax），并加一层有限性护栏。
 //
 // 之所以额外加护栏而不是直接调 Softmax：Softmax 本身对 -Inf 输入会产出 NaN 且**不报错**，
 // 而 NaN 一旦流出本函数，下游 WeightedSum / RMSNorm / GELU 会一路把它放大成
@@ -292,6 +292,85 @@ func Attention(q []float64, kRows, vRows [][]float64, heads, headDim, kvStart, q
 		return nil, err
 	}
 	return WeightedSum(probs, vRows, heads, headDim)
+}
+
+// ApplyRoPEHalf Qwen/LLaMA 风格 RoPE 的**非原地**版本，语义同 ApplyRoPEHalfInPlace。
+func ApplyRoPEHalf(vec []float64, pos, headDim int, theta float64) ([]float64, error) {
+	out := make([]float64, len(vec))
+	copy(out, vec)
+	if err := ApplyRoPEHalfInPlace(out, pos, headDim, theta); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ApplyRoPEHalfInPlace Qwen / LLaMA / HuggingFace 风格的 RoPE：**前后半劈**旋转 (i, i+headDim/2)。
+//
+// 与 ApplyRoPEInPlace（**相邻对** (2i, 2i+1)，GPT-J/NeoX 风格）是两种不同约定，
+// headDim>2 时二者算出的 Q/K **完全不同**，且错用不会报任何错：注意力只"略微"偏掉，
+// logits 仍在合理量级，唯有外部 golden 能发现（T5 实测 top-1 由 23811 偏到 264）。
+//
+// 判别：Qwen/Qwen2/Qwen3、LLaMA 系用本函数（rotate_half 前后半劈）；GPT-J/NeoX 用相邻对。
+// 角度表与已有实现一致：inv_freq[i] = theta^(-2i/headDim)，差别只在配对方式。
+func ApplyRoPEHalfInPlace(vec []float64, pos, headDim int, theta float64) error {
+	if headDim <= 0 || headDim%2 != 0 {
+		return fmt.Errorf("teecore: headDim=%d 非法（须为正偶数，RoPE 成对旋转）", headDim)
+	}
+	if len(vec) == 0 || len(vec)%headDim != 0 {
+		return fmt.Errorf("teecore: 向量长度 %d 不是 headDim=%d 的整数倍", len(vec), headDim)
+	}
+	if pos < 0 {
+		return fmt.Errorf("teecore: pos=%d 不可为负", pos)
+	}
+	if !(theta > 0) {
+		return fmt.Errorf("teecore: theta=%v 必须为正", theta)
+	}
+	half := headDim / 2
+	for base := 0; base < len(vec); base += headDim {
+		for i := 0; i < half; i++ {
+			ang := float64(pos) * math.Pow(theta, -float64(2*i)/float64(headDim))
+			c, s := math.Cos(ang), math.Sin(ang)
+			x0 := vec[base+i]
+			x1 := vec[base+i+half]
+			vec[base+i] = x0*c - x1*s
+			vec[base+i+half] = x0*s + x1*c
+		}
+	}
+	return nil
+}
+
+// ExpandGQA 把 KV 缓存行从 GQA 布局（kvHeads*headDim）扩展为 Q 头布局（heads*headDim）。
+//
+// 第 qh 个 Q 头复用第 qh/(heads/kvHeads) 个 KV 头（逐元素复制，其余头不变）。
+// 当 kvHeads==heads（MHA，即无 GQA）时为恒等变换，直接返回原切片，零拷贝。
+// 调用方须保证 heads%kvHeads==0（ModelConfig.Validate 已强制）。
+//
+// 之所以放在 trustedops 而非具体适配器：掩码单步引擎（route2step）是共享层，不得反向
+// 依赖任何具体模型适配器（adapters/qwen 等）；GQA 扩展是纯算子，属可信域共享计算。
+func ExpandGQA(rows [][]float64, kvHeads, heads, headDim int) ([][]float64, error) {
+	if kvHeads <= 0 || heads <= 0 || headDim <= 0 {
+		return nil, fmt.Errorf("teecore: ExpandGQA 参数非法 kvHeads=%d heads=%d headDim=%d", kvHeads, heads, headDim)
+	}
+	if heads%kvHeads != 0 {
+		return nil, fmt.Errorf("teecore: heads=%d 不能被 kvHeads=%d 整除", heads, kvHeads)
+	}
+	if kvHeads == heads {
+		return rows, nil
+	}
+	group := heads / kvHeads
+	out := make([][]float64, len(rows))
+	for i, row := range rows {
+		if len(row) != kvHeads*headDim {
+			return nil, fmt.Errorf("teecore: ExpandGQA 第 %d 行长度 %d != kvHeads*headDim=%d", i, len(row), kvHeads*headDim)
+		}
+		exp := make([]float64, heads*headDim)
+		for qh := 0; qh < heads; qh++ {
+			kvh := qh / group
+			copy(exp[qh*headDim:(qh+1)*headDim], row[kvh*headDim:(kvh+1)*headDim])
+		}
+		out[i] = exp
+	}
+	return out, nil
 }
 
 // checkHeadLayout 校验一个 Q/K/V 行的多头布局是否自洽（长度 == heads*headDim）。

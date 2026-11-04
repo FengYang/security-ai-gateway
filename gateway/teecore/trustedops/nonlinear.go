@@ -1,6 +1,9 @@
-package teecore
+package trustedops
 
-import "math"
+import (
+	"fmt"
+	"math"
+)
 
 // 非线性算子补算。
 //
@@ -22,12 +25,34 @@ func GELU(x float64) float64 {
 	return 0.5 * x * (1 + math.Erf(x/math.Sqrt2))
 }
 
+// SiLU Sigmoid 线性单元（Swish 的 β=1 特例）：x * σ(x) = x / (1 + e^{-x})。
+// Qwen3 等模型 SwiGLU 门控激活，与 vLLM/huggingface 权重精度对齐。
+func SiLU(x float64) float64 {
+	return x / (1 + math.Exp(-x))
+}
+
+// SiLUMul 逐元素 silu(gate) ⊙ up，即 SwiGLU 门控乘法：
+//
+//	out[i] = SiLU(gate[i]) * up[i]
+//
+// gate / up 长度必须相等（fail-closed：不等返回 error，绝不在长度错配下静默截断）。
+func SiLUMul(gate, up []float64) ([]float64, error) {
+	if len(gate) != len(up) {
+		return nil, fmt.Errorf("trustedops: SiLUMul 两输入长度不等 gate=%d up=%d", len(gate), len(up))
+	}
+	out := make([]float64, len(gate))
+	for i := range gate {
+		out[i] = SiLU(gate[i]) * up[i]
+	}
+	return out, nil
+}
+
 // Softmax 稳定 softmax：概率和为 1。
 // 减去最大值防止指数溢出。
 //
 // 【调用方约定 · D9】本算子**要求输入全部为有限值**：传入 `-Inf` 会在形如
 // `v[i] - maxV` 的步骤上得到 `-Inf - (-Inf) = NaN`，并把 NaN 顺着算子链放大到全链路。
-// 因此因果掩码一律使用**有限哨兵** `-1e30`（teecore.CausalMaskValue）而非 `-Inf`；
+// 因此因果掩码一律使用**有限哨兵** `-1e30`（trustedops.CausalMaskValue）而非 `-Inf`；
 // 需要"屏蔽"的分数请写成 -1e30，本算子会自动给出 0 概率，不会发生 NaN。
 //
 // 【共用纪律】本文件与 attention.go 的算子是 `route2ref` 参照前向与 TEE 服务端
@@ -73,6 +98,27 @@ func RMSNorm(x, gamma []float64, eps float64) []float64 {
 		out[i] = norm
 	}
 	return out
+}
+
+// PerHeadRMSNorm 逐头 RMSNorm（Qwen3 的 q_norm / k_norm）。
+//
+// 与 RMSNorm 的差别：不是整行归一，而是把一行按 headDim 切成 Heads 段、**每段独立**归一；
+// q_norm/k_norm.weight 形状是 [head_dim]，所有头共享同一组 gamma。用于 Q/K 投影后、RoPE 之前的
+// 逐头归一（真实 Qwen3 结构；V 不做 QK-norm）。
+//
+// 长度护栏：len(v) 须为 headDim 整数倍，len(gamma) 须 == headDim，否则 fail-closed。
+func PerHeadRMSNorm(v, gamma []float64, headDim int, eps float64) ([]float64, error) {
+	if headDim <= 0 || len(v)%headDim != 0 {
+		return nil, fmt.Errorf("trustedops: PerHeadRMSNorm 向量长度 %d 不是 headDim=%d 的整数倍", len(v), headDim)
+	}
+	if len(gamma) != headDim {
+		return nil, fmt.Errorf("trustedops: PerHeadRMSNorm gamma 长度 %d != headDim=%d", len(gamma), headDim)
+	}
+	out := make([]float64, len(v))
+	for off := 0; off < len(v); off += headDim {
+		copy(out[off:off+headDim], RMSNorm(v[off:off+headDim], gamma, eps))
+	}
+	return out, nil
 }
 
 // LayerNorm 层归一化：(x - mean) / sqrt(var + eps) * gamma + beta。

@@ -1,5 +1,5 @@
 // rmsnorm_test.go - RMSNorm 算子数值测试
-package teecore
+package trustedops
 
 import (
 	"math"

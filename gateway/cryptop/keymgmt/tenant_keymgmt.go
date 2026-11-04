@@ -1,4 +1,4 @@
-package teecore
+package keymgmt
 
 // tenant_keymgmt.go —— 二级租户主密钥（Tenant Master, KEK）生命周期（P0-4 §6，B6 子任务 #9）。
 //
@@ -80,11 +80,11 @@ type TenantKeyManager struct {
 
 // tenantState 单租户 KEK 状态。
 type tenantState struct {
-	kek        []byte       // 当前 KEK
-	history    [][]byte     // 旧 KEK（归档，只解不封）
-	epoch      uint64       // KEK 版本（1 起）
-	lastRotate time.Time    // 最近轮换时间（90 天扫描判据）
-	km         *KeyManager  // 当前三级会话管理器
+	kek        []byte        // 当前 KEK
+	history    [][]byte      // 旧 KEK（归档，只解不封）
+	epoch      uint64        // KEK 版本（1 起）
+	lastRotate time.Time     // 最近轮换时间（90 天扫描判据）
+	km         *KeyManager   // 当前三级会话管理器
 	kmHistory  []*KeyManager // 轮换前的会话管理器（在途请求 seed 回溯；已 Close）
 }
 

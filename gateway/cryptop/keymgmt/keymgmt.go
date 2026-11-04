@@ -8,7 +8,7 @@
 // - 主密钥：TEE 生成 256 位真随机，TTL 轮换，历史密钥销毁（前向保密）
 // - 请求密钥：request_key = HMAC(master, requestID || model || timestamp)
 // - 非线性算子：ReLU / GELU / Softmax / LayerNorm（浮点域，真实模型推理用）
-package teecore
+package keymgmt
 
 import (
 	"encoding/binary"
@@ -27,9 +27,9 @@ const InFlightWindow = 30 * time.Second
 
 // keyRecord 请求密钥记录。
 type keyRecord struct {
-	seed      []byte
-	masterID  uint64
-	issuedAt  time.Time
+	seed     []byte
+	masterID uint64
+	issuedAt time.Time
 }
 
 // KeyManager 主密钥 + 请求密钥派生管理器（模拟 TEE 飞地内安全存储）。

@@ -1,4 +1,4 @@
-package teecore
+package keymgmt
 
 import (
 	"bytes"
