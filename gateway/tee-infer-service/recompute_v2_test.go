@@ -7,14 +7,22 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"security-ai-gateway/gateway/tee-infer-service/route2step"
 	"security-ai-gateway/gateway/teecore/maskedinfer"
 	"security-ai-gateway/gateway/teecore/route2demo"
 	"security-ai-gateway/gateway/teecore/route2plan"
 )
+
+// route2MaskModulus 路线2 掩码模 R（M1 接线，技术方案 §7.7 定案）的测试侧别名。
+//
+// 权威定义已随步执行下沉到 route2step.Route2MaskModulus；宿主生产代码不再引用本名，
+// 仅测试用它独立重算掩码流，以断言「客户端/服务端同模」（任一环节退回 Mod32 垫片即红）。
+const route2MaskModulus = route2step.Route2MaskModulus
 
 // ---- 测试台：驱动 step 机的最小客户端（含"不可信加速器"模拟）----
 
@@ -634,36 +642,26 @@ func TestV2SessionEvictReleasesKV(t *testing.T) {
 	st := h.state()
 	st.mu.Lock()
 	kv := st.kv
-	heldK := append([][]float64{}, kv.layers[0].k...)
-	heldV := append([][]float64{}, kv.layers[0].v...)
 	st.mu.Unlock()
-	if len(heldK) == 0 || len(heldV) == 0 {
-		t.Fatal("清扫前 KV 应有内容")
+	// 前置：清扫前 KV 确有内容（否则下面的 fail-closed 断言会被空 cache 蒙对）。
+	if n, err := kv.Rows(0); err != nil || n == 0 {
+		t.Fatalf("清扫前 KV 应有内容: rows=%d err=%v", n, err)
 	}
 
 	h.srv.recomputeStates.evict(h.sessionID)
 
-	// (1) 已逐元素清零（不是只把行数置 0）
-	for i, row := range heldK {
-		for j, val := range row {
-			if val != 0 {
-				t.Fatalf("evict 后 K 行 %d 元素 %d 残留 %v", i, j, val)
-			}
-		}
-	}
-	for i, row := range heldV {
-		for j, val := range row {
-			if val != 0 {
-				t.Fatalf("evict 后 V 行 %d 元素 %d 残留 %v", i, j, val)
-			}
-		}
+	// (1) 清扫确实走了 Release 语义（而非只从 map 摘除）：读操作必须 fail-closed。
+	//     「逐元素清零」由 route2step 包内的 TestKVCacheReleaseZeroesElementsAndFailClosed
+	//     直接断言（行内存只有包内可见），本处不跨包窥探内部字段。
+	if _, err := kv.ReadK(0); !errors.Is(err, route2step.ErrKVCacheReleased) {
+		t.Fatalf("evict 后 ReadK 应报 ErrKVCacheReleased, got %v", err)
 	}
 	// (2) 已从 map 摘除，再次取到的是全新状态（KV 为 nil）
 	if _, ok := h.srv.recomputeStates.byID[h.sessionID]; ok {
 		t.Fatal("evict 后 recomputeStates 仍持有该会话")
 	}
 	// (3) 释放后的 KV 再调用写操作必须 fail-closed
-	if err := kv.AppendK(0, make([]float64, h.cfg.AttnDim())); err != ErrKVCacheReleased {
+	if err := kv.AppendK(0, make([]float64, h.cfg.AttnDim())); !errors.Is(err, route2step.ErrKVCacheReleased) {
 		t.Fatalf("释放后 AppendK 应报 ErrKVCacheReleased, got %v", err)
 	}
 }

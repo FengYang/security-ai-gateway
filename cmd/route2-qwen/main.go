@@ -25,8 +25,9 @@ import (
 	"strconv"
 	"strings"
 
+	"security-ai-gateway/gateway/route2/orchestrator"
+	"security-ai-gateway/gateway/teecore/adapters/qwen"
 	"security-ai-gateway/gateway/teecore/maskedinfer"
-	"security-ai-gateway/gateway/teecore/route2qwen"
 )
 
 func main() {
@@ -83,7 +84,7 @@ func parseTokens(s string) []int {
 }
 
 func runSelftest() {
-	cfg := route2qwen.QwenConfig{
+	cfg := qwen.QwenConfig{
 		Layers: 2, Dim: 16, Heads: 4, KVHeads: 2, HeadDim: 4,
 		FFN: 32, Vocab: 50, RopeTheta: 1e6, NormEps: 1e-6, MaxTokens: 64, TiedEmb: true,
 	}
@@ -91,18 +92,18 @@ func runSelftest() {
 		fmt.Fprintln(os.Stderr, "config 非法:", err)
 		os.Exit(1)
 	}
-	w := route2qwen.SyntheticWeights(cfg, 1)
-	masked, err := route2qwen.ForwardMasked(w, []int{1, 2, 3})
+	w := qwen.SyntheticWeights(cfg, 1)
+	masked, err := qwen.ForwardMasked(w, []int{1, 2, 3})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ForwardMasked:", err)
 		os.Exit(1)
 	}
-	ref, err := route2qwen.ForwardRef(w, []int{1, 2, 3})
+	ref, err := qwen.ForwardRef(w, []int{1, 2, 3})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ForwardRef:", err)
 		os.Exit(1)
 	}
-	rep, err := route2qwen.Compare(masked, ref, 0, 5e-2)
+	rep, err := qwen.Compare(masked, ref, 0, 5e-2)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Compare:", err)
 		os.Exit(1)
@@ -119,25 +120,25 @@ func runSelftest() {
 }
 
 func runReal(path string, tokens []int) error {
-	cfg := route2qwen.Qwen25_05B()
+	cfg := qwen.Qwen25_05B()
 	fmt.Printf("=== route2-qwen 真实模型（token 模式）===\n")
 	fmt.Printf("加载 %s (Qwen2.5-0.5B: L=%d D=%d H=%d KV=%d FFN=%d V=%d)\n",
 		path, cfg.Layers, cfg.Dim, cfg.Heads, cfg.KVHeads, cfg.FFN, cfg.Vocab)
-	w, err := route2qwen.LoadWeights(path, cfg)
+	w, err := qwen.LoadWeights(path, cfg)
 	if err != nil {
 		return fmt.Errorf("加载权重失败: %w", err)
 	}
 	fmt.Printf("权重加载完成（int8/Mod64 量化）。\n")
 
-	masked, err := route2qwen.ForwardMasked(w, tokens)
+	masked, err := qwen.ForwardMasked(w, tokens)
 	if err != nil {
 		return fmt.Errorf("掩码像前向失败: %w", err)
 	}
-	ref, err := route2qwen.ForwardRef(w, tokens)
+	ref, err := qwen.ForwardRef(w, tokens)
 	if err != nil {
 		return fmt.Errorf("参照前向失败: %w", err)
 	}
-	rep, err := route2qwen.Compare(masked, ref, 0, 5e-2)
+	rep, err := qwen.Compare(masked, ref, 0, 5e-2)
 	if err != nil {
 		return fmt.Errorf("对拍失败: %w", err)
 	}
@@ -159,14 +160,14 @@ func runText(modelPath, tokPath, prompt string) error {
 	if tokPath == "" {
 		return fmt.Errorf("文本模式需要 -tokenizer <tokenizer.json>")
 	}
-	cfg := route2qwen.Qwen25_05B()
+	cfg := qwen.Qwen25_05B()
 	fmt.Printf("=== route2-qwen 真实模型（文本模式）===\n")
 	fmt.Printf("加载 %s (Qwen2.5-0.5B)\n", modelPath)
-	w, err := route2qwen.LoadWeights(modelPath, cfg)
+	w, err := qwen.LoadWeights(modelPath, cfg)
 	if err != nil {
 		return fmt.Errorf("加载权重失败: %w", err)
 	}
-	tok, err := route2qwen.LoadTokenizer(tokPath)
+	tok, err := qwen.LoadTokenizer(tokPath)
 	if err != nil {
 		return fmt.Errorf("加载 tokenizer 失败: %w", err)
 	}
@@ -177,15 +178,15 @@ func runText(modelPath, tokPath, prompt string) error {
 	fmt.Printf("prompt=%q\n", prompt)
 	fmt.Printf("编码 token 数=%d  tokens=%v\n", len(tokens), tokens)
 
-	masked, err := route2qwen.ForwardMasked(w, tokens)
+	masked, err := qwen.ForwardMasked(w, tokens)
 	if err != nil {
 		return fmt.Errorf("掩码像前向失败: %w", err)
 	}
-	ref, err := route2qwen.ForwardRef(w, tokens)
+	ref, err := qwen.ForwardRef(w, tokens)
 	if err != nil {
 		return fmt.Errorf("参照前向失败: %w", err)
 	}
-	rep, err := route2qwen.Compare(masked, ref, 0, 5e-2)
+	rep, err := qwen.Compare(masked, ref, 0, 5e-2)
 	if err != nil {
 		return fmt.Errorf("对拍失败: %w", err)
 	}
@@ -221,9 +222,9 @@ func argmax(v []float64) int {
 //
 // 对拍末位 logits 的 argmax 与绝对误差，证明两种部署边界数值等价。
 func runFormA(modelPath, tokPath, prompt, tokensArg string) error {
-	cfg := route2qwen.Qwen25_05B()
+	cfg := qwen.Qwen25_05B()
 	fmt.Printf("=== route2-qwen 真实模型（形态A 验证）===\n")
-	w, err := route2qwen.LoadWeights(modelPath, cfg)
+	w, err := qwen.LoadWeights(modelPath, cfg)
 	if err != nil {
 		return fmt.Errorf("加载权重失败: %w", err)
 	}
@@ -232,7 +233,7 @@ func runFormA(modelPath, tokPath, prompt, tokensArg string) error {
 		if tokPath == "" {
 			return fmt.Errorf("形态A 文本模式需要 -tokenizer")
 		}
-		tok, err := route2qwen.LoadTokenizer(tokPath)
+		tok, err := qwen.LoadTokenizer(tokPath)
 		if err != nil {
 			return fmt.Errorf("加载 tokenizer 失败: %w", err)
 		}
@@ -250,13 +251,13 @@ func runFormA(modelPath, tokPath, prompt, tokensArg string) error {
 	}
 
 	// 形态B：词表在后端
-	logitsB, err := route2qwen.ForwardMasked(w, tokens)
+	logitsB, err := qwen.ForwardMasked(w, tokens)
 	if err != nil {
 		return fmt.Errorf("形态B 前向失败: %w", err)
 	}
 	// 形态A：词表在网关（OTP 加掩嵌入 → 后端 → 网关 LMHead）
-	rGW := route2qwen.GenOTP(cfg.Dim, maskedinfer.Mod64)
-	logitsA, err := route2qwen.ForwardMaskedFormA(w, tokens, rGW)
+	rGW := orchestrator.GenOTP(cfg.Dim, maskedinfer.Mod64)
+	logitsA, err := orchestrator.ForwardMaskedFormA(w, tokens, rGW)
 	if err != nil {
 		return fmt.Errorf("形态A 前向失败: %w", err)
 	}
@@ -272,7 +273,7 @@ func runFormA(modelPath, tokPath, prompt, tokensArg string) error {
 	agree := argmax(lastA) == argmax(lastB)
 	fmt.Printf("末位 logits MaxAbsDiff=%.3e  argmax一致=%v\n", maxd, agree)
 	if tokPath != "" {
-		tok, _ := route2qwen.LoadTokenizer(tokPath)
+		tok, _ := qwen.LoadTokenizer(tokPath)
 		na, nb := argmax(lastA), argmax(lastB)
 		fmt.Printf("形态A 下一token: id=%d text=%q\n", na, tok.Decode([]int{na}))
 		fmt.Printf("形态B 下一token: id=%d text=%q\n", nb, tok.Decode([]int{nb}))

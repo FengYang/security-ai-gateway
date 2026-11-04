@@ -112,9 +112,45 @@ func TestSegmentCapturingEngine_RecordsSegmentsAndForwardsFP(t *testing.T) {
 	if c.segments()[0].Text != "x" || c.segments()[0].At != 0 {
 		t.Fatalf("首片记录不符：%+v", c.segments()[0])
 	}
+	// 首片是时间基准点（At=0），后续分片是距基准点的非负、单调不减偏移；
+	// 回放侧（segmentReplayEngine / cacheengine.Replayer）只取相邻差，故 At[i]-At[i-1] 即真实节拍。
+	for i := 1; i < len(c.segments()); i++ {
+		cur, prev := c.segments()[i], c.segments()[i-1]
+		if cur.At < 0 || cur.At < prev.At {
+			t.Fatalf("分片 %d 偏移非法的（必须非负且单调不减）：%v ← %v", i, cur.At, prev.At)
+		}
+	}
 	// 可选方法必须显式转发（否则审计 KeyFP 归因丢失）
 	if c.LastKeyFingerprint() != "kf-1" {
 		t.Fatalf("LastKeyFingerprint 未转发：%q", c.LastKeyFingerprint())
+	}
+}
+
+// TestSegmentCapturingEngine_FirstSegmentAtDeterministic 首片 At 必须**恒为 0**（时间基准点语义）。
+// 依据：cacheengine/types.go 的 Segment.At 定义为「与首片的相对偏移」；cacheengine/replay.go 单块回放
+// 亦用 At=0。若首片记实耗（time.Since(e.start)，亚微秒噪声），则同一内容条目的分片序列不再确定，
+// 而 Segments 会经 cacheengine/redisbackend.go 的 persistEntry 参与 json.Marshal 落盘 →
+// 「内容完全相同的缓存工件」字节级不确定（AEAD 密文每次都不同，破坏可复现性/去重与审计比对）。
+func TestSegmentCapturingEngine_FirstSegmentAtDeterministic(t *testing.T) {
+	const deltas = 4
+	for round := 0; round < 5; round++ {
+		inner := &fakeDeltaEngine{deltas: []string{"a", "b", "c", "d"}}
+		c := newSegmentCapturingEngine(inner, time.Now(), nil)
+		if err := c.Generate(model.GenerateRequest{}, func(string) error { return nil }); err != nil {
+			t.Fatalf("round %d: Generate: %v", round, err)
+		}
+		segs := c.segments()
+		if len(segs) != deltas {
+			t.Fatalf("round %d: 采集分片数=%d，want %d", round, len(segs), deltas)
+		}
+		if segs[0].At != 0 {
+			t.Fatalf("round %d: 首片为时间基准点，At 必须恒为 0（否则回填工件不确定），got %v", round, segs[0].At)
+		}
+		for i := 1; i < len(segs); i++ {
+			if segs[i].At < segs[i-1].At {
+				t.Fatalf("round %d: 分片 %d 偏移倒退（%v < %v）", round, i, segs[i].At, segs[i-1].At)
+			}
+		}
 	}
 }
 

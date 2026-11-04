@@ -15,9 +15,9 @@ package main
 import (
 	"testing"
 
-	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/gateway/teecore/maskedinfer"
 	"security-ai-gateway/gateway/teecore/route2plan"
+	"security-ai-gateway/gateway/teecore/trustedops"
 )
 
 // TestM1RecomputeMod64 路线2 服务侧 Mod64 接线端到端验收（M1，proto=2）。
@@ -102,7 +102,7 @@ func TestM1RecomputeMod64(t *testing.T) {
 	xLin := wup.Decode(y)
 	geluOut := make([]float64, len(xLin))
 	for i := range xLin {
-		geluOut[i] = teecore.GELU(xLin[i])
+		geluOut[i] = trustedops.GELU(xLin[i])
 	}
 	fY := ref.ToMaskDomain(geluOut)
 	// 3) 重掩码（产出步自己的域，与服务端 outStream 同款派生）

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"security-ai-gateway/gateway/teecore"
+	"security-ai-gateway/gateway/cryptop/keymgmt"
 	"security-ai-gateway/protocol/go"
 	"security-ai-gateway/protocol/go/cryptoops"
 )
@@ -227,7 +227,7 @@ func assertEngineOrder(t *testing.T, got, want []string) {
 }
 
 func TestEngineTypeRouting(t *testing.T) {
-	km, _ := teecore.NewKeyManager(0)
+	km, _ := keymgmt.NewKeyManager(0)
 	req := &protocol.InferenceRequest{
 		RequestID:     "et-001",
 		TimestampNS:   time.Now().UnixNano(),

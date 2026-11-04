@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,11 +27,11 @@ import (
 
 	"security-ai-gateway/cipher/mask"
 	"security-ai-gateway/gateway/auditexport"
+	"security-ai-gateway/gateway/cryptop/keymgmt"
 	"security-ai-gateway/gateway/tee-infer-service/cacheengine"
 	"security-ai-gateway/gateway/tee-infer-service/mcpguard"
 	"security-ai-gateway/gateway/tee-infer-service/mcpproto"
 	"security-ai-gateway/gateway/tee-infer-service/model"
-	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/internal/memzero"
 	"security-ai-gateway/protocol/go"
 	"security-ai-gateway/protocol/go/cryptoops"
@@ -125,8 +126,8 @@ type keyIssueResponse struct {
 }
 
 type teeServer struct {
-	km            *teecore.KeyManager       // 默认租户（向后兼容）
-	tkm           *teecore.TenantKeyManager // 二级租户 KEK + 三级会话管理器（P0-4 §6）
+	km            *keymgmt.KeyManager       // 默认租户（向后兼容）
+	tkm           *keymgmt.TenantKeyManager // 二级租户 KEK + 三级会话管理器（P0-4 §6）
 	kSig          []byte
 	attest        string  // 远程证明共享令牌（MVP）
 	enclave       Enclave // 飞地抽象
@@ -2355,14 +2356,14 @@ type secConfigView struct {
 	// 审计/日志留存期声明（天；0=未声明）。声明式，删除由存储层生命周期策略执行。
 	AuditRetentionDays int `json:"audit_retention_days"`
 	// P1-7 T0（D-17 / A4-01）：审计 WORM 落盘强度只读视图（启动期定档）。
-	AuditFsyncMode     string            `json:"audit_fsync_mode"`     // batch | per_event | ""（内存模式）
-	AuditFsyncEvery    int               `json:"audit_fsync_every"`    // batch 档：每 N 条
-	AuditFsyncInterval string            `json:"audit_fsync_interval"` // batch 档：每 T（Go Duration 字符串）
-	AuditFsyncCount    uint64            `json:"audit_fsync_count"`    // 累计 fsync 次数
+	AuditFsyncMode     string `json:"audit_fsync_mode"`     // batch | per_event | ""（内存模式）
+	AuditFsyncEvery    int    `json:"audit_fsync_every"`    // batch 档：每 N 条
+	AuditFsyncInterval string `json:"audit_fsync_interval"` // batch 档：每 T（Go Duration 字符串）
+	AuditFsyncCount    uint64 `json:"audit_fsync_count"`    // 累计 fsync 次数
 	// P1-7 T15（§7.10）：租户级灰度开关只读视图（运行时切换走 PUT /audit/canary）。
-	AuditCanaryMode    string   `json:"audit_canary_mode"`    // all | canary | off
-	AuditCanaryTenants []string `json:"audit_canary_tenants"` // canary 档名单（排序稳定）
-	AuditCanarySkipped uint64   `json:"audit_canary_skipped"` // 累计灰度跳过事件数
+	AuditCanaryMode    string            `json:"audit_canary_mode"`    // all | canary | off
+	AuditCanaryTenants []string          `json:"audit_canary_tenants"` // canary 档名单（排序稳定）
+	AuditCanarySkipped uint64            `json:"audit_canary_skipped"` // 累计灰度跳过事件数
 	Guardrail          guardrailSnapshot `json:"guardrail"`
 	// GA-输出侧内容审查（OG-3）：当前模式与策略版本（只读；运行时覆盖/持久化归 OG-8）。
 	OutputGuard outputGuardSnapshot `json:"output_guard"`
@@ -3982,7 +3983,7 @@ func main() {
 	meterToken := flag.String("meter-token", "", "独立只读计量令牌（GA-计费 P1-2）：仅可读 /usage（含 from/to 增量），不可写配额/读审计；为空 = 仅管理令牌可用")
 	billingURL := flag.String("billing-url", "", "计费 Webhook 推送地址（GA-计费 P1-1，如 http://billing:8080/events）；为空 = 推送关闭，拉取为主")
 	billingSecret := flag.String("billing-secret", "", "计费 Webhook HMAC-SHA256 签名密钥（与 billing-url 同时配置；为空 = 不签名，仅内网明文模式）")
-	engineURL := flag.String("engine-url", "", "明文域推理引擎（vLLM OpenAI 兼容地址，如 http://vllm:8000；text 载荷流式直连；为空使用本地模拟引擎）")
+	engineURL := flag.String("engine-url", "", "明文域推理引擎（vLLM OpenAI 兼容地址，如 http://vllm:8000；text 载荷流式直连；为空使用本地模拟引擎）。安全约束（方案 §6.1 R4）：该端点运行于 TEE 明文域，须与 tee-infer-service 同处信任域（同 Pod/同节点回环/已验证对端）；本地址只经命令行或配置文件注入，不接受请求方传入")
 	cmaasURL := flag.String("cmaas-url", "", "百炼 C-MaaS openai-proxy 地址（P5，如 http://127.0.0.1:8080；为空 = cmaas 引擎未配置，请求 fail-closed）")
 	cmaasAPIKey := flag.String("cmaas-api-key", "", "C-MaaS API Key（DASHSCOPE_API_KEY，Bearer 透传代理；未指定时回退环境变量 CMAAS_API_KEY，推荐经 deploy/secrets/cmaas.env 注入）")
 	cmaasModel := flag.String("cmaas-model", "", "C-MaaS 缺省模型 code（cmaas-glm-5.2 等；请求未指定模型时使用）")
@@ -4180,7 +4181,7 @@ func main() {
 		log.Printf("密钥已 Seal 持久化: %s（重启经 Unseal 恢复）", *sealFile)
 	}
 
-	km, err := teecore.NewKeyManagerWithMaster(0, masterKey)
+	km, err := keymgmt.NewKeyManagerWithMaster(0, masterKey)
 	if err != nil {
 		log.Fatalf("初始化 KeyManager 失败: %v", err)
 	}
@@ -4190,6 +4191,7 @@ func main() {
 	var eng model.Engine = model.New()
 	if *engineURL != "" {
 		eng = model.NewRemoteEngine(*engineURL)
+		warnPlaintextEngineEndpoint("engine-url", *engineURL)
 		log.Printf("推理引擎: vLLM OpenAI 兼容 %s", *engineURL)
 	}
 	// P5：C-MaaS 引擎（openai-proxy 对接；未配置 -cmaas-url 时 cmaas 请求 fail-closed）
@@ -4376,12 +4378,12 @@ func main() {
 	}
 	rootWrap := &cryptoRootWrapper{prov: cryptoProvider, root: rootKey}
 	var persist *tenantKeyPersist
-	var changeHook teecore.ChangeHook
+	var changeHook keymgmt.ChangeHook
 	if *tenantKeyFilePath != "" {
 		persist = &tenantKeyPersist{path: *tenantKeyFilePath, encl: encl, root: rootWrap}
 		changeHook = persist
 	}
-	tkm := teecore.NewTenantKeyManager(cryptoProvider, 0, srv.metrics, &tenantKeyAudit{chain: audit}, changeHook)
+	tkm := keymgmt.NewTenantKeyManager(cryptoProvider, 0, srv.metrics, &tenantKeyAudit{chain: audit}, changeHook)
 	srv.tkm = tkm
 	if persist != nil {
 		persist.tkm = tkm
@@ -4638,10 +4640,10 @@ func main() {
 	} else {
 		log.Printf("[audit] -audit-report-token 缺省 → /audit/report 未注册（fail-closed，A3-11）")
 	}
-	mux.HandleFunc("/audit/verify", srv.handleAuditVerify)                             // M9-3 哈希链校验
-	mux.HandleFunc("/audit/anchor", srv.handleAuditAnchor)                             // C-5 审计锚定
-	mux.HandleFunc("/audit/retention", srv.handleAuditRetention)                       // P1-7 T9：留存/分层声明读写（§6.4）
-	mux.HandleFunc("/audit/canary", srv.handleAuditCanary)                             // P1-7 T15：租户级灰度开关读写（§7.10；GET 快照 / PUT 切换并落链）
+	mux.HandleFunc("/audit/verify", srv.handleAuditVerify)       // M9-3 哈希链校验
+	mux.HandleFunc("/audit/anchor", srv.handleAuditAnchor)       // C-5 审计锚定
+	mux.HandleFunc("/audit/retention", srv.handleAuditRetention) // P1-7 T9：留存/分层声明读写（§6.4）
+	mux.HandleFunc("/audit/canary", srv.handleAuditCanary)       // P1-7 T15：租户级灰度开关读写（§7.10；GET 快照 / PUT 切换并落链）
 	// P2-4 T-4.2：审计链导出端点（**默认关闭**：未启用即不注册 → 404）。
 	// ⚠️ T-2.3 接线点：授权由 auditexport.Authorizer 提供，真实实现（集群身份凭证
 	//    签发/校验/轮换/吊销）就绪后在此注入替换临时静态令牌口径。
@@ -4689,7 +4691,7 @@ func main() {
 
 	defer audit.Close() // WORM 模式落盘文件随进程退出关闭
 
-	log.Printf("tee-infer-service 就绪: %s（KeyManager 主密钥轮换 TTL=%v + attestation 双向）", *addr, teecore.DefaultMasterTTL)
+	log.Printf("tee-infer-service 就绪: %s（KeyManager 主密钥轮换 TTL=%v + attestation 双向）", *addr, keymgmt.DefaultMasterTTL)
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           limitBody(mux),
@@ -4709,4 +4711,32 @@ func randHex(n int) string {
 		panic(err)
 	}
 	return hex.EncodeToString(b)
+}
+
+// warnPlaintextEngineEndpoint 对「明文 http + 非回环」的引擎端点启动告警（方案 §6.1 R4）。
+// 返回是否真的告警（便于单测断言判定逻辑，调用方可忽略）。
+//
+// 为什么不直接拒绝启动：K8s 里 vLLM 常以 http://vllm:8000 在同一 Pod/节点内提供服务，
+// 硬拒会把合法部署挡在门外；但「明文 + 跨机」一旦成立即为配置错误（明文会在非预期实体
+// 落地），必须可观测。判定只看 scheme 与 host：https（含 mTLS）与回环地址不告警。
+func warnPlaintextEngineEndpoint(flagName, raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	if h := u.Hostname(); h != "" && isLoopbackHost(h) {
+		return false
+	}
+	log.Printf("⚠ %s=%s 是明文 http 且非回环地址（§6.1 R4）：请确认该端点与 tee-infer-service 同处信任域"+
+		"（同 Pod / 同节点 / 已验证对端），否则明文将在非预期实体落地", flagName, raw)
+	return true
+}
+
+// isLoopbackHost 判断主机名是否回环（localhost / 127.0.0.0/8 / ::1）。
+func isLoopbackHost(h string) bool {
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }

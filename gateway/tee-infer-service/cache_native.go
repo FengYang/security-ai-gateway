@@ -89,12 +89,15 @@ func clampDuration(d, lo, hi time.Duration) time.Duration {
 //
 // 注意：必须在 cmaas 引擎判定之后包装——否则 `eng.(*model.CmaasEngine)` 判定失效，
 // 会向 cmaas 上游透传错误模型名（model_not_found）。同时显式转发可选方法，避免副作用。
+//
+// 约束：本包装器为单次 Generate 的请求内临时对象，不可跨请求复用
+// （first/start/segs 不复位，复用会破坏首片 At=0 不变量）。
 type segmentCapturingEngine struct {
 	inner     model.Engine
 	releaseAt time.Time
 	rec       jitterRecorder
 	first     bool
-	start     time.Time
+	start     time.Time // 首片到达时刻：后续分片 At 的唯一时间基准点（首片自身 At=0，不用它）
 	segs      []cacheengine.Segment
 }
 
@@ -108,15 +111,27 @@ func newSegmentCapturingEngine(inner model.Engine, releaseAt time.Time, rec jitt
 func (e *segmentCapturingEngine) Predict(f []float64) int { return e.inner.Predict(f) }
 
 // Generate 透传内层生成，逐 delta 记录分片（文本 + 相对首片的偏移）。
+//
+// 分片偏移口径（与 cacheengine.Segment.At「与首片的相对偏移」定义一致）：
+//   - 首片是**时间基准点**，其偏移按定义恒为 0（cacheengine.replay.go 单块回放同样用 At=0）；
+//   - 后续分片 = 距首片到达时刻（e.start）的实耗，故 gap = At[i] - At[i-1] 即真实相邻间隔。
+//
+// 反例：若首片也记 time.Since(e.start)，取值只是 e.start 之后那次 time.Now 的调度噪声（亚微秒级），
+// 既非确定性又无语义；更实质的是分片会随条目落盘——`redisbackend.persistEntry` 的**明文 DTO** 含
+// Segments（json 序列化含 At），首片噪声会让「内容完全相同的工件」明文 DTO 字节级不同，破坏工件
+// 可复现性与去重比对。（注意：seal 之后的密文本就因随机 nonce 每次不同，不能作为论据。）
 func (e *segmentCapturingEngine) Generate(req model.GenerateRequest, onDelta func(string) error) error {
 	return e.inner.Generate(req, func(d string) error {
+		var at time.Duration // 零值 = 首片的基准点偏移，恰好是期望语义
 		if e.first {
 			e.first = false
 			// §7.3：miss 路径首字节前同样等待 releaseAt（通常已过 = no-op，防"快速未命中"漏网）。
 			waitUntilRelease(e.rec, "miss", e.releaseAt)
 			e.start = time.Now()
+		} else {
+			at = time.Since(e.start)
 		}
-		e.segs = append(e.segs, cacheengine.Segment{Text: d, At: time.Since(e.start)})
+		e.segs = append(e.segs, cacheengine.Segment{Text: d, At: at})
 		return onDelta(d)
 	})
 }

@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"testing"
 
-	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/gateway/teecore/route2plan"
+	"security-ai-gateway/gateway/teecore/trustedops"
 )
 
 // TestRecomputeRMSNorm 覆盖 rmsnorm 算子的数值正确性（proto=2，逐位对拍）。
@@ -70,7 +70,7 @@ func TestRecomputeRMSNorm(t *testing.T) {
 		xq[i] = float64(ref.SignedValue(y[i])) / ref.InputScale
 	}
 	// 2) RMSNorm（服务端权威 gamma/eps）→ 定点化 → 重掩码（产出步自己的域）
-	normed := teecore.RMSNorm(xq, gamma, eps)
+	normed := trustedops.RMSNorm(xq, gamma, eps)
 	fY := ref.ToMaskDomain(normed)
 	rhoOut := h.outRho(seq, len(fY))
 	expected := make([]uint64, len(fY))
@@ -147,7 +147,7 @@ func TestRecomputeArgMax(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unmask: %v", err)
 	}
-	want := teecore.ArgMax(wlm.Decode(y))
+	want := trustedops.ArgMax(wlm.Decode(y))
 	if rc.Token != want {
 		t.Fatalf("argmax token=%d != 期望 %d", rc.Token, want)
 	}

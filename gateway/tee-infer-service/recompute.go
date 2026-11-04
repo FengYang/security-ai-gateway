@@ -26,13 +26,6 @@ import (
 // recomputeBatchLimit 单请求 batch 上限（vLLM 连续批处理对齐，防超长请求）
 const recomputeBatchLimit = 4096
 
-// route2MaskModulus 路线2 掩码模 R（M1 接线，技术方案 §7.7 定案）。
-// 取 2^64-1 (=^uint64(0)) 作为 2^64 的等价代表：掩码流拒绝采样在 r=2^64-1 时
-// 近 100% 接受且返回值落在 [0, 2^64-1)，统计上与完整 2^64 等价；内核 Mod64 累积器
-// 以 mod 2^64（uint64 自然回绕）归约，故无需改动 cipher/mask 包。
-// 注意：本常量仅用于路线2 非线性补算路径，与 legacy OTP 的 route2MaskModulus(=2^32) 互不干扰。
-const route2MaskModulus uint64 = ^uint64(0)
-
 // LayerWeightProvider 层权重提供器（proto=1 遗留，仅 mock/旧测试使用）。
 //
 // D15：保留不删，新代码一律走 route2demo.ModelWeights（按 TensorKey 取张量）。

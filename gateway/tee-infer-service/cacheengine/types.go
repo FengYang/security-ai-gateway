@@ -158,6 +158,7 @@ type InferResult struct {
 }
 
 // Segment 流式分片：文本 + 与首片的相对偏移。
+// 不变量：首片是时间基准点，其 At 必须为 0（回放按 At 相邻差计算节拍，基准点绝对值会被平移抵消）。
 type Segment struct {
 	Text string
 	At   time.Duration

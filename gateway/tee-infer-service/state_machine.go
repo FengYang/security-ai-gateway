@@ -17,9 +17,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
+	"security-ai-gateway/gateway/tee-infer-service/route2step"
+	"security-ai-gateway/gateway/teecore/adapters/qwen"
 	"security-ai-gateway/gateway/teecore/route2demo"
 	"security-ai-gateway/gateway/teecore/route2plan"
 )
@@ -31,21 +34,19 @@ const protoV2 = 2
 const (
 	auditRecomputeProtoV1Unsupported = "recompute_proto_v1_unsupported"
 	auditRecomputeModelMismatch      = "recompute_model_mismatch"
-	auditRecomputeShapeMismatch      = "recompute_shape_mismatch"
-	auditRecomputeUnknownOp          = "recompute_unknown_op"
 	auditRecomputeStepOutOfOrder     = "recompute_step_out_of_order"
 	auditRecomputeStageMismatch      = "recompute_stage_mismatch"
-	auditRecomputeReplay             = "recompute_replay"
-	auditKVCacheFull                 = "kv_cache_full"
-	auditRecomputeStreamFailed       = "recompute_stream_failed"
-	auditRecomputeWeightLoadFailed   = "recompute_weight_load_failed"
-	auditRecomputeMaskImageFailed    = "recompute_mask_image_failed"
-	auditRecomputeUnmaskFailed       = "recompute_unmask_failed"
-	auditRecomputeRemaskFailed       = "recompute_remask_failed"
-	auditRecomputeNormFailed         = "recompute_norm_failed"
-	auditRecomputeAttentionFailed    = "recompute_attention_failed"
 	auditRecomputePlanBuildFailed    = "recompute_plan_build_failed"
-	auditRecomputeKVFailed           = "recompute_kv_failed"
+
+	// 以下审计码与 route2step 同源，别名到该包以保证单一事实来源（掩码单步在本包外）。
+	// 只有宿主**自己**仍会产出的码才留别名；其余（stream/mask_image/unmask/remask/norm/
+	// attention/kv_full 等）由 route2step 内部产生并经 StepError.Audit 原值透传，
+	// 宿主不再引用，故不在此重复声明（避免死代码）。
+	auditRecomputeShapeMismatch    = route2step.AuditRecomputeShapeMismatch
+	auditRecomputeUnknownOp        = route2step.AuditRecomputeUnknownOp
+	auditRecomputeReplay           = route2step.AuditRecomputeReplay
+	auditRecomputeWeightLoadFailed = route2step.AuditRecomputeWeightLoadFailed
+	auditRecomputeKVFailed         = route2step.AuditRecomputeKVFailed
 )
 
 // recomputeRequest proto=2 请求（设计 §7.1）。
@@ -62,7 +63,7 @@ type recomputeRequest struct {
 	Op          string     `json:"op"`
 	NRows       int        `json:"n_rows"`
 	Batch       [][]uint64 `json:"batch"`
-	MaskVersion int        `json:"mask_version"` // 保留，不参与任何判定
+	MaskVersion int        `json:"mask_version"`    // 保留，不参与任何判定
 	Layer       int        `json:"layer,omitempty"` // 保留，不参与任何判定
 	Gamma       []float64  `json:"gamma,omitempty"`
 	Beta        []float64  `json:"beta,omitempty"`
@@ -77,10 +78,10 @@ type recomputeResponse struct {
 	// Token 采样明文 token（G11 形态歧义修复）。字段恒存在：argmax 步骤为真实 token，
 	// 非 argmax 步骤取哨兵 -1（§7.2.1：不得因"有时有 token 有时没有"产生可预测的段数差异）。
 	// response signature 覆盖 request_id|next_coord|seq|token|result（§7.2.1 补齐）。
-	Token     int        `json:"token"`
-	NextCoord string     `json:"next_coord"`
-	MaskNext  string     `json:"mask_next"`
-	Signature string     `json:"signature"`
+	Token     int    `json:"token"`
+	NextCoord string `json:"next_coord"`
+	MaskNext  string `json:"mask_next"`
+	Signature string `json:"signature"`
 }
 
 // stepError 一步的失败结果：**只描述如何向调用方交代**，不含任何 IO 动作。
@@ -119,16 +120,16 @@ type recomputeState struct {
 	modelID string
 	cfg     route2plan.ModelConfig
 	weights route2demo.ModelWeights
-	kv      *KVCache
+	kv      *route2step.KVCache
 
 	// ---- 推进段 ----
-	plan     route2plan.Plan
-	stage    route2plan.Stage
-	turn     uint32
-	pos      int  // 下一个期望的 plan 下标
-	turnBase int  // 本轮开始时的 KV 行数（位置基准，服务端自持）
+	plan      route2plan.Plan
+	stage     route2plan.Stage
+	turn      uint32
+	pos       int // 下一个期望的 plan 下标
+	turnBase  int // 本轮开始时的 KV 行数（位置基准，服务端自持）
 	lastReqID string
-	lastUse  time.Time
+	lastUse   time.Time
 }
 
 type recomputeStates struct {
@@ -180,16 +181,91 @@ func (rs *recomputeStates) evict(sessionID string) {
 
 // ---- 模型解析 ----
 
-// resolveModelConfig 把 model_id 解析为模型配置。
+// realQwenModelID 真实 Qwen3 模型的 model_id（生产链路目标，T4 接入）。
+const realQwenModelID = "qwen3-0.6b"
+
+// envRealQwenWeights 真实 Qwen3 权重的 safetensors 路径的**安装期**配置键。
 //
-// 目前 demo 只认 route2plan.DemoModelID（唯一常量源）；未知 model_id 一律拒，
-// 而不是回落到某个"默认配置"——回落会让客户端以为换了模型其实没换。
-func resolveModelConfig(modelID string) (route2plan.ModelConfig, error) {
-	if modelID == route2plan.DemoModelID {
-		return route2plan.DemoTinyConfig(), nil
+// 按登记口径铁律：客户/部署环境才能定的取值一律做成「安装期可配置参数」，
+// 未设置即 fail-closed（绝不静默回落 demo），提示运维在部署时按现场填好路径。
+const envRealQwenWeights = "REAL_QWEN_WEIGHTS_PATH"
+
+// qwenCacheEntry 缓存项同时保存 cfg 与 weights。
+//
+// ⚠ 必须**成对**缓存：cfg.ModelID 是在 resolveModel 里按请求填入的（ToModelConfig 不知晓
+// 部署侧 model_id），若只缓存 weights 再在命中时调用 w.Config()，拿到的 cfg 的 ModelID 为空，
+// 会被 route2plan.Validate 以「ModelID 不可为空」fail-closed 拒绝——症状是**首个会话正常、
+// 从第二个会话起真实模型全部失败**。
+type qwenCacheEntry struct {
+	cfg route2plan.ModelConfig
+	w   route2demo.ModelWeights
+}
+
+// qwenCache 按「路径 + 文件身份」缓存已加载的真实 Qwen 权重（进程内多会话共享，
+// 避免重复加载 0.6B）。
+//
+// 键里带 size/mtime 而非仅 path：权重文件被替换后（换模型/换精度/热更新）必须重新加载，
+// 否则会静默沿用旧权重产出错误回答且无任何一层报错（§2.2 G6 同类风险）。
+var (
+	qwenCacheMu sync.Mutex
+	qwenCache   = map[string]qwenCacheEntry{} // path|size|mtime -> entry
+)
+
+// qwenCacheKey 由权重路径与文件身份（大小 + mtime）构造缓存键。
+func qwenCacheKey(path string) (string, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("真实权重路径不可读（%s）: %w", envRealQwenWeights, err)
 	}
-	return route2plan.ModelConfig{}, fmt.Errorf("未知 model_id %q（当前仅支持 %q）",
-		modelID, route2plan.DemoModelID)
+	return fmt.Sprintf("%s|%d|%d", path, st.Size(), st.ModTime().UnixNano()), nil
+}
+
+// resolveModel 把 model_id 解析为 (cfg, weights)。
+//
+//   - demo（route2plan.DemoModelID）：确定性玩具权重，零 I/O；
+//   - 真实 Qwen3（realQwenModelID）：从环境变量 REAL_QWEN_WEIGHTS_PATH 指向的 safetensors
+//     加载并量化（缓存），未配置即 fail-closed；
+//   - 未知 model_id 一律拒，而非回落默认配置——回落会让客户端以为换了模型其实没换。
+func resolveModel(modelID string) (route2plan.ModelConfig, route2demo.ModelWeights, error) {
+	switch modelID {
+	case route2plan.DemoModelID:
+		cfg := route2plan.DemoTinyConfig()
+		w, err := route2demo.NewWeights(cfg)
+		if err != nil {
+			return route2plan.ModelConfig{}, nil, err
+		}
+		return cfg, w, nil
+	case realQwenModelID:
+		path := os.Getenv(envRealQwenWeights)
+		if path == "" {
+			return route2plan.ModelConfig{}, nil, fmt.Errorf(
+				"model_id=%q 需要真实权重，但未设置安装期参数 %s（缺失即 fail-closed）", modelID, envRealQwenWeights)
+		}
+		key, err := qwenCacheKey(path)
+		if err != nil {
+			return route2plan.ModelConfig{}, nil, err
+		}
+		// 注：加载在锁内完成（0.6B 首次加载可达数秒），换取「同进程只加载一次」的简单正确性；
+		// 当前 model_id 白名单仅两项，不存在高并发加载多种大权重而被此锁放大的场景。
+		qwenCacheMu.Lock()
+		defer qwenCacheMu.Unlock()
+		if cached, ok := qwenCache[key]; ok {
+			return cached.cfg, cached.w, nil
+		}
+		w, err := qwen.LoadWeights(path, qwen.Qwen3_06B())
+		if err != nil {
+			return route2plan.ModelConfig{}, nil, fmt.Errorf("加载真实 Qwen3 权重失败: %w", err)
+		}
+		cfg := w.Config()
+		// model_id 是 ModelConfig 的标识字段（参与权重派生 key 与 Validate），
+		// 由 resolveModel 在此据请求填入；ToModelConfig 自身不知晓部署侧 model_id。
+		cfg.ModelID = modelID
+		qwenCache[key] = qwenCacheEntry{cfg: cfg, w: w}
+		return cfg, w, nil
+	default:
+		return route2plan.ModelConfig{}, nil, fmt.Errorf("未知 model_id %q（当前支持 %q / %q）",
+			modelID, route2plan.DemoModelID, realQwenModelID)
+	}
 }
 
 // ---- canonical v2 与签名 ----
@@ -251,15 +327,11 @@ func (st *recomputeState) initLocked(modelID string) *stepError {
 		}
 		return nil
 	}
-	cfg, err := resolveModelConfig(modelID)
+	cfg, weights, err := resolveModel(modelID)
 	if err != nil {
-		return newStepError(400, auditRecomputeModelMismatch, "model_id 非法: %v", err)
+		return newStepError(400, auditRecomputeModelMismatch, "model_id 解析失败: %v", err)
 	}
-	weights, err := route2demo.NewWeights(cfg)
-	if err != nil {
-		return newStepError(500, auditRecomputeWeightLoadFailed, "权重提供者构造失败: %v", err)
-	}
-	kv, err := NewKVCache(cfg)
+	kv, err := route2step.NewKVCache(cfg)
 	if err != nil {
 		return newStepError(500, auditRecomputeKVFailed, "KV cache 构造失败: %v", err)
 	}
@@ -365,7 +437,7 @@ func (st *recomputeState) checkStepLocked(req *recomputeRequest) (route2plan.Ste
 	}
 	nPos := len(req.Batch) / arity
 	for idx, row := range req.Batch {
-		kind := batchRowKind(arity, nPos, idx)
+		kind := route2step.BatchRowKind(arity, nPos, idx)
 		want := spec.InDim[kind]
 		if len(row) != want {
 			return route2plan.StepSpec{}, newStepError(400, auditRecomputeShapeMismatch,
@@ -410,22 +482,24 @@ func (st *recomputeState) runStep(req *recomputeRequest, seed []byte) stepOutcom
 	if serr != nil {
 		return stepOutcome{err: serr}
 	}
-	ctx := &stepContext{
-		cfg:      st.cfg,
-		weights:  st.weights,
-		plan:     st.plan,
-		seq:      st.pos,
-		spec:     spec,
-		stage:    st.stage,
-		turn:     st.turn,
-		turnBase: st.turnBase,
-		kv:       st.kv,
-		seed:     seed,
-		batch:    req.Batch,
+	ctx := &route2step.StepContext{
+		Cfg:       st.cfg,
+		Weights:   st.weights,
+		Plan:      st.plan,
+		Seq:       st.pos,
+		Spec:      spec,
+		Stage:     st.stage,
+		Turn:      st.turn,
+		TurnBase:  st.turnBase,
+		KV:        st.kv,
+		Seed:      seed,
+		Batch:     req.Batch,
+		NewStream: newLayerStream,
 	}
-	result, token, eerr := execStep(ctx)
+	result, token, eerr := route2step.ExecStep(ctx)
 	if eerr != nil {
-		return stepOutcome{err: eerr}
+		// 跨包边界：route2step.StepError → 宿主 stepError（同值转写，审计码单一来源）。
+		return stepOutcome{err: &stepError{httpStatus: eerr.Status, auditCode: eerr.Audit, msg: eerr.Msg}}
 	}
 	// 推进：pos++ 且记录 request_id（重放判重键）。
 	st.pos++
@@ -452,36 +526,4 @@ func (st *recomputeState) resetSession(reqID string) (modelID string, cfg route2
 	return st.modelID, st.cfg, st.modelID != ""
 }
 
-// ---- batch 行序（设计 §7.1.1 / D16 联合裁定：line-major，非待定项）----
-//
-// batch 承载 arity × T 行：arity 来自 StepSpec 的输入行数（residual_add 为 2，
-// 其余为 1），T 为位置数。布局**必须为 line-major**（设计 §7.1.1 已裁定）：
-//
-//	batch[ line*T + pos ]   // 第 line 条输入行、第 pos 个位置
-//
-// 客户端 cmd/route2-client/main.go 的 batchLayout="line-major" 与本常量必须同款；
-// 二者不一致时 residual_add 会把「不同位置的行」加在一起——不报错、数值全错
-// （与 §2.5.1 规则 4 同族静默失败）。false ⇒ line-major（见下方两个函数），true ⇒ 交错式。
-const batchRowOrderPosMajor = false // false ⇒ line-major（batch[line*T+pos]），与客户端/设计稿一致
-
-// batchRowIndex 位置 j、行类 r 在 batch 中的下标。
-func batchRowIndex(arity, nPos, posIdx, rowIdx int) int {
-	if batchRowOrderPosMajor {
-		return posIdx*arity + rowIdx
-	}
-	return rowIdx*nPos + posIdx
-}
-
-// batchRowKind batch 下标 idx 所属的行类（形状校验用）。
-func batchRowKind(arity, nPos, idx int) int {
-	if arity <= 0 {
-		return 0
-	}
-	if batchRowOrderPosMajor {
-		return idx % arity
-	}
-	if nPos <= 0 {
-		return 0
-	}
-	return idx / nPos
-}
+// batch 行布局（line-major）与行类判定已迁至 route2step.BatchRowIndex/BatchRowKind。

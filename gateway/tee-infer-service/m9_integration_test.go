@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"security-ai-gateway/cipher/mask"
+	"security-ai-gateway/gateway/cryptop/keymgmt"
 	"security-ai-gateway/gateway/tee-infer-service/model"
-	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/gateway/teecore/route2plan"
 	"security-ai-gateway/protocol/go"
 	"security-ai-gateway/protocol/go/cryptoops"
@@ -361,7 +361,7 @@ func TestRecomputeE2E(t *testing.T) {
 // newM9Server 构造测试服务（固定 K_sig/attest，启用 M9 全量能力）。
 func newM9Server(t *testing.T) (*teeServer, *httptest.Server) {
 	t.Helper()
-	km, err := teecore.NewKeyManager(0)
+	km, err := keymgmt.NewKeyManager(0)
 	if err != nil {
 		t.Fatalf("NewKeyManager: %v", err)
 	}
@@ -392,7 +392,7 @@ func newM9Server(t *testing.T) (*teeServer, *httptest.Server) {
 		guard:             newGuardrail(),
 		metrics:           newMetrics(),
 	}
-	srv.tkm = teecore.NewTenantKeyManager(cryptoProvider, 0, srv.metrics, &tenantKeyAudit{chain: srv.audit}, nil)
+	srv.tkm = keymgmt.NewTenantKeyManager(cryptoProvider, 0, srv.metrics, &tenantKeyAudit{chain: srv.audit}, nil)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/attest", srv.handleAttest)
 	mux.HandleFunc("/attest/complete", srv.handleAttestComplete)

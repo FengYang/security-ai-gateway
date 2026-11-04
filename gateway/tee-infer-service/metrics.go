@@ -78,8 +78,8 @@ type otpmaskMetrics struct {
 	ogMasked           map[string]int64 // category|field（命中且动作=mask/rewrite）
 	ogFirstChunkSkipL2 int64            // S3-2 策略 C：首段安全后跳过 L2 的请求数（gauge）
 	// P1-8 安全加固（M-7/M-8，source=tee）：审计 WORM 写入失败与 fail-closed 拒绝
-	wormWriteFail          map[string]int64 // policy（fail_closed|fail_open）：M-7 otpmask_worm_write_failed_total
-	auditFailClosedReject  int64            // M-8 otpmask_audit_failclosed_rejected_total
+	wormWriteFail         map[string]int64 // policy（fail_closed|fail_open）：M-7 otpmask_worm_write_failed_total
+	auditFailClosedReject int64            // M-8 otpmask_audit_failclosed_rejected_total
 	// ---- P1-7 全流量审计改造（T7，MOD5 容量管控；附加指标族，既有族不变，C-9）----
 	// 字节量（gauge，单调递增；每次 WORM 写入累加事件字节数）。
 	auditBytes int64
@@ -102,10 +102,10 @@ type otpmaskMetrics struct {
 	// T15：租户级灰度跳过的事件数（counter，无标签；canary/off 档累计，见 audit_canary.go）。
 	auditCanarySkipped int64
 	// C 类豁免出口计数（counter，handler|reason；T3b §7.3③：豁免项以聚合指标计数而非逐条落链）。
-	auditExemptExit map[string]int64
-	ogCanaryProbe      int64            // P0-3 策略 C：canary 探测句走完整 L2 的次数
-	ogCanaryReattach   int64            // P0-3 策略 C：canary 命中底线触发回挂的次数
-	ogPolicyRollback   map[string]int64 // reason（策略热加载回退事件）
+	auditExemptExit  map[string]int64
+	ogCanaryProbe    int64            // P0-3 策略 C：canary 探测句走完整 L2 的次数
+	ogCanaryReattach int64            // P0-3 策略 C：canary 命中底线触发回挂的次数
+	ogPolicyRollback map[string]int64 // reason（策略热加载回退事件）
 	// S1-4（G21）：策略版本库显式引用/回滚事件（action|result|reason）。
 	ogPolicyActivate  map[string]int64
 	ogDegraded        map[string]int64 // backend|reason（后端降级事件，M2）
@@ -542,14 +542,14 @@ func (m *otpmaskMetrics) incKeyIssue(tenant string) {
 	m.mu.Unlock()
 }
 
-// IncTenantRotation 实现 teecore.TenantMetrics：#7 scope=tenant_master 轮换计数。
+// IncTenantRotation 实现 keymgmt.TenantMetrics：#7 scope=tenant_master 轮换计数。
 func (m *otpmaskMetrics) IncTenantRotation() {
 	m.mu.Lock()
 	m.tenantKeyRotations++
 	m.mu.Unlock()
 }
 
-// IncTenantDestroy 实现 teecore.TenantMetrics：#8 scope=tenant_master 销毁计数。
+// IncTenantDestroy 实现 keymgmt.TenantMetrics：#8 scope=tenant_master 销毁计数。
 func (m *otpmaskMetrics) IncTenantDestroy() {
 	m.mu.Lock()
 	m.tenantKeyDestroys++
