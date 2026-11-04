@@ -26,16 +26,19 @@ type TensorKey struct {
 
 // 合法张量名（设计 §2.4.5）。注意这里刻意用「点号 + 小写」拼写，全局唯一。
 const (
-	TensorAttnQ   = "attn.q"   // Dim -> Heads*HeadDim，Q 投影
-	TensorAttnK   = "attn.k"   // Dim -> Heads*HeadDim，K 投影
-	TensorAttnV   = "attn.v"   // Dim -> Heads*HeadDim，V 投影
-	TensorAttnO   = "attn.o"   // Heads*HeadDim -> Dim，输出投影
-	TensorFFNUp   = "ffn.up"   // Dim -> FFNDim，FFN 升维
-	TensorFFNDown = "ffn.down" // FFNDim -> Dim，FFN 降维
-	TensorLNIn    = "ln_in"    // attention 前的 RMSNorm gamma（每 block 一份）
-	TensorLNPost  = "ln_post"  // FFN 前的 RMSNorm gamma（每 block 一份）
-	TensorLNFinal = "ln_final" // 收尾 RMSNorm gamma（全局一份）
-	TensorLMHead  = "lm_head"  // Dim -> Vocab；非方阵（Rows != Cols）由 QuantizedMatrix 的 Rows/Cols 分离天然支持，无需改动数值内核
+	TensorAttnQ   = "attn.q"      // Dim -> Heads*HeadDim，Q 投影
+	TensorAttnK   = "attn.k"      // Dim -> KVHeads*HeadDim（GQA 下窄于 Q），K 投影
+	TensorAttnV   = "attn.v"      // Dim -> KVHeads*HeadDim（同上），V 投影
+	TensorAttnO   = "attn.o"      // Heads*HeadDim -> Dim，输出投影
+	TensorFFNUp   = "ffn.up"      // Dim -> FFNDim，FFN 升维
+	TensorFFNDown = "ffn.down"    // FFNDim -> Dim，FFN 降维
+	TensorGate    = "ffn.gate"    // Dim -> FFNDim，SwiGLU 门控投影（仅 FFNType=swiglu 时存在）
+	TensorLNIn    = "ln_in"       // attention 前的 RMSNorm gamma（每 block 一份）
+	TensorLNPost  = "ln_post"     // FFN 前的 RMSNorm gamma（每 block 一份）
+	TensorLNFinal = "ln_final"    // 收尾 RMSNorm gamma（全局一份）
+	TensorQNorm   = "attn.q_norm" // 每 block 的 Q 逐头归一 gamma（Qwen3；长度 = HeadDim，所有头共享）
+	TensorKNorm   = "attn.k_norm" // 每 block 的 K 逐头归一 gamma（Qwen3；长度 = HeadDim，所有头共享）
+	TensorLMHead  = "lm_head"     // Dim -> Vocab；非方阵（Rows != Cols）由 QuantizedMatrix 的 Rows/Cols 分离天然支持，无需改动数值内核
 	// TensorTokEmb token 嵌入表：Vocab -> Dim 的查表（Gather），全局一份。
 	// 补录原因（T02 发现的设计漏项）：§2.4.5 的张量枚举原本只有 attn.*/ffn.*/ln_*/lm_head，
 	// 而**没有嵌入就跑不了前向**。客户端注入与服务端 Gather 必须共用同一张表，
@@ -49,6 +52,8 @@ var normTensorSet = map[string]bool{
 	TensorLNIn:    true,
 	TensorLNPost:  true,
 	TensorLNFinal: true,
+	TensorQNorm:   true,
+	TensorKNorm:   true,
 }
 
 // matrixTensorSet 线性权重类张量；它们产生 QuantizedMatrix。
@@ -59,6 +64,7 @@ var matrixTensorSet = map[string]bool{
 	TensorAttnO:   true,
 	TensorFFNUp:   true,
 	TensorFFNDown: true,
+	TensorGate:    true,
 	TensorLMHead:  true,
 	TensorTokEmb:  true,
 }
@@ -137,11 +143,13 @@ const SrcInject CoordRef = -1
 const (
 	OpRMSNorm     = "rmsnorm"
 	OpGELU        = "gelu"
+	OpLinear      = "linear" // 投影步的占位非线性：脱掩码后原样透传（SwiGLU 的 up/gate 投影用）
 	OpArgMax      = "argmax"
 	OpKVAppendK   = "kv_append_k"
 	OpKVAppendV   = "kv_append_v"
 	OpAttention   = "attention"
 	OpResidualAdd = "residual_add"
+	OpSwiGLUMul   = "swiglu_mul" // 逐元素 silu(gate) ⊙ up（SwiGLU 门控，arity=2）
 	// OpKVReset 会话级 KV 复位。它是**带外 op**（走同一 HTTP 端点但不占 plan 下标，
 	// 见 D10），故不得出现在任何 StepSpec.Op 中，Plan.Validate() 会据此拒绝。
 	OpKVReset = "kv_reset"
@@ -152,11 +160,13 @@ const (
 var opArity = map[string]int{
 	OpRMSNorm:     1,
 	OpGELU:        1,
+	OpLinear:      1,
 	OpArgMax:      1,
 	OpKVAppendK:   1,
 	OpKVAppendV:   1,
 	OpAttention:   1,
 	OpResidualAdd: 2,
+	OpSwiGLUMul:   2,
 }
 
 // ValidOp op 是否属于 plan 内合法 op（OpKVReset 返回 false）。
@@ -230,7 +240,7 @@ const StepsPerBlock = 8
 // TailSteps 收尾条目数：ln_final + argmax（设计 §3.3 的序 13 与序 15）。
 const TailSteps = 2
 
-// 每 block 内各条目的相对偏移（与 Step 枚举值不同，差在 StepKVAppend 的三分支）。
+// 每 block 内各条目的相对偏移（GELU 布局；与 Step 枚举值不同，差在 StepKVAppend 的三分支）。
 const (
 	offAttnNorm    = 0 // StepAttnNorm
 	offKVAppendK   = 1 // StepKVAppend + BranchK
@@ -242,14 +252,44 @@ const (
 	offFFNResidual = 7 // StepFFNResidual
 )
 
-// PlanLen plan 总条目数 == Blocks*StepsPerBlock + TailSteps。
-func PlanLen(blocks int) int {
-	return blocks*StepsPerBlock + TailSteps
+// SwiGLU 布局的 block 内相对偏移（仅 FFNType=swiglu 时使用，条目数 = 10）。
+// 前 6 条（attn_norm→ffn_norm）与 GELU 布局完全共用；FFN 尾段改为
+// up(StepFFNUp/BranchMain) → gate(StepFFNUp/BranchV) → swiglu_mul(StepFFNResidual/BranchV)
+// → down(StepFFNResidual/BranchQ)，其 Wire 次序 04b0<04b1<05b1<05b2 严格递增（见 §2.5.1）。
+const (
+	offSwiGLUGate     = 7 // StepFFNUp + BranchV
+	offSwiGLUMul      = 8 // StepFFNResidual + BranchV
+	offSwiGLUResidual = 9 // StepFFNResidual + BranchQ
+	// StepsPerBlockSwiGLU SwiGLU 布局每 block 条目数。
+	StepsPerBlockSwiGLU = 10
+)
+
+// stepsPerBlock 按 FFNType 返回每 block 的 plan 条目数（GELU=8 / SwiGLU=10）。
+func stepsPerBlock(cfg ModelConfig) int {
+	if cfg.FFNType == FFNTypeSwiGLU {
+		return StepsPerBlockSwiGLU
+	}
+	return StepsPerBlock
 }
 
-// BlockBase 第 b 个 block 的首条目下标。
-func BlockBase(b int) int {
-	return b * StepsPerBlock
+// PlanLen plan 总条目数 == Blocks*StepsPerBlock + TailSteps。
+// 为向后兼容既有调用点（plan_test / route2ref），cfg 省略时按 GELU 布局（8）计算；
+// SwiGLU 配置须显式传 cfg 以取得 10 步布局。
+func PlanLen(blocks int, cfg ...ModelConfig) int {
+	spb := StepsPerBlock
+	if len(cfg) > 0 {
+		spb = stepsPerBlock(cfg[0])
+	}
+	return blocks*spb + TailSteps
+}
+
+// BlockBase 第 b 个 block 的首条目下标。cfg 省略时按 GELU 布局。
+func BlockBase(b int, cfg ...ModelConfig) int {
+	spb := StepsPerBlock
+	if len(cfg) > 0 {
+		spb = stepsPerBlock(cfg[0])
+	}
+	return b * spb
 }
 
 // ---------- 构建 ----------
@@ -289,9 +329,9 @@ func BuildTurn(cfg ModelConfig, stage Stage, turn uint32) (Plan, error) {
 		return nil, errors.New("route2plan: decode 阶段的 Turn 必须 >= 1（Turn=0 由 prefill 独占）")
 	}
 	tailBlock := uint16(cfg.Blocks) // 收尾步的哨兵块号；cfg.Blocks <= MaxBlock-1 已由 Validate 保证
-	attnDim := cfg.AttnDim()        // == cfg.Dim
+	attnDim := cfg.AttnDim()        // 多头拼接宽度（真实 Qwen3 下 != Dim，由 Wo 回映）
 
-	p := make(Plan, 0, PlanLen(cfg.Blocks))
+	p := make(Plan, 0, PlanLen(cfg.Blocks, cfg))
 	// emit 追加一步；Seq 由下标自动写入，杜绝手抄下标错位。
 	emit := func(c LayerCoord, op string, inDim, inSrc []int, inW []WeightRef, outDim int, writes, reads, terminal bool) {
 		p = append(p, StepSpec{
@@ -314,12 +354,18 @@ func BuildTurn(cfg ModelConfig, stage Stage, turn uint32) (Plan, error) {
 
 	for b := 0; b < cfg.Blocks; b++ {
 		blk := uint16(b)
-		base := BlockBase(b)
-		// 残差直通来源：第 0 块来自客户端注入；其余来自上一块的 ffn_residual。
-		// （注意是「上一块的第 7 条」，不是「本块任何一步」，写错就会自引用成环。）
+		base := BlockBase(b, cfg)
+		// 本布局下「block 末步」偏移：GELU=offFFNResidual(7)，SwiGLU=offSwiGLUResidual(9)。
+		// 它产出流向下一块的残差流 h，故作为下一块 attn_norm 的直通来源。
+		lastOff := offFFNResidual
+		if cfg.FFNType == FFNTypeSwiGLU {
+			lastOff = offSwiGLUResidual
+		}
+		// 残差直通来源：第 0 块来自客户端注入；其余来自上一块的末步输出。
+		// （注意是「上一块的最后一条」，不是「本块任何一步」，写错就会自引用成环。）
 		residualSrc := SrcInject
 		if b > 0 {
-			residualSrc = BlockBase(b-1) + offFFNResidual
+			residualSrc = BlockBase(b-1, cfg) + lastOff
 		}
 
 		// (0) attn_norm：RMSNorm(h) -> V_hn，掩码 ρ_{base+0}。
@@ -328,26 +374,32 @@ func BuildTurn(cfg ModelConfig, stage Stage, turn uint32) (Plan, error) {
 			cfg.Dim, false, false, false)
 
 		// (1) kv_append_k：K̂ = Wk·V_hn -> 脱掩码->RoPE->写 KV。不产出张量（OutDim=0）。
+		// 输入宽 == KVDim（KVHeads*HeadDim）：GQA 下 K/V 投影输出宽度是 KVDim，而非 attnDim
+		// （仅 Q 与注意力原始输出为 attnDim，经 Wo 映回 Dim）；MHA 时 KVDim==attnDim 退化一致。
 		emit(coordOf(blk, StepKVAppend, BranchK), OpKVAppendK,
-			[]int{attnDim}, []int{base + offAttnNorm},
+			[]int{cfg.KVDim()}, []int{base + offAttnNorm},
 			[]WeightRef{RefKey(TensorKey{Block: b, Tensor: TensorAttnK})},
 			0, true, false, false)
 
-		// (2) kv_append_v：V̂ = Wv·V_hn（V 不做 RoPE，见 D8）。
+		// (2) kv_append_v：V̂ = Wv·V_hn（V 不做 RoPE，见 D8）。输入宽同 KVDim。
 		emit(coordOf(blk, StepKVAppend, BranchV), OpKVAppendV,
-			[]int{attnDim}, []int{base + offAttnNorm},
+			[]int{cfg.KVDim()}, []int{base + offAttnNorm},
 			[]WeightRef{RefKey(TensorKey{Block: b, Tensor: TensorAttnV})},
 			0, true, false, false)
 
-		// (3) attention：Q̂ = Wq·V_hn -> 全注意核（可信域明文，D1）-> V_ao，掩码 ρ_{base+3}。
+		// (3) attention：Q̂ = Wq·V_hn -> 全注意核（可信域明文，D1）-> V_ao（宽 attnDim）。
+		// 注意输出宽 == attnDim（Heads*HeadDim），而非 Dim：注意力原始拼接输出是多头宽，
+		// 由下一步 Wo([Dim, attnDim]) 映回 Dim 后才汇入残差流（Qwen3 attnDim≠Dim 亦成立）。
 		emit(coordOf(blk, StepKVAppend, BranchQ), OpAttention,
 			[]int{attnDim}, []int{base + offAttnNorm},
 			[]WeightRef{RefKey(TensorKey{Block: b, Tensor: TensorAttnQ})},
-			cfg.Dim, false, true, false)
+			attnDim, false, true, false)
 
-		// (4) attn_residual：两行扇入——Ao（经 Wo）与 h（直通）。两条掩码不同（G12/R2）。
+		// (4) attn_residual：两行扇入——Ao（经 Wo，宽 attnDim→Dim）与 h（直通，宽 Dim）。
+		// 第一输入宽度须 == attnDim（即上一步 attention 的输出宽），Wo 将其映回 Dim；
+		// 第二输入为残差 h（宽 Dim）。两条掩码不同（G12/R2）。
 		emit(coordOf(blk, StepAttnResidual, BranchMain), OpResidualAdd,
-			[]int{cfg.Dim, cfg.Dim}, []int{base + offAttention, residualSrc},
+			[]int{attnDim, cfg.Dim}, []int{base + offAttention, residualSrc},
 			[]WeightRef{RefKey(TensorKey{Block: b, Tensor: TensorAttnO}), NoWeight()},
 			cfg.Dim, false, false, false)
 
@@ -356,23 +408,57 @@ func BuildTurn(cfg ModelConfig, stage Stage, turn uint32) (Plan, error) {
 			[]int{cfg.Dim}, []int{base + offAttnRes}, []WeightRef{NoWeight()},
 			cfg.Dim, false, false, false)
 
-		// (6) ffn_up：Up = Wup·V_hn2 + b_up -> GELU -> V_f1，宽 FFNDim。
-		emit(coordOf(blk, StepFFNUp, BranchMain), OpGELU,
-			[]int{cfg.FFNDim}, []int{base + offFFNNorm},
-			[]WeightRef{RefKey(TensorKey{Block: b, Tensor: TensorFFNUp})},
-			cfg.FFNDim, false, false, false)
+		// (6)/(7)/(9) FFN 段：按 FFNType 分两条布局，二者前 6 条（attn_norm→ffn_norm）完全共用。
+		if cfg.FFNType == FFNTypeSwiGLU {
+			// SwiGLU：up(线性) → gate(线性) → silu(gate)⊙up → down(残差加)，共 4 条。
+			// up：Wup·V_hn2 -> 脱掩码后原样透传（OpLinear 占位非线性），宽 FFNDim。
+			emit(coordOf(blk, StepFFNUp, BranchMain), OpLinear,
+				[]int{cfg.FFNDim}, []int{base + offFFNNorm},
+				[]WeightRef{RefKey(TensorKey{Block: b, Tensor: TensorFFNUp})},
+				cfg.FFNDim, false, false, false)
 
-		// (7) ffn_residual：Down（经 Wdown）与 h₂（= 本块 (4) 的输出，直通）相加 -> h_{b+1}。
-		emit(coordOf(blk, StepFFNResidual, BranchMain), OpResidualAdd,
-			[]int{cfg.Dim, cfg.Dim}, []int{base + offFFNUp, base + offAttnRes},
-			[]WeightRef{RefKey(TensorKey{Block: b, Tensor: TensorFFNDown}), NoWeight()},
-			cfg.Dim, false, false, false)
+			// gate：Wgate·V_hn2 -> 脱掩码后原样透传，宽 FFNDim。
+			emit(coordOf(blk, StepFFNUp, BranchV), OpLinear,
+				[]int{cfg.FFNDim}, []int{base + offFFNNorm},
+				[]WeightRef{RefKey(TensorKey{Block: b, Tensor: TensorGate})},
+				cfg.FFNDim, false, false, false)
+
+			// swiglu_mul：逐元素 silu(gate) ⊙ up，宽 FFNDim。两行均直通（无线性搬运项）。
+			emit(coordOf(blk, StepFFNResidual, BranchV), OpSwiGLUMul,
+				[]int{cfg.FFNDim, cfg.FFNDim}, []int{base + offFFNUp, base + offSwiGLUGate},
+				[]WeightRef{NoWeight(), NoWeight()},
+				cfg.FFNDim, false, false, false)
+
+			// down：Down（经 Wdown）与 h₂（= 本块 attn_residual 输出，直通）相加 -> h_{b+1}。
+			emit(coordOf(blk, StepFFNResidual, BranchQ), OpResidualAdd,
+				[]int{cfg.Dim, cfg.Dim}, []int{base + offSwiGLUMul, base + offAttnRes},
+				[]WeightRef{RefKey(TensorKey{Block: b, Tensor: TensorFFNDown}), NoWeight()},
+				cfg.Dim, false, false, false)
+		} else {
+			// GELU（默认，§7.9 既有布局，零变化）：up(GELU) → down(残差加)，共 2 条。
+			// (6) ffn_up：Up = Wup·V_hn2 + b_up -> GELU -> V_f1，宽 FFNDim。
+			emit(coordOf(blk, StepFFNUp, BranchMain), OpGELU,
+				[]int{cfg.FFNDim}, []int{base + offFFNNorm},
+				[]WeightRef{RefKey(TensorKey{Block: b, Tensor: TensorFFNUp})},
+				cfg.FFNDim, false, false, false)
+
+			// (7) ffn_residual：Down（经 Wdown）与 h₂（= 本块 (4) 的输出，直通）相加 -> h_{b+1}。
+			emit(coordOf(blk, StepFFNResidual, BranchMain), OpResidualAdd,
+				[]int{cfg.Dim, cfg.Dim}, []int{base + offFFNUp, base + offAttnRes},
+				[]WeightRef{RefKey(TensorKey{Block: b, Tensor: TensorFFNDown}), NoWeight()},
+				cfg.Dim, false, false, false)
+		}
 	}
 
 	// ---- 收尾：ln_final + argmax（设计 §3.3）----
-	lastBlockResidual := BlockBase(cfg.Blocks-1) + offFFNResidual
+	// 取「最后一个 block 的末步输出」作为 ln_final 的输入（GELU=offFFNResidual / SwiGLU=offSwiGLUResidual）。
+	lastOff := offFFNResidual
+	if cfg.FFNType == FFNTypeSwiGLU {
+		lastOff = offSwiGLUResidual
+	}
+	lastBlockResidual := BlockBase(cfg.Blocks-1, cfg) + lastOff
 	// ln_final：RMSNorm(h_{B}) -> V_final，掩码 ρ_{B*8}。InWeight=nil（无线性搬运）。
-	finalIdx := BlockBase(cfg.Blocks)
+	finalIdx := BlockBase(cfg.Blocks, cfg)
 	emit(coordOf(tailBlock, StepFinalNorm, BranchMain), OpRMSNorm,
 		[]int{cfg.Dim}, []int{lastBlockResidual}, []WeightRef{NoWeight()},
 		cfg.Dim, false, false, false)
@@ -450,18 +536,22 @@ func (p Plan) Turn() uint32 {
 	return p[0].Coord.Turn
 }
 
-// Blocks 反推 plan 覆盖的 block 数（要求 len == Blocks*StepsPerBlock + TailSteps）。
+// Blocks 反推 plan 覆盖的 block 数（兼容 GELU=8 / SwiGLU=10 两种 block 布局）。
 func (p Plan) Blocks() (int, error) {
 	if len(p) < StepsPerBlock+TailSteps {
 		return 0, fmt.Errorf("route2plan: plan 长度 %d 过短，不足一个 block+收尾所需 %d",
 			len(p), StepsPerBlock+TailSteps)
 	}
 	n := len(p) - TailSteps
-	if n%StepsPerBlock != 0 {
-		return 0, fmt.Errorf("route2plan: plan 长度 %d 不满足 Blocks*%d+%d 形态",
-			len(p), StepsPerBlock, TailSteps)
+	// 优先 SwiGLU(10) 整除，回退 GELU(8)；两者皆不整除即形态非法。
+	if n%StepsPerBlockSwiGLU == 0 {
+		return n / StepsPerBlockSwiGLU, nil
 	}
-	return n / StepsPerBlock, nil
+	if n%StepsPerBlock == 0 {
+		return n / StepsPerBlock, nil
+	}
+	return 0, fmt.Errorf("route2plan: plan 长度 %d 不满足 Blocks*%d+%d 或 Blocks*%d+%d 形态",
+		len(p), StepsPerBlockSwiGLU, TailSteps, StepsPerBlock, TailSteps)
 }
 
 // SrcMaskDomain 返回第 seq 步第 row 行输入所携带的掩码域。

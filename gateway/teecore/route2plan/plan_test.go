@@ -88,10 +88,12 @@ func TestBuildTurnDistinct(t *testing.T) {
 	if _, err := Build(DemoTinyConfig()); err != nil {
 		t.Fatal(err)
 	}
-	bad := DemoTinyConfig()
-	bad.Heads = 3 // Heads*HeadDim = 24 != Dim=32
-	if _, err := Build(bad); err == nil {
-		t.Fatal("Heads*HeadDim != Dim 的配置应被拒绝")
+	// attnDim 与 Dim 解耦（真实 Qwen3 情形：attnDim=2048 ≠ Dim=1024）现必须被接受：
+	// 注意力投影/拼接输出宽 attnDim，经 Wo 映回 Dim；K/V 投影宽 KVDim。Validate 不再强制相等。
+	decoupled := DemoTinyConfig()
+	decoupled.Heads = 3 // attnDim=24 ≠ Dim=32
+	if _, err := Build(decoupled); err != nil {
+		t.Fatalf("attnDim≠Dim 的配置应被接受（真实 Qwen3 需要）: %v", err)
 	}
 }
 

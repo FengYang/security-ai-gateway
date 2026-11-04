@@ -14,7 +14,7 @@ import (
 	"testing"
 
 	"security-ai-gateway/cipher/mask"
-	"security-ai-gateway/gateway/teecore"
+	"security-ai-gateway/gateway/teecore/trustedops"
 )
 
 // testRoute2Modulus 与 recompute.go 的 route2MaskModulus 同源（2^64-1，统计等价 2^64）。
@@ -40,7 +40,7 @@ func plaintextGELUMLP(weights [][][]float64, biases [][]float64, x []float64) ([
 		inter = append(inter, append([]float64(nil), row...))
 		if ℓ < len(weights)-1 {
 			for i := range row {
-				row[i] = teecore.GELU(row[i])
+				row[i] = trustedops.GELU(row[i])
 			}
 		}
 		z = row
@@ -148,7 +148,7 @@ func TestMultilayerMaskedInferenceRealWeights(t *testing.T) {
 		if ℓ < L-1 {
 			// 隐藏层：GELU + 重掩码，原样转发为下一层 V_{ℓ+1}（含 r_{ℓ+1} 掩码项）
 			for i := range yFloat {
-				yFloat[i] = teecore.GELU(yFloat[i])
+				yFloat[i] = trustedops.GELU(yFloat[i])
 			}
 			fY := mats[ℓ].ToMaskDomain(yFloat)
 			sNext, err := mask.NewStreamDomain(seed, testRoute2Modulus, []byte(fmt.Sprintf("otpmask/layer/%d/v1", ℓ+1)))
@@ -163,7 +163,7 @@ func TestMultilayerMaskedInferenceRealWeights(t *testing.T) {
 			if err != nil {
 				t.Fatalf("layer %d Remask: %v", ℓ, err)
 			}
-			V = remasked // 转发：r_{ℓ+1} 已嵌入，下一层 TEE 以同 domain 重派生得到同一 r 完成 Unmask
+			V = remasked  // 转发：r_{ℓ+1} 已嵌入，下一层 TEE 以同 domain 重派生得到同一 r 完成 Unmask
 			xAct = yFloat // 下一层明文激活（GELU 后）
 		} else {
 			finalLogits = yFloat

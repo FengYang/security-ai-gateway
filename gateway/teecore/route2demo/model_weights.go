@@ -80,8 +80,12 @@ func (w *Weights) Matrix(k route2plan.TensorKey) (*maskedinfer.QuantizedMatrix, 
 	return TensorWeights(w.cfg, k)
 }
 
-// Affine 返回归一化仿射参数。
+// Affine 返回归一化仿射参数。QK-norm 张量（q_norm/k_norm）走独立的 QKNormParams，
+// 其余（ln_in/ln_post/ln_final）走 NormParams。
 func (w *Weights) Affine(k route2plan.TensorKey) ([]float64, float64, error) {
+	if k.Tensor == route2plan.TensorQNorm || k.Tensor == route2plan.TensorKNorm {
+		return QKNormParams(w.cfg, k)
+	}
 	return NormParams(w.cfg, k)
 }
 
@@ -187,6 +191,34 @@ func NormParams(cfg route2plan.ModelConfig, k route2plan.TensorKey) (gamma []flo
 	return gamma, cfg.NormEps, nil
 }
 
+// QKNormParams 确定性派生 Qwen3 的 q_norm / k_norm 仿射参数 gamma（长度 = HeadDim）。
+//
+// 与 NormParams 的差别：gamma 长度不是 Dim 而是 HeadDim，因为 QK-norm 在 head_dim 维上
+// 逐头归一、所有头共享同一组 gamma（见 trustedops.PerHeadRMSNorm）。block 纪律同 ln_in/ln_post：
+// per-block ⇒ Block ∈ [0, cfg.Blocks-1]。
+func QKNormParams(cfg route2plan.ModelConfig, k route2plan.TensorKey) (gamma []float64, eps float64, err error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, 0, fmt.Errorf("route2demo: 模型配置非法: %w", err)
+	}
+	if err := k.Validate(); err != nil {
+		return nil, 0, fmt.Errorf("route2demo: 张量 key 非法: %w", err)
+	}
+	if k.Tensor != route2plan.TensorQNorm && k.Tensor != route2plan.TensorKNorm {
+		return nil, 0, fmt.Errorf("route2demo: %s 不是 QK-norm 张量", k.String())
+	}
+	if k.Block < 0 || k.Block >= cfg.Blocks {
+		return nil, 0, fmt.Errorf("route2demo: %s 的 Block=%d 越界，QK-norm 张量须落在 0..%d",
+			k.String(), k.Block, cfg.Blocks-1)
+	}
+	gamma = make([]float64, cfg.HeadDim)
+	for i := range gamma {
+		h := sha256.Sum256([]byte(fmt.Sprintf("%s/%d/%s/gamma/%d", cfg.ModelID, k.Block, k.Tensor, i)))
+		u := int16(h[0]) | int16(h[1])<<8
+		gamma[i] = 1 + (float64(u)/32768.0)*(gammaSpread/2)
+	}
+	return gamma, cfg.NormEps, nil
+}
+
 // TensorShape 返回张量的逻辑形状 (rows, cols)：rows = 输出维，cols = 输入维。
 // 所有 Caller（TensorWeights / RawWeights / T02 的 ref 前向）都必须走这一处，
 // 杜绝「客户端按 (in,out) 造、服务端按 (out,in) 造」这类维度转置事故。
@@ -201,13 +233,18 @@ func TensorShape(cfg route2plan.ModelConfig, k route2plan.TensorKey) (rows int, 
 		return 0, 0, err
 	}
 	d := cfg.Dim
-	a := cfg.AttnDim() // == cfg.Dim
+	a := cfg.AttnDim() // Q 投影输出宽度 Heads*HeadDim（真实 Qwen3 下可 != Dim）
 	switch k.Tensor {
-	case route2plan.TensorAttnQ, route2plan.TensorAttnK, route2plan.TensorAttnV:
+	case route2plan.TensorAttnQ:
 		return a, d, nil
+	case route2plan.TensorAttnK, route2plan.TensorAttnV:
+		// GQA：K/V 投影输出宽度 = KVHeads*HeadDim（< Dim），注意力前由 route2step 扩展回 Q 头布局。
+		return cfg.KVDim(), d, nil
 	case route2plan.TensorAttnO:
 		return d, a, nil
 	case route2plan.TensorFFNUp:
+		return cfg.FFNDim, d, nil
+	case route2plan.TensorGate:
 		return cfg.FFNDim, d, nil
 	case route2plan.TensorFFNDown:
 		return d, cfg.FFNDim, nil

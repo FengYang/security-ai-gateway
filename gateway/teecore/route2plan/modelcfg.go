@@ -23,16 +23,37 @@ type ModelConfig struct {
 	Dim int
 	// Heads 注意力头数。
 	Heads int
-	// HeadDim 每头维度，必须为偶数（RoPE 成对旋转），且 Heads*HeadDim == Dim。
+	// HeadDim 每头维度，必须为偶数（RoPE 成对旋转），且 <= Dim。
+	// 注意 Heads*HeadDim（即 AttnDim）**不要求**等于 Dim：真实 Qwen3-0.6B 为 2048≠1024，
+	// 注意力拼接输出经 Wo([Dim, AttnDim]) 映回 Dim 汇入残差流（见 AttnDim/KVDim）。
 	HeadDim int
+	// KVHeads GQA 的 KV 头数（num_key_value_heads）。<= Heads 且必须整除 Heads。
+	// 0 表示未显式设置，等价于 KVHeads==Heads（即无 GQA 的 MHA 退化情形，见 KVDim）。
+	// GQA 下 K/V 投影输出宽度 = KVHeads*HeadDim（< Dim），注意力前需把 KV 从 KV 头布局
+	// 扩展回 Q 头布局（见 trustedops.ExpandGQA 与 route2step 注意力分支）。
+	KVHeads int
 	// FFNDim FFN 升维宽度（D4：无门控 MLP，up: Dim→FFNDim，down: FFNDim→Dim）。
 	FFNDim int
+	// FFNType FFN 结构类型："" 或 "gelu" 退化为经典无门控 MLP（up→GELU→down）；
+	// "swiglu" 走门控 FFN（up / gate / silu(gate)⊙up / down），真实 Qwen3 即此结构。
+	// 默认 "" 等价于 "gelu"，以保证既有 demo 配置零改动向后兼容。
+	FFNType string
 	// Vocab 词表大小，>= 2（argmax 至少要能在两个 logit 间抉择）。
 	Vocab int
 	// NormEps RMSNorm 的 epsilon，> 0。
 	NormEps float64
 	// RopeTheta RoPE 基频（D8 默认 1e4），> 0。
 	RopeTheta float64
+	// RopeStyle Q/K 旋转的配对约定："" 或 "interleaved" 为**相邻对** (2i, 2i+1)
+	// （GPT-J/NeoX 风格，demo 默认，保证零改动）；"half" 为**前后半劈** (i, i+headDim/2)
+	// （Qwen2/Qwen3、LLaMA、HuggingFace 风格）。
+	// 两种约定的旋转角度表相同、配对方式不同，headDim>2 时结果完全不同，且错用不报错，
+	// 只能靠外部 golden 发现（见 T5 实测与 trustedops.ApplyRoPEHalfInPlace 注释）。
+	RopeStyle string
+	// QKNorm 是否在 Q/K 投影之后、RoPE 之前对各注意力头做逐头 RMSNorm
+	// （真实 Qwen3 的 QK-norm）。默认 false（经典无 QK-norm）。true 时权重须提供
+	// TensorQNorm / TensorKNorm（逐头 gamma，长度 == HeadDim，见 route2demo）。
+	QKNorm bool
 	// MaxTokens 单会话 KV 行数上限，取值 1..MaxModelTokens（fail-closed 硬顶）。
 	MaxTokens int
 }
@@ -50,7 +71,28 @@ const (
 	MaxModelIDLen = 64
 	// MaxModelFFNDim / MaxModelVocab 同上的维度护栏。
 	MaxModelFFNDim = MaxModelDim
-	MaxModelVocab  = MaxModelDim
+	// MaxModelVocab 词表上界独立于 MaxModelDim：真实模型的词表普遍远大于 d_model
+	// （Qwen3-0.6B: 151936；Llama-3: 128256；Gemma: 256000），故不再复用 65535 这个
+	// "笔误护栏"，放宽到 1<<20（覆盖当前全部主流分词器，仍足以拦住明显笔误）。
+	// Vocab 不参与 Wire 坐标的定宽编码，放宽不影响掩码域/编码纪律。
+	MaxModelVocab = 1 << 20
+)
+
+// FFN 类型常量（见 ModelConfig.FFNType）。
+const (
+	// FFNTypeGELU 经典无门控 MLP：up: Dim→FFNDim → GELU → down: FFNDim→Dim。
+	// 空字符串 "" 也按 GELU 处理，以保证既有 demo 配置零改动向后兼容。
+	FFNTypeGELU = "gelu"
+	// FFNTypeSwiGLU 门控 FFN：up / gate / silu(gate)⊙up / down（真实 Qwen3 结构）。
+	FFNTypeSwiGLU = "swiglu"
+)
+
+// RoPE 配对约定常量（见 ModelConfig.RopeStyle）。
+const (
+	// RopeStyleInterleaved 相邻对 (2i, 2i+1)（GPT-J/NeoX）；空字符串等价于本值。
+	RopeStyleInterleaved = "interleaved"
+	// RopeStyleHalf 前后半劈 (i, i+headDim/2)（Qwen2/Qwen3、LLaMA、HuggingFace）。
+	RopeStyleHalf = "half"
 )
 
 // ---- DemoTiny：demo 模型的**唯一配置常量源**（设计 §2.6 D6） ----
@@ -94,16 +136,33 @@ func DemoTinyConfig() ModelConfig {
 	return DemoTiny
 }
 
-// AttnDim 注意力投影的输出宽度 Heads*HeadDim（Validate 保证其 == Dim）。
+// AttnDim 注意力投影的输出宽度 Heads*HeadDim。
+//
+// 真实 Qwen3 起允许与 Dim 解耦（0.6B: attnDim=2048 ≠ Dim=1024）：Q/K/V 投影输出 attnDim
+// 宽、K/V cache 按 KVDim 宽、注意力原始拼接输出 attnDim 宽，再经 Wo([Dim, attnDim]) 映回
+// Dim 汇入残差流。故 attnDim 与 Dim 不再强制相等（旧约束见 T4 评估修复说明）。
 func (c ModelConfig) AttnDim() int {
 	return c.Heads * c.HeadDim
 }
 
+// KVDim KV 投影的输出宽度 KVHeads*HeadDim。
+//
+// GQA 下 < Dim（多个 Q 头共享一组 KV 头）；MHA 下（KVHeads 未设置或 == Heads）== Dim。
+// 注意力前须把 KV cache 的 KV 头布局（KVHeads*HeadDim）扩展回 Q 头布局（Heads*HeadDim），
+// 见 trustedops.ExpandGQA。KVHeads==0 时按 Heads 处理（向后兼容既有未显式设置 KVHeads 的配置）。
+func (c ModelConfig) KVDim() int {
+	if c.KVHeads <= 0 {
+		return c.Heads * c.HeadDim
+	}
+	return c.KVHeads * c.HeadDim
+}
+
 // Validate 逐字段校验配置合法性；fail-closed，任一不合法即返回显式 error。
 //
-// 注意这里把「Heads*HeadDim == Dim」写成硬约束：一旦不等，
-// attention 的 concat-heads 输出与残差流的 Dim 就对不上，
-// 错误会以「行维度不匹配」的形式在很后面才炸，届时排查成本极高（§2.2 G6）。
+// 历史上曾把「Heads*HeadDim == Dim」写成硬约束。自真实 Qwen3 接入（T4）起该约束被解除：
+// attention 的 concat-heads 输出宽为 AttnDim，由 Wo([Dim, AttnDim]) 映回 Dim 汇入残差流，
+// K/V 投影输出宽为 KVDim，三者本就无须相等。为免"行维度不匹配"在很靠后才炸（§2.2 G6），
+// 改由 plan 构造期按 AttnDim/KVDim 精确赋值各步 InDim/OutDim 来保证布局自洽。
 func (c ModelConfig) Validate() error {
 	if err := validateModelID(c.ModelID); err != nil {
 		return err
@@ -123,8 +182,31 @@ func (c ModelConfig) Validate() error {
 	if c.HeadDim%2 != 0 {
 		return fmt.Errorf("route2plan: HeadDim=%d 必须为偶数（RoPE 成对旋转，见 D8）", c.HeadDim)
 	}
-	if got := c.AttnDim(); got != c.Dim {
-		return fmt.Errorf("route2plan: Heads*HeadDim=%d != Dim=%d（注意力输出无法与残差流对齐）", got, c.Dim)
+	// GQA 约束（KVHeads 未设置即 MHA，等价于 KVHeads==Heads）。
+	if c.KVHeads < 0 {
+		return fmt.Errorf("route2plan: KVHeads=%d 不可为负", c.KVHeads)
+	}
+	if c.KVHeads > 0 {
+		if c.KVHeads > c.Heads {
+			return fmt.Errorf("route2plan: KVHeads=%d 超出 Heads=%d（GQA 组大小须 <= Heads）", c.KVHeads, c.Heads)
+		}
+		if c.Heads%c.KVHeads != 0 {
+			return fmt.Errorf("route2plan: KVHeads=%d 不能整除 Heads=%d（GQA 组大小须为整数）", c.KVHeads, c.Heads)
+		}
+	}
+	// 注意：自真实 Qwen3 起 attnDim(=Heads*HeadDim) 允许与 Dim 解耦（0.6B: 2048≠1024）。
+	// 注意力原始输出宽 attnDim，由 Wo([Dim, attnDim]) 映回 Dim 汇入残差流，故不再强制相等。
+	// 仍要求 Heads/HeadDim 合法（上面已校验），attnDim 自然为正。
+	switch c.FFNType {
+	case "", FFNTypeGELU, FFNTypeSwiGLU:
+	default:
+		return fmt.Errorf("route2plan: FFNType=%q 非法（合法值：\"\" / %q / %q）", c.FFNType, FFNTypeGELU, FFNTypeSwiGLU)
+	}
+	switch c.RopeStyle {
+	case "", RopeStyleInterleaved, RopeStyleHalf:
+	default:
+		return fmt.Errorf("route2plan: RopeStyle=%q 非法（合法值：\"\" / %q / %q）",
+			c.RopeStyle, RopeStyleInterleaved, RopeStyleHalf)
 	}
 	if c.FFNDim < 1 || c.FFNDim > MaxModelFFNDim {
 		return fmt.Errorf("route2plan: FFNDim=%d 超出取值域 1..%d", c.FFNDim, MaxModelFFNDim)

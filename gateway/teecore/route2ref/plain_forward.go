@@ -39,9 +39,9 @@ import (
 	"fmt"
 	"math"
 
-	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/gateway/teecore/route2demo"
 	"security-ai-gateway/gateway/teecore/route2plan"
+	"security-ai-gateway/gateway/teecore/trustedops"
 )
 
 // 基线类别名（D13 / §8.1）。
@@ -180,12 +180,37 @@ func NewRunner(w Weights, cfg route2plan.ModelConfig) (*Runner, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("route2ref: 模型配置非法: %w", err)
 	}
+	if err := checkRefSupported(cfg); err != nil {
+		return nil, err
+	}
 	return &Runner{
 		cfg: cfg,
 		w:   w,
 		k:   make([][][]float64, cfg.Blocks),
 		v:   make([][][]float64, cfg.Blocks),
 	}, nil
+}
+
+// checkRefSupported 拦截本参考前向（demo 版明文实现）无法忠实执行的结构。
+//
+// 本实现硬编码 GELU-MLP、无 QK-norm、KV cache 按 Q 头布局存放（无 GQA 扩展）。
+// 自 T4 起 route2plan.Validate 允许真实 Qwen3 那样的 SwiGLU / QK-norm / GQA / attnDim≠Dim，
+// 若此处不拦，参考前向会**静默算出错误 logits**而不是报错——"两边都对"式的假绿最难查。
+// 故一律 fail-closed，真实 Qwen3 的明文真值请走 adapters/qwen.ForwardRef（它实现了这三者）。
+func checkRefSupported(cfg route2plan.ModelConfig) error {
+	if cfg.FFNType == route2plan.FFNTypeSwiGLU {
+		return errors.New("route2ref: 参考前向仅实现 GELU-MLP，不支持 SwiGLU（真实 Qwen3 请用 adapters/qwen.ForwardRef）")
+	}
+	if cfg.QKNorm {
+		return errors.New("route2ref: 参考前向未实现 QK-norm（真实 Qwen3 请用 adapters/qwen.ForwardRef）")
+	}
+	if cfg.KVHeads > 0 && cfg.KVHeads != cfg.Heads {
+		return fmt.Errorf("route2ref: 参考前向未实现 GQA 的 KV 头扩展（KVHeads=%d != Heads=%d）", cfg.KVHeads, cfg.Heads)
+	}
+	if cfg.RopeStyle == route2plan.RopeStyleHalf {
+		return errors.New("route2ref: 参考前向只实现相邻对 RoPE，未实现 Qwen/LLaMA 的前后半劈（真实 Qwen3 请用 adapters/qwen.ForwardRef）")
+	}
+	return nil
 }
 
 // Positions 返回已追加的 KV 行数（== 下一个 token 的绝对位置）。
@@ -253,10 +278,10 @@ func (r *Runner) Step(tokens []int) ([][]float64, error) {
 		}
 		// RoPE 只作用于 Q/K（V 不旋转，D8），且**在 KV 追加之前**完成。
 		for i := range q {
-			if err := teecore.ApplyRoPEInPlace(q[i], base+i, headDim, theta); err != nil {
+			if err := trustedops.ApplyRoPEInPlace(q[i], base+i, headDim, theta); err != nil {
 				return nil, err
 			}
-			if err := teecore.ApplyRoPEInPlace(kRows[i], base+i, headDim, theta); err != nil {
+			if err := trustedops.ApplyRoPEInPlace(kRows[i], base+i, headDim, theta); err != nil {
 				return nil, err
 			}
 		}
@@ -265,7 +290,7 @@ func (r *Runner) Step(tokens []int) ([][]float64, error) {
 
 		h2 := make([][]float64, len(tokens))
 		for i := range q {
-			o, err := teecore.Attention(q[i], r.k[b], r.v[b], heads, headDim, 0, base+i, true)
+			o, err := trustedops.Attention(q[i], r.k[b], r.v[b], heads, headDim, 0, base+i, true)
 			if err != nil {
 				return nil, fmt.Errorf("route2ref: block %d attention 失败: %w", b, err)
 			}
@@ -295,7 +320,7 @@ func (r *Runner) Step(tokens []int) ([][]float64, error) {
 		for i := range up {
 			act[i] = make([]float64, len(up[i]))
 			for j := range up[i] {
-				act[i][j] = teecore.GELU(up[i][j])
+				act[i][j] = trustedops.GELU(up[i][j])
 			}
 		}
 		down, err := matVecRows(r.w, route2plan.TensorKey{Block: b, Tensor: route2plan.TensorFFNDown}, act)
@@ -368,7 +393,7 @@ func ForwardFP32(cfg route2plan.ModelConfig, tokens []int) ([][]float64, error) 
 //   - logits：每步生成的 logits（行序 == 生成序，含 prefill 末位那一步）；
 //   - generated：解码出来的 token 序列（长度 == steps）。
 //
-// next token 由 teecore.ArgMax 决定（方案 C：TEE 内 argmax），与服务端判据一致。
+// next token 由 trustedops.ArgMax 决定（方案 C：TEE 内 argmax），与服务端判据一致。
 func Generate(w Weights, cfg route2plan.ModelConfig, prompt []int, steps int) (logits [][]float64, generated []int, err error) {
 	if steps < 0 {
 		return nil, nil, fmt.Errorf("route2ref: steps=%d 不可为负", steps)
@@ -385,7 +410,7 @@ func Generate(w Weights, cfg route2plan.ModelConfig, prompt []int, steps int) (l
 		return nil, nil, err
 	}
 	logits = append(logits, prefill[len(prefill)-1])
-	next := teecore.ArgMax(prefill[len(prefill)-1])
+	next := trustedops.ArgMax(prefill[len(prefill)-1])
 	generated = append(generated, next)
 	for i := 1; i < steps; i++ {
 		outs, err := r.Step([]int{next})
@@ -393,7 +418,7 @@ func Generate(w Weights, cfg route2plan.ModelConfig, prompt []int, steps int) (l
 			return nil, nil, err
 		}
 		logits = append(logits, outs[0])
-		next = teecore.ArgMax(outs[0])
+		next = trustedops.ArgMax(outs[0])
 		generated = append(generated, next)
 	}
 	return logits, generated, nil
@@ -484,7 +509,7 @@ func Compare(a, b [][]float64, atol, rtol float64) (Report, error) {
 				rep.MaxRelDiff = math.Inf(1)
 			}
 		}
-		if len(a[s]) > 0 && teecore.ArgMax(a[s]) == teecore.ArgMax(b[s]) {
+		if len(a[s]) > 0 && trustedops.ArgMax(a[s]) == trustedops.ArgMax(b[s]) {
 			rep.Top1Agree++
 		}
 	}
@@ -579,14 +604,14 @@ func matVecRow(w Weights, k route2plan.TensorKey, x []float64) ([]float64, error
 	return rows[0], nil
 }
 
-// rowRMSNorm 逐行 RMSNorm（直接复用 teecore.RMSNorm，不另写一份）。
+// rowRMSNorm 逐行 RMSNorm（直接复用 trustedops.RMSNorm，不另写一份）。
 func rowRMSNorm(rows [][]float64, gamma []float64, eps float64) ([][]float64, error) {
 	out := make([][]float64, len(rows))
 	for i, row := range rows {
 		if len(gamma) != len(row) {
 			return nil, fmt.Errorf("route2ref: gamma 长度 %d != 行维度 %d", len(gamma), len(row))
 		}
-		out[i] = teecore.RMSNorm(row, gamma, eps)
+		out[i] = trustedops.RMSNorm(row, gamma, eps)
 	}
 	return out, nil
 }

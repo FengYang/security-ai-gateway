@@ -126,50 +126,56 @@ func (m *QuantizedMatrix) MaskImage(r []uint64) ([]uint64, error) {
 	if len(r) != m.Cols {
 		return nil, fmt.Errorf("maskedinfer: 掩码长度 %d != 权重列数 %d", len(r), m.Cols)
 	}
-	R := m.bigR()
-	acc := big.NewInt(0)
-	term := big.NewInt(0)
+	// 注意：偏置仅由 CipherLinear（不可信加速器侧）加入一次，此处掩码像不含偏置，
+	// 以保证 Unmask(yCipher, maskImage) = W·xMask（+ 偏置在 yCipher 中仅出现一次）。
+	return m.linearMod(r, false), nil
+}
+
+// linearMod 计算 (W·v [+ b]) mod R 的定点快速路径，返回 [0, R) 的 uint64。
+//
+// 为什么不用 math/big：旧实现对**每个内层元素**新建一个 big.Int 做 Mul，单次乘法
+// 开销在几十纳秒量级。真实 Qwen3-0.6B 一次 6-token prefill 的掩码像计算量约 2.6G
+// 次乘加（28 层 × 7 个线性步 × 6 位置 × 每步 1~3M 元素），big.Int 版本实测 >10 分钟
+// 仍未跑完 —— 这已不是"测试慢"，而是生产链路不可用。
+//
+// 等价性（不是"近似"，是逐位相同）：R = 2^bits 是 2 的幂，模 2^bits 运算是
+// uint64 回绕的自然结果：
+//   - 权重 int8 存于 int32，int64(w)*int64(v) 的**低 64 位**即 w·v mod 2^64
+//     （补码乘法对取模同态，v 取 uint64 全范围亦成立）；
+//   - Mod32 时再取低 32 位即 mod 2^32（2^32 整除 2^64）。
+//
+// 累加不必担心中途溢出：uint64 溢出即模 2^64 回绕，与目标同余；Mod32 时"先模 2^64
+// 再取低 32 位"仍等于直接模 2^32（2^32 整除 2^64）。故无需 math/big 的大数累加。
+// 与 big.Int 版本的逐位一致由 TestLinearModMatchesBigInt 随机对拍守住。
+func (m *QuantizedMatrix) linearMod(v []uint64, addBias bool) []uint64 {
 	out := make([]uint64, m.Rows)
 	for i := 0; i < m.Rows; i++ {
-		acc.SetInt64(0)
+		var acc uint64
+		base := i * m.Cols
 		for j := 0; j < m.Cols; j++ {
-			term.SetInt64(int64(m.Data[i*m.Cols+j]))
-			term.Mul(term, big.NewInt(0).SetUint64(r[j]))
-			acc.Add(acc, term)
+			acc += uint64(int64(m.Data[base+j]) * int64(v[j]))
 		}
-		// 注意：偏置仅由 CipherLinear（不可信加速器侧）加入一次，此处掩码像不含偏置，
-		// 以保证 Unmask(yCipher, maskImage) = W·xMask（+ 偏置在 yCipher 中仅出现一次）。
-		out[i] = m.reduce(acc, R)
+		if addBias && m.Bias != nil {
+			acc += uint64(int64(m.Bias[i]))
+		}
+		if m.ModBits == Mod32 {
+			acc &= 0xFFFFFFFF
+		}
+		out[i] = acc
 	}
-	return out, nil
+	return out
 }
 
 // CipherLinear 密文线性内核：y = W_q·V + b_q (mod R)，整数域（不先乘 scale）。
-// 修正（路线 2 技术方案 §7.1/§7.7）：先整数域脱掩码、后缩放；
-// 累加器在 Mod64 下需 int128，此处用 math/big 精确模拟，生产 GPU 内核用 Triton/CUTLASS 的 __int128。
+// 修正（路线 2 技术方案 §7.1/§7.7）：先整数域脱掩码、后缩放。
+// 生产 GPU 内核用 __int128 累加；此处用 uint64 回绕（Mod64）等价实现，见 linearMod。
 func (m *QuantizedMatrix) CipherLinear(V [][]uint64) ([][]uint64, error) {
 	out := make([][]uint64, len(V))
 	for b, vec := range V {
 		if len(vec) != m.Cols {
 			return nil, fmt.Errorf("maskedinfer: 向量[%d]长度 %d != 列数 %d", b, len(vec), m.Cols)
 		}
-		R := m.bigR()
-		acc := big.NewInt(0)
-		term := big.NewInt(0)
-		row := make([]uint64, m.Rows)
-		for i := 0; i < m.Rows; i++ {
-			acc.SetInt64(0)
-			for j := 0; j < m.Cols; j++ {
-				term.SetInt64(int64(m.Data[i*m.Cols+j]))
-				term.Mul(term, big.NewInt(0).SetUint64(vec[j]))
-				acc.Add(acc, term)
-			}
-			if m.Bias != nil {
-				acc.Add(acc, big.NewInt(int64(m.Bias[i])))
-			}
-			row[i] = m.reduce(acc, R)
-		}
-		out[b] = row
+		out[b] = m.linearMod(vec, true)
 	}
 	return out, nil
 }
@@ -292,7 +298,9 @@ func absF(x float64) float64 {
 var defaultMod = &QuantizedMatrix{ModBits: Mod32, InputScale: InputScale}
 
 // Unmask 包级兼容：2^32 默认模。
-func Unmask(yCipher, maskImage []uint64) ([]uint64, error) { return defaultMod.Unmask(yCipher, maskImage) }
+func Unmask(yCipher, maskImage []uint64) ([]uint64, error) {
+	return defaultMod.Unmask(yCipher, maskImage)
+}
 
 // SignedValue 包级兼容。
 func SignedValue(v uint64) int64 { return defaultMod.SignedValue(v) }

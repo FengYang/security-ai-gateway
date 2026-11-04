@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"security-ai-gateway/gateway/teecore"
 	"security-ai-gateway/gateway/teecore/route2demo"
 	"security-ai-gateway/gateway/teecore/route2plan"
+	"security-ai-gateway/gateway/teecore/trustedops"
 )
 
 // demoCfg 引用 T01 的唯一常量源（禁止在本文件另抄一份数字）。
@@ -449,12 +449,6 @@ func TestForwardErrorCases(t *testing.T) {
 	if _, err := ForwardExact(small, demoTokens(5)); err == nil {
 		t.Error("超出 MaxTokens 应报错")
 	}
-	// 非法 cfg
-	bad := demoCfg()
-	bad.Heads = 3
-	if _, err := ForwardExact(bad, demoTokens(2)); err == nil {
-		t.Error("非法 cfg 应报错")
-	}
 	if _, err := NewRunner(nil, cfg); err == nil {
 		t.Error("nil Weights 应报错")
 	}
@@ -503,9 +497,6 @@ func TestEmbeddingDeterministic(t *testing.T) {
 	if _, err := Embedding(cfg, []int{cfg.Vocab}); err == nil {
 		t.Error("越界 token 应报错")
 	}
-	if _, err := Embedding(demoCfgBadHeads(), []int{0}); err == nil {
-		t.Error("非法 cfg 应报错")
-	}
 }
 
 // TestCachedKVFeedsSharedOperators 一个 batch 之后，KV 缓存必须能被 teecore 的
@@ -513,7 +504,7 @@ func TestEmbeddingDeterministic(t *testing.T) {
 // 也就无从长出一份「只有参考实现才有的算子」。
 //
 // 我们不去逐项重算 Runner 的内部中间值来证明同一性（那会把测试写成生产的镜像实现），
-// 而是验证契约：缓存的行维度 == AttnDim、K/V 一一对应、且直接喂给 teecore.Attention
+// 而是验证契约：缓存的行维度 == AttnDim、K/V 一一对应、且直接喂给 trustedops.Attention
 // 能产出有限输出。真正的数值同一性由 TestPrefillEqualsSequentialDecode 与
 // TestExactWeightsMatchPlainLinear 两条共同兜住。
 func TestCachedKVFeedsSharedOperators(t *testing.T) {
@@ -553,9 +544,9 @@ func TestCachedKVFeedsSharedOperators(t *testing.T) {
 			}
 		}
 		q := deterministicVec(cfg.AttnDim(), int64(b)*13+1)
-		out, err := teecore.Attention(q, r.k[b], r.v[b], cfg.Heads, cfg.HeadDim, 0, len(r.k[b])-1, true)
+		out, err := trustedops.Attention(q, r.k[b], r.v[b], cfg.Heads, cfg.HeadDim, 0, len(r.k[b])-1, true)
 		if err != nil {
-			t.Fatalf("block %d: teecore.Attention 直接消费缓存失败: %v", b, err)
+			t.Fatalf("block %d: trustedops.Attention 直接消费缓存失败: %v", b, err)
 		}
 		if len(out) != cfg.AttnDim() {
 			t.Fatalf("block %d: attention 输出长度 = %d, want %d", b, len(out), cfg.AttnDim())
@@ -610,13 +601,6 @@ func mustExact(t *testing.T, cfg route2plan.ModelConfig) Weights {
 	return w
 }
 
-// demoCfgBadHeads 返回一个 Heads*HeadDim != Dim 的非法配置。
-func demoCfgBadHeads() route2plan.ModelConfig {
-	c := demoCfg()
-	c.Heads = 3
-	return c
-}
-
 // deterministicVec 生成确定性浮点向量（不引入 math/rand 全局状态）。
 func deterministicVec(n int, seed int64) []float64 {
 	out := make([]float64, n)
@@ -626,4 +610,44 @@ func deterministicVec(n int, seed int64) []float64 {
 		out[i] = float64(int64(s>>11)%2001-1000) / 1000
 	}
 	return out
+}
+
+// TestRefRejectsUnsupportedStructures 参考前向只实现 demo 结构（GELU-MLP / 无 QK-norm / 无 GQA）。
+//
+// 自 T4 起 route2plan.Validate 允许真实 Qwen3 的 SwiGLU / QK-norm / GQA / attnDim≠Dim。
+// 本参考前向若不拦就会**静默算出错误 logits**（假绿），故必须 fail-closed：
+// 这些结构一律走 adapters/qwen.ForwardRef 取明文真值。
+func TestRefRejectsUnsupportedStructures(t *testing.T) {
+	w, err := NewExactWeights(demoCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		mutate func(*route2plan.ModelConfig)
+	}{
+		{"SwiGLU", func(c *route2plan.ModelConfig) { c.FFNType = route2plan.FFNTypeSwiGLU }},
+		{"QK-norm", func(c *route2plan.ModelConfig) { c.QKNorm = true }},
+		{"GQA", func(c *route2plan.ModelConfig) { c.KVHeads = 2 }},
+		{"前后半劈 RoPE", func(c *route2plan.ModelConfig) { c.RopeStyle = route2plan.RopeStyleHalf }},
+	}
+	for _, tc := range cases {
+		cfg := demoCfg()
+		tc.mutate(&cfg)
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("%s: 构造的 cfg 本身应合法: %v", tc.name, err)
+		}
+		if _, err := NewRunner(w, cfg); err == nil {
+			t.Errorf("%s: 参考前向应 fail-closed 拒绝，却被接受", tc.name)
+		}
+	}
+	// 反向护栏：attnDim≠Dim 但仍是 GELU/MHA/无 QK-norm 时必须被接受（T4 放宽后的合法组合）。
+	ok := demoCfg()
+	ok.Heads = 3 // attnDim=24 ≠ Dim=32，其余保持 demo 结构
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("attnDim≠Dim 应合法: %v", err)
+	}
+	if _, err := NewRunner(w, ok); err != nil {
+		t.Errorf("attnDim≠Dim（GELU/MHA）应被参考前向接受: %v", err)
+	}
 }

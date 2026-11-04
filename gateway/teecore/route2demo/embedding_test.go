@@ -80,8 +80,10 @@ func TestEmbeddingGuards(t *testing.T) {
 	if _, err := Embedding(cfg, []int{-1}); err == nil {
 		t.Error("负 token 应报错")
 	}
+	// 非法 cfg：Heads*HeadDim != Dim 自 T4 起已合法（真实 Qwen3 即如此），
+	// 故改用真正越界的 HeadDim（奇数，RoPE 成对旋转需要偶数）。
 	bad := cfg
-	bad.Heads = 3
+	bad.HeadDim = 3
 	if _, err := Embedding(bad, []int{0}); err == nil {
 		t.Error("非法 cfg 应报错")
 	}

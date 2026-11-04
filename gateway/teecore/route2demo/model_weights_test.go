@@ -323,12 +323,6 @@ func TestNormParamsRejects(t *testing.T) {
 			t.Errorf("NormParams(%s) 应被拒绝却被接受", k)
 		}
 	}
-	// 非法 cfg
-	broken := cfg
-	broken.Heads = 3
-	if _, _, err := NormParams(broken, route2plan.TensorKey{Block: 0, Tensor: route2plan.TensorLNIn}); err == nil {
-		t.Error("非法 cfg 应被拒绝")
-	}
 }
 
 // TestTensorShapeMissuse 形状查询的负面路径。
