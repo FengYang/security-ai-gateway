@@ -1,4 +1,4 @@
-package route2qwen
+package qwen
 
 import (
 	"encoding/json"
@@ -10,7 +10,7 @@ import (
 
 // tokenizer.go — Qwen2.5 BPE tokenizer（纯 Go，零外部依赖）。
 //
-// 设计目标：让 route2qwen 从"token id 直入"升级为"文本直入"，使端到端真模型验证
+// 设计目标：让 qwen 适配器从"token id 直入"升级为"文本直入"，使端到端真模型验证
 // 可用自然语言 prompt。实现忠实对应 Qwen2.5 的 tokenizer.json：
 //   - model.type = BPE，merges 为空格分隔对（"Ġ Ġ"）
 //   - byte-level 编码（GPT-2 byte_to_unicode 映射，空格→Ġ=U+0120）
@@ -36,7 +36,7 @@ type Tokenizer struct {
 func LoadTokenizer(path string) (*Tokenizer, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("route2qwen: 读 tokenizer.json 失败: %w", err)
+		return nil, fmt.Errorf("qwen: 读 tokenizer.json 失败: %w", err)
 	}
 	var f struct {
 		Model struct {
@@ -51,10 +51,10 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 		} `json:"added_tokens"`
 	}
 	if err := json.Unmarshal(raw, &f); err != nil {
-		return nil, fmt.Errorf("route2qwen: 解析 tokenizer.json 失败: %w", err)
+		return nil, fmt.Errorf("qwen: 解析 tokenizer.json 失败: %w", err)
 	}
 	if strings.ToUpper(f.Model.Type) != "BPE" {
-		return nil, fmt.Errorf("route2qwen: 仅支持 BPE，实际 %q", f.Model.Type)
+		return nil, fmt.Errorf("qwen: 仅支持 BPE，实际 %q", f.Model.Type)
 	}
 	t := &Tokenizer{
 		vocab:       f.Model.Vocab,

@@ -1,4 +1,4 @@
-package route2qwen
+package qwen
 
 import (
 	"os"

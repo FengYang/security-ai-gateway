@@ -1,4 +1,4 @@
-package route2qwen
+package qwen
 
 import (
 	"bytes"
@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
-
-	"security-ai-gateway/gateway/teecore/maskedinfer"
 )
 
 // buildSafetensors 在内存里构造一个最小的 safetensors 文件（用于解析器单测）。
@@ -222,114 +220,88 @@ func TestGQAExpansion(t *testing.T) {
 	}
 }
 
-// TestFormAEquivalence 验证形态A（词表在网关）与形态B（词表在后端）数值等价。
-//   - 形态B：ForwardMasked 直接返回 logits（Embed/LMHead 均在后端）
-//   - 形态A：网关加掩嵌入 → 后端 ForwardMaskedEmb（吐掩码 hidden）→ 网关 GatewayLMHead
-//     二者应给出完全相同（int8 量化下一致）的 argmax 与可忽略的 logits 差。
-func TestFormAEquivalence(t *testing.T) {
-	rand.Seed(123)
-	cfg := smallQwenCfg()
-	if err := cfg.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	w := SyntheticWeights(cfg, 1)
-	tokens := []int{1, 2, 3}
-	rGW := GenOTP(cfg.Dim, maskedinfer.Mod64)
+// TestPerHeadRMSNorm 逐头 RMSNorm 与手算逐元素对齐（Qwen3 的 q_norm/k_norm）。
+//
+// 为什么单独测：该函数只在"权重里带 q_norm/k_norm"时才被调用，而合成权重默认不带，
+// 唯一的端到端覆盖是真实权重 golden 门控（~16 分钟、且需本机有权重）。缺了这条便宜用例，
+// 一旦 perHeadRMSNorm 被改坏（例如按整行归一、gamma 用错段），常规 CI 全绿而无感知。
+func TestPerHeadRMSNorm(t *testing.T) {
+	const headDim = 4
+	gamma := []float64{1, 1.2, 0.8, 1}
+	v := []float64{1, -2, 3, -4, 0.5, 1.5, -2.5, 0.25} // 2 个头 × headDim
+	const eps = 1e-6
 
-	// 形态B：词表在后端
-	logitsB, err := ForwardMasked(w, tokens)
+	got, err := perHeadRMSNorm(v, gamma, headDim, eps)
 	if err != nil {
-		t.Fatalf("ForwardMasked: %v", err)
+		t.Fatalf("perHeadRMSNorm: %v", err)
 	}
-	// 形态A：词表在网关（OTP 加掩嵌入 → 后端 → 网关 LMHead）
-	logitsA, err := ForwardMaskedFormA(w, tokens, rGW)
-	if err != nil {
-		t.Fatalf("ForwardMaskedFormA: %v", err)
-	}
-	// 真值参照：去量化 int8 权重（无掩码/无定点）
-	ref, err := ForwardRef(w, tokens)
-	if err != nil {
-		t.Fatalf("ForwardRef: %v", err)
-	}
-
-	repAB, err := Compare(logitsA, logitsB, 0, 5e-2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("形态A vs 形态B: MaxAbsDiff=%.3e MaxRelDiff=%.3f Top1=%d/%d",
-		repAB.MaxAbsDiff, repAB.MaxRelDiff, repAB.Top1Agree, repAB.Steps)
-	if !repAB.Top1All {
-		t.Fatalf("形态A 与形态B top-1 未全一致 %d/%d", repAB.Top1Agree, repAB.Steps)
-	}
-	if repAB.MaxRelDiff > 1.0 {
-		t.Fatalf("形态A 与形态B 误差过大 MaxRelDiff=%.3f（应 <=1.0）", repAB.MaxRelDiff)
+	for h := 0; h < len(v)/headDim; h++ {
+		seg := v[h*headDim : (h+1)*headDim]
+		var sq float64
+		for _, x := range seg {
+			sq += x * x
+		}
+		inv := 1 / math.Sqrt(sq/float64(headDim)+eps)
+		for i := range seg {
+			want := seg[i] * inv * gamma[i]
+			if math.Abs(got[h*headDim+i]-want) > 1e-12 {
+				t.Fatalf("head %d elem %d: got %.12f want %.12f", h, i, got[h*headDim+i], want)
+			}
+		}
 	}
 
-	repAR, err := Compare(logitsA, ref, 0, 5e-2)
-	if err != nil {
-		t.Fatal(err)
+	// 失败路径：gamma 长度不符 / 向量长度不是 headDim 整数倍，均须 fail-closed。
+	if _, err := perHeadRMSNorm(v, gamma[:3], headDim, eps); err == nil {
+		t.Fatal("gamma 长度 != head_dim 应报错")
 	}
-	t.Logf("形态A vs 参照: MaxAbsDiff=%.3e MaxRelDiff=%.3f Top1=%d/%d",
-		repAR.MaxAbsDiff, repAR.MaxRelDiff, repAR.Top1Agree, repAR.Steps)
-	if !repAR.Top1All {
-		t.Fatalf("形态A 与参照 top-1 未全一致 %d/%d", repAR.Top1Agree, repAR.Steps)
+	if _, err := perHeadRMSNorm(v, gamma, 3, eps); err == nil {
+		t.Fatal("向量长度不是 head_dim 整数倍应报错")
 	}
 }
 
-// TestFormAKVConsistency 验证形态A 的「prefill+decode 分步」与「一次性前向」给出相同掩码 hidden。
-func TestFormAKVConsistency(t *testing.T) {
-	rand.Seed(7)
-	cfg := smallQwenCfg()
-	w := SyntheticWeights(cfg, 3)
-	rGW := GenOTP(cfg.Dim, maskedinfer.Mod64)
+// TestForwardAppliesQKNorm 合成权重上验证 QK-norm 真的接进了前向。
+//
+// 判据：给同一份权重补上 gamma=1 的 q_norm/k_norm 后，logits 必须**发生变化**
+// （RMSNorm 即使 gamma 全 1 也不是恒等变换——归一化会改写幅度）；若不变化，
+// 说明 runLayers 里的 QK-norm 分支没生效或接错了位置。
+func TestForwardAppliesQKNorm(t *testing.T) {
+	cfg := QwenConfig{
+		Layers: 2, Dim: 16, Heads: 4, KVHeads: 2, HeadDim: 4,
+		FFN: 32, Vocab: 50, RopeTheta: 1e6, NormEps: 1e-6, MaxTokens: 64, TiedEmb: true,
+	}
+	w := SyntheticWeights(cfg, 11)
+	base, err := ForwardRef(w, []int{1, 2, 3})
+	if err != nil {
+		t.Fatalf("baseline ForwardRef: %v", err)
+	}
 
-	embAll, err := w.embedRows([]int{1, 2, 3, 4})
-	if err != nil {
-		t.Fatal(err)
-	}
-	maskedAll := MaskEmbedding(w, embAll, rGW)
-	all, err := ForwardMaskedEmb(w, maskedAll, rGW)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lastAll := all[len(all)-1]
-
-	embP, err := w.embedRows([]int{1, 2, 3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	maskedP := MaskEmbedding(w, embP, rGW)
-	r := NewRunner(w)
-	if _, err := r.StepEmb(maskedP, rGW); err != nil {
-		t.Fatal(err)
-	}
-	emb4, err := w.embedRows([]int{4})
-	if err != nil {
-		t.Fatal(err)
-	}
-	masked4 := MaskEmbedding(w, emb4, rGW)
-	dec2, err := r.StepEmb(masked4, rGW)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lastDec := dec2[len(dec2)-1]
-
-	maxd := 0.0
-	for i := range lastAll {
-		// 末层 hidden 是掩码域；比较其「掩码像本身」是否一致（同一 OTP 下应逐位相同）
-		xa := int64(lastAll[i])
-		xb := int64(lastDec[i])
-		d := xa - xb
-		if d < 0 {
-			d = -d
-		}
-		df := float64(d)
-		if df > maxd {
-			maxd = df
+	w.QNorm = make([][]float64, cfg.Layers)
+	w.KNorm = make([][]float64, cfg.Layers)
+	for l := 0; l < cfg.Layers; l++ {
+		w.QNorm[l] = make([]float64, cfg.HeadDim)
+		w.KNorm[l] = make([]float64, cfg.HeadDim)
+		for i := range w.QNorm[l] {
+			w.QNorm[l][i], w.KNorm[l][i] = 1, 1
 		}
 	}
-	t.Logf("形态A KV 一致性 末位掩码 hidden 最大差=%v", maxd)
-	if maxd != 0 {
-		t.Fatalf("形态A prefill+decode 与一次性前向掩码 hidden 不一致 maxd=%v", maxd)
+	withNorm, err := ForwardRef(w, []int{1, 2, 3})
+	if err != nil {
+		t.Fatalf("QK-norm ForwardRef: %v", err)
+	}
+
+	same := true
+	for i := range base {
+		for j := range base[i] {
+			if math.Abs(base[i][j]-withNorm[i][j]) > 1e-9 {
+				same = false
+				break
+			}
+		}
+		if !same {
+			break
+		}
+	}
+	if same {
+		t.Fatal("启用 QK-norm 后 logits 未变化：runLayers 的 QK-norm 分支未生效")
 	}
 }

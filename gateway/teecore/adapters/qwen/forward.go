@@ -1,11 +1,11 @@
-package route2qwen
+package qwen
 
 import (
 	"fmt"
 	"math"
-	"math/rand"
 
 	"security-ai-gateway/gateway/teecore/maskedinfer"
+	"security-ai-gateway/gateway/teecore/trustedops"
 )
 
 // linearFn 一个线性层求值器：输入 batch 行，输出 batch 行。
@@ -46,10 +46,10 @@ func (r *Runner) Reset() {
 func (r *Runner) Step(fn linearFn, tokens []int) ([][]float64, error) {
 	cfg := r.w.Cfg
 	if len(tokens) == 0 {
-		return nil, fmt.Errorf("route2qwen: 空 batch")
+		return nil, fmt.Errorf("qwen: 空 batch")
 	}
 	if r.pos+len(tokens) > cfg.MaxTokens {
-		return nil, fmt.Errorf("route2qwen: 位置 %d + batch %d 超出 MaxTokens=%d", r.pos, len(tokens), cfg.MaxTokens)
+		return nil, fmt.Errorf("qwen: 位置 %d + batch %d 超出 MaxTokens=%d", r.pos, len(tokens), cfg.MaxTokens)
 	}
 	h, err := r.w.embedRows(tokens)
 	if err != nil {
@@ -59,7 +59,7 @@ func (r *Runner) Step(fn linearFn, tokens []int) ([][]float64, error) {
 		return nil, err
 	}
 	hn := rmsNormRows(h, r.w.LNFinal, cfg.NormEps)
-	logits := mustBatch(fn(r.w.LMHead, hn))
+	logits := mustBatch(fn(r.w.LMHeadMat, hn))
 	r.pos += len(tokens)
 	return logits, nil
 }
@@ -75,6 +75,20 @@ func (r *Runner) runLayers(h [][]float64, fn linearFn) ([][]float64, error) {
 		q := mustBatch(fn(r.w.AttnQ[L][0], hn))
 		k := mustBatch(fn(r.w.AttnK[L][0], hn))
 		vv := mustBatch(fn(r.w.AttnV[L][0], hn))
+
+		// Qwen3 的 QK-norm：逐头在 head_dim 维上 RMSNorm，且**必须在 RoPE 之前**
+		// （HF 实现顺序：q_proj → reshape(heads, head_dim) → q_norm → RoPE）。
+		// 无 QK-norm 的模型（Qwen2/2.5）QNorm 为 nil，整段跳过，行为与改造前逐位一致。
+		if r.w.QNorm != nil {
+			for i := range q {
+				if q[i], err = perHeadRMSNorm(q[i], r.w.QNorm[L], cfg.HeadDim, cfg.NormEps); err != nil {
+					return nil, err
+				}
+				if k[i], err = perHeadRMSNorm(k[i], r.w.KNorm[L], cfg.HeadDim, cfg.NormEps); err != nil {
+					return nil, err
+				}
+			}
+		}
 
 		// RoPE 只作用于 Q/K（V 不旋转），且必须在 KV 追加之前完成（Qwen/LLaMA 约定）
 		for i := range q {
@@ -92,7 +106,7 @@ func (r *Runner) runLayers(h [][]float64, fn linearFn) ([][]float64, error) {
 		for i := range q {
 			var o []float64
 			if o, err = attentionQwen(q[i], r.k[L], r.v[L], cfg, base+i); err != nil {
-				return nil, fmt.Errorf("route2qwen: 层 %d 注意力失败: %w", L, err)
+				return nil, fmt.Errorf("qwen: 层 %d 注意力失败: %w", L, err)
 			}
 			ao := mustOne(fn(r.w.AttnO[L][0], [][]float64{o}))
 			if h2[i], err = addVec(h[i], ao); err != nil {
@@ -119,9 +133,27 @@ func (r *Runner) runLayers(h [][]float64, fn linearFn) ([][]float64, error) {
 func rmsNormRows(h [][]float64, gamma []float64, eps float64) [][]float64 {
 	out := make([][]float64, len(h))
 	for i := range h {
-		out[i] = RMSNorm(h[i], gamma, eps)
+		out[i] = trustedops.RMSNorm(h[i], gamma, eps)
 	}
 	return out
+}
+
+// perHeadRMSNorm 逐头 RMSNorm（Qwen3 的 q_norm / k_norm）。
+//
+// 与 rmsNormRows 的差别：不是整行归一，而是把一行按 head_dim 切成 Heads 段、**每段独立**归一。
+// q_norm.weight / k_norm.weight 形状是 [head_dim]，所有头共享同一组 gamma。
+func perHeadRMSNorm(v, gamma []float64, headDim int, eps float64) ([]float64, error) {
+	if headDim <= 0 || len(v)%headDim != 0 {
+		return nil, fmt.Errorf("qwen: 向量长度 %d 不是 head_dim=%d 的整数倍", len(v), headDim)
+	}
+	if len(gamma) != headDim {
+		return nil, fmt.Errorf("qwen: QK-norm gamma 长度 %d != head_dim=%d", len(gamma), headDim)
+	}
+	out := make([]float64, len(v))
+	for off := 0; off < len(v); off += headDim {
+		copy(out[off:off+headDim], trustedops.RMSNorm(v[off:off+headDim], gamma, eps))
+	}
+	return out, nil
 }
 
 // StepEmb 形态A 入口：输入网关侧 OTP 加掩的嵌入，输出重新加掩的末层 hidden。
@@ -130,10 +162,10 @@ func rmsNormRows(h [][]float64, gamma []float64, eps float64) [][]float64 {
 func (r *Runner) StepEmb(maskedEmb [][]uint64, rGW []uint64) ([][]uint64, error) {
 	cfg := r.w.Cfg
 	if len(maskedEmb) == 0 {
-		return nil, fmt.Errorf("route2qwen: 空 batch")
+		return nil, fmt.Errorf("qwen: 空 batch")
 	}
 	if r.pos+len(maskedEmb) > cfg.MaxTokens {
-		return nil, fmt.Errorf("route2qwen: 位置 %d + batch %d 超出 MaxTokens=%d", r.pos, len(maskedEmb), cfg.MaxTokens)
+		return nil, fmt.Errorf("qwen: 位置 %d + batch %d 超出 MaxTokens=%d", r.pos, len(maskedEmb), cfg.MaxTokens)
 	}
 	// 1. 用 OTP rGW 元素级脱掩码，恢复明文嵌入（Embed 仅作定点缩放中介，不持有明文）。
 	// 注意：ToMaskDomain/Decode 这对内核操作实际是「×Scale / ÷Scale」，Decode(ToMaskDomain(x))=x·Scale；
@@ -142,16 +174,16 @@ func (r *Runner) StepEmb(maskedEmb [][]uint64, rGW []uint64) ([][]uint64, error)
 	h := make([][]float64, len(maskedEmb))
 	for i, v := range maskedEmb {
 		if len(v) != len(rGW) {
-			return nil, fmt.Errorf("route2qwen: 掩码嵌入长度 %d != OTP 长度 %d", len(v), len(rGW))
+			return nil, fmt.Errorf("qwen: 掩码嵌入长度 %d != OTP 长度 %d", len(v), len(rGW))
 		}
-		hu, err := r.w.Embed.Unmask(v, rGW)
+		hu, err := r.w.EmbedMat.Unmask(v, rGW)
 		if err != nil {
 			return nil, err
 		}
 		// Decode(ToMaskDomain(x)) = x·Scale；需逐元素 ÷Scale 还原回缩放域（与形态B 输入同域）
-		dec := r.w.Embed.Decode(hu)
+		dec := r.w.EmbedMat.Decode(hu)
 		for j := range dec {
-			dec[j] /= r.w.Embed.Scale
+			dec[j] /= r.w.EmbedMat.Scale
 		}
 		h[i] = dec
 	}
@@ -164,7 +196,7 @@ func (r *Runner) StepEmb(maskedEmb [][]uint64, rGW []uint64) ([][]uint64, error)
 	hn := rmsNormRows(h, r.w.LNFinal, cfg.NormEps)
 	out := make([][]uint64, len(hn))
 	for i, row := range hn {
-		rm, err := r.w.LMHead.Remask(r.w.LMHead.ToMaskDomain(row), rGW)
+		rm, err := r.w.LMHeadMat.Remask(r.w.LMHeadMat.ToMaskDomain(row), rGW)
 		if err != nil {
 			return nil, err
 		}
@@ -180,82 +212,16 @@ func ForwardMaskedEmb(w *Weights, maskedEmb [][]uint64, rGW []uint64) ([][]uint6
 	return r.StepEmb(maskedEmb, rGW)
 }
 
-// GenOTP 生成一次一密掩码 rGW（长度 = Dim）。网关与后端共享同一 rGW 用于输入/输出边界。
-func GenOTP(dim int, modBits maskedinfer.MaskModulusBits) []uint64 {
-	r := make([]uint64, dim)
-	if modBits == maskedinfer.Mod64 {
-		for i := range r {
-			r[i] = rand.Uint64()
-		}
-	} else {
-		for i := range r {
-			r[i] = uint64(rand.Uint32())
-		}
-	}
-	return r
-}
-
-// MaskEmbedding 网关侧：对明文嵌入逐行加 OTP 掩码（ToMaskDomain(x) + rGW）。
-func MaskEmbedding(w *Weights, embRows [][]float64, rGW []uint64) [][]uint64 {
-	out := make([][]uint64, len(embRows))
-	for i, row := range embRows {
-		rm, err := w.Embed.Remask(w.Embed.ToMaskDomain(row), rGW)
-		if err != nil {
-			// Remask 报错仅当维度不符，属编程错误；用 panic 暴露以符合包内 must* 约定
-			panic(fmt.Sprintf("route2qwen: MaskEmbedding Remask 失败: %v", err))
-		}
-		out[i] = rm
-	}
-	return out
-}
-
-// GatewayLMHead 形态A 网关侧：对后端返回的掩码 hidden 做 LMHead 线性（可仍在 GPU 掩码盲算），
-// 用 OTP rGW 脱掩码得明文 logits，随后由网关做 argmax/采样。LMHead 是线性层，无需 TEE 明文 matmul。
-func GatewayLMHead(lmHead *maskedinfer.QuantizedMatrix, maskedHidden [][]uint64, rGW []uint64) ([][]float64, error) {
-	out := make([][]float64, len(maskedHidden))
-	for b, v := range maskedHidden {
-		yc, err := lmHead.CipherLinear([][]uint64{v})
-		if err != nil {
-			return nil, err
-		}
-		mi, err := lmHead.MaskImage(rGW)
-		if err != nil {
-			return nil, err
-		}
-		yu, err := lmHead.Unmask(yc[0], mi)
-		if err != nil {
-			return nil, err
-		}
-		out[b] = lmHead.Decode(yu)
-	}
-	return out, nil
-}
-
-// ForwardMaskedFormA 形态A 便捷入口：在包内模拟「网关加掩嵌入 → 后端 → 网关 LMHead」三段。
-// 真实部署中三段由网关(①)与路线2(②)分别执行；此处合在一起仅为对拍验证。
-func ForwardMaskedFormA(w *Weights, tokens []int, rGW []uint64) ([][]float64, error) {
-	emb, err := w.embedRows(tokens)
-	if err != nil {
-		return nil, err
-	}
-	maskedEmb := MaskEmbedding(w, emb, rGW)
-	maskedHidden, err := ForwardMaskedEmb(w, maskedEmb, rGW)
-	if err != nil {
-		return nil, err
-	}
-	return GatewayLMHead(w.LMHead, maskedHidden, rGW)
-}
-
 // applyRoPEQwen Qwen/LLaMA 风格 RoPE：**前后半劈开**旋转（旋转 (i, i+headDim/2)）。
 //
 // 注意：本仓库 teecore 冻结为 Su et al. 相邻对旋转，与 Qwen/LLaMA 数值不兼容；
 // 故 Qwen 前向必须在此使用正确的前后半劈开排布，否则 RoPE 相位错误、注意力错位。
 func applyRoPEQwen(vec []float64, pos, headDim int, theta float64) error {
 	if headDim <= 0 || headDim%2 != 0 {
-		return fmt.Errorf("route2qwen: headDim=%d 须为正偶数", headDim)
+		return fmt.Errorf("qwen: headDim=%d 须为正偶数", headDim)
 	}
 	if len(vec)%headDim != 0 {
-		return fmt.Errorf("route2qwen: 向量长度 %d 不是 headDim=%d 整数倍", len(vec), headDim)
+		return fmt.Errorf("qwen: 向量长度 %d 不是 headDim=%d 整数倍", len(vec), headDim)
 	}
 	half := headDim / 2
 	for base := 0; base < len(vec); base += headDim {
@@ -286,7 +252,7 @@ func expandKVRow(row []float64, cfg QwenConfig) []float64 {
 	return out
 }
 
-// attentionQwen 单查询行注意力：先把 KV 缓存按 GQA 扩展到 Q 头布局，再走 teecore.Attention。
+// attentionQwen 单查询行注意力：先把 KV 缓存按 GQA 扩展到 Q 头布局，再走 trustedops.Attention。
 func attentionQwen(q []float64, kCache, vCache [][]float64, cfg QwenConfig, pos int) ([]float64, error) {
 	kExp := make([][]float64, len(kCache))
 	vExp := make([][]float64, len(vCache))
@@ -294,7 +260,7 @@ func attentionQwen(q []float64, kCache, vCache [][]float64, cfg QwenConfig, pos 
 		kExp[i] = expandKVRow(kCache[i], cfg)
 		vExp[i] = expandKVRow(vCache[i], cfg)
 	}
-	return Attention(q, kExp, vExp, cfg.Heads, cfg.HeadDim, 0, pos, true)
+	return trustedops.Attention(q, kExp, vExp, cfg.Heads, cfg.HeadDim, 0, pos, true)
 }
 
 // siluMul SwiGLU 激活：out = silu(gate) * up，逐元素。
@@ -313,7 +279,7 @@ func siluMul(gate, up [][]float64) [][]float64 {
 
 func addVec(a, b []float64) ([]float64, error) {
 	if len(a) != len(b) {
-		return nil, fmt.Errorf("route2qwen: 残差维度不一致 %d != %d", len(a), len(b))
+		return nil, fmt.Errorf("qwen: 残差维度不一致 %d != %d", len(a), len(b))
 	}
 	out := make([]float64, len(a))
 	for i := range a {
@@ -339,14 +305,14 @@ func ForwardRef(w *Weights, tokens []int) ([][]float64, error) {
 // MUST 辅助：把单/批量结果从 (out,err) 取出，err 直接 panic（仅用于内部已保证合法的调用）。
 func mustBatch(out [][]float64, err error) [][]float64 {
 	if err != nil {
-		panic(fmt.Sprintf("route2qwen: 内部线性层失败: %v", err))
+		panic(fmt.Sprintf("qwen: 内部线性层失败: %v", err))
 	}
 	return out
 }
 
 func mustOne(out [][]float64, err error) []float64 {
 	if err != nil {
-		panic(fmt.Sprintf("route2qwen: 内部线性层失败: %v", err))
+		panic(fmt.Sprintf("qwen: 内部线性层失败: %v", err))
 	}
 	return out[0]
 }
@@ -367,16 +333,16 @@ type Report struct {
 func Compare(a, b [][]float64, atol, rtol float64) (Report, error) {
 	rep := Report{Atol: atol, Rtol: rtol, Steps: len(a)}
 	if len(a) != len(b) {
-		return Report{}, fmt.Errorf("route2qwen: 步数不一致 %d != %d", len(a), len(b))
+		return Report{}, fmt.Errorf("qwen: 步数不一致 %d != %d", len(a), len(b))
 	}
 	for s := range a {
 		if len(a[s]) != len(b[s]) {
-			return Report{}, fmt.Errorf("route2qwen: 第 %d 步 logits 维度不一致 %d != %d", s, len(a[s]), len(b[s]))
+			return Report{}, fmt.Errorf("qwen: 第 %d 步 logits 维度不一致 %d != %d", s, len(a[s]), len(b[s]))
 		}
 		for i := range a[s] {
 			x, y := a[s][i], b[s][i]
 			if math.IsNaN(x) || math.IsInf(x, 0) || math.IsNaN(y) || math.IsInf(y, 0) {
-				return Report{}, fmt.Errorf("route2qwen: 第 %d 步第 %d 个 logit 非有限（x=%v y=%v）", s, i, x, y)
+				return Report{}, fmt.Errorf("qwen: 第 %d 步第 %d 个 logit 非有限（x=%v y=%v）", s, i, x, y)
 			}
 			d := math.Abs(x - y)
 			rep.Logits++
@@ -389,7 +355,7 @@ func Compare(a, b [][]float64, atol, rtol float64) (Report, error) {
 				}
 			}
 		}
-		if len(a[s]) > 0 && ArgMax(a[s]) == ArgMax(b[s]) {
+		if len(a[s]) > 0 && trustedops.ArgMax(a[s]) == trustedops.ArgMax(b[s]) {
 			rep.Top1Agree++
 		}
 	}

@@ -1,4 +1,4 @@
-package route2qwen
+package qwen
 
 import (
 	"math/rand"
@@ -27,9 +27,9 @@ func SyntheticWeights(cfg QwenConfig, seed int64) *Weights {
 	}
 
 	w := &Weights{Cfg: cfg}
-	w.Embed, _ = quantize(cfg.Vocab, cfg.Dim, rf(cfg.Vocab, cfg.Dim))
+	w.EmbedMat, _ = quantize(cfg.Vocab, cfg.Dim, rf(cfg.Vocab, cfg.Dim))
 	// tie_word_embeddings=true：LMHead 复用 Embed 本身（[Vocab×Dim]），logits = Embed·hn -> [Vocab]。
-	w.LMHead = w.Embed
+	w.LMHeadMat = w.EmbedMat
 
 	for L := 0; L < cfg.Layers; L++ {
 		// QuantizedMatrix 约定 [rows=out_features, cols=in_features]，与 PyTorch Linear 一致。

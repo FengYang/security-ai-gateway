@@ -1,6 +1,7 @@
-package route2qwen
+package qwen
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"math/rand"
@@ -14,9 +15,13 @@ import (
 // RMSNorm 的 gamma 是仿射参数，不参与量化，直接存 float64。
 // 归一化权重本身就在 [-1,1] 附近，定点误差可忽略，且 demo 的对照基线也把 gamma 当 fp 处理。
 type Weights struct {
-	Cfg    QwenConfig
-	Embed  *maskedinfer.QuantizedMatrix // Vocab × Dim
-	LMHead *maskedinfer.QuantizedMatrix // Dim × Vocab（tie 时由 Embed 转置得到）
+	Cfg       QwenConfig
+	EmbedMat  *maskedinfer.QuantizedMatrix // Vocab × Dim
+	LMHeadMat *maskedinfer.QuantizedMatrix // Dim × Vocab（tie 时由 EmbedMat 转置得到）
+
+	// Tok 可选：绑定后使 *Weights 满足网关侧 ModelAdapter 的文本进出（Encode/Decode）。
+	// 仅加载权重、只用 token 级接口时可留 nil。
+	Tok *Tokenizer
 
 	AttnQ [][]*maskedinfer.QuantizedMatrix // [layer][0]
 	AttnK [][]*maskedinfer.QuantizedMatrix
@@ -29,6 +34,11 @@ type Weights struct {
 	LNIn    [][]float64 // [layer] gamma
 	LNPost  [][]float64 // [layer] gamma
 	LNFinal []float64   // 全局 ln_final gamma
+
+	// QNorm / KNorm 每层 q_norm / k_norm 的 gamma（长度 = HeadDim），Qwen3 起才有。
+	// nil 表示该模型无 QK-norm（Qwen2/2.5），runLayers 据此跳过逐头归一。
+	QNorm [][]float64
+	KNorm [][]float64
 }
 
 // quantize 把扁平 float32 张量（行优先，rows×cols）量化成 int8/Mod64 的 QuantizedMatrix。
@@ -37,7 +47,7 @@ type Weights struct {
 // 以免在 embed_tokens 等大矩阵（1.3 亿参数）上瞬时消耗双倍内存导致 OOM。
 func quantize(rows, cols int, f []float32) (*maskedinfer.QuantizedMatrix, error) {
 	if len(f) != rows*cols {
-		return nil, fmt.Errorf("route2qwen: 张量长度 %d != %d×%d", len(f), rows, cols)
+		return nil, fmt.Errorf("qwen: 张量长度 %d != %d×%d", len(f), rows, cols)
 	}
 	maxW := 0.0
 	for _, v := range f {
@@ -46,7 +56,7 @@ func quantize(rows, cols int, f []float32) (*maskedinfer.QuantizedMatrix, error)
 		}
 	}
 	if maxW == 0 {
-		return nil, fmt.Errorf("route2qwen: 权重全零，无法量化")
+		return nil, fmt.Errorf("qwen: 权重全零，无法量化")
 	}
 	maxQ := float64((int64(1) << 7) - 1) // INT8 上限 127
 	scale := maxW / maxQ
@@ -91,7 +101,7 @@ func LoadWeights(path string, cfg QwenConfig) (*Weights, error) {
 	get := func(name string) (STTensor, error) {
 		t, ok := st.Tensors[name]
 		if !ok {
-			return STTensor{}, fmt.Errorf("route2qwen: 缺失张量 %q", name)
+			return STTensor{}, fmt.Errorf("qwen: 缺失张量 %q", name)
 		}
 		return t, nil
 	}
@@ -107,22 +117,31 @@ func LoadWeights(path string, cfg QwenConfig) (*Weights, error) {
 	if t, err := get("model.embed_tokens.weight"); err != nil {
 		return nil, err
 	} else {
-		w.Embed, err = quantOf(t, cfg.Vocab, cfg.Dim)
+		w.EmbedMat, err = quantOf(t, cfg.Vocab, cfg.Dim)
 		if err != nil {
 			return nil, err
 		}
 	}
-	// lm_head：Qwen2.5 tie_word_embeddings=true，复用 embed 的转置
+	// lm_head：tie_word_embeddings=true 时与 embed_tokens 是同一份权重，直接复用
+	// （0.6B 规模下 embed 占 155M 参数，再量化一份等于白吃 ~0.6GB；构建机只有 7GB 内存，
+	// 这点在真实权重链路上是能不能跑起来的分界）。复用前做一次前缀逐字节抽查，
+	// 配置与权重矛盾时 fail-closed，而不是静默用错矩阵。
 	if t, ok := st.Tensors["model.lm_head.weight"]; ok {
-		w.LMHead, err = quantOf(t, cfg.Vocab, cfg.Dim)
-		if err != nil {
+		if cfg.TiedEmb {
+			if !sameTensorPrefix(st, t, st.Tensors["model.embed_tokens.weight"], 1<<16) {
+				return nil, fmt.Errorf("qwen: tie_word_embeddings=true 但 lm_head 与 embed_tokens 前缀不一致（权重与配置矛盾）")
+			}
+			w.LMHeadMat = w.EmbedMat
+		} else if w.LMHeadMat, err = quantOf(t, cfg.Vocab, cfg.Dim); err != nil {
 			return nil, err
 		}
 	} else {
 		// tie_word_embeddings=true：lm_head 与 embed_tokens 共享同一权重矩阵 [Vocab×Dim]，
 		// logits = Embed · hn 即 [Vocab×Dim]·[Dim]=[Vocab]，无需转置（转置会输出 [Dim] 维度错误）。
-		w.LMHead = w.Embed
+		w.LMHeadMat = w.EmbedMat
 	}
+
+	var qNorms, kNorms [][]float64
 
 	for L := 0; L < cfg.Layers; L++ {
 		p := fmt.Sprintf("model.layers.%d.", L)
@@ -178,6 +197,30 @@ func LoadWeights(path string, cfg QwenConfig) (*Weights, error) {
 		}
 		w.LNIn = append(w.LNIn, toF64(liF))
 		w.LNPost = append(w.LNPost, toF64(lpF))
+
+		// Qwen3 起每层带 q_norm/k_norm（逐头 RMSNorm，gamma 长度 = HeadDim）。
+		// 二者必须同时存在或同时缺失：只出现一个说明权重被裁剪/版本混杂，直接 fail-closed，
+		// 否则会静默退化成"只归一 Q 不归一 K"，数值全错但不报错。
+		qnT, hasQN := st.Tensors[p+"self_attn.q_norm.weight"]
+		knT, hasKN := st.Tensors[p+"self_attn.k_norm.weight"]
+		if hasQN != hasKN {
+			return nil, fmt.Errorf("qwen: 层 %d 的 q_norm/k_norm 只存在其一（QK-norm 权重不完整）", L)
+		}
+		if hasQN {
+			var qnF, knF []float32
+			if qnF, e = qnT.Float32(st); e != nil {
+				return nil, e
+			}
+			if knF, e = knT.Float32(st); e != nil {
+				return nil, e
+			}
+			if len(qnF) != cfg.HeadDim || len(knF) != cfg.HeadDim {
+				return nil, fmt.Errorf("qwen: 层 %d q_norm/k_norm 长度 %d/%d != HeadDim=%d",
+					L, len(qnF), len(knF), cfg.HeadDim)
+			}
+			qNorms = append(qNorms, toF64(qnF))
+			kNorms = append(kNorms, toF64(knF))
+		}
 	}
 	if t, err := get("model.norm.weight"); err != nil {
 		return nil, err
@@ -188,7 +231,27 @@ func LoadWeights(path string, cfg QwenConfig) (*Weights, error) {
 		}
 		w.LNFinal = toF64(f)
 	}
+	// Qwen3 才有：全部层都带 QK-norm 时启用；否则保持 nil（runLayers 跳过逐头归一）。
+	w.QNorm, w.KNorm = qNorms, kNorms
 	return w, nil
+}
+
+// sameTensorPrefix 比较两个张量在数据区里前 nbytes 字节是否相同（tie 的廉价抽查）。
+//
+// 只做前缀比对、不做全量比对的理由：全量比对 embed/lm_head 等于把 1.2GB 再扫一遍，
+// 而复用的目的正是省内存/省时间；前缀抽查足以拦住"配置写 tie、权重其实是两套"的矛盾，
+// 真正的数值正确性由真实权重 golden 对拍兜底（top-1/logits 容差）。
+func sameTensorPrefix(st *SafeTensors, a, b STTensor, nbytes int) bool {
+	if a.DType != b.DType || a.Length != b.Length {
+		return false
+	}
+	if a.Offset < 0 || b.Offset < 0 || a.Offset+a.Length > len(st.data) || b.Offset+b.Length > len(st.data) {
+		return false
+	}
+	if nbytes > a.Length {
+		nbytes = a.Length
+	}
+	return bytes.Equal(st.data[a.Offset:a.Offset+nbytes], st.data[b.Offset:b.Offset+nbytes])
 }
 
 // toF64 把 float32 切片转 float64。
@@ -206,29 +269,16 @@ func (w *Weights) embedRows(tokens []int) ([][]float64, error) {
 	out := make([][]float64, len(tokens))
 	for i, t := range tokens {
 		if t < 0 || t >= w.Cfg.Vocab {
-			return nil, fmt.Errorf("route2qwen: token=%d 越界（词表 0..%d）", t, w.Cfg.Vocab-1)
+			return nil, fmt.Errorf("qwen: token=%d 越界（词表 0..%d）", t, w.Cfg.Vocab-1)
 		}
 		row := make([]float64, w.Cfg.Dim)
 		base := t * w.Cfg.Dim
 		for j := 0; j < w.Cfg.Dim; j++ {
-			row[j] = w.Embed.Scale * float64(w.Embed.Data[base+j])
+			row[j] = w.EmbedMat.Scale * float64(w.EmbedMat.Data[base+j])
 		}
 		out[i] = row
 	}
 	return out, nil
-}
-
-// dequant 把 QuantizedMatrix 去量化回 fp64 矩阵（行优先）。
-func dequant(m *maskedinfer.QuantizedMatrix) [][]float64 {
-	out := make([][]float64, m.Rows)
-	for i := 0; i < m.Rows; i++ {
-		row := make([]float64, m.Cols)
-		for j := 0; j < m.Cols; j++ {
-			row[j] = m.Scale * float64(m.Data[i*m.Cols+j])
-		}
-		out[i] = row
-	}
-	return out
 }
 
 // maskedLinear 掩码像线性层：y = W_q · x（int8/Mod64 定点 + 一次掩码脱掩码）。
@@ -275,18 +325,22 @@ func maskedLinear(m *maskedinfer.QuantizedMatrix, x [][]float64) ([][]float64, e
 
 // refLinear 参照线性层：用去量化（Scale·Data）的 int8 权重做 fp64 矩阵乘。
 // 与 maskedLinear 的区别仅在掩码/定点环节，用于隔离量化误差（档 A 对照）。
+//
+// 【逐行流式，不整体反量化】旧实现先 dequant(m) 得到整矩阵 [][]float64：对 0.6B 模型的
+// embed/LMHead（151936×1024）瞬时就是 1.24GB，真实权重 golden 在 7GB 构建机上会 OOM。
+// 现按输出行累加，峰值内存 O(输出行数)；运算次序与 dequant 版逐元素一致（Scale·Data 再乘 x）。
 func refLinear(m *maskedinfer.QuantizedMatrix, x [][]float64) ([][]float64, error) {
-	f := dequant(m)
 	out := make([][]float64, len(x))
 	for b, xr := range x {
-		if len(xr) != len(f[0]) {
-			return nil, fmt.Errorf("route2qwen: refLinear 维度不符 %d != %d", len(xr), len(f[0]))
+		if len(xr) != m.Cols {
+			return nil, fmt.Errorf("qwen: refLinear 维度不符 %d != %d", len(xr), m.Cols)
 		}
-		o := make([]float64, len(f))
-		for i := range f {
+		o := make([]float64, m.Rows)
+		for i := 0; i < m.Rows; i++ {
+			base := i * m.Cols
 			var acc float64
-			for j := range f[i] {
-				acc += f[i][j] * xr[j]
+			for j, xv := range xr {
+				acc += float64(m.Data[base+j]) * m.Scale * xv
 			}
 			o[i] = acc
 		}

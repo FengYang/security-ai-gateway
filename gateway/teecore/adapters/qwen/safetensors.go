@@ -1,4 +1,4 @@
-package route2qwen
+package qwen
 
 import (
 	"encoding/binary"
@@ -28,19 +28,19 @@ type SafeTensors struct {
 func LoadSafeTensors(path string) (*SafeTensors, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("route2qwen: 读 safetensors 失败: %w", err)
+		return nil, fmt.Errorf("qwen: 读 safetensors 失败: %w", err)
 	}
 	if len(raw) < 8 {
-		return nil, fmt.Errorf("route2qwen: 文件过短")
+		return nil, fmt.Errorf("qwen: 文件过短")
 	}
 	headerLen := binary.LittleEndian.Uint64(raw[0:8])
 	if int(8+headerLen) > len(raw) {
-		return nil, fmt.Errorf("route2qwen: header 长度越界 %d > %d", 8+headerLen, len(raw))
+		return nil, fmt.Errorf("qwen: header 长度越界 %d > %d", 8+headerLen, len(raw))
 	}
 	// 先解析顶层（含 __metadata__ 与所有张量键）
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(raw[8:8+headerLen], &top); err != nil {
-		return nil, fmt.Errorf("route2qwen: 解析 header JSON 失败: %w", err)
+		return nil, fmt.Errorf("qwen: 解析 header JSON 失败: %w", err)
 	}
 	st := &SafeTensors{Tensors: map[string]STTensor{}, Meta: map[string]string{}}
 	if meta, ok := top["__metadata__"]; ok {
@@ -56,10 +56,10 @@ func LoadSafeTensors(path string) (*SafeTensors, error) {
 			DataOffsets []int  `json:"data_offsets"`
 		}
 		if err := json.Unmarshal(rawMsg, &t); err != nil {
-			return nil, fmt.Errorf("route2qwen: 解析张量 %q 失败: %w", name, err)
+			return nil, fmt.Errorf("qwen: 解析张量 %q 失败: %w", name, err)
 		}
 		if len(t.DataOffsets) != 2 {
-			return nil, fmt.Errorf("route2qwen: 张量 %q 的 data_offsets 非法", name)
+			return nil, fmt.Errorf("qwen: 张量 %q 的 data_offsets 非法", name)
 		}
 		st.Tensors[name] = STTensor{
 			Name:   name,
@@ -89,7 +89,7 @@ func (t STTensor) Float32(st *SafeTensors) ([]float32, error) {
 	switch t.DType {
 	case "F32":
 		if len(raw) != count*4 {
-			return nil, fmt.Errorf("route2qwen: %s F32 长度不符 %d != %d", t.Name, len(raw), count*4)
+			return nil, fmt.Errorf("qwen: %s F32 长度不符 %d != %d", t.Name, len(raw), count*4)
 		}
 		out := make([]float32, count)
 		for i := 0; i < count; i++ {
@@ -98,7 +98,7 @@ func (t STTensor) Float32(st *SafeTensors) ([]float32, error) {
 		return out, nil
 	case "BF16":
 		if len(raw) != count*2 {
-			return nil, fmt.Errorf("route2qwen: %s BF16 长度不符 %d != %d", t.Name, len(raw), count*2)
+			return nil, fmt.Errorf("qwen: %s BF16 长度不符 %d != %d", t.Name, len(raw), count*2)
 		}
 		out := make([]float32, count)
 		for i := 0; i < count; i++ {
@@ -110,7 +110,7 @@ func (t STTensor) Float32(st *SafeTensors) ([]float32, error) {
 		return out, nil
 	case "F16":
 		if len(raw) != count*2 {
-			return nil, fmt.Errorf("route2qwen: %s F16 长度不符 %d != %d", t.Name, len(raw), count*2)
+			return nil, fmt.Errorf("qwen: %s F16 长度不符 %d != %d", t.Name, len(raw), count*2)
 		}
 		out := make([]float32, count)
 		for i := 0; i < count; i++ {
@@ -119,7 +119,7 @@ func (t STTensor) Float32(st *SafeTensors) ([]float32, error) {
 		}
 		return out, nil
 	default:
-		return nil, fmt.Errorf("route2qwen: 不支持的 dtype %q（张量 %s）", t.DType, t.Name)
+		return nil, fmt.Errorf("qwen: 不支持的 dtype %q（张量 %s）", t.DType, t.Name)
 	}
 }
 
