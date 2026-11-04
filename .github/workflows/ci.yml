@@ -37,6 +37,11 @@ jobs:
       # 1. 静态与单元（-mod=mod：仓库含 vendor/ 但无 modules.txt，裸 go 会 inconsistent vendoring）
       - name: go vet
         run: go vet -mod=mod ./...
+
+      # 1a. 全仓构建（方案 §6.1 R5：本 job 此前只 vet+test，缺"全部包可构建"这条判据；
+      #     包级重构要靠它拦回归——例如把包拆错目录、留下重复符号/同名包时，vet 可能不报）。
+      - name: go build (all packages)
+        run: go build -mod=mod ./...
       - name: unit tests
         run: go test -mod=mod ./...
 
@@ -116,6 +121,17 @@ jobs:
       - name: secrets-guard
         run: python scripts/check-secrets.py
 
+      # 7c. SBOM 一致性门禁（方案 §6.3：主仓与新库须各带机器可读 SBOM）。
+      #     判据：sbom.cyclonedx.json 必须存在，且与当前 go.mod 依赖**逐字节一致**。
+      #     依赖变更后忘记刷新 SBOM ⇒ 这里红（而不是等到发版才发现清单过期）。
+      #     生成器确定性由 scripts/gen-sbom.py 保证（除 metadata.timestamp 外无易变字段，
+      #     timestamp 缺省取固定值，故 CI 与本地生成结果一致）。
+      - name: sbom gate
+        run: |
+          python scripts/gen-sbom.py --out /tmp/sbom.regen.json
+          diff -u sbom.cyclonedx.json /tmp/sbom.regen.json
+          echo "PASS: SBOM 与当前依赖一致"
+
       # 8. gofmt 增量门禁（仅校验本次变更的 .go 文件；防新代码格式漂移）
       #    全仓历史仍存在漂移，故不做全量校验；待全量清零后可放宽。
       - name: gofmt gate (changed files)
@@ -126,6 +142,62 @@ jobs:
             BASE="HEAD^"
           fi
           pwsh -NoProfile -File scripts/check-gofmt.ps1 -Base "$BASE"
+
+      # 9. 架构边界门禁（《路线2-架构理清与包级重构方案》§6.3）
+      #    四层依赖方向（engine ↛ 信任锚 / adapters ↛ orchestrator / cryptop 无环 /
+      #    orchestrator 仅产品层与 cmd/route2-* 可引用）+ 国密实现零命中。
+      #    判据在 gateway/archtest，用 AST 读 import；`go test ./...` 已覆盖，此处单列一步，
+      #    使边界回归在 CI 上"一眼可见失败原因"，而不是淹没在全量单测输出里。
+      - name: arch boundary gate
+        run: go test -mod=mod -count=1 -run 'TestDependencyDirection|TestNoGuomiImplementation' -v ./gateway/archtest/
+
+  # ---------------- job 1b：构建标签矩阵（方案 §6.1 R5） ----------------
+  # 为什么单独成 job：job 1 的 `go build ./...` 只用默认 CGO + 默认标签，覆盖不到
+  # 「关掉 cgo 的纯 Go 回退路径」与「saas/pkcs11 档位」——重构把包搬来搬去时，最典型的
+  # 回归就是某个文件忘了加/加错构建标签：默认档全绿，换档直接编不过（本地不易发现）。
+  #
+  # 关于 CUDA/昇腾（方案 §6.1 R5 括注）：本仓加速后端不是编译期标签，而是运行期
+  # dlopen（`ACCEL_BACKEND_LIB` + 统一 C ABI `accel_cipher_linear_int128`），
+  # 唯一编译期开关是 `//go:build cgo`（gateway/teecore/maskedinfer/accel_dispatch.go）。
+  # 故「CUDA/昇腾」两档的编译覆盖等价于下面的 cgo-on 两行；真正的多后端功能验证
+  # 需真机 GPU/NPU，属环境门控（不得用编译通过冒充）。
+  #
+  # 组合均为**实测通过**后才写入（避免把没验过的组合塞进 CI 造成长期红灯）；
+  # 嵌套 module（testkit/poc、wasm/*）由 ./... 自动排除，不在此矩阵覆盖面。
+  build-matrix:
+    name: build (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cgo-on / 默认标签（含 CUDA·昇腾加速后端编译路径）
+            cgo: "1"
+            tags: ""
+          - name: cgo-off / 默认标签（纯 Go 回退路径）
+            cgo: "0"
+            tags: ""
+          - name: cgo-on / pkcs11（硬件密码模块档）
+            cgo: "1"
+            tags: "pkcs11"
+          - name: cgo-off / saas（租户化档）
+            cgo: "0"
+            tags: "saas"
+          - name: cgo-off / perf（性能基准档）
+            cgo: "0"
+            tags: "perf"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      - name: go build ./... (${{ matrix.name }})
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: go build -mod=mod ${{ matrix.tags != '' && format('-tags {0}', matrix.tags) || '' }} ./...
 
   # ---------------- job 2：自托管 runner（完整环境依赖） ----------------
   # 前置条件（在环境机上注册 runner 并打标签 otpmask-e2e）：

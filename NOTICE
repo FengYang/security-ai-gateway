@@ -1,0 +1,41 @@
+Confidential AI Gateway (密态 AI 网关)
+Copyright 2026 The Confidential AI Gateway Authors
+
+This product includes software developed at the Confidential AI Gateway project
+and third-party components. The attribution notices below are provided in
+accordance with the Apache License, Version 2.0 (the "License"). This product is
+licensed under the Apache License, Version 2.0; see the LICENSE file for the full
+license text.
+
+===============================================================================
+1. Modifications to upstream works (Apache-2.0 §4(b))
+===============================================================================
+
+1.1 Higress Console v2.2.4 (Apache License 2.0)
+    The patch files under fork-patches/higress-console/ (higress-console-billing.patch,
+    higress-console-custom.patch, higress-console-trace.patch) modify Higress Console
+    v2.2.4. This product therefore contains modified material from that upstream work.
+    Copyright of the upstream work remains with its respective contributors; refer to
+    the upstream repository for the original license and copyright notices.
+
+===============================================================================
+2. Third-party works distributed with this repository
+===============================================================================
+
+2.1 Qwen3Guard plugin — upstream license copy is distributed at:
+    gateway/wasm/qwen3guard-plugin/LICENSE.upstream
+
+2.2 ECharts (Apache License 2.0) — frontend charting assets bundled with the
+    management portal static resources.
+
+===============================================================================
+3. Third-party dependency inventory
+===============================================================================
+
+See THIRD-PARTY-NOTICES.txt for the generated inventory of Go module dependencies
+and their licenses. That file is auto-generated; consult it alongside this NOTICE.
+
+===============================================================================
+Note: this NOTICE is provided as a good-faith attribution summary and does not
+constitute legal advice. Verify attributions against the upstream projects and
+dependency inventory before any public release.

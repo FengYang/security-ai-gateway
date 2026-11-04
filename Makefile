@@ -134,6 +134,27 @@ secrets-guard:
 	@if command -v python3 >/dev/null 2>&1; then P=python3; else P=python; fi; \
 	"$$P" scripts/check-secrets.py
 
+# sbom —— 重新生成 CycloneDX 1.5 SBOM（方案 §6.3：主仓与新库各带机器可读 SBOM）。
+#   `make sbom` 刷新 sbom.cyclonedx.json（依赖变更后必须刷新，否则 sbom-guard 红）；
+#   `make sbom-guard` 只校验"已提交的 SBOM 与当前依赖一致"，供 CI 使用。
+SBOM_FILE = sbom.cyclonedx.json
+
+.PHONY: sbom
+sbom:
+	@if command -v python3 >/dev/null 2>&1; then P=python3; else P=python; fi; \
+	"$$P" scripts/gen-sbom.py --out $(SBOM_FILE)
+
+.PHONY: sbom-guard
+sbom-guard:
+	@if command -v python3 >/dev/null 2>&1; then P=python3; else P=python; fi; \
+	test -f $(SBOM_FILE) || { echo "FAIL: 缺 $(SBOM_FILE)，先跑 make sbom"; exit 1; }; \
+	TS=$$("$$P" -c "import json;print(json.load(open('$(SBOM_FILE)'))['metadata']['timestamp'])"); \
+	SBOM_TIMESTAMP="$$TS" "$$P" scripts/gen-sbom.py --out /tmp/sbom.regen.json >/dev/null; \
+	if ! diff -u $(SBOM_FILE) /tmp/sbom.regen.json; then \
+	  echo "FAIL: SBOM 与当前 go.mod 依赖不一致 —— 跑 make sbom 并提交"; exit 1; \
+	fi; \
+	echo "PASS: SBOM 与依赖一致（$$(grep -c '"bom-ref"' $(SBOM_FILE)) 个组件条目）"
+
 # ---- P2-1 T-4：mcp-acl 插件（网关侧工具级 ACL）----
 MCP_ACL_PKG = ./gateway/wasm/mcp-acl-plugin/...
 MCP_ACL_MAIN_PKG = ./gateway/wasm/mcp-acl-plugin
