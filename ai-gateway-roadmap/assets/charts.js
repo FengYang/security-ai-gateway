@@ -94,6 +94,8 @@
 
   // --- 06-C 散点图：接入维度(D1均值) vs 密态(D3) ---
   // 我们 + 代表性竞品的 D1/D3
+  // 竞品数值以《GA-技术架构方案.md》§10「竞争力分析」矩阵为唯一源（2026-11-05 阶段 A 裁定 MD 权威）。
+  // 本图为可视化快照：§10 更新时须同步此处，不得据此反向修改 §10，亦不得另立第二份评分。
   var scatterEl = document.getElementById('chart-scatter');
   if (scatterEl) {
     var scatter = echarts.init(scatterEl, null, {renderer:'svg'});
@@ -105,16 +107,16 @@
       { name:'我们·Phase 2', d1:4, d3:5, cat:'OTP-Mask' },
       { name:'我们·Phase 3', d1:5, d3:5, cat:'OTP-Mask' },
       // 开源通用网关
-      { name:'Higress', d1:4, d3:1, cat:'开源通用' },
+      { name:'Higress', d1:5, d3:1, cat:'开源通用' },
       { name:'Envoy AI Gateway', d1:4, d3:1, cat:'开源通用' },
       { name:'Kong AI Gateway', d1:4, d3:1, cat:'开源通用' },
       { name:'APISIX', d1:4, d3:1, cat:'开源通用' },
       // Lite 网关
-      { name:'LiteLLM', d1:5, d3:1, cat:'Lite 网关' },
-      { name:'Portkey', d1:4, d3:1, cat:'Lite 网关' },
+      { name:'LiteLLM', d1:5, d3:0, cat:'Lite 网关' },
+      { name:'Portkey', d1:4, d3:0, cat:'Lite 网关' },
       // 云厂商
       { name:'Cloudflare', d1:4, d3:1, cat:'云平台' },
-      { name:'Azure APIM+Foundry', d1:3, d3:2, cat:'云平台' },
+      { name:'Azure APIM+Foundry', d1:4, d3:2, cat:'云平台' },
       { name:'AWS Bedrock', d1:3, d3:2, cat:'云平台' },
       { name:'阿里云百炼 C-MaaS', d1:4, d3:4, cat:'云平台' },
       { name:'NVIDIA NIM', d1:3, d3:1, cat:'云平台' }
