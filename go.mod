@@ -26,6 +26,7 @@ require (
 	google.golang.org/grpc v1.83.2
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.60.1
+	github.com/FengYang/masked-infer v0.0.0-00010101000000-000000000000
 )
 
 require (
@@ -108,3 +109,8 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+// 路线2 密态推理后端已拆分为独立仓库 github.com/FengYang/masked-infer（见 docs/路线2-独立代码库拆分方案.md）。
+// 发布首个公开 tag 前，先用本地 replace 解析（与未跟踪的 go.work 二选一即可；CI 用 GOWORK=off 走这里）。
+// 发布后改为正式版本号 require 并删除本 replace。
+replace github.com/FengYang/masked-infer => ../masked-infer
