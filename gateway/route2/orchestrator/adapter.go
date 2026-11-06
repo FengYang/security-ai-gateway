@@ -1,13 +1,13 @@
 // Package orchestrator 路线2 网关侧模型无关密态编排。
 //
 // 本包只依赖 ModelAdapter 契约完成「加掩嵌入 → 后端掩码 step → LMHead/argmax」三段，
-// 全程模型无关；具体模型（qwen/llama/…）由 gateway/teecore/adapters/* 实现该契约。
+// 全程模型无关；具体模型（qwen/llama/…）由 github.com/FengYang/masked-infer/adapters/* 实现该契约。
 //
 // 安全边界：本包处理明文 Embedding/OTP/LMHead/argmax，必须运行于**可信网关侧①**，
 // 不得部署到不可信加速器；后端掩码 step 全程只见掩码态（见 INV-1）。
 package orchestrator
 
-import "security-ai-gateway/gateway/teecore/maskedinfer"
+import "github.com/FengYang/masked-infer/core"
 
 // ModelAdapter 网关侧编排器对模型适配器的唯一依赖。
 //

@@ -12,8 +12,8 @@
 // 【门槛】权重不在本机时 Skip 并写明「D2 未执行」，不伪造 PASS。
 // 显式执行：
 //
-//	ROUTE2_QWEN_DIR=.tools/models/Qwen3Guard-Gen-0.6B go test ./gateway/teecore/adapters/qwen -run TestRoute2StepRealQwenGolden -v
-package qwen_test
+//	ROUTE2_QWEN_DIR=.tools/models/Qwen3Guard-Gen-0.6B go test ./gateway/tee-infer-service/route2step -run TestRoute2StepRealQwenGolden -v
+package route2step_test
 
 import (
 	"encoding/json"
@@ -21,15 +21,16 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/FengYang/masked-infer/adapters/qwen"
+	"github.com/FengYang/masked-infer/masklite"
+	"github.com/FengYang/masked-infer/plan"
 	"security-ai-gateway/cipher/mask"
 	"security-ai-gateway/gateway/tee-infer-service/route2step"
-	"security-ai-gateway/gateway/teecore/adapters/qwen"
-	"security-ai-gateway/gateway/teecore/route2plan"
 )
 
 // defaultRoute2QwenDir 与 realweights_test.go 的默认路径保持一致（本文件是外部测试包，
 // 不能引用其未导出常量，故在此声明同一默认值；两处漂移只会让 Skip 消息里的路径不准）。
-const defaultRoute2QwenDir = "../../../../.tools/models/Qwen3Guard-Gen-0.6B"
+const defaultRoute2QwenDir = "../../../.tools/models/Qwen3Guard-Gen-0.6B"
 
 // route2GoldenFile 与 scripts/gen-qwen3-golden.py 的输出一一对应（只取本用例需要的字段）。
 type route2GoldenFile struct {
@@ -114,7 +115,7 @@ func TestRoute2StepRealQwenGolden(t *testing.T) {
 		TurnBase: 0,
 		KV:       kv,
 		Seed:     seed,
-		NewStream: func(s []byte, modulus uint64, domain []byte) (*mask.Stream, error) {
+		NewStream: func(s []byte, modulus uint64, domain []byte) (masklite.MaskStream, error) {
 			return mask.NewStreamDomain(s, modulus, domain)
 		},
 	}

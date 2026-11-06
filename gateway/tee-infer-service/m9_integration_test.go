@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FengYang/masked-infer/plan"
 	"security-ai-gateway/cipher/mask"
 	"security-ai-gateway/gateway/cryptop/keymgmt"
 	"security-ai-gateway/gateway/tee-infer-service/model"
-	"security-ai-gateway/gateway/teecore/route2plan"
 	"security-ai-gateway/protocol/go"
 	"security-ai-gateway/protocol/go/cryptoops"
 )

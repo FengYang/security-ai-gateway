@@ -17,10 +17,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/FengYang/masked-infer/core"
+	"github.com/FengYang/masked-infer/demo"
+	"github.com/FengYang/masked-infer/masklite"
+	"github.com/FengYang/masked-infer/plan"
 	"security-ai-gateway/cipher/mask"
-	"security-ai-gateway/gateway/teecore/maskedinfer"
-	"security-ai-gateway/gateway/teecore/route2demo"
-	"security-ai-gateway/gateway/teecore/route2plan"
 )
 
 // recomputeBatchLimit 单请求 batch 上限（vLLM 连续批处理对齐，防超长请求）
@@ -201,7 +202,7 @@ func (s *teeServer) sessionSeed(r *http.Request) ([]byte, error) {
 //   - `hmac-sha256`（intl 默认）→ `NewStreamDomain`（hmacPRG，profile 无关，逐字节等价现役实现）；
 //   - `sm4` → `NewStreamWithProvider`（SM4-CTR，key 长度须 = SymmetricKeySize，由 seed 长度保证）；
 //   - `bridge` → sm 档迁移桥接，层掩码无请求头可依，按 profile 目标态取 `sm4`。
-func newLayerStream(seed []byte, modulus uint64, domain []byte) (*mask.Stream, error) {
+func newLayerStream(seed []byte, modulus uint64, domain []byte) (masklite.MaskStream, error) {
 	if cryptoMaskPRG == "sm4" || cryptoMaskPRG == "bridge" {
 		return mask.NewStreamWithProvider(cryptoProvider, seed, domain, modulus)
 	}

@@ -25,9 +25,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/FengYang/masked-infer/adapters/qwen"
+	"github.com/FengYang/masked-infer/core"
 	"security-ai-gateway/gateway/route2/orchestrator"
-	"security-ai-gateway/gateway/teecore/adapters/qwen"
-	"security-ai-gateway/gateway/teecore/maskedinfer"
 )
 
 func main() {

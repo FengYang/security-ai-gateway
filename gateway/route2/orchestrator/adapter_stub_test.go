@@ -3,7 +3,7 @@ package orchestrator
 import (
 	"testing"
 
-	"security-ai-gateway/gateway/teecore/maskedinfer"
+	"github.com/FengYang/masked-infer/core"
 )
 
 // stubAdapter 仅实现 ModelAdapter，用于 L1 复用性冒烟：

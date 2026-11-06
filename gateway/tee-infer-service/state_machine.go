@@ -21,10 +21,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FengYang/masked-infer/adapters/qwen"
+	"github.com/FengYang/masked-infer/demo"
+	"github.com/FengYang/masked-infer/plan"
 	"security-ai-gateway/gateway/tee-infer-service/route2step"
-	"security-ai-gateway/gateway/teecore/adapters/qwen"
-	"security-ai-gateway/gateway/teecore/route2demo"
-	"security-ai-gateway/gateway/teecore/route2plan"
 )
 
 // protoV2 协议版本门禁常量。硬切换（设计 §2.5.2 方案 B）：proto≠2 一律拒绝。

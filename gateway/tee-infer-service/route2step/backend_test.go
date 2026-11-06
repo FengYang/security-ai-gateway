@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"security-ai-gateway/gateway/teecore/route2plan"
+	"github.com/FengYang/masked-infer/plan"
 )
 
 // TestMaskedStepPlaneIsMaskedOnly 断言 MaskedStepBackend 的签名只吞吐掩码态数据。

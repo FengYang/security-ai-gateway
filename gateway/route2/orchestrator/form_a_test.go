@@ -4,8 +4,8 @@ import (
 	"math/rand"
 	"testing"
 
-	"security-ai-gateway/gateway/teecore/adapters/qwen"
-	"security-ai-gateway/gateway/teecore/maskedinfer"
+	"github.com/FengYang/masked-infer/adapters/qwen"
+	"github.com/FengYang/masked-infer/core"
 )
 
 // 编译期断言：qwen 适配器满足网关侧 ModelAdapter 契约。

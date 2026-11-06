@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"testing"
 
-	"security-ai-gateway/gateway/teecore/route2plan"
-	"security-ai-gateway/gateway/teecore/trustedops"
+	"github.com/FengYang/masked-infer/core/trustedops"
+	"github.com/FengYang/masked-infer/plan"
 )
 
 // TestRecomputeRMSNorm 覆盖 rmsnorm 算子的数值正确性（proto=2，逐位对拍）。

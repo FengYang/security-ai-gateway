@@ -46,12 +46,12 @@ import (
 	"strings"
 	"time"
 
-	"security-ai-gateway/cipher/mask"
+	"github.com/FengYang/masked-infer/core"
+	"github.com/FengYang/masked-infer/demo"
+	"github.com/FengYang/masked-infer/masklite"
+	"github.com/FengYang/masked-infer/plan"
+	"github.com/FengYang/masked-infer/ref"
 	"security-ai-gateway/gateway/cryptop"
-	"security-ai-gateway/gateway/teecore/maskedinfer"
-	"security-ai-gateway/gateway/teecore/route2demo"
-	"security-ai-gateway/gateway/teecore/route2plan"
-	"security-ai-gateway/gateway/teecore/route2ref"
 )
 
 const (
@@ -326,7 +326,7 @@ func (o *orchestrator) matrix(k route2plan.TensorKey) (*maskedinfer.QuantizedMat
 // 注意：同一批的所有位置共用同一条 r —— 掩码像 MaskImage(W,r) 只需算一次，
 // 服务端也是这么做的（recompute.go 现有实现即按"一步一条 r"处理整个 batch）。
 func (o *orchestrator) rho(domain string, n int) ([]uint64, error) {
-	st, err := mask.NewStreamDomain(o.sess.seed, route2MaskModulus, []byte(domain))
+	st, err := masklite.NewStreamDomain(o.sess.seed, route2MaskModulus, []byte(domain))
 	if err != nil {
 		return nil, fmt.Errorf("派生掩码流(%s)失败: %w", domain, err)
 	}
@@ -355,7 +355,7 @@ func (o *orchestrator) injectRows(plan route2plan.Plan, tokens []int) ([][]uint6
 	if err != nil {
 		return nil, err
 	}
-	st, err := mask.NewStreamDomain(o.sess.seed, route2MaskModulus, []byte(domain))
+	st, err := masklite.NewStreamDomain(o.sess.seed, route2MaskModulus, []byte(domain))
 	if err != nil {
 		return nil, fmt.Errorf("派生注入掩码流(%s)失败: %w", domain, err)
 	}
@@ -885,7 +885,7 @@ func (c *client) run(dim, layers int, input string) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("派生掩码 seed: %w", err)
 	}
-	stream0, err := mask.NewStreamDomain(seed, route2MaskModulus, []byte("otpmask/layer/0/v1"))
+	stream0, err := masklite.NewStreamDomain(seed, route2MaskModulus, []byte("otpmask/layer/0/v1"))
 	if err != nil {
 		return 0, fmt.Errorf("第0层掩码流: %w", err)
 	}

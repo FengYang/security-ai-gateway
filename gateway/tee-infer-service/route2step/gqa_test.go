@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"security-ai-gateway/gateway/teecore/route2plan"
+	"github.com/FengYang/masked-infer/plan"
 )
 
 // gqaCfg 一个 GQA 配置：Heads=4 / KVHeads=2 / HeadDim=4 ⇒ Dim=16，KVDim=8（!= Dim）。

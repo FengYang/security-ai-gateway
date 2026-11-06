@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 
-	"security-ai-gateway/gateway/teecore/maskedinfer"
+	"github.com/FengYang/masked-infer/core"
 )
 
 // GenOTP 生成一次一密掩码 rGW（长度 = Dim）。网关与后端共享同一 rGW 用于输入/输出边界。

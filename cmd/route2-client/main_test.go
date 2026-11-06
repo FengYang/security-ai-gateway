@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/FengYang/masked-infer/demo"
+	"github.com/FengYang/masked-infer/plan"
 	"security-ai-gateway/gateway/cryptop"
-	"security-ai-gateway/gateway/teecore/route2demo"
-	"security-ai-gateway/gateway/teecore/route2plan"
 )
 
 // newTestOrchestrator 构造一个不联网的编排器（seed 用固定材料派生，与网络无关）。

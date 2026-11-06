@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"security-ai-gateway/gateway/teecore/route2plan"
+	"github.com/FengYang/masked-infer/plan"
 )
 
 // TestResolveModelDemo demo 模型必须可用，且配置的 ModelID 与常量源一致。

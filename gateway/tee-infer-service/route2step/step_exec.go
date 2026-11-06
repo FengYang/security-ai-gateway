@@ -17,11 +17,11 @@ package route2step
 import (
 	"fmt"
 
-	"security-ai-gateway/cipher/mask"
-	"security-ai-gateway/gateway/teecore/maskedinfer"
-	"security-ai-gateway/gateway/teecore/route2demo"
-	"security-ai-gateway/gateway/teecore/route2plan"
-	"security-ai-gateway/gateway/teecore/trustedops"
+	"github.com/FengYang/masked-infer/core"
+	"github.com/FengYang/masked-infer/core/trustedops"
+	"github.com/FengYang/masked-infer/demo"
+	"github.com/FengYang/masked-infer/masklite"
+	"github.com/FengYang/masked-infer/plan"
 )
 
 // StepContext 一步执行所需的全部上下文（纯数据，由 runStep 在 st.mu 内装配）。
@@ -39,7 +39,7 @@ type StepContext struct {
 	Batch    [][]uint64
 
 	// NewStream 按当前密码档构造掩码流（由宿主注入，避免本包依赖宿主的 cryptoProvider）。
-	NewStream func(seed []byte, modulus uint64, domain []byte) (*mask.Stream, error)
+	NewStream func(seed []byte, modulus uint64, domain []byte) (masklite.MaskStream, error)
 
 	// Ref 直通行的还原基准矩阵（惰性加载；仅取 ModBits 与 InputScale 两个标量）。
 	Ref *maskedinfer.QuantizedMatrix
@@ -59,7 +59,7 @@ func ExecStep(ctx *StepContext) ([][]uint64, int, *StepError) {
 	nPos := len(ctx.Batch) / arity
 
 	// ---- 输入侧：每行的源掩码流（按行类各一条）+ 被施加的权重 ----
-	srcStream := make([]*mask.Stream, arity)
+	srcStream := make([]masklite.MaskStream, arity)
 	srcMatrix := make([]*maskedinfer.QuantizedMatrix, arity)
 	for r := 0; r < arity; r++ {
 		domain, err := ctx.Plan.SrcMaskDomain(ctx.Seq, r)
@@ -85,7 +85,7 @@ func ExecStep(ctx *StepContext) ([][]uint64, int, *StepError) {
 
 	// ---- 输出侧：产出步 own 自己的域 ----
 	isKVAppend := ctx.Spec.Op == route2plan.OpKVAppendK || ctx.Spec.Op == route2plan.OpKVAppendV
-	var outStream *mask.Stream
+	var outStream masklite.MaskStream
 	if !isKVAppend && !ctx.Spec.Terminal {
 		s, err := ctx.NewStream(ctx.Seed, Route2MaskModulus, []byte(ctx.Spec.MaskDomain()))
 		if err != nil {
@@ -331,7 +331,7 @@ func kvStepError(call string, block int, err error) *StepError {
 }
 
 // nextMaskVec 从掩码流取 n 个掩码分量（沿用既有取模方式：stream.Next() % R）。
-func nextMaskVec(s *mask.Stream, n int) []uint64 {
+func nextMaskVec(s masklite.MaskStream, n int) []uint64 {
 	out := make([]uint64, n)
 	for i := range out {
 		out[i] = s.Next() % Route2MaskModulus

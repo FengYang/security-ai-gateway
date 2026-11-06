@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"security-ai-gateway/gateway/teecore/route2plan"
+	"github.com/FengYang/masked-infer/plan"
 )
 
 // ---- 工具 ----

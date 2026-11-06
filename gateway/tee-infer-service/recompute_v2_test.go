@@ -12,10 +12,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/FengYang/masked-infer/core"
+	"github.com/FengYang/masked-infer/demo"
+	"github.com/FengYang/masked-infer/plan"
 	"security-ai-gateway/gateway/tee-infer-service/route2step"
-	"security-ai-gateway/gateway/teecore/maskedinfer"
-	"security-ai-gateway/gateway/teecore/route2demo"
-	"security-ai-gateway/gateway/teecore/route2plan"
 )
 
 // route2MaskModulus 路线2 掩码模 R（M1 接线，技术方案 §7.7 定案）的测试侧别名。

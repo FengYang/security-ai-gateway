@@ -8,7 +8,7 @@ package modelengine
 import (
 	"math"
 
-	"security-ai-gateway/gateway/teecore/trustedops"
+	"github.com/FengYang/masked-infer/core/trustedops"
 )
 
 // VocabSize 词表大小（演示模型）。

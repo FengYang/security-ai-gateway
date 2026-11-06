@@ -22,7 +22,7 @@ import (
 	"strings"
 	"sync"
 
-	"security-ai-gateway/gateway/teecore/route2plan"
+	"github.com/FengYang/masked-infer/plan"
 )
 
 // ---- 哨兵 error（上层据此映射 HTTP 码与审计码，故一律用可 errors.Is 判定的哨兵）----

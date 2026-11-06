@@ -15,9 +15,9 @@ package main
 import (
 	"testing"
 
-	"security-ai-gateway/gateway/teecore/maskedinfer"
-	"security-ai-gateway/gateway/teecore/route2plan"
-	"security-ai-gateway/gateway/teecore/trustedops"
+	"github.com/FengYang/masked-infer/core"
+	"github.com/FengYang/masked-infer/core/trustedops"
+	"github.com/FengYang/masked-infer/plan"
 )
 
 // TestM1RecomputeMod64 路线2 服务侧 Mod64 接线端到端验收（M1，proto=2）。
