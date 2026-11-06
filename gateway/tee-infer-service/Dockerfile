@@ -7,7 +7,9 @@ RUN go mod download
 COPY cipher ./cipher
 COPY protocol ./protocol
 COPY internal ./internal
-COPY gateway/teecore ./gateway/teecore
+# 路线2 引擎（masked-infer）已拆分为独立仓库 github.com/FengYang/masked-infer。
+# 本镜像构建时该模块须可达：发布后由 go.mod 正式 require（去掉本地 replace）经 proxy 拉取；
+# 本地构建须把 masked-infer 源码拷入构建上下文（或挂载），否则 go build 无法解析 masked-infer。
 COPY gateway/cryptop ./gateway/cryptop
 COPY gateway/tee-infer-service ./gateway/tee-infer-service
 # 补全导入树：main.go/audit_export.go 依赖 auditexport（审计导出），mcp_config.go 等依赖

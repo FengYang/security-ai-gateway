@@ -45,47 +45,22 @@ type denyRule struct {
 	why    string // 依据（方案条款），便于失败时直接定位
 }
 
-// denyRules 方案 §6.3 的四条禁止规则。
+// denyRules 方案 §6.3 的禁止规则——仅覆盖**主仓库内部**的依赖方向。
 //
-// 说明：「禁止混合包」一条（同一 package 内不得既有纯计算文件又有 import cryptop 的文件）
-// 在本仓落地为**per-file 判定**——即下列规则对每个 .go 文件逐一检查，而不是对包整体。
-// 这样比"包内混装"更严：只要有一个文件越界就红，无需再区分"纯计算文件"这种模糊边界。
+// 「禁止混合包」在本仓落地为 **per-file 判定**：下列每条规则对每个 .go 文件逐一检查，
+// 只要有一个文件越界就红，比"包内混装"更严。
+//
+// 关于新库（github.com/FengYang/masked-infer）内部的依赖方向（core/trustedops/plan/ref/adapters
+// 不得 import 主仓库 cryptop 或 orchestrator）——本门禁**不重复守卫**：collectGoFiles 只扫
+// 主仓库根，那些把 dir 指向 masked-infer 的规则会"永不命中"而假绿。该职责由新库侧权威门禁
+// 承担：masked-infer/scripts/gate_g1.sh（G1：含 _test.go 的依赖闭包零主仓库 / 零 gmsm 前缀），
+// 在 CI 的 g1 job 实跑，能真正覆盖新库全部包。故此处只保留主仓库内部的 5 条规则。
 var denyRules = []denyRule{
-	{
-		name:   "engine 层不得依赖信任锚：trustedops",
-		dir:    "gateway/teecore/trustedops",
-		banned: modPath + "/gateway/cryptop",
-		why:    "§6.3 ① trustedops 须零 cryptop，才能随新库外发",
-	},
-	{
-		name:   "engine 层不得依赖信任锚：maskedinfer",
-		dir:    "gateway/teecore/maskedinfer",
-		banned: modPath + "/gateway/cryptop",
-		why:    "§6.3 ① maskedinfer 须零 cryptop",
-	},
-	{
-		name:   "engine 层不得依赖信任锚：route2plan",
-		dir:    "gateway/teecore/route2plan",
-		banned: modPath + "/gateway/cryptop",
-		why:    "§6.3 ① route2plan 须零 cryptop",
-	},
-	{
-		name:   "engine 层不得依赖信任锚：route2ref",
-		dir:    "gateway/teecore/route2ref",
-		banned: modPath + "/gateway/cryptop",
-		why:    "§6.3 ① route2ref 须零 cryptop",
-	},
 	{
 		name:   "掩码步引擎不得依赖信任锚：route2step",
 		dir:    "gateway/tee-infer-service/route2step",
 		banned: modPath + "/gateway/cryptop",
 		why:    "§4 步骤5：掩码流由宿主注入（StepContext.NewStream），本包不持密钥实现",
-	},
-	{
-		name:   "适配层不得反向依赖编排层：adapters/*",
-		dir:    "gateway/teecore/adapters",
-		banned: modPath + "/gateway/route2/orchestrator",
-		why:    "§6.3 ② adapters 只实现契约，契约定义方不得反向被依赖（否则拆库时成环）",
 	},
 	{
 		name:   "vLLM 适配器不得依赖宿主包",
@@ -102,8 +77,8 @@ var denyRules = []denyRule{
 	{
 		name:   "信任锚不得反向依赖上层：cryptop",
 		dir:    "gateway/cryptop",
-		banned: modPath + "/gateway/teecore/",
-		why:    "§6.3 ④ cryptop 保无环",
+		banned: "github.com/FengYang/masked-infer",
+		why:    "§6.3 ④ cryptop 保无环（路线2 新库不得反向被 cryptop 依赖）",
 	},
 	{
 		name:   "信任锚不得反向依赖宿主：cryptop",
@@ -227,15 +202,15 @@ func orchestratorImporterAllowed(pkg string) bool {
 // 否则视为「未验证的门禁」。本测试不修改仓库，仅用合成文件集驱动同一份 checkDenyRule /
 // orchestratorImporterAllowed，断言：注入违例 → 必红；清理后 → 必绿。
 func TestBoundaryNegativeControl(t *testing.T) {
-	// 三个代表性 deny 规则：引擎层↛信任锚、适配层↛编排层、vLLM↛宿主。
+	// 三个代表性 deny 规则：掩码步引擎↛信任锚（rule0）、信任锚↛新库（rule3）、vLLM↛宿主（rule1）。
 	reps := []struct {
 		ruleIdx  int
 		violImp  string // 触发违例的 import
 		cleanImp string // 清理后的合法 import
 	}{
 		{0, modPath + "/gateway/cryptop", modPath + "/gateway/maskedinfer"},
-		{5, modPath + "/gateway/route2/orchestrator", modPath + "/gateway/maskedinfer"},
-		{6, modPath + "/gateway/tee-infer-service", modPath + "/gateway/modelengine"},
+		{3, "github.com/FengYang/masked-infer", modPath + "/gateway/maskedinfer"},
+		{1, modPath + "/gateway/tee-infer-service", modPath + "/gateway/modelengine"},
 	}
 	for _, rep := range reps {
 		r := denyRules[rep.ruleIdx]

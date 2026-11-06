@@ -89,7 +89,7 @@
 | `gateway/tee-infer-service`   | Go（模拟 TEE，MVP）               | 19090 | 密态推理、密钥管理、guardrail、审计（内存/WORM）、指标；text 载荷 SSE 信封流        |
 | `gateway/vllm-adapter`        | Go / Python                  | 19190 | vLLM 明文推理对接（路线 2 保留；路线 1 由 tee-infer 直连 vLLM OpenAI 兼容接口） |
 | `gateway/attest-verify`       | Go                           | 19191 | 证明验证 sidecar（D2）：quote 解析 + 度量基线比对，localhost `/verify`    |
-| `gateway/teecore`             | Go 库                         | -     | KeyManager + 非线性算子（TEE 可信侧核心）                             |
+| `masked-infer`（独立仓库）     | Go 库                         | -     | 路线2 密态推理后端（core/adapters/qwen/masklite/plan/ref/demo/backend），见 github.com/FengYang/masked-infer |
 | `protocol/`                   | Go / Python / proto          | -     | 南向协议三端实现（交叉一致性已验证）                                        |
 | `cipher/mask`、`secagg/`       | Go                           | -     | OTP-Mask 流、安全聚合（Paillier/Shamir）                          |
 
@@ -160,7 +160,7 @@ gateway/
   wasm/          Higress 插件（otpmask 主插件 + hello 示例）
   embedding-service/  文本向量服务
   tee-infer-service/  TEE 密态推理（含 guardrail/审计/指标）
-  teecore/       KeyManager + 非线性算子
+  masked-infer/   路线2 密态推理后端（独立仓库 github.com/FengYang/masked-infer）
 protocol/        南向协议（Go/Python/proto 三端一致）
 deploy/          K8s 清单 + 监控 + kind 配置
 scripts/         验证套件（verify-all / verify-k8s / pen_test）

@@ -22,9 +22,9 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
 
 if [ "${WITH_ACCEL:-0}" = "1" ]; then
   echo "==> 构建昇腾可移植参考 .so（libaccel_ascend.so，任意 x86_64/aarch64 可编）"
-  g++ -shared -fPIC gateway/teecore/maskedinfer/cipher_linear_int128_ascend.cpp \
+  g++ -shared -fPIC ../masked-infer/core/cipher_linear_int128_ascend.cpp \
     -o "$OUT/libaccel_ascend.so"
-  echo "    CUDA 后端需 nvcc：见 gateway/teecore/maskedinfer/accel_linear_int128.h 头注释"
+  echo "    CUDA 后端需 nvcc：见 ../masked-infer/core/accel_linear_int128.h 头注释"
 fi
 
 echo "==> 产物："

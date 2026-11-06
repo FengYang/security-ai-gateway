@@ -16,7 +16,7 @@ E1.2 环绕边界扫描：真实放大权重使输出落到目标量级，验证
 E1.3 深度累积：端到端堆叠 L 层，掩码链 vs 明文链，看误差是否随深度发散
 E1.4 int64 溢出上界：Cols * max|Wq| * max|V| vs 2^63，跨 bit 宽度与常见宽度
 
-算法语义（逐行移植自 gateway/teecore/maskedinfer/masked_linear.go）
+算法语义（逐行移植自 masked-infer/core/masked_linear.go）
 ------------------------------------------------------------------
   R = 2^32
   量化：   scale = max|W| / (2^(b-1)-1)， Wq = round(W/scale)
@@ -122,7 +122,7 @@ def main():
 
     print("=" * 80)
     print("路线 2 掩码像推理 —— 实验 1：数值保真度与安全域边界")
-    print("算法来源: gateway/teecore/maskedinfer/masked_linear.go (1:1 语义移植)")
+    print("算法来源: masked-infer/core/masked_linear.go (1:1 语义移植)")
     print("=" * 80)
 
     # ---------- E1.1 单层正确性 ----------

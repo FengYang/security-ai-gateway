@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成路线2「真实权重 golden」参考数据（供 gateway/teecore/adapters/qwen 的门控测试消费）。
+"""生成路线2「真实权重 golden」参考数据（供 gateway/tee-infer-service/route2step 的门控测试消费）。
 
 为什么需要外部参考：Go 侧三条路径（形态A 掩码 / 形态B 掩码 / 参照浮点）共用同一份
 前向实现，互相之间"自洽"只能证明掩码链路没写错，**不能证明模型结构实现正确**
@@ -10,7 +10,7 @@
     python scripts/gen-qwen3-golden.py [模型目录] [输出 json]
 
 默认读 .tools/models/Qwen3Guard-Gen-0.6B，写
-gateway/teecore/adapters/qwen/testdata/qwen3-06b-golden.json。
+gateway/tee-infer-service/route2step/testdata/qwen3-06b-golden.json。
 
 注意：本脚本**不是** CI 依赖（CI 无 GPU/torch）；它只在需要重生成基准时手动跑，
 产物（小 JSON）入库，Go 测试读产物 + 本地真实权重做对拍。
@@ -32,7 +32,7 @@ def main() -> int:
     out_path = Path(
         sys.argv[2]
         if len(sys.argv) > 2
-        else "gateway/teecore/adapters/qwen/testdata/qwen3-06b-golden.json"
+        else "gateway/tee-infer-service/route2step/testdata/qwen3-06b-golden.json"
     )
     model = AutoModelForCausalLM.from_pretrained(str(model_dir), torch_dtype=torch.float32)
     model.eval()
