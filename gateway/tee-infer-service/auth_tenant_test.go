@@ -57,6 +57,7 @@ func testKeySource() *mapTenantKeySource {
 // ---- verifyTenantJWT 正例 ----
 
 func TestVerifyTenantJWTValid(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	now := time.Now()
 	claims := tenantJWTClaims{
 		Sub: testTenant,
@@ -81,6 +82,7 @@ func TestVerifyTenantJWTValid(t *testing.T) {
 // ---- 格式类负例 ----
 
 func TestVerifyTenantJWTEmpty(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	_, err := verifyTenantJWT("", testKey, time.Now(), 0)
 	if err == nil {
 		t.Fatal("空令牌应报错")
@@ -88,6 +90,7 @@ func TestVerifyTenantJWTEmpty(t *testing.T) {
 }
 
 func TestVerifyTenantJWTMalformed(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	cases := []string{
 		"only.one",       // 2 段
 		"one.two.three.four", // 4 段
@@ -105,6 +108,7 @@ func TestVerifyTenantJWTMalformed(t *testing.T) {
 }
 
 func TestVerifyTenantJWTEmptyKey(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	now := time.Now()
 	claims := tenantJWTClaims{Sub: testTenant, Exp: now.Add(time.Hour).Unix()}
 	token := makeTestJWT(claims, testKey)
@@ -117,6 +121,7 @@ func TestVerifyTenantJWTEmptyKey(t *testing.T) {
 // ---- 签名负例 ----
 
 func TestVerifyTenantJWTBadSignature(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	now := time.Now()
 	claims := tenantJWTClaims{Sub: testTenant, Exp: now.Add(time.Hour).Unix()}
 	token := makeTestJWT(claims, testKey)
@@ -132,6 +137,7 @@ func TestVerifyTenantJWTBadSignature(t *testing.T) {
 }
 
 func TestVerifyTenantJWTWrongKey(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	now := time.Now()
 	claims := tenantJWTClaims{Sub: testTenant, Exp: now.Add(time.Hour).Unix()}
 	token := makeTestJWT(claims, testKey)
@@ -145,6 +151,7 @@ func TestVerifyTenantJWTWrongKey(t *testing.T) {
 // ---- 声明类负例 ----
 
 func TestVerifyTenantJWTExpired(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	now := time.Now()
 	claims := tenantJWTClaims{
 		Sub: testTenant,
@@ -159,6 +166,7 @@ func TestVerifyTenantJWTExpired(t *testing.T) {
 }
 
 func TestVerifyTenantJWTExpiredWithinLeeway(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	now := time.Now()
 	claims := tenantJWTClaims{
 		Sub: testTenant,
@@ -173,6 +181,7 @@ func TestVerifyTenantJWTExpiredWithinLeeway(t *testing.T) {
 }
 
 func TestVerifyTenantJWTNoExp(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	now := time.Now()
 	claims := tenantJWTClaims{
 		Sub: testTenant,
@@ -187,6 +196,7 @@ func TestVerifyTenantJWTNoExp(t *testing.T) {
 }
 
 func TestVerifyTenantJWTNoSub(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	now := time.Now()
 	claims := tenantJWTClaims{
 		Exp: now.Add(time.Hour).Unix(),
@@ -200,6 +210,7 @@ func TestVerifyTenantJWTNoSub(t *testing.T) {
 }
 
 func TestVerifyTenantJWTFutureIat(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	now := time.Now()
 	claims := tenantJWTClaims{
 		Sub: testTenant,
@@ -214,6 +225,7 @@ func TestVerifyTenantJWTFutureIat(t *testing.T) {
 }
 
 func TestVerifyTenantJWTTenantMismatch(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	now := time.Now()
 	claims := tenantJWTClaims{
 		Sub:    testTenant,
@@ -228,6 +240,7 @@ func TestVerifyTenantJWTTenantMismatch(t *testing.T) {
 }
 
 func TestVerifyTenantJWTTenantMatch(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	now := time.Now()
 	claims := tenantJWTClaims{
 		Sub:    testTenant,
@@ -247,6 +260,7 @@ func TestVerifyTenantJWTTenantMatch(t *testing.T) {
 // ---- 算法负例 ----
 
 func TestVerifyTenantJWTUnsupportedAlg(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	// 手动构造一个 alg=none 的 token
 	header := base64urlEncode([]byte(`{"alg":"none","typ":"JWT"}`))
 	payload := base64urlEncode([]byte(`{"sub":"t1","exp":9999999999}`))
@@ -260,6 +274,7 @@ func TestVerifyTenantJWTUnsupportedAlg(t *testing.T) {
 // ---- requireTenant 中间件测试 ----
 
 func TestRequireTenantValid(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	ks := testKeySource()
 	now := time.Now()
 	claims := tenantJWTClaims{
@@ -288,6 +303,7 @@ func TestRequireTenantValid(t *testing.T) {
 }
 
 func TestRequireTenantNoAuth(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	ks := testKeySource()
 	handler := requireTenant(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("不应调用 next")
@@ -303,6 +319,7 @@ func TestRequireTenantNoAuth(t *testing.T) {
 }
 
 func TestRequireTenantBadFormat(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	ks := testKeySource()
 	handler := requireTenant(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("不应调用 next")
@@ -319,6 +336,7 @@ func TestRequireTenantBadFormat(t *testing.T) {
 }
 
 func TestRequireTenantCrossTenant(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	ks := testKeySource()
 	now := time.Now()
 	// 用 tenant-001 的密钥签发令牌（sub=tenant-001）
@@ -346,6 +364,7 @@ func TestRequireTenantCrossTenant(t *testing.T) {
 }
 
 func TestRequireTenantSameKeySubMismatch403(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	// 模拟场景：同一把密钥（如网关侧共用密钥）签发，但 sub 与预期租户不符。
 	// 这种情况下签名验证通过，但 sub 不匹配 → 403。
 	sharedKey := []byte("shared-secret-key")
@@ -380,6 +399,7 @@ func TestRequireTenantSameKeySubMismatch403(t *testing.T) {
 }
 
 func TestRequireTenantXTenantIDConflict(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	ks := testKeySource()
 	now := time.Now()
 	claims := tenantJWTClaims{
@@ -407,6 +427,7 @@ func TestRequireTenantXTenantIDConflict(t *testing.T) {
 }
 
 func TestRequireTenantNoTenantID(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	ks := testKeySource()
 	now := time.Now()
 	claims := tenantJWTClaims{
@@ -431,6 +452,7 @@ func TestRequireTenantNoTenantID(t *testing.T) {
 }
 
 func TestRequireTenantUnknownTenant(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	ks := testKeySource()
 	now := time.Now()
 	claims := tenantJWTClaims{
@@ -454,6 +476,7 @@ func TestRequireTenantUnknownTenant(t *testing.T) {
 }
 
 func TestRequireTenantKeySourceNotConfigured(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	ks := &mapTenantKeySource{keys: map[string][]byte{}, required: false}
 	handler := requireTenant(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("不应调用 next")
@@ -470,6 +493,7 @@ func TestRequireTenantKeySourceNotConfigured(t *testing.T) {
 }
 
 func TestRequireTenantNilKeySource(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	handler := requireTenant(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("不应调用 next")
 	}, nil, testTenant, 0)
@@ -487,6 +511,7 @@ func TestRequireTenantNilKeySource(t *testing.T) {
 // ---- 既有 auth 零侵入验证 ----
 
 func TestAuthZeroIntrusion(t *testing.T) {
+	pinCryptoProviderIntl(t)
 	// 验证：auth.go 中的函数（如 verifyPluginProof / doAttestHandshake）
 	// 不因租户 JWT 新增而有任何行为变化。
 	// 这里通过构建成功间接验证：编译通过 = 接口签名未变。
@@ -494,4 +519,14 @@ func TestAuthZeroIntrusion(t *testing.T) {
 	if cryptoProvider == nil {
 		t.Fatal("cryptoProvider 不应为 nil")
 	}
+}
+
+// pinCryptoProviderIntl 固定进程级 cryptoProvider 为 intl 档确定性 provider，
+// 消除与并行/其它测试切换的 provider（如 sm-module 档 via withModuleProvider）之间的
+// 共享/全局状态竞争；测试结束（t.Cleanup）恢复现场。仅用于隔离测试，不改动任何断言意图。
+func pinCryptoProviderIntl(t *testing.T) {
+	t.Helper()
+	old := cryptoProvider
+	cryptoProvider = defaultCryptoProvider()
+	t.Cleanup(func() { cryptoProvider = old })
 }
