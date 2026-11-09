@@ -294,6 +294,29 @@ func taskIDOf(t *testing.T, result json.RawMessage) string {
 	return both.ID
 }
 
+// waitTaskState polls GetTask until the store observes the task in want, or
+// fails after a short deadline. It closes the race in
+// TestProxyInputRequiredAndCancel where the A2A SDK materializes task state
+// into its store in a detached goroutine after SendMessage returns (KI#4).
+func waitTaskState(t *testing.T, h *harness, taskID, want string) {
+	t.Helper()
+	body := `{"jsonrpc":"2.0","id":99,"method":"GetTask","params":{"id":` + quote(taskID) + `}}`
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, raw := h.invoke(t, "GetTask", body, nil)
+		if resp.StatusCode == http.StatusOK {
+			env := decodeEnvelope(t, raw)
+			if env.Error == nil && taskState(t, env.Result) == want {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("waitTaskState: task %s never reached %s within 5s", taskID, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // --- V-1: task lifecycle through the data plane ----------------------------
 
 func TestProxyTaskLifecycle(t *testing.T) {
@@ -384,6 +407,11 @@ func TestProxyInputRequiredAndCancel(t *testing.T) {
 		t.Fatalf("state = %s", got)
 	}
 	taskID := taskIDOf(t, env.Result)
+	// KI#4 fix: the A2A SDK materializes the task into its store in a
+	// detached goroutine after SendMessage returns; CancelTask races that
+	// materialization under full-suite load. Wait until GetTask observes the
+	// input-required state (i.e. the store holds the task) before cancelling.
+	waitTaskState(t, h, taskID, "TASK_STATE_INPUT_REQUIRED")
 	resp, raw = h.invoke(t, "CancelTask", `{"jsonrpc":"2.0","id":2,"method":"CancelTask","params":{"id":`+quote(taskID)+`}}`, nil)
 	env = decodeEnvelope(t, raw)
 	if env.Error != nil {
