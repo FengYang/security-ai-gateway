@@ -21,6 +21,16 @@
   "components": [
     {
       "type": "library",
+      "bom-ref": "pkg:golang/../masked-infer@v0.0.0-00010101000000-000000000000",
+      "name": "../masked-infer",
+      "version": "v0.0.0-00010101000000-000000000000",
+      "supplier": {
+        "name": "NOASSERTION"
+      },
+      "purl": "pkg:golang/../masked-infer@v0.0.0-00010101000000-000000000000"
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:golang/buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go@v1.36.6-20250425153114-8976f5be98c1.1",
       "name": "buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go",
       "version": "v1.36.6-20250425153114-8976f5be98c1.1",
@@ -2734,6 +2744,7 @@
     {
       "ref": "pkg:golang/security-ai-gateway",
       "dependsOn": [
+        "pkg:golang/../masked-infer@v0.0.0-00010101000000-000000000000",
         "pkg:golang/buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go@v1.36.6-20250425153114-8976f5be98c1.1",
         "pkg:golang/buf.build/go/protovalidate@v0.12.0",
         "pkg:golang/cel.dev/expr@v0.25.2",

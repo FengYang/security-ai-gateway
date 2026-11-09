@@ -428,7 +428,11 @@ func TestProxyVersionMatrix(t *testing.T) {
 		code    int
 	}{
 		{"1.0", "1.0", true, 0},
-		{"1.0.1", "1.0.1", true, 0},
+		// A2A-Version 1.0-only 为冻结契约（见 doc.go「Scope (frozen F-1..F-5)」）：
+		// 白名单仅 "1.0"，其余版本号（含 1.0.1）服务端一律返回
+		// -32009 CodeVersionNotSupported，与 0.3 / 1.1 / 2.0 同处理。
+		// 不得把此用例改成「支持 1.0.1」——那属变更评审，须另走流程。
+		{"1.0.1", "1.0.1", true, a2a.CodeVersionNotSupported},
 		{"missing", "", false, a2a.CodeVersionNotSupported},
 		{"0.3", "0.3", true, a2a.CodeVersionNotSupported},
 		{"1.1", "1.1", true, a2a.CodeVersionNotSupported},
