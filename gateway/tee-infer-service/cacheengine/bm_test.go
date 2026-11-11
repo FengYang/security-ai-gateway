@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
 	"runtime"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -24,6 +26,25 @@ func bmSkipShort(t *testing.T) {
 	if testing.Short() {
 		t.Skip("基准用例在 -short 下跳过")
 	}
+}
+
+// bm2EnvInt reads a positive-int BM-2 scale override from env, or returns def.
+// Defaults keep the production-representative full scale (50000x512) so the
+// p95<15ms judgement keeps its discriminating power; CI / local smoke runs
+// lower it via CACHE_BM2_*. Invalid values fail closed (Fatalf), never silently
+// fall back to a smaller scale -- that would be a hidden weakening of the
+// performance baseline.
+func bm2EnvInt(t *testing.T, key string, def int) int {
+	t.Helper()
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		t.Fatalf("BM-2 规模参数 %s=%q 非法（须为正整数）", key, v)
+	}
+	return n
 }
 
 // percentile 返回升序 samples 的 p 分位（p∈[0,1]）。
@@ -282,8 +303,15 @@ func TestBM8_FaultInjectionLatency(t *testing.T) {
 // （**不含** embedder；端到端待真实 sidecar）。判据（p95 < 15ms）在本地对 HNSW 生效。
 func TestBM2_LocalReference_Backends(t *testing.T) {
 	bmSkipShort(t)
-	const vecN = 50000
-	const dim = 512
+	// 规模可配（KI#5）：默认保持生产代表性全量档，CI / 本地冒烟用
+	// CACHE_BM2_VECN / CACHE_BM2_DIM / CACHE_BM2_SAMPLES / CACHE_BM2_BATCH 降档。
+	// p95<15ms 判据与产品代码均不变；全量档须由 make test-bm2-full 单独举证。
+	vecN := bm2EnvInt(t, "CACHE_BM2_VECN", 50000)
+	dim := bm2EnvInt(t, "CACHE_BM2_DIM", 512)
+	samples := bm2EnvInt(t, "CACHE_BM2_SAMPLES", 200)
+	hnswBatch := bm2EnvInt(t, "CACHE_BM2_BATCH", 50)
+	t.Logf("BM-2 规模档：vecN=%d dim=%d samples=%d flatBatch=1 hnswBatch=%d（默认全量档 50000x512；CACHE_BM2_* 可覆写）",
+		vecN, dim, samples, hnswBatch)
 	rng := rand.New(rand.NewSource(2))
 	vecs := make([][]float32, vecN)
 	for i := range vecs {
@@ -318,8 +346,8 @@ func TestBM2_LocalReference_Backends(t *testing.T) {
 		}
 		return percentile(durs, 0.50), percentile(durs, 0.95), percentile(durs, 0.99)
 	}
-	f50, f95, f99 := measure(flat, 200, 1)
-	h50, h95, h99 := measure(hn, 200, 50)
+	f50, f95, f99 := measure(flat, samples, 1)
+	h50, h95, h99 := measure(hn, samples, hnswBatch)
 
 	t.Logf("BM-2 本地参考（不含 embedder；向量=%d×%d）：flat 建索引=%.2fs 检索 p50/p95/p99 = %.2f/%.2f/%.2f ms",
 		vecN, dim, flatBuild.Seconds(), f50, f95, f99)

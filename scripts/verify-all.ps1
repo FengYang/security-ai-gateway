@@ -43,6 +43,12 @@ function Check($name, [bool]$ok, $detail = '') {
 Write-Host "===== M1-M12 automated verification =====" -ForegroundColor Cyan
 Push-Location $root
 
+# KI#5：BM-2 默认全量档 50000x512 HNSW 建图常态 575~578s，逼近 go test
+# 默认单包 10m 超时。本地全套回归降档冒烟（判据 p95<15ms、dim 与产品
+# 代码均不变）；生产代表性全量档请用 `make test-bm2-full`（-timeout 30m）
+# 单独举证，不占常规回归算力。
+$env:CACHE_BM2_VECN = "5000"
+
 # 1. Unit tests
 Write-Host "`n[1/7] Unit tests (go test ./...)" -ForegroundColor Yellow
 & $go test ./... *> $null

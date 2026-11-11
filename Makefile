@@ -16,11 +16,24 @@ lint:
 
 .PHONY: test
 test:
-	$(GO) test -race -count=1 ./...
+	# KI#5：常规全量回归走 BM-2 降档冒烟，避免 HNSW 全量建图逼近 go test
+	# 默认单包 10m 超时；生产代表性全量档由 make test-bm2-full（30m）单独举证。
+	CACHE_BM2_VECN=5000 $(GO) test -race -count=1 ./...
 
 .PHONY: test-short
 test-short:
 	$(GO) test -race -short ./...
+
+# BM-2 全量档基线举证（KI#5）：生产代表性 50000x512 的 HNSW 建图常态
+# 575~578s，逼近 go test 默认单包 10m 超时；单列并放宽到 30m，让判据
+# p95<15ms 真正跑完再裁决（放宽的是框架截止线，不是判据）。日常 CI 走
+# 降档冒烟（ci.yml 的 CACHE_BM2_*），全量档仅发布前显式执行，不占常规算力。
+.PHONY: test-bm2-full
+test-bm2-full:
+	CACHE_BM2_VECN=50000 CACHE_BM2_DIM=512 CACHE_BM2_SAMPLES=200 CACHE_BM2_BATCH=50 \
+		$(GO) test -mod=mod -count=1 -timeout 30m \
+		-run '^TestBM2_LocalReference_Backends$$' -v \
+		./gateway/tee-infer-service/cacheengine/
 
 # test-e2e —— §11.4/11.5 进程级集成/端到端回归（INT-1..5 + E2E-01..04/06；
 # 真实二进制子进程 + 仅 HTTP 驱动；E2E-05 完整切换演练留部署环境，见 make drill）。
