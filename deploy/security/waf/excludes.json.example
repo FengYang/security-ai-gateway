@@ -1,0 +1,8 @@
+[
+  {
+    "tenant": "acme",
+    "location": "/provider/openai/v1/chat",
+    "rule_id": "942190",
+    "reason": "LLM 提示词含 SQL 术语的业务误杀豁免（M3-1 排除表调优样例，变更须落审计）"
+  }
+]

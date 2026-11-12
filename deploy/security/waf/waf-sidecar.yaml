@@ -1,0 +1,66 @@
+# M3-1 WAF sidecar 部署清单（技术实现方案 §2.3/§2.4：形态优先独立 sidecar）
+#
+# ⚠ P1-8 红线：本目录为新增，**不修改 deploy/higress/* 任何既有文件**；
+#   gateway/wasm/otpmask-plugin/* 只读不动。Wasm 内嵌形态为二期优化。
+# ⚠ 装配路由（Higress 控制台 /provider/* → wafsvc.security.svc:8080）由部署线按现场配置，
+#   本清单只提供目标 Service；未发话不纳入既有 kustomization。
+# ⚠ 镜像 tag 为占位：构建/推 registry 属发布事项，按协作边界待发话后推进。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wafsvc-config
+  namespace: security
+data:
+  # 安装期参数（参数名·默认值·覆写点·未填行为，见 gateway/wafsvc/config.go）
+  WAF_MODE: "detection"              # 一期默认检测模式（不阻断）；灰度后切 blocking
+  WAF_CRS_VERSION: "4.25.0"         # 与内嵌定版不符 → fail-closed 拒绝启动
+  WAF_PARANOIA_LEVEL: "1"           # PL1..PL4
+  WAF_BODY_MAX_BYTES: "262144"      # 256KB；超限跳过 body 检查（不丢请求）
+  WAF_FAIL_MODE: "auto"             # 检测→放行+告警；阻断→403（不静默放行）
+  WAF_EXCLUDES_PATH: ""             # 排除表挂载路径（示例见 excludes.json.example）
+  WAF_LISTEN: ":8080"
+  WAF_UPSTREAM_URL: "http://ai-proxy.security.svc.cluster.local:8080"  # ⚙ 安装期参数：按现场 Provider 上游覆写；未填 fail-closed 拒绝启动
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wafsvc
+  namespace: security
+  labels: { app: wafsvc }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: wafsvc }
+  template:
+    metadata:
+      labels: { app: wafsvc }
+      annotations:
+        # 规则集定版校验和（与 crs-manifest.yaml 对齐；变更须评审）
+        security.ai/crs-version: "4.25.0"
+        security.ai/crs-checksum-sha256: "c0a9f4ae9f2a5f2dcdcfb154946b30df8f565448495891019a84231d581c6066"
+    spec:
+      containers:
+        - name: wafsvc
+          image: security-ai-gateway/wafsvc:dev   # 占位：构建/推 registry 待发布指令
+          ports:
+            - { name: http, containerPort: 8080 }
+          envFrom:
+            - configMapRef: { name: wafsvc-config }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            # §2.5 性能红线：显式资源上限，防 useCRS 失控空转重演
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wafsvc
+  namespace: security
+spec:
+  selector: { app: wafsvc }
+  ports:
+    - { name: http, port: 8080, targetPort: http }
