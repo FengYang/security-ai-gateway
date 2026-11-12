@@ -1,8 +1,9 @@
 // Package ohttp 最小 OHTTP（Oblivious HTTP）客户端封装（Azure Confidential Inferencing 使用 OHTTP+HPKE 端到端加密）。
 //
-// 本期实现 HPKE 加密核心（基于 Go 1.26 标准库 crypto/hpke，RFC 9180，真实可运行）；OHTTP 二进制 HTTP
-// 消息封装为简化占位（pending-doc，待对齐 RFC 9458 的 binary HTTP framing 与 gateway 侧解密代理）。
-// 设计依据：§1.4 / 设计文档 Azure P1 分支。
+// M8-1 后实现状态：HPKE 加密核心（Go 1.26 标准库 crypto/hpke，RFC 9180，真实可运行）+
+// RFC 9292 binary HTTP 编解码（framing.go）+ RFC 9458 请求/响应封装与响应派生（ohttp_req.go，
+// 封装算法逐字对齐 RFC 9458 §4.3/§4.4）。legacy 占位封装路径保留一个版本作回退。
+// 设计依据：技术方案《网关侧缺口整改》§5.5 / 设计文档 Azure P1 分支。
 //
 // 说明：刻意不引入第三方 HPKE/KEM 库——标准库 crypto/hpke 自 Go 1.26 起提供完整 RFC 9180 实现，
 // 与本模块 go.mod 声明的 go 1.26.0 一致，且保证离线构建稳定（架构决策：不引入重型 SDK）。
@@ -14,9 +15,11 @@ import (
 	"fmt"
 )
 
-// hpkeInfo 为 HPKE 上下文的 application info（RFC 9180 §5.1）。
-// 真实部署须与 Azure 机密推理侧约定的 info 保持一致，否则密钥派生不匹配、解密失败。
-// pending-doc：Azure 侧 info 约定待官方文档/商务对接确认后替换。
+// hpkeInfoLegacy 为 legacy 封装路径的 HPKE application info（占位实现专用）。
+// RFC 9458 正式封装（framing.go + ohttp_req.go，M8-1 已实装）的方向化 info 为
+// "message/bhttp request" / "message/bhttp response"（OHTTP_INFO_REQ/OHTTP_INFO_RES 可覆写，
+// 见 ohttp_req.go）。legacy 路径保留一个版本作为回退（OHTTP_FRAMING=legacy，技术方案 §5.5），
+// 其后删除——不得用于新集成。
 const hpkeInfo = "confllm-ohttp-v1"
 
 // OHClient 基于 HPKE 的最小 OHTTP 客户端。
@@ -80,5 +83,6 @@ func (c *OHClient) Seal(plaintext []byte) ([]byte, error) {
 	return out, nil
 }
 
-// PendingDocNote 记录 OHTTP 二进制 HTTP 封装待补全的约定（RFC 9458）。
-const PendingDocNote = "OHTTP 二进制 HTTP 消息封装为简化实现（pending-doc）：当前仅提供 HPKE 加密核心，待对齐 RFC 9458 的 binary HTTP framing 与 gateway 侧解密代理。"
+// PendingDocNote 记录 OHTTP 封装实现状态（M8-1 后：RFC 9458/9292 framing 已实装；
+// 本常量仅描述 legacy 占位路径的回退语义，新集成一律使用 RFC 9458 正式封装）。
+const PendingDocNote = "legacy 占位封装（OHTTP_FRAMING=legacy 回退路径，保留一个版本）：仅提供 HPKE 加密核心；RFC 9458 binary HTTP framing 与请求/响应封装已在 framing.go / ohttp_req.go 实装（M8-1）。"
