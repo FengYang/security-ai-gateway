@@ -1337,7 +1337,7 @@ func (s *teeServer) engineFor(engineType string) (model.Engine, error) {
 //   - preferred 为空（仅当 route.Policy 配置了成本路由时进入）→ 自动择优：按成本排序的
 //     候选列表顺序 failover（engineFor 失败才切下一个，流式开始后不切换，避免半截明文）。
 func (s *teeServer) resolveEngineWithFailover(tenant, modelName, preferred string) (string, model.Engine, error) {
-	allowed, _, err := s.routeCfg().Resolve(tenant, modelName)
+	allowed, _, _, err := s.routeCfg().Resolve(tenant, modelName)
 	if err != nil {
 		return "", nil, err
 	}

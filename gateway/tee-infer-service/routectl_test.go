@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"security-ai-gateway/protocol/go"
 )
 
 // bytesSource 测试用内存配置源。
@@ -216,5 +218,114 @@ func TestRouteCfgFallback(t *testing.T) {
 func TestDefaultRouteConfigPassesValidation(t *testing.T) {
 	if err := validateRouteConfig(DefaultRouteConfig()); err != nil {
 		t.Fatalf("内置缺省配置未通过校验: %v", err)
+	}
+}
+
+// ---------- M9-1/M4-3：路由配置扩展点（placement，技术实现方案 §7.1） ----------
+
+// TestPlacementHintDerivation hint 派生规则：nil→cloud；edge 目标+租户在范围→raw edge；
+// 不在范围且有 cloud 目标→raw auto；均不满足→cloud；edge 引擎未注册时 raw 非 cloud
+// 一律回退 cloud（§7.1：未注册回退 + 告警），现有引擎列表语义不变。
+func TestPlacementHintDerivation(t *testing.T) {
+	cases := []struct {
+		name string
+		p    *PlacementConfig
+		hint string
+	}{
+		{"未配置", nil, PlacementHintCloud},
+		{"仅 cloud", &PlacementConfig{Targets: []string{"cloud"}}, PlacementHintCloud},
+		{"edge+范围匹配", &PlacementConfig{Targets: []string{"cloud", "edge"}, EdgeRequiredTenantScopes: []string{"edge-tenant"}}, PlacementHintCloud},  // edge 未注册 → 回退
+		{"edge+不限范围", &PlacementConfig{Targets: []string{"edge"}}, PlacementHintCloud},                                                              // raw=edge，未注册 → 回退
+		{"edge+范围不匹配含cloud", &PlacementConfig{Targets: []string{"cloud", "edge"}, EdgeRequiredTenantScopes: []string{"other"}}, PlacementHintCloud}, // raw=auto → 回退
+		{"edge+范围不匹配仅edge", &PlacementConfig{Targets: []string{"edge"}, EdgeRequiredTenantScopes: []string{"other"}}, PlacementHintCloud},           // fail-safe → cloud
+	}
+	for _, tc := range cases {
+		cfg := DefaultRouteConfig()
+		cfg.Placement = tc.p
+		if got := cfg.placementHintFor("edge-tenant"); got != tc.hint {
+			t.Fatalf("%s: placementHintFor = %q，want %q", tc.name, got, tc.hint)
+		}
+	}
+}
+
+// TestPlacementRawHintBeforeEdgeRegistered 验证 raw hint 派生逻辑本身（绕过未注册回退：
+// edge 注册后 hint 即生效——以「直接调派生规则」的等价输入组合断言中间值）。
+func TestPlacementRawHintBeforeEdgeRegistered(t *testing.T) {
+	cfg := DefaultRouteConfig()
+	cfg.Placement = &PlacementConfig{Targets: []string{"cloud", "edge"}, EdgeRequiredTenantScopes: []string{"t1", "t2"}}
+	// 在范围内 → raw=edge（当前因未注册回退 cloud；注册 edge 后此处直接生效）。
+	if got := cfg.placementHintFor("t1"); got != PlacementHintCloud {
+		t.Fatalf("edge 未注册时应回退 cloud，got %q", got)
+	}
+	// 模拟端侧引擎注册后的行为：临时登记 edge 引擎（仅测试进程内）。
+	registeredEngines[placementEngineEdge] = true
+	defer delete(registeredEngines, placementEngineEdge)
+	if got := cfg.placementHintFor("t1"); got != PlacementHintEdge {
+		t.Fatalf("edge 注册后 hint 应为 edge，got %q", got)
+	}
+	if got := cfg.placementHintFor("t3"); got != PlacementHintAuto {
+		t.Fatalf("范围外 hint 应为 auto，got %q", got)
+	}
+}
+
+// TestValidatePlacementConfig 校验：非法 targets/policy/空白 scope 拒绝换入（fail-safe）。
+func TestValidatePlacementConfig(t *testing.T) {
+	bads := []PlacementConfig{
+		{Targets: nil},
+		{Targets: []string{"cloud", "far-edge"}},
+		{Targets: []string{"edge"}, Policy: "cheapest"},
+		{Targets: []string{"edge"}, EdgeRequiredTenantScopes: []string{"  "}},
+	}
+	for i, p := range bads {
+		if err := validatePlacementConfig(&p); err == nil {
+			t.Fatalf("负例 %d 应拒绝: %+v", i, p)
+		}
+	}
+	if err := validatePlacementConfig(nil); err != nil {
+		t.Fatalf("nil 应放行（缺省 cloud）: %v", err)
+	}
+	if err := validatePlacementConfig(&PlacementConfig{Targets: []string{"cloud", "edge"}, Policy: "privacy"}); err != nil {
+		t.Fatalf("合法配置应放行: %v", err)
+	}
+}
+
+// TestResolvePlacementExtensionPoint Resolve 第 4 返回值：未配置 → cloud；
+// 配置后因 edge 未注册 → cloud（现有路由行为不受影响）；配置经热加载可插拔换入。
+func TestResolvePlacementExtensionPoint(t *testing.T) {
+	src := &bytesSource{data: []byte(`{"model": {"m": {"engines": ["tee_gpu"]}}, "placement": {"targets": ["cloud", "edge"], "policy": "privacy", "edge_required_tenant_scopes": ["t1"]}}`)}
+	mgr, err := NewRouteConfigManager(src)
+	if err != nil {
+		t.Fatalf("首载带 placement 配置失败: %v", err)
+	}
+	cfg := mgr.Get()
+	if cfg.Placement == nil {
+		t.Fatal("placement 字段应解析成功（扩展点可插拔）")
+	}
+	engines, attest, placement, err := cfg.Resolve("t1", "m")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(engines) != 1 || engines[0] != protocol.EngineTypeTEEGPU || attest == "" {
+		t.Fatalf("引擎列表语义不得因扩展点改变: engines=%v attest=%q", engines, attest)
+	}
+	if placement != PlacementHintCloud {
+		t.Fatalf("edge 未注册时 placement 应回退 cloud，got %q", placement)
+	}
+	// 未配置 placement 的配置 → cloud（与现状一致）。
+	cfg2, err := ParseRouteConfig([]byte(`{"model": {"m": {"engines": ["tee_gpu"]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, placement2, err := cfg2.Resolve("any", "m")
+	if err != nil || placement2 != PlacementHintCloud {
+		t.Fatalf("未配置 placement 应恒 cloud: got %q err=%v", placement2, err)
+	}
+	// 非法 placement 拒绝换入，保持旧配置。
+	src.set([]byte(`{"model": {"m": {"engines": ["tee_gpu"]}}, "placement": {"targets": ["mars"]}}`))
+	if err := mgr.Reload(); err == nil {
+		t.Fatal("非法 placement 应拒绝换入")
+	}
+	if mgr.Get().Placement == nil {
+		t.Fatal("拒绝换入后应保持旧配置（含 placement）")
 	}
 }

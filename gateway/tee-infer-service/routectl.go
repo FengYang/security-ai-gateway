@@ -28,6 +28,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -116,6 +117,10 @@ func validateRouteConfig(c *RouteConfig) error {
 			return fmt.Errorf("routectl: 租户 %q attest %q 非法", t, tr.Attest)
 		}
 	}
+	// M9-1/M4-3 扩展点：placement 字段合法性（非法拒绝换入，fail-safe）。
+	if err := validatePlacementConfig(c.Placement); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -123,6 +128,115 @@ func validateRouteConfig(c *RouteConfig) error {
 func routeConfigVersion(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])[:12]
+}
+
+// ---------- M9-1/M4-3：路由配置扩展点（端侧适配，技术实现方案 §7.1） ----------
+
+// PlacementHint 端/云落点提示取值（§7.1：不实现端/云动态调度，仅预留决策点接口形态）。
+const (
+	PlacementHintCloud = "cloud" // 缺省：云端执行
+	PlacementHintEdge  = "edge"  // 端侧执行（未来端侧引擎注册后生效）
+	PlacementHintAuto  = "auto"  // 由调度器决定（当前无调度实现 → 执行点回退 cloud）
+)
+
+// placementEngineEdge 端侧引擎类型占位（§7.1：edge 作为未来引擎类型占位；
+// 端侧引擎真正注册时须加入 registeredEngines 并在模型 engines 列表显式声明，
+// 届时 edge 提示不再回退 cloud）。
+const placementEngineEdge = "edge"
+
+// PlacementConfig 端/云落点配置（RouteConfig 可选字段；缺省 = cloud，行为与现状一致）。
+//
+// JSON 形态（§7.1）：
+//
+//	"placement": {
+//	  "targets": ["cloud", "edge"],
+//	  "policy": "latency|cost|privacy",
+//	  "edge_required_tenant_scopes": ["..."]
+//	}
+type PlacementConfig struct {
+	// Targets 落点目标集合（⊆ {cloud, edge}，非空）。
+	Targets []string `json:"targets"`
+	// Policy 端/云调度策略（latency|cost|privacy；预留字段，当前仅校验合法性）。
+	Policy string `json:"policy,omitempty"`
+	// EdgeRequiredTenantScopes 允许 edge 落点的租户范围（空 = 不限租户）。
+	EdgeRequiredTenantScopes []string `json:"edge_required_tenant_scopes,omitempty"`
+}
+
+// placementHintFor 由配置+租户派生落点提示（确定性规则，无动态调度）：
+//   - Placement 未配置 / targets 不含 edge → cloud；
+//   - targets 含 edge：租户在 edge_required_tenant_scopes（scopes 空 = 不限）→ edge；
+//     否则 targets 含 cloud → auto；否则 → cloud（fail-safe）；
+//   - raw hint != cloud 且 edge 引擎未注册（现状恒成立）→ 告警（进程级一次）+ 回退 cloud
+//     （§7.1：edge 为未来引擎占位，未注册时回退 cloud + 告警；现有引擎列表语义不变）。
+func (c *RouteConfig) placementHintFor(tenant string) string {
+	p := c.Placement
+	if p == nil {
+		return PlacementHintCloud
+	}
+	hasCloud, hasEdge := false, false
+	for _, t := range p.Targets {
+		switch t {
+		case PlacementHintCloud:
+			hasCloud = true
+		case PlacementHintEdge:
+			hasEdge = true
+		}
+	}
+	raw := PlacementHintCloud
+	if hasEdge {
+		inScope := len(p.EdgeRequiredTenantScopes) == 0
+		for _, s := range p.EdgeRequiredTenantScopes {
+			if s == tenant {
+				inScope = true
+				break
+			}
+		}
+		switch {
+		case inScope:
+			raw = PlacementHintEdge
+		case hasCloud:
+			raw = PlacementHintAuto
+		}
+	}
+	if raw != PlacementHintCloud && !registeredEngines[placementEngineEdge] {
+		placementEdgeWarnOnce.Do(func() {
+			log.Printf("[routectl] placement 提示 %q 回退 cloud：edge 引擎类型尚未注册（端侧适配扩展点 §7.1；端侧引擎注册后自动生效）", raw)
+		})
+		return PlacementHintCloud
+	}
+	return raw
+}
+
+// placementEdgeWarnOnce 进程级一次告警（避免每请求刷日志）。
+var placementEdgeWarnOnce sync.Once
+
+// ---------- M9-1 扩展点校验（并入 validateRouteConfig，见下方调用） ----------
+
+// validatePlacementConfig placement 字段合法性校验（校验失败拒绝换入，fail-safe）。
+func validatePlacementConfig(p *PlacementConfig) error {
+	if p == nil {
+		return nil
+	}
+	if len(p.Targets) == 0 {
+		return fmt.Errorf("routectl: placement.targets 为空")
+	}
+	validTargets := map[string]bool{PlacementHintCloud: true, PlacementHintEdge: true}
+	for i, t := range p.Targets {
+		if !validTargets[t] {
+			return fmt.Errorf("routectl: placement.targets[%d] %q 非法（允许：cloud/edge）", i, t)
+		}
+	}
+	switch p.Policy {
+	case "", "latency", "cost", "privacy":
+	default:
+		return fmt.Errorf("routectl: placement.policy %q 非法（允许：latency/cost/privacy）", p.Policy)
+	}
+	for i, s := range p.EdgeRequiredTenantScopes {
+		if strings.TrimSpace(s) == "" {
+			return fmt.Errorf("routectl: placement.edge_required_tenant_scopes[%d] 为空白", i)
+		}
+	}
+	return nil
 }
 
 // ---------- M4-2：RouteConfigManager（热加载 + 原子换入） ----------

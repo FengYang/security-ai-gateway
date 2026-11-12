@@ -19,6 +19,9 @@ type RouteConfig struct {
 	// "latency"（延迟）/"quality"（质量）。仅影响候选引擎排序与 failover 顺序，
 	// 不改变 ValidateRequest 的准入语义（引擎必须在模型支持列表内）。
 	Policy string `json:"policy,omitempty"`
+	// Placement 端/云落点扩展点（M9-1/M4-3，技术实现方案 §7.1；可选，缺省 = cloud，
+	// 行为与现状一致。仅产出提示，不改变引擎列表语义；端/云动态调度不实现）。
+	Placement *PlacementConfig `json:"placement,omitempty"`
 }
 
 type TenantRoute struct {
@@ -51,8 +54,10 @@ func (c *RouteConfig) defaultRoute() TenantRoute {
 	return TenantRoute{Engine: eng, Attest: protocol.AttestTypeQuote}
 }
 
-// Resolve 解析租户+模型的最终路由
-func (c *RouteConfig) Resolve(tenant, model string) (allowedEngines []string, attest string, err error) {
+// Resolve 解析租户+模型的最终路由（M9-1/M4-3 扩展点：第 4 返回值 placement 为
+// 端/云落点提示，"cloud"|"edge"|"auto"，缺省 cloud；端/云动态调度不实现——
+// edge 引擎未注册时自动回退 cloud 并告警，现有引擎列表语义不变，见 routectl.go）。
+func (c *RouteConfig) Resolve(tenant, model string) (allowedEngines []string, attest string, placement string, err error) {
 	if mr, ok := c.Model[model]; ok {
 		allowedEngines = append([]string(nil), mr.Engines...)
 	} else {
@@ -70,7 +75,7 @@ func (c *RouteConfig) Resolve(tenant, model string) (allowedEngines []string, at
 				}
 			}
 			if !ok2 {
-				return nil, "", fmt.Errorf("route: 租户 %q 指定引擎 %q 不在模型 %q 支持列表 %v 中", tenant, tr.Engine, model, allowedEngines)
+				return nil, "", "", fmt.Errorf("route: 租户 %q 指定引擎 %q 不在模型 %q 支持列表 %v 中", tenant, tr.Engine, model, allowedEngines)
 			}
 			allowedEngines = []string{tr.Engine}
 		}
@@ -81,12 +86,13 @@ func (c *RouteConfig) Resolve(tenant, model string) (allowedEngines []string, at
 	if attest == "" {
 		attest = c.defaultRoute().Attest
 	}
-	return allowedEngines, attest, nil
+	placement = c.placementHintFor(tenant)
+	return allowedEngines, attest, placement, nil
 }
 
 // ValidateRequest 校验请求的 engine_type/attest_type 与路由配置，不匹配就拒绝
 func (c *RouteConfig) ValidateRequest(tenant, model, engineType, attestType string) error {
-	allowed, _, err := c.Resolve(tenant, model)
+	allowed, _, _, err := c.Resolve(tenant, model)
 	if err != nil {
 		return err
 	}

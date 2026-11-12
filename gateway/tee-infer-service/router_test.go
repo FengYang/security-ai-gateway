@@ -25,7 +25,7 @@ func TestRouteConfigParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engines, attest, err := cfg.Resolve("tenant-a", "qwen2.5-0.5b")
+	engines, attest, _, err := cfg.Resolve("tenant-a", "qwen2.5-0.5b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestRouteConfigParse(t *testing.T) {
 		t.Fatalf("attest 应为 quote: %s", attest)
 	}
 	// 未知模型 → 缺省路线 1
-	engines2, _, err := cfg.Resolve("other", "unknown-model")
+	engines2, _, _, err := cfg.Resolve("other", "unknown-model")
 	if err != nil {
 		t.Fatal(err)
 	}
