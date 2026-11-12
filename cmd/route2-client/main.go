@@ -150,9 +150,10 @@ type v2Response struct {
 }
 
 type client struct {
-	base string
-	http *http.Client
-	p    cryptop.Provider
+	base      string
+	http      *http.Client
+	p         cryptop.Provider
+	accelHint string // M5-2 请求级加速后端 hint（空=池默认；非法值由 masked-infer 拒绝并回退 CPU）
 }
 
 // session 一次 attest/ECDH/complete 之后得到的会话态。
@@ -174,13 +175,14 @@ func main() {
 	promptLen := flag.Int("prompt-len", 0, "prompt token 数；>0 时走 plan 驱动的 prefill/decode 路径")
 	gen := flag.Int("gen", 0, "生成 token 数（配合 -prompt-len；<=0 视为 1）")
 	selftest := flag.Bool("selftest", false, "本地直跑 route2ref 双基线（不连服务端）并打印对比报告")
+	accelHint := flag.String("accel-hint", "", "M5-2 请求级加速后端 hint（须为 ACCEL_BACKEND_LIB 候选列表内的受信路径；空=池默认）")
 	flag.Parse()
 
 	p, err := cryptop.New(cryptop.ProfileIntl)
 	if err != nil {
 		log.Fatalf("[route2-client] 初始化 cryptop(intl) 失败: %v", err)
 	}
-	c := &client{base: strings.TrimRight(*server, "/"), http: &http.Client{Timeout: 30 * time.Second}, p: p}
+	c := &client{base: strings.TrimRight(*server, "/"), http: &http.Client{Timeout: 30 * time.Second}, p: p, accelHint: strings.TrimSpace(*accelHint)}
 
 	// --selftest：完全本地，直连 route2ref.Selftest，不发起任何网络请求。
 	if *selftest {
@@ -947,7 +949,9 @@ func (c *client) run(dim, layers int, input string) (uint64, error) {
 
 // linearBatch 对 batch 做线性搬运，返回与 batch 同形的结果（旧路径与新路径共用）。
 func (c *client) linearBatch(m *maskedinfer.QuantizedMatrix, batch [][]uint64) ([][]uint64, error) {
-	out, err := m.AccelLinearInt128(batch)
+	// M5-2：请求级 hint 透传（空 = 池默认，行为与旧版完全一致）；
+	// 非法 hint（不在候选列表）由引擎返回 ErrAccelUnavailable → 下方 CPU 回退路径不变。
+	out, err := m.AccelLinearInt128Via(c.accelHint, batch)
 	if err == nil {
 		return out, nil
 	}

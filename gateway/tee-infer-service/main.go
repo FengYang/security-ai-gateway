@@ -240,6 +240,7 @@ type teeServer struct {
 	weightProvider      LayerWeightProvider        // 层权重提供器（掩码像计算）
 	route               *RouteConfig               // 双路线路由配置（启动期基线；未启用外置热加载时为唯一在效配置）
 	routeMgr            *RouteConfigManager        // M4-1/M4-2：外置路由配置热加载管理器（nil = 未启用；routeCfg() 优先取此）
+	accelSched          *accelScheduler            // M5-2：加速后端动态调度（与 AccelPool 同进程；路由表原子换入）
 	tokenizer           Tokenizer                  // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
 	cache               model.SemanticCache        // GF.4.1 精确缓存（P0-2：legacy 兜底；仅原生引擎未生效时使用）
 	cacheRT             atomic.Pointer[cacheState] // P0-2 B2 + §6.10：缓存运行时快照（原子切换，请求内一致）
@@ -4356,6 +4357,7 @@ func main() {
 		weightProvider:     NewMockWeightProvider(32),
 		route:              routeCfg,
 		routeMgr:           routeMgr,
+		accelSched:         newAccelScheduler(),
 		tokenizer:          nil,                                          // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
 		cache:              cacheengine.NewLegacyAdapter(cacheSt.engine), // P0-2：legacy 兜底（仅原生引擎未生效时使用）
 		usage:              make(map[string]*usageRecord),
@@ -4711,8 +4713,24 @@ func main() {
 	} else {
 		log.Printf("[audit] -audit-export-enabled 缺省 → 审计链导出端点未注册（默认关闭，零行为变化）")
 	}
-	mux.HandleFunc("/metrics", srv.handleMetrics)                                      // M10 可观测性
-	mux.HandleFunc("/config", srv.handleConfig)                                        // M3-B 安全中心：配置只读快照
+	mux.HandleFunc("/metrics", srv.handleMetrics) // M10 可观测性
+	mux.HandleFunc("/config", srv.handleConfig)   // M3-B 安全中心：配置只读快照
+	// M5-2：加速后端动态调度（与 AccelPool 同进程；管理令牌之下，变更落审计）。
+	if srv.accelSched != nil && srv.audit != nil {
+		srv.accelSched.onAudit = func(action, result, detail string) {
+			_ = srv.audit.append(AuditEvent{
+				EventID:   fmt.Sprintf("evt-accel-%d", time.Now().UnixNano()),
+				Timestamp: time.Now().UnixNano(),
+				RequestID: "-",
+				Action:    action,
+				Result:    result,
+				TraceID:   detail, // 证据字段承载版本/后端/原因摘要，不进 hash 域（旧链兼容）
+			})
+		}
+	}
+	mux.HandleFunc("/config/accel", srv.handleAccelConfig)
+	mux.HandleFunc("/config/accel/routes", srv.handleAccelRoutes)
+	mux.HandleFunc("/config/accel/switch", srv.handleAccelSwitch)
 	mux.HandleFunc("/config/guardrail", srv.handleGuardrailConfig)                     // M3-B 高敏复核：Guardrail 降级生效点
 	mux.HandleFunc("/config/output-guard", srv.handleOutputGuardConfig)                // OG-8 输出侧审查 mode 运行时切换
 	mux.HandleFunc("/config/output-guard/strategy", srv.handleOutputGuardStrategy)     // S3-2 策略 A/B/C 切换（C 诚实门控）
