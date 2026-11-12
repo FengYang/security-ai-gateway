@@ -238,7 +238,8 @@ type teeServer struct {
 	sessions            map[string]*teeSession     // 挑战-响应会话（session_id -> 会话）
 	recomputeStates     *recomputeStates           // 补算层序状态机（会话级）
 	weightProvider      LayerWeightProvider        // 层权重提供器（掩码像计算）
-	route               *RouteConfig               // 双路线路由配置
+	route               *RouteConfig               // 双路线路由配置（启动期基线；未启用外置热加载时为唯一在效配置）
+	routeMgr            *RouteConfigManager        // M4-1/M4-2：外置路由配置热加载管理器（nil = 未启用；routeCfg() 优先取此）
 	tokenizer           Tokenizer                  // 计量口径（nil = 字符/4 估算；GF.2.4 真机 tokenizer 接入点）
 	cache               model.SemanticCache        // GF.4.1 精确缓存（P0-2：legacy 兜底；仅原生引擎未生效时使用）
 	cacheRT             atomic.Pointer[cacheState] // P0-2 B2 + §6.10：缓存运行时快照（原子切换，请求内一致）
@@ -1105,7 +1106,7 @@ func (s *teeServer) handleInfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 双路线路由校验
-	if err := s.route.ValidateRequest(tenant, req.Model, req.EngineType, req.AttestType); err != nil {
+	if err := s.routeCfg().ValidateRequest(tenant, req.Model, req.EngineType, req.AttestType); err != nil {
 		s.denyAndAudit(r, tenant, req.RequestID, "route_rejected", payloadSHA)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1336,7 +1337,7 @@ func (s *teeServer) engineFor(engineType string) (model.Engine, error) {
 //   - preferred 为空（仅当 route.Policy 配置了成本路由时进入）→ 自动择优：按成本排序的
 //     候选列表顺序 failover（engineFor 失败才切下一个，流式开始后不切换，避免半截明文）。
 func (s *teeServer) resolveEngineWithFailover(tenant, modelName, preferred string) (string, model.Engine, error) {
-	allowed, _, err := s.route.Resolve(tenant, modelName)
+	allowed, _, err := s.routeCfg().Resolve(tenant, modelName)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1347,7 +1348,7 @@ func (s *teeServer) resolveEngineWithFailover(tenant, modelName, preferred strin
 		}
 		return preferred, eng, nil
 	}
-	ordered := s.route.orderEngines(allowed, modelName)
+	ordered := s.routeCfg().orderEngines(allowed, modelName)
 	var lastErr error
 	for _, et := range ordered {
 		eng, err := s.engineFor(et)
@@ -1488,7 +1489,7 @@ func (s *teeServer) handleTextInfer(w http.ResponseWriter, sess *teeSession,
 	if engType == "" {
 		// GF.3.3 / D-6：未显式指定引擎时，若配置了成本路由策略（route.Policy）则自动择优
 		// （首选 = 成本排序首候选）；否则回退 tee_gpu（既有缺省行为，向后兼容）。
-		if s.route.Policy != "" {
+		if s.routeCfg().Policy != "" {
 			engType = "" // 交由 resolveEngineWithFailover 的成本择优分支选择
 		} else {
 			engType = protocol.EngineTypeTEEGPU
@@ -4088,17 +4089,47 @@ func main() {
 	// tracing 未启用时为 http.DefaultTransport（零行为变化）。
 	model.SetUpstreamTransport(upstreamTransport())
 
-	// 双路线路由配置
+	// 双路线路由配置（M4-1/M4-2：外置热加载优先，未配置回退内置缺省）
 	routeCfg := DefaultRouteConfig()
-	if *routeConfigFile != "" {
-		data, err := os.ReadFile(*routeConfigFile)
+	routeCfgPath := *routeConfigFile
+	if routeCfgPath == "" {
+		// 技术方案 §3.6：ROUTE_CONFIG_PATH·空·env·未填=内置 DefaultRouteConfig（现状行为）
+		routeCfgPath = os.Getenv("ROUTE_CONFIG_PATH")
+	}
+	var routeMgr *RouteConfigManager
+	if routeCfgPath != "" {
+		mgr, err := NewRouteConfigManager(NewFileRouteConfigSource(routeCfgPath))
 		if err != nil {
-			log.Fatalf("读取路由配置失败（fail-closed）: %v", err)
+			log.Fatalf("外置路由配置首载失败（fail-closed 拒绝启动）: %v", err)
 		}
-		routeCfg, err = ParseRouteConfig(data)
-		if err != nil {
-			log.Fatalf("解析路由配置失败（fail-closed）: %v", err)
+		// 热加载换入/拒绝留痕（技术方案 §3.1 判据 5：变更审计；version+err 由回调方落审计）
+		mgr.OnReload = func(version string, rerr error) {
+			action := "route_config_reload"
+			if rerr != nil {
+				action = "route_config_reload_rejected"
+			}
+			if audit == nil {
+				log.Printf("[routectl] 配置变更留痕（审计链未就绪，仅日志）version=%s err=%v", version, rerr)
+				return
+			}
+			_ = audit.append(AuditEvent{
+				EventID:   fmt.Sprintf("evt-routeconfig-%d", time.Now().UnixNano()),
+				Timestamp: time.Now().UnixNano(),
+				RequestID: "-",
+				Action:    action,
+				Result:    map[bool]string{true: "ok", false: "deny"}[rerr == nil],
+				// 版本号与错误摘要入 payload_hash 槽位口径之外：复用 ShadowRule/OGPolicySHA256 证据字段不合语义，
+				// 以 TraceID 承载版本号（证据字段，不进 hash）——避免 AuditEvent 结构变更（旧链兼容红线）。
+				TraceID: version,
+			})
 		}
+		stopWatch := mgr.StartWatch(routeReloadModeFromEnv(), routePollIntervalFromEnv())
+		defer stopWatch()
+		routeMgr = mgr
+		routeCfg = mgr.Get()
+		log.Printf("路由配置: 外置热加载 path=%s version=%s reload=%s", routeCfgPath, mgr.Version(), routeReloadModeFromEnv())
+	} else {
+		log.Printf("路由配置: 内置缺省 DefaultRouteConfig（未配置 -route-config / ROUTE_CONFIG_PATH）")
 	}
 
 	// 飞地抽象初始化（mock / tdx / sgx；tdx/sgx 需硬件接入）
@@ -4251,6 +4282,24 @@ func main() {
 		if err != nil {
 			log.Fatalf("初始化 WORM 审计失败（fail-closed 拒绝启动）: %v", err)
 		}
+		// M2-2：WORM 后端选择（技术方案 §1.6：WORM_BACKEND·file·默认；dual=fileWorm 权威 + S3 镜像）。
+		wormMode, wmErr := wormBackendModeFromEnv()
+		if wmErr != nil {
+			log.Fatalf("WORM_BACKEND 配置非法（fail-closed 拒绝启动）: %v", wmErr)
+		}
+		if wormMode == "dual" {
+			s3Cfg, scErr := s3WormConfigFromEnv()
+			if scErr != nil {
+				log.Fatalf("WORM S3 配置非法（fail-closed 拒绝启动）: %v", scErr)
+			}
+			sb, sbErr := newS3WormBackend(context.Background(), s3Cfg)
+			if sbErr != nil {
+				log.Fatalf("初始化 WORM S3 镜像后端失败（fail-closed 拒绝启动）: %v", sbErr)
+			}
+			audit.worm = &dualWorm{primary: audit.worm, mirror: sb}
+			log.Printf("审计 WORM: S3 镜像已挂载 backend=%s mode=%s retention=%dd（主链 fileWorm 链序权威不变）",
+				sb.Name(), s3Cfg.Mode, s3Cfg.RetentionDays)
+		}
 		audit.tsa = tsa
 		rec := audit.anchorNow()
 		// P1-7 T0（D-17）：落盘强度档位在启动日志暴露（单一计数点归属 fileWorm）。
@@ -4305,6 +4354,7 @@ func main() {
 		recomputeStates:    newRecomputeStates(),
 		weightProvider:     NewMockWeightProvider(32),
 		route:              routeCfg,
+		routeMgr:           routeMgr,
 		tokenizer:          nil,                                          // GF.2.4：nil = CJK 感知估算（过渡口径，metering_mode=estimate）；真机 tokenizer 注入点
 		cache:              cacheengine.NewLegacyAdapter(cacheSt.engine), // P0-2：legacy 兜底（仅原生引擎未生效时使用）
 		usage:              make(map[string]*usageRecord),
