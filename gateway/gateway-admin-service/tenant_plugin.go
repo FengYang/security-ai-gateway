@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -383,6 +385,89 @@ var pluginExclusiveClass = map[string]string{
 	"otpmask":                "segment1",
 }
 
+// ---------- M3-2：WAF 租户插件下发字段（gateway/wafsvc sidecar） ----------
+
+// WafPluginParams WAF 插件下发参数（pluginEntry.Params 的强类型视图）。
+// 参数名·默认值·覆写点·未填行为（技术方案 §2.6 安装期参数在租户级的映射）：
+//   - mode·detection·租户插件 params·未填=检测模式（命中告警不阻断）；off=该租户关闭
+//   - paranoia·1·租户插件 params·未填=PL1
+//   - excludes_path·空·租户插件 params·未填=无排除项（须为受信绝对路径）
+//   - fail_mode·auto·租户插件 params·未填=按 mode 联动（检测→放行+告警，阻断→403）
+//
+// ⚠ 复用率口径：WAF 由本仓 wafsvc sidecar 提供，**不计入 Higress 原生插件复用数**
+// （governanceCapabilities 第 16 项 Reused 保持 false，不虚增 V-S9 指标）。
+type WafPluginParams struct {
+	Mode         string `json:"mode"`
+	Paranoia     int    `json:"paranoia"`
+	ExcludesPath string `json:"excludes_path"`
+	FailMode     string `json:"fail_mode"`
+}
+
+// validateWafPluginParams 校验租户下发的 WAF 参数（非法值在 N6 预检阶段拒绝，不下发）。
+func validateWafPluginParams(params map[string]string) error {
+	mode := strings.TrimSpace(params["mode"])
+	switch mode {
+	case "", "off", "detection", "blocking":
+	default:
+		return fmt.Errorf("waf.mode %q 非法（off|detection|blocking）", mode)
+	}
+	if v := strings.TrimSpace(params["paranoia"]); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 4 {
+			return fmt.Errorf("waf.paranoia %q 非法（1..4）", v)
+		}
+	}
+	if v := strings.TrimSpace(params["fail_mode"]); v != "" {
+		switch v {
+		case "auto", "open", "block":
+		default:
+			return fmt.Errorf("waf.fail_mode %q 非法（auto|open|block）", v)
+		}
+	}
+	if v := strings.TrimSpace(params["excludes_path"]); v != "" && !filepath.IsAbs(v) {
+		return fmt.Errorf("waf.excludes_path 须为受信绝对路径: %q", v)
+	}
+	return nil
+}
+
+// WafPluginParamsFromChain 从插件链提取 WAF 下发参数；返回 (参数, 是否启用, error)。
+// 链中含 waf 插件且 mode != off → 启用；无 waf 或 mode=off → 关闭（per-tenant 开关）。
+func WafPluginParamsFromChain(chain []pluginEntry) (WafPluginParams, bool, error) {
+	p := WafPluginParams{Mode: "detection", Paranoia: 1, FailMode: "auto"}
+	found := false
+	for _, e := range chain {
+		if strings.TrimSpace(e.Name) != "waf" {
+			continue
+		}
+		found = true
+		if err := validateWafPluginParams(e.Params); err != nil {
+			return p, false, err
+		}
+		if v := strings.TrimSpace(e.Params["mode"]); v != "" {
+			p.Mode = v
+		}
+		if v := strings.TrimSpace(e.Params["paranoia"]); v != "" {
+			p.Paranoia, _ = strconv.Atoi(v) // 已由 validate 保证
+		}
+		if v := strings.TrimSpace(e.Params["fail_mode"]); v != "" {
+			p.FailMode = v
+		}
+		p.ExcludesPath = strings.TrimSpace(e.Params["excludes_path"])
+		break
+	}
+	return p, found && p.Mode != "off", nil
+}
+
+// ToEnv 映射为 wafsvc 安装期 env（N5 下发通道复用）。
+func (p WafPluginParams) ToEnv() map[string]string {
+	return map[string]string{
+		"WAF_MODE":           p.Mode,
+		"WAF_PARANOIA_LEVEL": strconv.Itoa(p.Paranoia),
+		"WAF_EXCLUDES_PATH":  p.ExcludesPath,
+		"WAF_FAIL_MODE":      p.FailMode,
+	}
+}
+
 // precheckPluginSet 冲突/完整性预检（N6，交 N5 下发前的门禁）。
 // 覆盖：① 缺失必需插件；② 同类互斥插件重复；③ 段① 开关与 otpmask 一致；
 // ④ otpmask 必须先于 ai-proxy；⑤ 执行序唯一且升序。
@@ -423,6 +508,12 @@ func precheckPluginSet(t *pluginTemplate) error {
 				reasons = append(reasons, fmt.Sprintf("同类插件冲突：%s 与 %s 同属 %s 类", first, name, class))
 			} else {
 				classSeen[class] = name
+			}
+		}
+		// M3-2：waf 插件下发参数合法性（非法值在 N6 预检拒绝，不下发到 wafsvc）。
+		if name == "waf" {
+			if err := validateWafPluginParams(p.Params); err != nil {
+				reasons = append(reasons, fmt.Sprintf("waf 插件参数非法：%v", err))
 			}
 		}
 	}
@@ -536,7 +627,7 @@ var governanceCapabilities = []governanceCapability{
 	{"敏感数据脱敏（Guardrail）", "ai-data-masking", false, true},            // 13 结构不可复用
 	{"复杂策略外置", "opa", false, false},                                  // 14 增强候选
 	{"数据出境地域策略", "geo-ip", true, false},                              // 15 复用候选
-	{"WAF / 防爬", "waf/bot-detect/request-block", false, false},       // 16 按需
+	{"WAF / 防爬", "waf/bot-detect/request-block", false, false},       // 16 可用（M3-2：per-tenant 可启用 wafsvc sidecar；不计 Higress 原生复用，见 WafPluginParams 注释）
 }
 
 // higressReuseRate 计算治理面插件复用率（V-S9：≥ 70%）。

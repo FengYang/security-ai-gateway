@@ -260,3 +260,76 @@ func TestDiffPluginSet(t *testing.T) {
 		t.Error("存在差异时 InSync 应为 false")
 	}
 }
+
+// ---------- M3-2：WAF 租户插件接入 ----------
+
+func wafTemplate(t *testing.T, params map[string]string) *pluginTemplate {
+	t.Helper()
+	tmpl, err := loadPluginTemplate(scenarioS1)
+	if err != nil {
+		t.Fatalf("加载 s1 失败: %v", err)
+	}
+	tmpl.Chain = append(tmpl.Chain, pluginEntry{Name: "waf", Order: 95, Params: params})
+	return tmpl
+}
+
+// TestM32WafPluginValidParams 合法下发参数：预检通过、启用、env 映射正确。
+func TestM32WafPluginValidParams(t *testing.T) {
+	tmpl := wafTemplate(t, map[string]string{
+		"mode": "blocking", "paranoia": "2", "fail_mode": "block", "excludes_path": "/etc/waf/excludes.json",
+	})
+	if err := precheckPluginSet(tmpl); err != nil {
+		t.Fatalf("合法 waf 参数应通过预检: %v", err)
+	}
+	p, enabled, err := WafPluginParamsFromChain(tmpl.Chain)
+	if err != nil || !enabled {
+		t.Fatalf("应启用: p=%+v enabled=%v err=%v", p, enabled, err)
+	}
+	env := p.ToEnv()
+	if env["WAF_MODE"] != "blocking" || env["WAF_PARANOIA_LEVEL"] != "2" ||
+		env["WAF_FAIL_MODE"] != "block" || env["WAF_EXCLUDES_PATH"] != "/etc/waf/excludes.json" {
+		t.Fatalf("env 映射错误: %+v", env)
+	}
+}
+
+// TestM32WafPluginInvalidParams 非法参数在 N6 预检阶段拒绝（不下发）。
+func TestM32WafPluginInvalidParams(t *testing.T) {
+	bad := []map[string]string{
+		{"mode": "bogus"},
+		{"paranoia": "9"},
+		{"fail_mode": "maybe"},
+		{"excludes_path": "relative.json"},
+	}
+	for i, p := range bad {
+		if err := precheckPluginSet(wafTemplate(t, p)); err == nil {
+			t.Errorf("负例 %d 应拒绝: %+v", i, p)
+		}
+	}
+}
+
+// TestM32WafPluginPerTenantSwitch per-tenant 开关：无 waf / mode=off → 关闭；默认 detection。
+func TestM32WafPluginPerTenantSwitch(t *testing.T) {
+	tmpl, err := loadPluginTemplate(scenarioS1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, enabled, _ := WafPluginParamsFromChain(tmpl.Chain); enabled {
+		t.Fatal("链中无 waf 插件时不应启用")
+	}
+	if _, enabled, _ := WafPluginParamsFromChain(wafTemplate(t, map[string]string{"mode": "off"}).Chain); enabled {
+		t.Fatal("mode=off 时该租户应关闭")
+	}
+	p, enabled, _ := WafPluginParamsFromChain(wafTemplate(t, nil).Chain)
+	if !enabled || p.Mode != "detection" || p.Paranoia != 1 {
+		t.Fatalf("缺省应为 detection/PL1: p=%+v enabled=%v", p, enabled)
+	}
+}
+
+// TestM32WafPluginExclusiveClass 「waf」类互斥语义生效（同链两个 waf 拒绝）。
+func TestM32WafPluginExclusiveClass(t *testing.T) {
+	tmpl := wafTemplate(t, nil)
+	tmpl.Chain = append(tmpl.Chain, pluginEntry{Name: "waf", Order: 96})
+	if err := precheckPluginSet(tmpl); err == nil {
+		t.Fatal("同链两个 waf 插件应被同类互斥拦截")
+	}
+}
