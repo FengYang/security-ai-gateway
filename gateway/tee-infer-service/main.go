@@ -4089,6 +4089,8 @@ func main() {
 	// tracing 未启用时为 http.DefaultTransport（零行为变化）。
 	model.SetUpstreamTransport(upstreamTransport())
 
+	var audit *auditChain // 提前声明：M4-2 路由配置热加载回调需引用审计链（WORM 模式下运行期赋值）
+
 	// 双路线路由配置（M4-1/M4-2：外置热加载优先，未配置回退内置缺省）
 	routeCfg := DefaultRouteConfig()
 	routeCfgPath := *routeConfigFile
@@ -4272,7 +4274,6 @@ func main() {
 	default:
 		log.Fatalf("未知 TSA 模式: %q（mock|rfc3161|off）", *tsaMode)
 	}
-	var audit *auditChain
 	if *auditFile != "" {
 		fsyncCfg, ferr := auditFsyncConfigFromFlag(*auditFsync)
 		if ferr != nil {
