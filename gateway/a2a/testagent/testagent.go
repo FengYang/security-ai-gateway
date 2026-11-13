@@ -146,7 +146,7 @@ func (a *Agent) PinnedKeys() []protocol.PinnedKey {
 
 type executor struct{}
 
-func (executor) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[sdk.Event, error] {
+func (executor) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[sdk.Event, error] {
 	return func(yield func(sdk.Event, error) bool) {
 		if ec.StoredTask == nil {
 			if !yield(sdk.NewSubmittedTask(ec, ec.Message), nil) {
@@ -159,6 +159,17 @@ func (executor) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2
 		state := finalState(ec)
 		if !yield(sdk.NewStatusUpdateEvent(ec, state, nil), nil) {
 			return
+		}
+		// INPUT_REQUIRED / AUTH_REQUIRED 是「等待外部输入」的**可恢复中间态**：
+		// agent 此时并未结束工作，而是挂起等待下一条消息。sdk 以「迭代器返回」
+		// 作为执行结束信号并随即关闭该任务的执行队列，因此这里若直接返回，紧随
+		// 其后的 CancelTask 就会命中已关闭队列，sdk 把它报成
+		// -32603(INTERNAL_ERROR: cancelation failed: queue is closed) 而不是正常
+		// 取消（KI#4 的剩余竞态：约 1/50 触发）。保持迭代器存活即可让队列不关，
+		// 取消路径按 sdk 既有语义产出 CANCELED。释放由上下文结束承担（请求结束 /
+		// 连接关闭 / 测试清理时 sdk 取消 ctx）。
+		if state == sdk.TaskStateInputRequired || state == sdk.TaskStateAuthRequired {
+			<-ctx.Done()
 		}
 	}
 }
