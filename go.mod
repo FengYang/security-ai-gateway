@@ -11,7 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.21.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.10
 	github.com/corazawaf/coraza-coreruleset/v4 v4.25.0
-	github.com/corazawaf/coraza/v3 v3.5.0
+	github.com/corazawaf/coraza/v3 v3.8.1
 	github.com/emmansun/gmsm v0.44.1
 	github.com/google/go-tdx-guest v0.3.1
 	github.com/higress-group/proxy-wasm-go-sdk v0.0.0-20260525073613-662ed045bf0b
@@ -52,7 +52,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/corazawaf/libinjection-go v0.3.2 // indirect
+	github.com/corazawaf/libinjection-go v0.3.3 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/dlclark/regexp2 v1.10.0 // indirect
@@ -60,7 +60,7 @@ require (
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
-	github.com/goccy/go-yaml v1.18.0 // indirect
+	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect

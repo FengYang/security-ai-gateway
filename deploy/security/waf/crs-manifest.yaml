@@ -3,7 +3,7 @@
 # ⚠ 许可口径修正：OWASP CRS 4.x 起为 **Apache-2.0（ASLv2）**，非技术方案 §2.4 表格
 #   所写的 CC-BY-SA 3.0（CRS 3.x 口径）。规则集数据随 Go 模块
 #   github.com/corazawaf/coraza-coreruleset/v4@v4.25.0 内嵌发布，其 LICENSE 为 Apache-2.0；
-#   Coraza 引擎 github.com/corazawaf/coraza/v3@v3.5.0 同为 Apache-2.0。
+#   Coraza 引擎 github.com/corazawaf/coraza/v3@v3.8.1 同为 Apache-2.0。
 #   署名：OWASP® ModSecurity Core Rule Set (CRS) / Trustwave & CRS project contributors,
 #         Copyright (c) 2006-2020 Trustwave, 2021-2026 CRS project.
 #   禁止引入 AGPL/GPL/SSPL/BUSL 引擎（§2.4）。
@@ -18,8 +18,8 @@ metadata:
   namespace: security
 data:
   crs_version: "4.25.0"
-  coraza_version: "3.5.0"
-  rules_count_at_build: "662"           # coraza WAF.RulesCount() 实跑值（.248, 2026-11-13）
+  coraza_version: "3.8.1"
+  rules_count_at_build: "662"           # coraza WAF.RulesCount() 实跑值（.248, 2026-11-13；规则集文本未变，引擎升级 v3.8.1 后校验和不变）
   ruleset_checksum_sha256: "c0a9f4ae9f2a5f2dcdcfb154946b30df8f565448495891019a84231d581c6066"
   ruleset_license: "Apache-2.0"
   ruleset_attribution: "OWASP ModSecurity Core Rule Set (CRS) 4.25.0, Trustwave & CRS project contributors, Apache-2.0"

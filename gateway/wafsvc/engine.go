@@ -1,6 +1,6 @@
 // Package wafsvc — 明文 Provider 入口 WAF 过滤服务（M3-1，技术实现方案 §2）。
 //
-// 形态：独立 sidecar（in-process Coraza v3.5.0 + OWASP CRS 4.25.0），一期不碰
+// 形态：独立 sidecar（in-process Coraza v3.8.1 + OWASP CRS 4.25.0），一期不碰
 // Higress 插件链本体（P1-8 红线：deploy/higress/* 与 otpmask-plugin 只读不动）。
 // 防护边界：仅明文 Provider 入口 `/provider/<name>/...`；密态路径仅元数据防护不变。
 //
@@ -39,7 +39,7 @@ import (
 
 // 版本定版（安装期 WAF_CRS_VERSION 必须与之匹配；升级走规则集变更评审 + 重登记校验和）。
 const (
-	CorazaVersion = "3.5.0"
+	CorazaVersion = "3.8.1"
 	CRSVersion    = "4.25.0"
 )
 
