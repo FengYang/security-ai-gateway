@@ -86,9 +86,16 @@ jobs:
       # 2b. Trivy 依赖扫描门禁（P1-3 等保 §6.4④/§6.7：漏洞扫描门禁，HIGH/CRITICAL 阻止合入）。
       #     范围限本仓库自有依赖清单（go.sum 等）；跳过 vendor/ 与外部工具/模型树，避免历史遗留
       #     第三方向量产生噪声门禁失败（本方案自有依赖的高危以本步骤 + govulncheck 双门禁兜底）。
+      #     ⚠ 版本钉死说明（2026-11-13）：`version` 必须显式给出。trivy-action 的默认 trivy 版本
+      #     曾指向**没有 release 资产**的 tag（v0.33.1 默认 v0.65.0、v0.34.0 默认 v0.69.1，
+      #     releases/tags 均 404）⇒ setup-trivy 下载 tar.gz 失败、步骤在安装阶段即退出，
+      #     门禁从未真正执行过（表现为看似随机的红灯，极易被误判成依赖漏洞）。此处钉 v0.70.0
+      #     （与 action v0.36.0 同批测试的版本，tar.gz + checksums 资产齐备）；漏洞检出能力由
+      #     扫描时拉取的漏洞库决定、与二进制版本无关，故钉版本不降低门禁强度。
       - name: trivy fs scan (deps)
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
+          version: v0.70.0
           scan-type: fs
           scan-ref: .
           severity: HIGH,CRITICAL
@@ -363,9 +370,11 @@ jobs:
         run: docker build -t security-ai-gateway/gateway-admin-service:ci -f gateway/gateway-admin-service/Dockerfile .
 
       # 镜像漏洞扫描门禁（§6.4④：高危漏洞禁止合入）。
+      # `version` 显式钉死：理由同 2b（action 默认 trivy 版本曾指向无 release 资产的 tag）。
       - name: trivy image scan
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
+          version: v0.70.0
           image-ref: security-ai-gateway/gateway-admin-service:ci
           format: table
           severity: HIGH,CRITICAL
