@@ -15,11 +15,11 @@ type JitterInjector interface {
 
 // uniformJitter 均匀分布抖动（U[0, max_ms]）。
 type uniformJitter struct {
-	cfg   *CacheConfig
-	mu    sync.Mutex
-	rng   *rand.Rand
+	cfg     *CacheConfig
+	mu      sync.Mutex
+	rng     *rand.Rand
 	enabled bool
-	maxMs  int
+	maxMs   int
 }
 
 // NewJitterInjector 构造抖动注入器。
@@ -38,6 +38,18 @@ func NewJitterInjector(cfg *CacheConfig) JitterInjector {
 		}
 	}
 	j.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	return j
+}
+
+// newJitterInjectorWithSeed 仅供确定性回归测试（BM-4 KS）使用：固定随机源，
+// 消除「单次 KS 检验在 H0 成立时 p≤0.05 的固有 5% 随机误拒」导致的 flaky。
+// 生产路径仍由 NewJitterInjector 使用时间种子；判据（p>0.05）不放宽——
+// 若实现真的引入 hit/miss 分布偏差，任何种子下 KS 都会失败，故固定种子不构成掩盖。
+func newJitterInjectorWithSeed(cfg *CacheConfig, seed int64) JitterInjector {
+	j := NewJitterInjector(cfg)
+	if u, ok := j.(*uniformJitter); ok {
+		u.rng = rand.New(rand.NewSource(seed))
+	}
 	return j
 }
 

@@ -44,6 +44,14 @@ jobs:
       #     包级重构要靠它拦回归——例如把包拆错目录、留下重复符号/同名包时，vet 可能不报）。
       - name: go build (all packages)
         run: go build -mod=mod ./...
+
+      # 1b. Guardrail 基准语料：corpus.jsonl 按设计被 .gitignore 忽略（含第三方数据集内容 + 体积），
+      #     只入库生成脚本 + sources.json。CI 全新 checkout 无此文件 → 两个 baseline 用例 t.Fatalf。
+      #     脚本离线安全：公开集取数失败不中断，合成族（rule/benign/known_fp）照常生成，门禁①②生效。
+      - name: generate guardrail bench corpus (CI-only)
+        timeout-minutes: 8
+        run: pwsh -NoProfile -File scripts/build-guardrail-bench.ps1
+
       - name: unit tests
         env:
           # KI#5：BM-2 默认全量档 50000x512 的 HNSW 建图常态 575~578s，

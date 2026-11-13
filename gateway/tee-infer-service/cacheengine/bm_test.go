@@ -137,7 +137,7 @@ func TestBM1_ExactHitLatency(t *testing.T) {
 	cfg.Mode = ModeExact
 	cfg.Exact.MinPromptTokens = 2
 	cfg.Exact.MinTokens = 2
-	cfg.Exact.MaxEntries = 20000 // 保证 8192 预填不被淘汰
+	cfg.Exact.MaxEntries = 20000   // 保证 8192 预填不被淘汰
 	cfg.WriteLimit.Enabled = false // 基准预填非请求驱动写入，关闭 §7.4.2 写入限流
 	cfg.Guard.ReadFastCheck = false
 	eng := NewCacheEngine(cfg)
@@ -183,7 +183,10 @@ func TestBM4_JitterKS(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Semantic.Jitter.Enabled = true
 	cfg.Semantic.Jitter.MaxMs = 20
-	j := NewJitterInjector(&cfg)
+	// 固定种子（BM-4 回归确定性）：hit/miss 同分布的 KS 检验在 H0 成立时，
+	// 单次 p≤0.05 的固有误拒率约 5%，时间种子会让 CI 偶发红灯（KI flaky）。
+	// 生产注入器仍用时间种子；判据 p>0.05 不变，实现若有真实偏差任何种子都会失败。
+	j := newJitterInjectorWithSeed(&cfg, 1)
 
 	const n = 10000
 	hit := make([]float64, 0, n)
@@ -208,7 +211,7 @@ func TestBM5_MemoryBudget(t *testing.T) {
 	cfg.CacheMemoryBudget = ByteSize(256 * 1024 * 1024) // 基准预算 256MB
 	cfg.Exact.MinPromptTokens = 2
 	cfg.Exact.MinTokens = 2
-	cfg.Exact.MaxEntries = 20000 // 保证 8192 预填不被淘汰
+	cfg.Exact.MaxEntries = 20000   // 保证 8192 预填不被淘汰
 	cfg.WriteLimit.Enabled = false // 基准预填非请求驱动写入，关闭 §7.4.2 写入限流
 	cfg.Guard.ReadFastCheck = false
 
