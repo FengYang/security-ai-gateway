@@ -1503,17 +1503,17 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:golang/github.com/klauspost/compress@v1.18.0",
+      "bom-ref": "pkg:golang/github.com/klauspost/compress@v1.20.4",
       "name": "github.com/klauspost/compress",
-      "version": "v1.18.0",
+      "version": "v1.20.4",
       "supplier": {
         "name": "NOASSERTION"
       },
-      "purl": "pkg:golang/github.com/klauspost/compress@v1.18.0",
+      "purl": "pkg:golang/github.com/klauspost/compress@v1.20.4",
       "properties": [
         {
           "name": "cdx:go:sum",
-          "value": "h1:c/Cqfb0r+Yi+JtIEq73FWXVkRonBlf0CRNYc8Zttxdo="
+          "value": "h1:dD0v/bvxtjCBqQu6sx1TNWkalEY5lNTIe+HY9w8TeNI="
         }
       ]
     },
@@ -2731,17 +2731,17 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:golang/golang.org/x/crypto@v0.58.0",
+      "bom-ref": "pkg:golang/golang.org/x/crypto@v0.59.0",
       "name": "golang.org/x/crypto",
-      "version": "v0.58.0",
+      "version": "v0.59.0",
       "supplier": {
         "name": "NOASSERTION"
       },
-      "purl": "pkg:golang/golang.org/x/crypto@v0.58.0",
+      "purl": "pkg:golang/golang.org/x/crypto@v0.59.0",
       "properties": [
         {
           "name": "cdx:go:sum",
-          "value": "h1:COkYLr4k7nDI4r6QtMML2AfzeIswWHAJthLS6K/M/54="
+          "value": "h1:xS2jhqYbzNrpvkWP2YTDf4TJwBy3ykR03i8vFDxEc7c="
         }
       ]
     },
@@ -2757,17 +2757,17 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:golang/golang.org/x/mod@v0.41.0",
+      "bom-ref": "pkg:golang/golang.org/x/mod@v0.42.0",
       "name": "golang.org/x/mod",
-      "version": "v0.41.0",
+      "version": "v0.42.0",
       "supplier": {
         "name": "NOASSERTION"
       },
-      "purl": "pkg:golang/golang.org/x/mod@v0.41.0",
+      "purl": "pkg:golang/golang.org/x/mod@v0.42.0",
       "properties": [
         {
           "name": "cdx:go:sum",
-          "value": "h1:qJmnOUb4YB+FsEuM3HcWucdZASCPGhsX6uljO6pog0c="
+          "value": "h1:ICeL3t2L30ljSPHHxDnR4fqVcBt/zR2zJAb9juavmQg="
         }
       ]
     },
@@ -2815,59 +2815,59 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:golang/golang.org/x/sync@v0.24.0",
+      "bom-ref": "pkg:golang/golang.org/x/sync@v0.25.0",
       "name": "golang.org/x/sync",
-      "version": "v0.24.0",
+      "version": "v0.25.0",
       "supplier": {
         "name": "NOASSERTION"
       },
-      "purl": "pkg:golang/golang.org/x/sync@v0.24.0",
+      "purl": "pkg:golang/golang.org/x/sync@v0.25.0",
       "properties": [
         {
           "name": "cdx:go:sum",
-          "value": "h1:iqiDrGoDgyuvAKrhLQthUEzU/R378N78gXbBjxed7oA="
+          "value": "h1:dJnifr0nMV8/SBnBvdo4eSGGnrc3O4FFx6IqvtLcmRs="
         }
       ]
     },
     {
       "type": "library",
-      "bom-ref": "pkg:golang/golang.org/x/sys@v0.49.0",
+      "bom-ref": "pkg:golang/golang.org/x/sys@v0.50.0",
       "name": "golang.org/x/sys",
-      "version": "v0.49.0",
+      "version": "v0.50.0",
       "supplier": {
         "name": "NOASSERTION"
       },
-      "purl": "pkg:golang/golang.org/x/sys@v0.49.0",
+      "purl": "pkg:golang/golang.org/x/sys@v0.50.0",
       "properties": [
         {
           "name": "cdx:go:sum",
-          "value": "h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA="
+          "value": "h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs="
         }
       ]
     },
     {
       "type": "library",
-      "bom-ref": "pkg:golang/golang.org/x/term@v0.47.0",
+      "bom-ref": "pkg:golang/golang.org/x/term@v0.48.0",
       "name": "golang.org/x/term",
-      "version": "v0.47.0",
+      "version": "v0.48.0",
       "supplier": {
         "name": "NOASSERTION"
       },
-      "purl": "pkg:golang/golang.org/x/term@v0.47.0"
+      "purl": "pkg:golang/golang.org/x/term@v0.48.0"
     },
     {
       "type": "library",
-      "bom-ref": "pkg:golang/golang.org/x/text@v0.43.0",
+      "bom-ref": "pkg:golang/golang.org/x/text@v0.44.0",
       "name": "golang.org/x/text",
-      "version": "v0.43.0",
+      "version": "v0.44.0",
       "supplier": {
         "name": "NOASSERTION"
       },
-      "purl": "pkg:golang/golang.org/x/text@v0.43.0",
+      "purl": "pkg:golang/golang.org/x/text@v0.44.0",
       "properties": [
         {
           "name": "cdx:go:sum",
-          "value": "h1:1QivrlhwAsnMOcqgOdl9my7s9OyZl8O5/UGUTJVXoWc="
+          "value": "h1:YItdp/mQNGnsmrgpcdA5yQ3bnRxCfo/Tj/iByGW9GGo="
         }
       ]
     },
@@ -2889,17 +2889,17 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:golang/golang.org/x/tools@v0.51.0",
+      "bom-ref": "pkg:golang/golang.org/x/tools@v0.52.0",
       "name": "golang.org/x/tools",
-      "version": "v0.51.0",
+      "version": "v0.52.0",
       "supplier": {
         "name": "NOASSERTION"
       },
-      "purl": "pkg:golang/golang.org/x/tools@v0.51.0",
+      "purl": "pkg:golang/golang.org/x/tools@v0.52.0",
       "properties": [
         {
           "name": "cdx:go:sum",
-          "value": "h1:k4Xc/1Om9jwkBJBo4NVLMSARBoWtK10mx+W5BnXCeAI="
+          "value": "h1:ryxg4U63oaUYk7uOLTF37n43f4qgtGvqV4Ioit1BaEs="
         }
       ]
     },
@@ -3456,7 +3456,7 @@
         "pkg:golang/github.com/julienschmidt/httprouter@v1.3.0",
         "pkg:golang/github.com/kaptinlin/go-i18n@v0.1.4",
         "pkg:golang/github.com/kaptinlin/jsonschema@v0.4.6",
-        "pkg:golang/github.com/klauspost/compress@v1.18.0",
+        "pkg:golang/github.com/klauspost/compress@v1.20.4",
         "pkg:golang/github.com/klauspost/cpuid/v2@v2.4.0",
         "pkg:golang/github.com/kr/pretty@v0.3.1",
         "pkg:golang/github.com/kr/text@v0.2.0",
@@ -3541,18 +3541,18 @@
         "pkg:golang/go.uber.org/zap@v1.27.1",
         "pkg:golang/go.yaml.in/yaml/v2@v2.4.3",
         "pkg:golang/go.yaml.in/yaml/v3@v3.0.5",
-        "pkg:golang/golang.org/x/crypto@v0.58.0",
+        "pkg:golang/golang.org/x/crypto@v0.59.0",
         "pkg:golang/golang.org/x/exp@v0.0.0-20240325151524-a685a6edb6d8",
-        "pkg:golang/golang.org/x/mod@v0.41.0",
+        "pkg:golang/golang.org/x/mod@v0.42.0",
         "pkg:golang/golang.org/x/net@v0.62.0",
         "pkg:golang/golang.org/x/oauth2@v0.36.0",
         "pkg:golang/golang.org/x/perf@v0.0.0-20250813145418-2f7363a06fe1",
-        "pkg:golang/golang.org/x/sync@v0.24.0",
-        "pkg:golang/golang.org/x/sys@v0.49.0",
-        "pkg:golang/golang.org/x/term@v0.47.0",
-        "pkg:golang/golang.org/x/text@v0.43.0",
+        "pkg:golang/golang.org/x/sync@v0.25.0",
+        "pkg:golang/golang.org/x/sys@v0.50.0",
+        "pkg:golang/golang.org/x/term@v0.48.0",
+        "pkg:golang/golang.org/x/text@v0.44.0",
         "pkg:golang/golang.org/x/time@v0.15.0",
-        "pkg:golang/golang.org/x/tools@v0.51.0",
+        "pkg:golang/golang.org/x/tools@v0.52.0",
         "pkg:golang/golang.org/x/xerrors@v0.0.0-20191204190536-9bdfabe68543",
         "pkg:golang/gonum.org/v1/gonum@v0.17.0",
         "pkg:golang/google.golang.org/genproto/googleapis/api@v0.0.0-20260803160001-6ac0973c030d",
