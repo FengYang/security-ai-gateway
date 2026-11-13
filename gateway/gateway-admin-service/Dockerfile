@@ -4,7 +4,8 @@
 #   docker build -t security-ai-gateway/gateway-admin-service:latest -f gateway/gateway-admin-service/Dockerfile .
 #
 # 说明：
-#   - 依赖本目录 + `gateway/cryptop`（密码运行时）+ `protocol/go`（tracing/审计帧），故需 COPY 三处；
+#   - 依赖本目录 + `gateway/cryptop`（密码运行时）+ `gateway/confllm-adapter`（密态大模型适配器，
+#     由 confllm_policy.go / confllm_wire.go 直接引用）+ `protocol/go`（tracing/审计帧），故需 COPY 四处；
 #   - 运行镜像安装 ca-certificates：broker 需出网访问厂商 HTTPS 端点
 #     （NetworkPolicy 已限定仅 443 且排除集群内网段，见 deploy/k8s/gateway-admin-service.yaml）；
 #   - USER 65532 与清单 runAsUser/fsGroup 一致（least privilege；清单另置
@@ -16,6 +17,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY gateway/gateway-admin-service ./gateway/gateway-admin-service
 COPY gateway/cryptop ./gateway/cryptop
+COPY gateway/confllm-adapter ./gateway/confllm-adapter
 COPY protocol ./protocol
 RUN CGO_ENABLED=0 go build -trimpath -o /out/gateway-admin-service ./gateway/gateway-admin-service
 
