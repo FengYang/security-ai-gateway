@@ -79,7 +79,7 @@ jobs:
       #     范围限本仓库自有依赖清单（go.sum 等）；跳过 vendor/ 与外部工具/模型树，避免历史遗留
       #     第三方向量产生噪声门禁失败（本方案自有依赖的高危以本步骤 + govulncheck 双门禁兜底）。
       - name: trivy fs scan (deps)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           scan-type: fs
           scan-ref: .
@@ -356,7 +356,7 @@ jobs:
 
       # 镜像漏洞扫描门禁（§6.4④：高危漏洞禁止合入）。
       - name: trivy image scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: security-ai-gateway/gateway-admin-service:ci
           format: table
