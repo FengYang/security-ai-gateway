@@ -2,6 +2,12 @@ module security-ai-gateway
 
 go 1.26.0
 
+// 安全门禁硬要求：go1.26.0 的标准库存在 GO-2026-6589~6859 等已披露漏洞
+// （net/http / crypto/x509 / crypto/tls / html/template 等，修复于 go1.26.9/1.26.10/1.26.11）。
+// 工具链钉死 1.26.11（覆盖全部修复版本），govulncheck 据此判定为 0 受影响漏洞。
+// CI 与真机（.248）均安装 go1.26.11；本地联调用未跟踪 go.work 不受影响。
+toolchain go1.26.11
+
 require (
 	github.com/FengYang/masked-infer v0.1.0
 	github.com/Trisia/randomness v1.6.0
@@ -16,7 +22,7 @@ require (
 	github.com/google/go-tdx-guest v0.3.1
 	github.com/higress-group/proxy-wasm-go-sdk v0.0.0-20260525073613-662ed045bf0b
 	github.com/higress-group/wasm-go v1.1.2
-	github.com/jackc/pgx/v5 v5.7.6
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/miekg/pkcs11 v1.1.1
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pkoukk/tiktoken-go v0.1.8

@@ -1377,17 +1377,17 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:golang/github.com/jackc/pgx/v5@v5.7.6",
+      "bom-ref": "pkg:golang/github.com/jackc/pgx/v5@v5.9.2",
       "name": "github.com/jackc/pgx/v5",
-      "version": "v5.7.6",
+      "version": "v5.9.2",
       "supplier": {
         "name": "NOASSERTION"
       },
-      "purl": "pkg:golang/github.com/jackc/pgx/v5@v5.7.6",
+      "purl": "pkg:golang/github.com/jackc/pgx/v5@v5.9.2",
       "properties": [
         {
           "name": "cdx:go:sum",
-          "value": "h1:rWQc5FwZSPX58r1OQmkuaNicxdmExaEz5A2DO2hUuTk="
+          "value": "h1:3ZhOzMWnR4yJ+RW1XImIPsD1aNSz4T4fyP7zlQb56hw="
         }
       ]
     },
@@ -3447,7 +3447,7 @@
         "pkg:golang/github.com/invopop/jsonschema@v0.13.0",
         "pkg:golang/github.com/jackc/pgpassfile@v1.0.0",
         "pkg:golang/github.com/jackc/pgservicefile@v0.0.0-20240606120523-5a60cdf6a761",
-        "pkg:golang/github.com/jackc/pgx/v5@v5.7.6",
+        "pkg:golang/github.com/jackc/pgx/v5@v5.9.2",
         "pkg:golang/github.com/jackc/puddle/v2@v2.2.2",
         "pkg:golang/github.com/jcchavezs/mergefs@v0.1.1",
         "pkg:golang/github.com/jonboulle/clockwork@v0.5.0",
