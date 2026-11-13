@@ -7,6 +7,7 @@ P1a 起增加段① 加密信封跨语言一致性（双向加解密、方向/�
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -228,11 +229,29 @@ def run_go_encode(kind: str, fields: dict, k_sig_hex: str) -> str:
     return out.strip()
 
 
+def resolve_go_bin() -> str:
+    """解析 go 可执行文件，保证跨平台（CI 为 Linux，开发机为 Windows）。
+
+    优先级：显式 GO_BIN 环境变量 > PATH 中的 go > Go 官方 Windows 安装包默认路径。
+    此前直接硬编码 Windows 路径，导致 CI（ubuntu-latest，go 在 PATH）本步骤
+    FileNotFoundError；该步骤长期被前序门禁红灯遮蔽，2026-11-13 预验时暴露。
+    """
+    env_bin = os.environ.get("GO_BIN")
+    if env_bin:
+        return env_bin
+    found = shutil.which("go")
+    if found:
+        return found
+    win_default = r"C:\Program Files\Go\bin\go.exe"  # PATH 未配置时的兜底
+    if os.path.exists(win_default):
+        return win_default
+    return "go"
+
+
 def run_go_helper(args: list) -> str:
     repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     helper = os.path.join(repo, "protocol", "go", "cmd", "cross_helper", "main.go")
-    # 本机 Go 不在 PATH（默认安装于 Program Files）
-    go_bin = os.environ.get("GO_BIN", r"C:\Program Files\Go\bin\go.exe")
+    go_bin = resolve_go_bin()
     r = subprocess.run(
         [go_bin, "run", helper] + args,
         cwd=repo, capture_output=True, text=True, timeout=120,

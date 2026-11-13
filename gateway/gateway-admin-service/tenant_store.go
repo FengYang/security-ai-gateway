@@ -489,7 +489,7 @@ func OpenTenantStore(dsn string, wal bool, pepper []byte) (TenantStore, error) {
 }
 
 // OpenTenantStoreWithDialect 按方言打开租户存储。
-// postgres 时 dsn 为 PG 连接串（如 postgres://user:pass@host:5432/db?sslmode=disable）。
+// postgres 时 dsn 为 PG 连接串（如 postgres://<user>:<password>@host:5432/db?sslmode=disable）。
 func OpenTenantStoreWithDialect(d sqlutil.Dialect, dsn string, wal bool, pepper []byte) (TenantStore, error) {
 	if d.IsPostgres() {
 		return openPostgresTenantStore(dsn, pepper)

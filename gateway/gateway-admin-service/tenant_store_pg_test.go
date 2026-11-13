@@ -1,7 +1,7 @@
 // tenant_store_pg_test.go — P2-4 T-1.2 租户存储 PostgreSQL 门控集成测试。
 //
 // DSN 由环境变量 ADMIN_TEST_PG_DSN 提供（如
-// postgres://user:pass@host:5432/db?sslmode=disable）；未设置时 t.Skip，
+// postgres://<user>:<password>@host:5432/db?sslmode=disable）；未设置时 t.Skip，
 // 不伪装通过。覆盖：PG DDL 等价迁移（11 张表）/ CRUD（含 RETURNING 自增、
 // 乐观锁冲突、ON CONFLICT upsert、GREATEST 应用版本）/ 写事务串行。
 //
@@ -10,7 +10,7 @@
 // 本包所有"只在真机 PG 上跑"的用例，统一用一条命令跑完（Go 的 -run 为非锚定
 // 正则，匹配所有名字中含 "PG" 的用例）：
 //
-//	ADMIN_TEST_PG_DSN='postgres://user:pass@host:5432/db?sslmode=disable' \
+//	ADMIN_TEST_PG_DSN='postgres://<user>:<password>@host:5432/db?sslmode=disable' \
 //	  go test -count=1 -v -run PG ./gateway/gateway-admin-service/...
 //
 // 用例清单：

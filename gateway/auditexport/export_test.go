@@ -57,9 +57,9 @@ func TestAuthorizers(t *testing.T) {
 	if err := empty.Authorize(httptest.NewRequest(http.MethodGet, "/", nil)); err == nil {
 		t.Fatalf("空令牌应拒绝")
 	}
-	ta := TokenAuthorizer{Token: "s3cret"}
+	ta := TokenAuthorizer{Token: "dummy"}
 	reqOK := httptest.NewRequest(http.MethodGet, "/", nil)
-	reqOK.Header.Set("Authorization", "Bearer s3cret")
+	reqOK.Header.Set("Authorization", "Bearer dummy")
 	if err := ta.Authorize(reqOK); err != nil {
 		t.Fatalf("正确令牌应放行: %v", err)
 	}

@@ -48,11 +48,11 @@ except ImportError:  # pragma: no cover - 环境依赖缺失
     )
     sys.exit(2)
 
-PASS = "PASS"
+PASS: str = "PASS"
 FAIL = "FAIL"
 SKIP = "SKIP"
 
-# 明文凭据扫描：postgres://user:pass@host 形态
+# 明文凭据扫描：postgres://<user>:<password>@host 形态
 CRED_RE = re.compile(r"(?:postgres(?:ql)?|mysql|mongodb)://[^\s\"']*:[^\s\"'@]+@")
 # 白名单：模板文件 / 占位符
 PLACEHOLDER_RE = re.compile(r"(REPLACE_[A-Z_]+|<user>|<pass>|<password>|\$\(|xxx+)", re.I)

@@ -22,7 +22,7 @@ func TestCheckBackendURL(t *testing.T) {
 		{"link-local rejected", "http://169.254.169.254/latest/meta-data", false, true},
 		{"ipv6 loopback rejected", "http://[::1]:9001/a2a", false, true},
 		{"unspecified rejected", "http://0.0.0.0:9001/a2a", false, true},
-		{"userinfo rejected", "http://user:pass@10.0.0.1:8080", false, true},
+		{"userinfo rejected", "http://user:pw@10.0.0.1:8080", false, true},
 		{"ftp scheme rejected", "ftp://10.0.0.1:8080", false, true},
 		{"empty host rejected", "http:///a2a", false, true},
 	}

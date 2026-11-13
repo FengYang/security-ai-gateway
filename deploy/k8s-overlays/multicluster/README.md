@@ -188,7 +188,7 @@ kubectl apply -k deploy/k8s-overlays/multicluster
 | 全域构建 | `kubectl kustomize` × 6 目录（`deploy/k8s`、`k8s-overlays/multicluster`、`k8s-overlays/trust`、`monitoring`、`monitoring/central`、`monitoring-overlays/remote-write-mtls`） | ✅ 全部通过（26 / 28 / 28 / 25 / 11 / 25 文档） |
 | 合并结果结构校验 | PyYAML 解析构建产物，断言 25 项（base 7 + overlay 17 + 凭据 1） | ✅ **FAIL=0**（base：replicas=1、tenant-store 卷/挂载仍在、PDB `maxUnavailable=0`、无 `TENANT_STORE_PG_DSN`；overlay：replicas=2、`maxSurge=0/maxUnavailable=1`、两个 DSN 均为 `secretKeyRef` 无明文、tenant-store 卷/挂载已移除而 PVC 保留、PDB 仅 `minAvailable:1`、core 快照 env + WORM PVC） |
 | YAML 语法 | 逐文件 `yaml.safe_load_all` + 内嵌 YAML 单独解析 | ✅ 通过 |
-| 明文凭据扫描 | 断言 overlay 内无 `postgres://...:password@` 形态（占位符白名单） | ✅ 通过 |
+| 明文凭据扫描 | 断言 overlay 内无 `postgres://<user>:<password>@` 形态（占位符白名单） | ✅ 通过 |
 | 部署资产自检脚本 | `python scripts/check-central-aggregation-assets.py` | ✅ **PASS=69 / FAIL=0 / SKIP=22，退出码 0**（SKIP 项含 promtool 未安装 → 明确标注**未做**规则语法校验） |
 | 基础清单零改动 | `git diff HEAD --stat -- deploy/k8s deploy/higress deploy/monitoring/{prometheus,grafana,alertmanager,kustomization,slo-prometheusrule}.yaml` | ✅ 为空 |
 | `$patch: delete` 兼容性 | kustomize v2 实测：strategic merge 列表项删除 | ✅ 可用；**注意 merge key 差异**：`volumeMounts` 的 patchMergeKey 是 **`mountPath`**（不是 `name`），`volumes` 才是 `name`——只写 `name` 会报 `does not contain declared merge key: mountPath` |

@@ -69,13 +69,13 @@ func TestAuditExportEnabledAndRecompute(t *testing.T) {
 	seedAuditEvents(t, s, 3)
 	s.SetAuditExport(auditexport.Config{
 		Enabled:    true,
-		Authorizer: auditexport.TokenAuthorizer{Token: "export-tok"},
+		Authorizer: auditexport.TokenAuthorizer{Token: "dummy"},
 		Whitelist:  auditExportWhitelist(t, "192.0.2.1/32"),
 		MaxLimit:   1000,
 	})
 
 	req := httptest.NewRequest(http.MethodGet, auditExportPath, nil)
-	req.Header.Set("Authorization", "Bearer export-tok")
+	req.Header.Set("Authorization", "Bearer dummy")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -126,7 +126,7 @@ func TestAuditExportDenyAllAuthorizer(t *testing.T) {
 	// 令牌不匹配（TokenAuthorizer）→ 403。
 	s3 := testServer()
 	s3.SetAuditExport(auditexport.Config{
-		Enabled: true, Authorizer: auditexport.TokenAuthorizer{Token: "export-tok"},
+		Enabled: true, Authorizer: auditexport.TokenAuthorizer{Token: "dummy"},
 		Whitelist: auditExportWhitelist(t, "192.0.2.1/32"),
 	})
 	req := httptest.NewRequest(http.MethodGet, auditExportPath, nil)

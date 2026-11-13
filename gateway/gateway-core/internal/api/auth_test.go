@@ -15,7 +15,7 @@ func okHandler() http.HandlerFunc {
 }
 
 func TestWithAuthRejectsMissingToken(t *testing.T) {
-	s := &Server{token: "secret-token"}
+	s := &Server{token: "dummy"}
 	h := s.withAuth(okHandler())
 
 	rec := httptest.NewRecorder()
@@ -26,7 +26,7 @@ func TestWithAuthRejectsMissingToken(t *testing.T) {
 }
 
 func TestWithAuthRejectsWrongToken(t *testing.T) {
-	s := &Server{token: "secret-token"}
+	s := &Server{token: "dummy"}
 	h := s.withAuth(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -39,11 +39,11 @@ func TestWithAuthRejectsWrongToken(t *testing.T) {
 }
 
 func TestWithAuthAcceptsCorrectToken(t *testing.T) {
-	s := &Server{token: "secret-token"}
+	s := &Server{token: "dummy"}
 	h := s.withAuth(okHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
-	req.Header.Set("Authorization", "Bearer secret-token")
+	req.Header.Set("Authorization", "Bearer dummy")
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusOK {

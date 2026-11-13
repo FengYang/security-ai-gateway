@@ -20,7 +20,7 @@ import (
 // newAuditQueryMux 装配含聚合查询端点的 mux（复用 buildAdminMux + 显式注册 query 路由）。
 func newAuditQueryMux(t *testing.T, cfg *config, chain *adminAuditChain, cs ClusterStore, token string) (*http.ServeMux, *secCenterHandler) {
 	t.Helper()
-	us := &usageSettings{url: "", token: "tee-tok"}
+	us := &usageSettings{url: "", token: "dummy"}
 	sch := newSecCenterHandler(chain, us)
 	if cs != nil {
 		sch.setClusterStore(cs)

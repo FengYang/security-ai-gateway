@@ -220,7 +220,7 @@ func TestTeeAuditExportHandlerGates(t *testing.T) {
 		audit:           c,
 		auditAnchorPath: anchorPath,
 		auditExportCfg: auditexport.Config{
-			Enabled: true, Authorizer: auditexport.TokenAuthorizer{Token: "tok"},
+			Enabled: true, Authorizer: auditexport.TokenAuthorizer{Token: "dummy"},
 			Whitelist: wl, MaxLimit: 10,
 		},
 	}
@@ -235,7 +235,7 @@ func TestTeeAuditExportHandlerGates(t *testing.T) {
 	}
 
 	// 放行：200 + NDJSON + 元信息头。
-	rec := do(srvOK, "", "tok")
+	rec := do(srvOK, "", "dummy")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("授权+白名单内应 200: got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -256,12 +256,12 @@ func TestTeeAuditExportHandlerGates(t *testing.T) {
 
 	// 默认关闭（端点未启用）→ 404。
 	srvOff := &teeServer{audit: c, auditExportCfg: auditexport.Config{Enabled: false, Whitelist: wl}}
-	if r := do(srvOff, "", "tok"); r.Code != http.StatusNotFound {
+	if r := do(srvOff, "", "dummy"); r.Code != http.StatusNotFound {
 		t.Fatalf("未启用应 404: got %d", r.Code)
 	}
 	// deny-all（未注入授权实现）→ 403。
 	srvDeny := &teeServer{audit: c, auditExportCfg: auditexport.Config{Enabled: true, Whitelist: wl}}
-	if r := do(srvDeny, "", "tok"); r.Code != http.StatusForbidden {
+	if r := do(srvDeny, "", "dummy"); r.Code != http.StatusForbidden {
 		t.Fatalf("deny-all 应 403: got %d", r.Code)
 	}
 	// 令牌不匹配 → 403。
@@ -274,27 +274,27 @@ func TestTeeAuditExportHandlerGates(t *testing.T) {
 		t.Fatalf("构造白名单失败: %v", werr)
 	}
 	srvWL := &teeServer{audit: c, auditExportCfg: auditexport.Config{
-		Enabled: true, Authorizer: auditexport.TokenAuthorizer{Token: "tok"}, Whitelist: wlOther,
+		Enabled: true, Authorizer: auditexport.TokenAuthorizer{Token: "dummy"}, Whitelist: wlOther,
 	}}
-	if r := do(srvWL, "", "tok"); r.Code != http.StatusForbidden {
+	if r := do(srvWL, "", "dummy"); r.Code != http.StatusForbidden {
 		t.Fatalf("白名单外来源应 403: got %d", r.Code)
 	}
 	// 空白名单 = 拒绝所有来源（fail-closed）。
 	srvEmpty := &teeServer{audit: c, auditExportCfg: auditexport.Config{
-		Enabled: true, Authorizer: auditexport.TokenAuthorizer{Token: "tok"},
+		Enabled: true, Authorizer: auditexport.TokenAuthorizer{Token: "dummy"},
 	}}
-	if r := do(srvEmpty, "", "tok"); r.Code != http.StatusForbidden {
+	if r := do(srvEmpty, "", "dummy"); r.Code != http.StatusForbidden {
 		t.Fatalf("空白名单应拒绝所有来源: got %d", r.Code)
 	}
 	// schema 口径：tee 放行；core → 400。
-	if r := do(srvOK, "?schema=tee", "tok"); r.Code != http.StatusOK {
+	if r := do(srvOK, "?schema=tee", "dummy"); r.Code != http.StatusOK {
 		t.Fatalf("schema=tee 应 200: got %d", r.Code)
 	}
-	if r := do(srvOK, "?schema=core", "tok"); r.Code != http.StatusBadRequest {
+	if r := do(srvOK, "?schema=core", "dummy"); r.Code != http.StatusBadRequest {
 		t.Fatalf("schema=core 在 tee 侧应 400: got %d", r.Code)
 	}
 	// 非法 limit → 400。
-	if r := do(srvOK, "?limit=-1", "tok"); r.Code != http.StatusBadRequest {
+	if r := do(srvOK, "?limit=-1", "dummy"); r.Code != http.StatusBadRequest {
 		t.Fatalf("负 limit 应 400: got %d", r.Code)
 	}
 	// 非 GET → 405。
@@ -315,13 +315,13 @@ func TestTeeAuditExportHandlerGates(t *testing.T) {
 
 // TestTeeAuditExportSetup 装配校验：空白名单/非法 CIDR → 错误（fail-closed 拒绝启动）。
 func TestTeeAuditExportSetup(t *testing.T) {
-	if _, err := setupTeeAuditExport("", "tok", 100); err == nil {
+	if _, err := setupTeeAuditExport("", "dummy", 100); err == nil {
 		t.Fatalf("空白名单应拒绝装配")
 	}
-	if _, err := setupTeeAuditExport("not-a-cidr", "tok", 100); err == nil {
+	if _, err := setupTeeAuditExport("not-a-cidr", "dummy", 100); err == nil {
 		t.Fatalf("非法 CIDR 应拒绝装配")
 	}
-	cfg, err := setupTeeAuditExport("10.0.0.0/8, 192.168.1.1/32", "tok", 100)
+	cfg, err := setupTeeAuditExport("10.0.0.0/8, 192.168.1.1/32", "dummy", 100)
 	if err != nil {
 		t.Fatalf("合法配置应装配成功: %v", err)
 	}
