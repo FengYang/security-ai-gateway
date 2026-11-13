@@ -105,6 +105,13 @@ jobs:
           skip-dirs: vendor,.tools,tools,vllm,docs,node_modules,.git
 
       # 3. 南向协议 Go/Python 交叉一致性（M5 验收）
+      #    Python 侧的信封断言依赖 cryptography（惰性导入，见 otpmask_protocol.py:300）。
+      #    托管 runner 的 setup-python 不装第三方包 ⇒ 此前该步骤必然
+      #    `ModuleNotFoundError: No module named 'cryptography'`。此处显式安装而非
+      #    「缺库就跳过信封断言」：跳过等于给交叉一致性开静默豁免口子，门禁不允许降级。
+      - name: install python deps (protocol cross)
+        run: python -m pip install --disable-pip-version-check -q -r protocol/python/requirements.txt
+
       - name: protocol cross
         run: python protocol/python/cross_test.py
 

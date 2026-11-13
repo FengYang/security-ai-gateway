@@ -1,0 +1,10 @@
+# protocol/python 门禁依赖（南向协议 Go/Python 交叉一致性，CI 步骤「protocol cross」）
+#
+# 仅 `otpmask_protocol.py` 的**信封（envelope）**功能需要 AES-GCM：
+#   from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+# 该导入按设计是惰性的（模块级只用 stdlib），缺库时信封相关断言无法执行。
+#
+# 为什么显式钉死：CI 的 setup-python 不装第三方包，此前该步骤在 ubuntu runner 上
+# 因 `ModuleNotFoundError: No module named 'cryptography'` 直接失败——而门禁一旦
+# 允许"缺库就跳过信封断言"，等于给交叉一致性开了静默豁免口子，故选择装库而非跳过。
+cryptography==50.0.2
