@@ -4,7 +4,7 @@
 doc-audit.py — GA 文档体系机检脚本（《GA-文档体系规范》v2.0 §8）
 
 规则：
-  R01 根逃逸   仓库根存在 *.md（仅 README.md 白名单）           error
+  R01 根逃逸   仓库根存在 *.md（README/README.en/SECURITY/CLA 白名单）  error
   R02 孤儿     L3/L4 文档未被任何文档引用                        error
   R03 悬空链接 markdown 相对链接目标不存在                       error
   R04 头部     L3/L4 缺「文档性质/状态/本体」三字段或本体不存在  error
@@ -31,7 +31,10 @@ from pathlib import Path
 # R01 根逃逸白名单：仓库根仅允许以下 *.md。
 # README.md 为项目入口；README.en.md（英文 README）、SECURITY.md（安全披露策略）为
 # GitHub 必需的根文档，不属于"项目文档逃逸到根目录"，故一并豁免（见《GA-文档体系规范》§1.3.1 / §8.1）。
-ROOT_MD_WHITELIST = {"README.md", "README.en.md", "SECURITY.md"}
+# CLA.md（贡献者许可协议，M7-1 发布硬前置）同为 GitHub/CLA 生态要求的根级法律文件，
+# 与 README 同级且被 README.md / README.en.md §9 引用；不属于设计/评审交付物，
+# 故显式豁免（配套 .gitignore 根级例外，避免用 git add -f 强加）。
+ROOT_MD_WHITELIST = {"README.md", "README.en.md", "SECURITY.md", "CLA.md"}
 
 # L1 项目级标准文档与排期分册（按 basename）：不参与 R02/R04/R06 判定
 L1_BASENAMES = {
