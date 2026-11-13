@@ -3,7 +3,10 @@ package mask
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"strconv"
 	"sync"
 	"testing"
 )
@@ -15,6 +18,17 @@ func randomSeed(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return seed
+}
+
+// uniformitySeedCount 均匀性检验使用的固定种子组数（组数越多覆盖面越广，
+// 代价是每组一次 65536 次抽样）。
+const uniformitySeedCount = 8
+
+// uniformitySeed 返回第 i 组**固定**测试种子（纯哈希派生，不引入随机源）。
+// 域串含版本号：若检验范围/判据变更须升版本，避免新旧基准混用。
+func uniformitySeed(i int) []byte {
+	h := sha256.Sum256([]byte("security-ai-gateway/cipher/mask/uniformity/v1/" + strconv.Itoa(i)))
+	return h[:]
 }
 
 func TestStreamDeterministic(t *testing.T) {
@@ -155,29 +169,77 @@ func TestStreamConcurrent(t *testing.T) {
 }
 
 // TestStreamUniformity 卡方均匀性检验：输出应均匀分布（α=0.05 下不应拒绝）。
+//
+// 判据未放宽：仍是自由度 255、α=0.05、临界值 293.25，逐组独立判定、任一组
+// 越界即失败。改动只在**取样方式**：原实现每组用 new 随机种子跑单次检验，
+// 而良态实现本身就有 5% 概率落入拒绝域（第一类错误，检验固有性质，不是缺陷），
+// 故每轮 CI 约 1/20 概率误红（KI#2）。改用固定种子矩阵后判定完全确定：
+// 良态实现恒通过、退化实现恒失败，无随机误拒，且 8 组种子比单组覆盖面更广。
 func TestStreamUniformity(t *testing.T) {
-	seed := randomSeed(t)
 	const buckets = 256
 	const samples = 65536
-	s, err := NewStream(seed, uint64(buckets))
-	if err != nil {
-		t.Fatal(err)
-	}
-	counts := make([]int, buckets)
-	for i := 0; i < samples; i++ {
-		counts[s.Next()]++
-	}
-	// 卡方统计量：Σ (observed - expected)^2 / expected
-	expected := samples / buckets
-	var chi2 float64
-	for _, c := range counts {
-		d := float64(c - expected)
-		chi2 += d * d / float64(expected)
-	}
 	// 自由度为 255 时，α=0.05 的临界值约为 293.25
 	const critical = 293.25
-	if chi2 > critical {
-		t.Fatalf("卡方检验失败: chi2=%.2f > 临界值 %.2f", chi2, critical)
+	for i := 0; i < uniformitySeedCount; i++ {
+		s, err := NewStream(uniformitySeed(i), uint64(buckets))
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts := make([]int, buckets)
+		for k := 0; k < samples; k++ {
+			counts[s.Next()]++
+		}
+		// 卡方统计量：Σ (observed - expected)^2 / expected
+		expected := samples / buckets
+		var chi2 float64
+		for _, c := range counts {
+			d := float64(c - expected)
+			chi2 += d * d / float64(expected)
+		}
+		t.Logf("固定种子#%d：chi2=%.4f（临界 %.2f）", i, chi2, critical)
+		if chi2 > critical {
+			t.Fatalf("卡方检验失败 seed#%d: chi2=%.2f > 临界值 %.2f", i, chi2, critical)
+		}
+	}
+}
+
+// streamKAT 固定种子 → 前 8 个 Next() 输出的指纹（大端序拼接后 SHA-256）。
+// 用途：卡方只验证「分布形状」，对「底层原语变了但分布依旧均匀」这类改动
+// 无检出力；掩码序列一旦变化会破坏已分发密文的互操作性，必须被显式发现。
+var streamKAT = []string{
+	"1a6aa8ebc34354d8731e4176771acba38f9403a83ccb32565b0e3a88438e6d8b",
+	"6f5223904790eb1f96fdffe785f0b21ae39acff7099440b48b0423d477ec87ad",
+	"c57db7970ca0fc5dd87ee07382e87dc7abe701027e00a875c050251db6f51bce",
+	"5eaeef381d1d8e78c12a7f8de3ddb95427817e26509371aa6f1d93e2360549d4",
+	"6bf0b9c4da9e1cdd7422b3d6b16043fc1786d29750884815bdfec03914df0cc3",
+	"09e2d0e83eb1ae6c50aa1dd135c275b5addbe05112caf1a5aec84c8dbfd77376",
+	"16ed783c9b47b8fb2c8e602edf4609df2ee58ca73b5773479a09bd609842e6a2",
+	"93fd6e7cda90feb0444fddb8f7627915b132b22e2b3a076df2d83b95632a5f17",
+}
+
+// TestStreamKnownAnswer 掩码序列逐位回归（已知答案测试）。
+// 与 TestStreamUniformity 用同一组固定种子（域串 v1），二者基准一一对应；
+// 若断言失败，说明输出序列已变：须先确认是否属有意的算法版本升级，再连同
+// uniformitySeed 的版本号一起更新基准——不得直接改期望值掩盖回归。
+func TestStreamKnownAnswer(t *testing.T) {
+	if len(streamKAT) != uniformitySeedCount {
+		t.Fatalf("KAT 条数 %d 与种子组数 %d 不一致", len(streamKAT), uniformitySeedCount)
+	}
+	for i, want := range streamKAT {
+		s, err := NewStream(uniformitySeed(i), 1<<32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]uint64, 8)
+		for k := range out {
+			out[k] = s.Next()
+		}
+		sum := sha256.Sum256(uint64sToBytes(out))
+		got := hex.EncodeToString(sum[:])
+		if got != want {
+			t.Fatalf("掩码序列变更 seed#%d: got %s want %s（输出序列与基准不符，\n"+
+				"若为有意的算法版本升级，须同步升 uniformitySeed 域串版本并更新本基准）", i, got, want)
+		}
 	}
 }
 
