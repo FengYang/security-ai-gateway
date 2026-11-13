@@ -18,9 +18,11 @@ package main
 //   - keySource 未配置 → 503（运行时 fail-closed 防御）
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,9 +94,9 @@ func TestVerifyTenantJWTEmpty(t *testing.T) {
 func TestVerifyTenantJWTMalformed(t *testing.T) {
 	pinCryptoProviderIntl(t)
 	cases := []string{
-		"only.one",       // 2 段
+		"only.one",           // 2 段
 		"one.two.three.four", // 4 段
-		"...",            // 3 段但空
+		"...",                // 3 段但空
 		"not-base64.abc.def",
 	}
 	for _, tc := range cases {
@@ -125,11 +127,18 @@ func TestVerifyTenantJWTBadSignature(t *testing.T) {
 	now := time.Now()
 	claims := tenantJWTClaims{Sub: testTenant, Exp: now.Add(time.Hour).Unix()}
 	token := makeTestJWT(claims, testKey)
-	// 篡改签名（把最后一个字符改掉）
-	badToken := token[:len(token)-1] + "A"
-	if badToken == token {
-		badToken = token[:len(token)-1] + "B"
+	// 篡改签名：解码后翻转首字节再重编码，保证"字节级"改变。
+	// 不可只替换末位字符——JWT 签名用 base64url **无填充**编码，末位字符仅承载
+	// 部分有效 bit（HS256 的 32 字节签名末位只用到 4 bit），被解码器忽略的位改掉后
+	// 解码结果完全相同，验签照样通过 ⇒ 该写法天生 flaky（CI 2026-11-13 实发）。
+	parts := strings.Split(token, ".")
+	sig, derr := base64.RawURLEncoding.DecodeString(parts[2])
+	if derr != nil {
+		t.Fatalf("解析签名字段失败: %v", derr)
 	}
+	sig[0] ^= 0x01
+	parts[2] = base64.RawURLEncoding.EncodeToString(sig)
+	badToken := strings.Join(parts, ".")
 	_, err := verifyTenantJWT(badToken, testKey, now, 0)
 	if err == nil {
 		t.Fatal("签名无效应报错")
