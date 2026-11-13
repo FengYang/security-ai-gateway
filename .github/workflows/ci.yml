@@ -433,8 +433,15 @@ jobs:
         run: |
           docker tag security-ai-gateway/gateway-admin-service:ci "$IMAGE_REF"
           docker push "$IMAGE_REF"
+          # 按 digest 签名而非 tag：tag 可变，cosign 对 tag 输入会告警「可能签到的不是你构建的那份
+          # 镜像」。push 后 RepoDigests 才是本次推送内容的不可变标识。
+          DIGEST_REF=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE_REF")
+          echo "IMAGE_DIGEST_REF=${DIGEST_REF}" >> "$GITHUB_ENV"
+          echo "pushed digest ref: ${DIGEST_REF}"
 
       - uses: sigstore/cosign-installer@v3
-      - name: cosign sign (keyless; 生产切 KMS)
+      - name: cosign sign (keyless; 按 digest，生产切 KMS)
         if: github.event_name == 'push'
-        run: cosign sign --yes "$IMAGE_REF"
+        run: |
+          test -n "$IMAGE_DIGEST_REF" || { echo "FAIL: 未取得镜像 digest（push 步骤失败或 RepoDigests 为空）"; exit 1; }
+          cosign sign --yes "$IMAGE_DIGEST_REF"
