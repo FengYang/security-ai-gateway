@@ -171,9 +171,9 @@ jobs:
   #
   # 关于 CUDA/昇腾（方案 §6.1 R5 括注）：本仓加速后端不是编译期标签，而是运行期
   # dlopen（`ACCEL_BACKEND_LIB` + 统一 C ABI `accel_cipher_linear_int128`），
-  # 唯一编译期开关是 `//go:build cgo`（gateway/teecore/maskedinfer/accel_dispatch.go）。
-  # 故「CUDA/昇腾」两档的编译覆盖等价于下面的 cgo-on 两行；真正的多后端功能验证
-  # 需真机 GPU/NPU，属环境门控（不得用编译通过冒充）。
+  # 唯一编译期开关是 `//go:build cgo`（拆分后独立仓 masked-infer/core/accel_dispatch.go）。
+  # 目标硬件轨道（CUDA/昇腾）的运行期 .so 注入与逐位对拍由下方 accel-e2e job 覆盖（M-5/G-3）；
+  # 真机 GPU/NPU 取证仍属 🖥 待环境就绪（E-11 / M5-3），不得用编译通过冒充。
   #
   # 组合均为**实测通过**后才写入（避免把没验过的组合塞进 CI 造成长期红灯）；
   # 嵌套 module（testkit/poc、wasm/*）由 ./... 自动排除，不在此矩阵覆盖面。
@@ -211,6 +211,67 @@ jobs:
         env:
           CGO_ENABLED: ${{ matrix.cgo }}
         run: go build -mod=mod ${{ matrix.tags != '' && format('-tags {0}', matrix.tags) || '' }} ./...
+
+  # ---------------- job 1c：加速后端 ABI 端到端（M-5 / G-3 修复，需主理人授权后落地） ----------------
+  # 语义分层红线（§4.6）：
+  #   ACCEL_BUILD_TRACK = 构建期轨道（cpu|cuda|ascend|both），只决定 .so 产物，不作运行期值；
+  #   ACCEL_BACKEND_LIB = 运行期注入，必须是逗号分隔的受信**绝对路径**候选列表。
+  # 链路（G-3 缺口）：编译 .so → 注入绝对路径 → 跑 TestAccelDispatch 与 CPU 基准逐位对拍；
+  # 负向用例：把构建期轨道字面量 / 相对路径注入运行期变量，须被路径校验拒绝并回退 CPU。
+  # ⚠ CUDA / 昇腾目标硬件轨道属 🖥 待环境就绪（E-11）：本 job 用可移植参考实现验证
+  #   「统一 C ABI + 后端无关派发」链路，**不冒充**真机 GPU/NPU 取证（M5-3 另计）。
+  accel-e2e:
+    name: accel ABI e2e (${{ matrix.track }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        track: [cpu, ascend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      # TestAccelDispatch 位于拆分后的独立仓；CI 检出 master 以取得最新负向用例。
+      - name: checkout masked-infer
+        uses: actions/checkout@v4
+        with:
+          repository: FengYang/masked-infer
+          ref: master
+          path: masked-infer
+
+      - name: build .so from build-time track
+        env:
+          ACCEL_BUILD_TRACK: ${{ matrix.track }}
+        run: |
+          set -euo pipefail
+          case "$ACCEL_BUILD_TRACK" in
+            cpu|ascend) ;;
+            cuda|both) echo "CUDA/CANN 目标工具链未就绪（E-11），本 job 不覆盖目标硬件轨道"; exit 1 ;;
+            *) echo "unknown ACCEL_BUILD_TRACK=$ACCEL_BUILD_TRACK"; exit 1 ;;
+          esac
+          SO="${RUNNER_TEMP}/libaccel_${ACCEL_BUILD_TRACK}.so"
+          g++ -shared -fPIC -O2 -I masked-infer/core \
+            masked-infer/core/cipher_linear_int128_ascend.cpp -o "$SO"
+          chmod 0644 "$SO"   # validateAccelLibPath：group/other 不可写
+          test -f "$SO"
+          echo "built $SO ($(stat -c %s "$SO") bytes)"
+
+      - name: negative cases (build-time literals / relative paths rejected → CPU fallback)
+        run: |
+          cd masked-infer
+          go test -count=1 -v -run 'TestAccelDispatchRejectsLiteralBackendAndFallsBackCPU' ./core/
+
+      - name: bit-exact golden (runtime injection via ACCEL_BACKEND_LIB absolute path)
+        env:
+          ACCEL_BACKEND_LIB: ${{ runner.temp }}/libaccel_${{ matrix.track }}.so
+          TEST_ACCEL_LIB: ${{ runner.temp }}/libaccel_${{ matrix.track }}.so
+        run: |
+          cd masked-infer
+          go test -count=1 -v -run 'TestAccelDispatch$|TestAccelPoolDualBackendSwitchByHint' ./core/
 
   # ---------------- job 2：自托管 runner（完整环境依赖） ----------------
   # 前置条件（在环境机上注册 runner 并打标签 otpmask-e2e）：
