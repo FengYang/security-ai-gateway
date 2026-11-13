@@ -21,14 +21,14 @@ COPY gateway/confllm-adapter ./gateway/confllm-adapter
 COPY protocol ./protocol
 RUN CGO_ENABLED=0 go build -trimpath -o /out/gateway-admin-service ./gateway/gateway-admin-service
 
-FROM alpine:3.20
-# 运行阶段先做一次 `apk upgrade`：基础镜像把包钉在快照版本上（alpine:3.20.10 自带
-# musl/musl-utils 1.2.5-r3），而同一 3.20 分支已发布带修复的 r4（CVE-2026-107891：
+FROM alpine:3.24
+# 运行阶段先做一次 `apk upgrade`：基础镜像把包钉在快照版本上（例如 3.20.10 自带
+# musl/musl-utils 1.2.5-r3，而同一分支已发布带修复的 r4 —— CVE-2026-107891：
 # musl regcomp 整数溢出可致任意代码执行）。不 upgrade 则 trivy 镜像门禁
 # （HIGH/CRITICAL + ignore-unfixed）必红——patch 级重建包属同一分支内的正常修复，
 # 不改变运行特性，故就地升级而非放宽门禁。
-# 另注：3.20 分支已于 2026-04-01 结束支持（alpine 官方 releases 页），
-# 「是否把基底升到当前稳定分支」属发布物变更，另行按决策项跟踪。
+# 基底分支说明：2026-11-13 由 alpine:3.20 升到 3.24（3.20 已于 2026-04-01 结束支持，
+# 官方 releases 页 support level = on request；3.24 为当前稳定分支、EOL 2028-06-01）。
 RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
 COPY --from=build /out/gateway-admin-service /usr/local/bin/gateway-admin-service
 USER 65532:65532

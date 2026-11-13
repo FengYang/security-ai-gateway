@@ -369,6 +369,14 @@ jobs:
     name: image supply chain (hosted)
     runs-on: ubuntu-latest
     needs: static-and-unit
+    # 推 GHCR + keyless 签名所需最小权限（2026-11-13 决策）：
+    #   contents: read  —— checkout
+    #   packages: write —— docker push ghcr.io
+    #   id-token: write —— cosign keyless 需向 Fulcio 换取 OIDC 令牌
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -403,6 +411,30 @@ jobs:
           path: sbom-admin-service.spdx.json
 
       # 镜像签名（cosign；生产以 KMS 托管密钥，admission 侧校验签名后方可入集群）。
+      # ⚠ 2026-11-13 修正：原实现 `cosign sign <纯本地镜像名>` 不成立——cosign 直接向
+      # registry 解析 ref（不经 docker daemon），本地名必然 404/401；且 keyless 需要
+      # `id-token: write` 而 job 未声明。现改为：先推 GHCR，再对 registry 中的 ref 签名。
+      # PR 场景不推送、不签名（fork PR 的 token 无 packages:write，也不应对外发布产物），
+      # 仅保留 构建 + 漏洞扫描 + SBOM。
+      - name: compute image ref
+        if: github.event_name == 'push'
+        run: |
+          REF="ghcr.io/${GITHUB_REPOSITORY,,}/gateway-admin-service:ci-${GITHUB_SHA::7}"
+          echo "IMAGE_REF=${REF}" >> "$GITHUB_ENV"
+          echo "IMAGE_REF=${REF}"
+
+      - name: login GHCR
+        if: github.event_name == 'push'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: push image to GHCR
+        if: github.event_name == 'push'
+        run: |
+          docker tag security-ai-gateway/gateway-admin-service:ci "$IMAGE_REF"
+          docker push "$IMAGE_REF"
+
       - uses: sigstore/cosign-installer@v3
       - name: cosign sign (keyless; 生产切 KMS)
-        run: cosign sign --yes security-ai-gateway/gateway-admin-service:ci
+        if: github.event_name == 'push'
+        run: cosign sign --yes "$IMAGE_REF"
