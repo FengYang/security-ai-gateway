@@ -3,7 +3,7 @@ module security-ai-gateway
 go 1.26.0
 
 require (
-	github.com/FengYang/masked-infer v0.0.0-00010101000000-000000000000
+	github.com/FengYang/masked-infer v0.1.0
 	github.com/Trisia/randomness v1.6.0
 	github.com/a2aproject/a2a-go/v2 v2.7.0
 	github.com/aws/aws-sdk-go-v2 v1.48.0
@@ -139,7 +139,7 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-// 路线2 密态推理后端已拆分为独立仓库 github.com/FengYang/masked-infer（见 docs/路线2-独立代码库拆分方案.md）。
-// 发布首个公开 tag 前，先用本地 replace 解析（与未跟踪的 go.work 二选一即可；CI 用 GOWORK=off 走这里）。
-// 发布后改为正式版本号 require 并删除本 replace。
-replace github.com/FengYang/masked-infer => ../masked-infer
+// M7-3（2026-11-13）：masked-infer 已发布公开 tag v0.1.0（github.com/FengYang/masked-infer），
+// 发布态改为正式版本 require，本地 replace 已删除。
+// 本地联调两仓最新代码时改用未跟踪的 go.work（use ( . ../masked-infer )），不入库；
+// CI 与独立 clone 一律 GOWORK=off 走本 require，保证可复现构建。

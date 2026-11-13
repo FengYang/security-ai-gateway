@@ -1,3 +1,5 @@
+github.com/FengYang/masked-infer v0.1.0 h1:BdBk/ow6z2+OsrkhI8M7EzCUNWOUh5p+B5gIfqCzN0c=
+github.com/FengYang/masked-infer v0.1.0/go.mod h1:z5lcVbLGypMwwX+pmpFKeH+l7OnfYGZG2AAxJGQW4Q0=
 github.com/Trisia/randomness v1.6.0 h1:koHmuE/Ul7S08fiWog2j+TsNFnXnvD98GGpm6vHuL3A=
 github.com/Trisia/randomness v1.6.0/go.mod h1:OlWmE3b51RTsHJ7t4pKQyCvrg8kPzDa3wBxo5q/jz/g=
 github.com/a2aproject/a2a-go/v2 v2.7.0 h1:rwIpzO5O9Mxu/Rm4S2SZfHYzNcvF3FK9aaaTxP35kAo=
