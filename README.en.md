@@ -191,3 +191,7 @@ docs/            Milestone documents (M1-M12)
 ## 8. Status
 
 Phase 1-3 (M1-M12) all complete ✅ → **Route 1 (unified multi-engine confidential-inference gateway) M1-M3 achieved, code frozen**; gateway feature-surface core set (quota/desensitization/decoration/double-hash + Envoy base) complete; D-0 corrected to Higress control-plane form, `deploy/higress/` manifests ready pending cluster deployment. **Next: advance GF.1 (Higress control-plane landing) per `docs/GA-网关功能面研发计划.md`**; remaining work is blocked on external dependencies (M4 real machine: TDX hardware / C-MaaS account) or scheduled per the dev plan. Full progress in `docs/GA-项目总览与路线图.md` (Chinese).
+
+## 9. Contributing & License
+
+Licensed under [Apache License 2.0](./LICENSE). Before contributing, please read [CLA.md](./CLA.md); a `Signed-off-by` line in your commit constitutes acceptance. Third-party attributions are listed in [NOTICE](./NOTICE).

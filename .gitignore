@@ -62,6 +62,8 @@ assets/
 # 仅豁免"技术入口文档"8 份（对外发布仓库入口所需）
 *.md
 !/README.md
+# M7-1 发布硬前置：贡献者许可协议（仓库根级法律文件，与 README 同级；非设计/评审交付物）
+!/CLA.md
 !docs/API-参考.md
 !docs/GA-部署指南.md
 !docs/GA-报备与上线放行单模板.md
