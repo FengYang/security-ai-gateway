@@ -141,7 +141,21 @@ func batchRequestRaw() []byte {
 }
 
 // TestBatchVsSequential T-8.3：64 seal op——/v1/batch 单次 vs 64 次顺序单调用，报耗时对比。
+//
+// 采样方式（2026-11-13 由"单次采样"改为"多轮交错取最小值"）：
+//
+//	原实现对 batch / sequential 各只测**一次**，随后直接比较两个约 10ms 的单样本。
+//	CI 共享 runner 上相邻包的 CPU 争用会让单样本抖动 10%~2x，实测出现过
+//	batch=10.197ms vs sequential=10.168ms（差 0.3%）被判负的假红；
+//	而同一提交在空载环境机 -count=10 复跑 10/10 通过、加速比 1.71x~3.40x。
+//	故改为每档 **N 轮交错采样（batch, seq, batch, seq, …）各取最小值**再比较：
+//	  - 取最小值是微基准抑制"加性噪声"的标准估计量（噪声只会让耗时变大）；
+//	  - 交错采样消除顺序/漂移偏差；两侧同等待遇，判据仍是严格 `batch < sequential`，
+//	    **阈值未放宽、断言未跳过**。
+//	若持续争用，两侧最小值被同等抬高，比较结论不受影响。
 func TestBatchVsSequential(t *testing.T) {
+	const rounds = 5 // 每档交错采样轮数（单轮 batch+seq 约 20~40ms，整体开销可忽略）
+
 	for _, profile := range benchProfiles {
 		_, ts, _ := newTestServer(t, profile)
 		client := newSidecarClient()
@@ -157,25 +171,34 @@ func TestBatchVsSequential(t *testing.T) {
 			}
 		}
 
-		start := time.Now()
-		if err := postSidecar(client, ts.URL, "/v1/batch", batchRaw); err != nil {
-			t.Fatalf("profile=%s batch: %v", profile, err)
-		}
-		batchDur := time.Since(start)
+		batchDur := time.Duration(1 << 62)
+		sequentialDur := time.Duration(1 << 62)
+		for round := 0; round < rounds; round++ {
+			start := time.Now()
+			if err := postSidecar(client, ts.URL, "/v1/batch", batchRaw); err != nil {
+				t.Fatalf("profile=%s batch round %d: %v", profile, round, err)
+			}
+			if d := time.Since(start); d < batchDur {
+				batchDur = d
+			}
 
-		start = time.Now()
-		for i := 0; i < batchOpsCount; i++ {
-			if err := postSidecar(client, ts.URL, "/v1/seal", sealRaw); err != nil {
-				t.Fatalf("profile=%s sequential seal %d: %v", profile, i, err)
+			start = time.Now()
+			for i := 0; i < batchOpsCount; i++ {
+				if err := postSidecar(client, ts.URL, "/v1/seal", sealRaw); err != nil {
+					t.Fatalf("profile=%s sequential seal round %d op %d: %v", profile, round, i, err)
+				}
+			}
+			if d := time.Since(start); d < sequentialDur {
+				sequentialDur = d
 			}
 		}
-		sequentialDur := time.Since(start)
 
 		speedup := float64(sequentialDur) / float64(batchDur)
-		t.Logf("T-8.3 profile=%s 64×seal(1KB)：batch=%v sequential=%v 加速比=%.2fx",
-			profile, batchDur, sequentialDur, speedup)
+		t.Logf("T-8.3 profile=%s 64×seal(1KB)：batch=%v sequential=%v 加速比=%.2fx（各取 %d 轮最小值）",
+			profile, batchDur, sequentialDur, speedup, rounds)
 		if batchDur >= sequentialDur {
-			t.Errorf("T-8.3 profile=%s batch=%v 不优于 sequential=%v", profile, batchDur, sequentialDur)
+			t.Errorf("T-8.3 profile=%s batch=%v 不优于 sequential=%v（%d 轮最小值比较）",
+				profile, batchDur, sequentialDur, rounds)
 		}
 	}
 }
