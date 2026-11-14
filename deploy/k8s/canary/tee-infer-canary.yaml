@@ -2,7 +2,7 @@
 #
 # 与稳定版共用 Service 选择器（app: tee-infer-service），副本数比例即流量比例：
 #   stable replicas=2 + canary replicas=1 → canary 承担约 1/3 推理流量
-# 由 scripts/canary-release.ps1 替换 __TAG__ 后应用。
+# 由 scripts/canary-release.py 替换 __TAG__ 后应用。
 apiVersion: apps/v1
 kind: Deployment
 metadata:

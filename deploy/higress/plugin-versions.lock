@@ -4,20 +4,20 @@
 # fail to load; with FAIL_OPEN the route then passes through without auth/limits, and
 # nothing visibly breaks until an incident. This file is the single source of truth for
 # expected plugin versions and is enforced by:
-#     scripts/check-higress-plugin-versions.ps1
+#     scripts/check-higress-plugin-versions.py
 #
 # Authority (how these values were obtained):
 #   Derived on 2026-09-12 from the deployed image
 #   higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/all-in-one:latest
 #   by inspecting its plugin directory and snapshot-inventory.json.
 #   Re-verify against a running image with:
-#     powershell -File scripts/check-higress-plugin-versions.ps1 -Container <container-name>
+#     python3 scripts/check-higress-plugin-versions.py --container <container-name>
 #   That check fails if the image no longer ships the locked version (image upgrade drift).
 #
 # Rule: every `plugins/<name>/<version>/plugin.wasm` reference in this repo must be listed
 # here. Unknown plugins and version mismatches are reported as errors.
 #
-# NOTE: keep this file ASCII-only -- it is parsed by PowerShell 5.1 (ANSI-sensitive).
+# NOTE: keep this file ASCII-only -- it is parsed by the CI gate and by Windows tooling alike.
 # NOTE: otpmask is our own plugin (bind-mounted into the gateway), version 1.0.0 by design.
 
 ai-proxy=2.0.1

@@ -1,35 +1,29 @@
-# check-gofmt.ps1 - Incremental gofmt gate.
+# check-gofmt.ps1 - Windows local entry point (thin forwarder)
 #
-# Purpose: fail CI when newly added/modified .go files are not gofmt-clean.
-# Rationale: the repository still carries legacy gofmt drift in several packages,
-# so a full-repo check would fail today; this gate only checks the .go files that
-# changed in the current change set (base..HEAD). Once the whole tree is clean the
-# gate can be widened to a full-repo check.
+# The single implementation moved to scripts/check-gofmt.py on 2026-11-14.
+# CI (Linux) and this wrapper both run the SAME logic; this file carries no
+# gate logic of its own. Do NOT add logic here -- it would recreate a second
+# implementation and let the two drift apart.
 #
-# Usage:
-#   pwsh -NoProfile -File scripts/check-gofmt.ps1 -Base origin/master
-#   pwsh -NoProfile -File scripts/check-gofmt.ps1 -Base HEAD^
+# Usage: powershell -NoProfile -File scripts/check-gofmt.ps1 -Base origin/master
 param(
   [string]$Base = ""
 )
+
 $ErrorActionPreference = 'Stop'
-Set-Location (Join-Path $PSScriptRoot '..')
-
-# Diff range: explicit base (PR base / previous commit) when provided, else HEAD^.
-$range = if ($Base -ne "") { "$Base...HEAD" } else { "HEAD^...HEAD" }
-$changed = & git diff --name-only $range -- '*.go' 2>$null
-$files = @($changed | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
-if ($files.Count -eq 0) {
-  Write-Host "gofmt gate: no changed .go files in '$range'; skip."
-  exit 0
+$py = $null
+foreach ($c in @('python', 'python3')) {
+  $cmd = Get-Command $c -ErrorAction SilentlyContinue
+  if ($cmd) { $py = $cmd.Source; break }
+}
+if (-not $py) {
+  Write-Host "ERROR: python not found (3.8+ required)" -ForegroundColor Red
+  exit 2
 }
 
-$bad = @(& gofmt -l $files)
-if ($bad.Count -gt 0) {
-  Write-Host "gofmt gate FAIL: the following changed .go files are not gofmt-clean:"
-  $bad | ForEach-Object { Write-Host "  $_" }
-  Write-Host "Fix locally with: gofmt -w <files>"
-  exit 1
-}
-Write-Host "gofmt gate PASS: $($files.Count) changed .go file(s) are gofmt-clean."
-exit 0
+$target = Join-Path $PSScriptRoot 'check-gofmt.py'
+$cliArgs = @($target)
+if ($Base -ne "") { $cliArgs += @('--base', $Base) }
+
+& $py @cliArgs
+exit $LASTEXITCODE

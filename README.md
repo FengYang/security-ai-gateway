@@ -120,15 +120,16 @@ curl http://127.0.0.1:19090/usage
 curl http://127.0.0.1:19090/audit/verify
 curl http://127.0.0.1:19090/metrics
 
-# 5. 全套验证（11 项）
-powershell -NoProfile -File scripts/verify-all.ps1
+# 5. 全套验证（23 项；Linux / macOS）
+python3 scripts/verify-all.py
+#    Windows 亦可：powershell -NoProfile -File scripts/verify-all.ps1（转发同一实现）
 ```
 
 ## 4. K8s 部署（生产路径）
 
 ```bash
 # 清单校验（无集群）
-powershell -NoProfile -File scripts/verify-k8s.ps1
+python3 scripts/verify-k8s.py
 
 # Helm 一键部署（推荐；deploy/helm/otpmask）
 helm install otpmask deploy/helm/otpmask \
@@ -139,7 +140,7 @@ kubectl apply -k deploy/k8s            # 应用 + HPA + PDB
 kubectl apply -k deploy/monitoring     # Prometheus + Grafana
 
 # 单节点真机验证（需 kind）
-powershell -NoProfile -File scripts/verify-k8s.ps1 -Kind
+python3 scripts/verify-k8s.py --kind
 ```
 
 详见 `docs/GA-部署指南.md`：端口映射（网关 10000 / Grafana 3000 / Prometheus 9090）、密钥注入、wasm 镜像打包、监控面板；接口文档见 `docs/API-参考.md`。

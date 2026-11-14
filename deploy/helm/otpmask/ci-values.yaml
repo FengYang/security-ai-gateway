@@ -1,4 +1,4 @@
-# CI 专用演示值——仅用于 verify-k8s.ps1 的 helm lint/template 渲染校验，严禁用于生产部署。
+# CI 专用演示值——仅用于 verify-k8s.py 的 helm lint/template 渲染校验，严禁用于生产部署。
 # 生产部署必须用真实密钥：
 #   helm install otpmask deploy/helm/otpmask \
 #     --set secret.sigKey=<32字节hex> --set secret.attestToken=<32字节hex>

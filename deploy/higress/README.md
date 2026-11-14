@@ -95,7 +95,7 @@ python3 scripts/higress-mcp.py --profile native             # 合并写入 higre
 #   配 key + 合法请求 → 200 SSE
 #   IP 名单外 → 403
 # 验证通过后，将外部流量切至 higress-gateway Service（DNS/LB 权重），
-# 观察 verify-all.ps1 第 17-19 项 + 渗透回归，再下线 envoy-gateway。
+# 观察 verify-all.py 第 17-19 项 + 渗透回归，再下线 envoy-gateway。
 ```
 
 ## 4. 与既有清单的关系

@@ -5,7 +5,8 @@
 #   job 1 static-and-unit：不依赖任何本地环境（静态检查/单测/协议一致/门禁/wasm 构建/脚本语法）
 #                          → 跑托管 runner（ubuntu-latest），可立即给出结论；
 #   job 2 env-suite      ：依赖完整环境（compose 容器组 + kubectl/kustomize/helm/docker）
-#                          → 跑自托管 runner（标签 otpmask-e2e），需在具备该环境的机器上注册 runner。
+#                          → 跑**Linux** 自托管 runner（标签 otpmask-e2e），需在具备该环境的机器上注册 runner。
+#                          （2026-11-14：该 job 全链已 bash/python 化，不再依赖 PowerShell。）
 # 说明：未接入自托管 runner 时，job 2 会处于"等待 runner"状态（不阻塞 job 1 的结论）；
 #       job 2 依赖 job 1 成功（needs），避免浪费环境机资源。
 name: ci
@@ -50,7 +51,8 @@ jobs:
       #     脚本离线安全：公开集取数失败不中断，合成族（rule/benign/known_fp）照常生成，门禁①②生效。
       - name: generate guardrail bench corpus (CI-only)
         timeout-minutes: 8
-        run: pwsh -NoProfile -File scripts/build-guardrail-bench.ps1
+        # 2026-11-14：由 pwsh 版改为 python 版（唯一实现，Linux/Windows 同源）
+        run: python scripts/build-guardrail-bench.py
 
       - name: unit tests
         env:
@@ -122,7 +124,7 @@ jobs:
       # 5. Higress 插件版本门禁（防“版本漂移 → 插件 URL 404 → wasm 加载失败 → FAIL_OPEN 静默放行”）
       #    仅校验“仓库 ↔ plugin-versions.lock”（不传 -Container），故不依赖 Docker
       - name: higress plugin version gate
-        run: pwsh -NoProfile -File scripts/check-higress-plugin-versions.ps1
+        run: python scripts/check-higress-plugin-versions.py
 
       # 6. wasm 插件构建（Go 1.25 原生 wasm；国密库 gmsm 要求 1.25+）
       #    注：本 job 为 Linux 原生 go，GOOS/GOARCH 生效。若在 WSL 下调 Windows go.exe 则**不传递** env
@@ -145,11 +147,15 @@ jobs:
       - name: wasm artifact guard
         run: make wasm-artifact-guard
 
-      # 7. 脚本语法（纯静态：bash -n + 全部 ps1 解析）
-      - name: Linux scripts syntax
+      # 7. 脚本语法（纯静态：bash -n 全部 .sh + py_compile 全部 .py）
+      #    2026-11-14：ps1 已退化为 Windows 本地转发薄壳（CI 不再执行 PowerShell），
+      #    故本步骤改为校验 sh + py —— 与 CI 实际执行面一致，不留"校验了不跑的东西"的空转。
+      - name: scripts syntax (bash -n + py parse)
         run: |
-          bash -n scripts/setup-env.sh
-          pwsh -NoProfile -Command "Get-ChildItem scripts/*.ps1 | ForEach-Object { \$null = [System.Management.Automation.Language.Parser]::ParseFile(\$_.FullName, [ref]\$null, [ref]\$e); if (\$e) { throw \$e[0] } }; Write-Host 'ps1 parse OK'"
+          for f in scripts/*.sh; do bash -n "$f"; done
+          echo "bash -n OK ($(ls scripts/*.sh | wc -l) files)"
+          # 用 ast.parse 而非 compileall：不落 __pycache__，CI 工作区保持干净
+          python -c "import ast,pathlib; fs=sorted(pathlib.Path('scripts').glob('*.py')); [ast.parse(p.read_text(encoding='utf-8'), str(p)) for p in fs]; print(f'py syntax OK ({len(fs)} files)')"
 
       # 7b. 明文凭据门禁（口令仅经环境变量注入，严禁入库；T-4 窗口发现 68 件硬编码口令）。
       #     既有债务登记于 scripts/secrets-baseline.txt；仅 **新增** 命中失败（值级兜底见脚本 docstring）。
@@ -176,7 +182,7 @@ jobs:
           else
             BASE="HEAD^"
           fi
-          pwsh -NoProfile -File scripts/check-gofmt.ps1 -Base "$BASE"
+          python scripts/check-gofmt.py --base "$BASE"
 
       # 9. 架构边界门禁（《路线2-架构理清与包级重构方案》§6.3）
       #    四层依赖方向（engine ↛ 信任锚 / adapters ↛ orchestrator / cryptop 无环 /
@@ -296,20 +302,29 @@ jobs:
           go test -count=1 -v -run 'TestAccelDispatch$|TestAccelPoolDualBackendSwitchByHint' ./core/
 
   # ---------------- job 2：自托管 runner（完整环境依赖） ----------------
-  # 前置条件（在环境机上注册 runner 并打标签 otpmask-e2e）：
+  # 前置条件（在 **Linux** 环境机上注册 runner 并打标签 otpmask-e2e）：
   #   - 已启动 compose 环境（higress 控制面/网关 + tee-infer + embedding 等容器组）；
-  #   - 具备 kubectl（kustomize 子命令）、helm、docker（可构建镜像）与 go/python 工具链；
-  #   - Windows 环境亦可（脚本均为 ps1，经 pwsh 调用；python 需在 PATH）。
+  #   - 具备 kubectl（kustomize 子命令）、helm、docker（可构建镜像）与 go/python3 工具链；
+  #   - python3 需带 PyYAML（YAML 语法校验用）。
+  # 2026-11-14：本 job 全链已改为 bash/python，**不再依赖 PowerShell**——Linux runner 无需
+  #   安装 pwsh。23 项 PASS/FAIL 判据与原 ps1 版逐条一致（未放宽、未新增跳过豁免）。
   env-suite:
-    name: e2e & governance (self-hosted)
+    name: e2e & governance (self-hosted linux)
     needs: static-and-unit
     runs-on: [self-hosted, otpmask-e2e]
+    # C8 / P1-22（见 docs/开源前全面评估报告.md）：自托管 runner 只在主仓自己的
+    # 事件里可用；来自 fork 的 PR 拿不到 runner，会**永久 Queued**（不是失败，但让
+    # 整个 PR 卡住）。故显式门控：push / workflow_dispatch 一律跑；PR 仅在同仓分支时跑。
+    # fork PR 由 job1（托管 runner）给出结论，本 job 如实 skip，不伪装成通过。
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v4
 
       # 8. 端到端 + 治理 + 渗透（Docker Compose 环境）
       - name: e2e & governance suite
-        run: pwsh -NoProfile -File scripts/verify-all.ps1
+        run: python3 scripts/verify-all.py
         env:
           GO_BIN: go
 
@@ -317,49 +332,15 @@ jobs:
       #     需自托管 runner 具备 llama-server + GGUF + transformers；
       #     环境不满足时自动跳过，不阻塞 CI。
       - name: L2 two-stage smoke (optional)
-        shell: pwsh
-        run: |
-          $gguf = ".tools/models/Qwen3Guard-Gen-0.6B-GGUF/Qwen3Guard-Gen-0.6B.Q8_0.gguf"
-          $llama = ".tools/llamacpp/llama-server.exe"
-          if (-not (Test-Path $gguf) -or -not (Test-Path $llama)) {
-            Write-Host "SKIP: llama-server or GGUF not found (expected at $llama / $gguf)"
-            exit 0
-          }
-          # 起 llama-server（后台）
-          $llamaProc = Start-Process -FilePath $llama `
-            -ArgumentList "-m", $gguf, "--host", "127.0.0.1", "--port", "19110", "-np", "2", "-c", "2048", "-t", "4" `
-            -PassThru -NoNewWindow
-          try {
-            # 等健康检查
-            for ($i = 0; $i -lt 30; $i++) {
-              try {
-                $r = Invoke-WebRequest -Uri "http://127.0.0.1:19110/health" -UseBasicParsing -TimeoutSec 2
-                if ($r.StatusCode -eq 200) { break }
-              } catch { Start-Sleep -Seconds 2 }
-            }
-            # 起侧车
-            $sidecarProc = Start-Process -FilePath "python" `
-              -ArgumentList "scripts/qwen3guard-l2-sidecar.py", "--model-dir", ".tools/models/Qwen3Guard-Gen-0.6B", `
-                "--port", "19112", "--llama-url", "http://127.0.0.1:19110" `
-              -PassThru -NoNewWindow
-            try {
-              Start-Sleep -Seconds 5
-              python scripts/og1b-smoke.py --sidecar http://127.0.0.1:19112
-              if ($LASTEXITCODE -ne 0) { throw "smoke test failed with exit $LASTEXITCODE" }
-            } finally {
-              Stop-Process -Id $sidecarProc.Id -Force -ErrorAction SilentlyContinue
-            }
-          } finally {
-            Stop-Process -Id $llamaProc.Id -Force -ErrorAction SilentlyContinue
-          }
+        run: python3 scripts/l2-smoke.py
 
       - name: penetration tests
-        run: python scripts/pen_test.py
+        run: python3 scripts/pen_test.py
 
       # 9. K8s 清单校验（kustomize 渲染 + YAML 语法 + dry-run + 镜像构建 + helm lint）
       #    依赖 kubectl/helm/docker，故与 e2e 同置自托管 runner
       - name: K8s manifests
-        run: pwsh -NoProfile -File scripts/verify-k8s.ps1
+        run: python3 scripts/verify-k8s.py
 
   # ---------------- job 3：镜像供应链（构建 → 扫描 → SBOM → 签名） ----------------
   # P1-3 等保 §6.7（W11/M9）：镜像 digest + cosign 签名 + SBOM（SPDX）随镜像发布 + 扫描门禁。

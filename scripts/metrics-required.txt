@@ -1,7 +1,7 @@
 # Metrics "all-green" checklist (Phase 1 gate #9)
 #
 # Format: <source> <metric> <required|conditional>
-#   source   = tee | admin | plugin   (see check-metrics-green.ps1)
+#   source   = tee | admin | core | plugin | cryptop | a2a   (see check-metrics-green.py)
 #   required = must exist whenever the source is reachable
 #   conditional = registered only after a specific event / switch; treated as SKIP
 #                 when absent (NOT a failure), because the trigger has not happened.
@@ -11,7 +11,7 @@
 # first increment; tee-infer counters likewise), so a never-triggered counter does not
 # exist. Judging them as failures would make "all green" unreachable by design.
 #
-# NOTE: keep this file ASCII-only (PS 5.1 Get-Content reads BOM-less files as ANSI).
+# NOTE: keep this file ASCII-only (read by the CI gate and by Windows tooling alike).
 
 # ---- tee-infer (inference / quota / audit / guardrail) ----
 tee otpmask_inference_requests_total required

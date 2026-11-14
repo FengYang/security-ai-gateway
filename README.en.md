@@ -113,15 +113,16 @@ curl http://127.0.0.1:19090/usage
 curl http://127.0.0.1:19090/audit/verify
 curl http://127.0.0.1:19090/metrics
 
-# 5. Full verification (11 items)
-powershell -NoProfile -File scripts/verify-all.ps1
+# 5. Full verification (23 items; Linux / macOS)
+python3 scripts/verify-all.py
+#    Windows also works: powershell -NoProfile -File scripts/verify-all.ps1 (forwards to the same implementation)
 ```
 
 ## 4. K8s Deployment (production path)
 
 ```bash
 # Manifest validation (no cluster)
-powershell -NoProfile -File scripts/verify-k8s.ps1
+python3 scripts/verify-k8s.py
 
 # Helm one-shot deployment (recommended; deploy/helm/otpmask)
 helm install otpmask deploy/helm/otpmask \
@@ -132,7 +133,7 @@ kubectl apply -k deploy/k8s            # apply + HPA + PDB
 kubectl apply -k deploy/monitoring     # Prometheus + Grafana
 
 # Single-node real-machine verification (requires kind)
-powershell -NoProfile -File scripts/verify-k8s.ps1 -Kind
+python3 scripts/verify-k8s.py --kind
 ```
 
 See `docs/GA-部署指南.md` (Chinese): port mapping (gateway 10000 / Grafana 3000 / Prometheus 9090), secret injection, wasm image packaging, monitoring dashboards; interface docs in `docs/API-参考.md` (Chinese).
