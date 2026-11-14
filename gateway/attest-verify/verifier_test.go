@@ -40,7 +40,13 @@ func signProof(t *testing.T, platform string, reportData []byte, appHash string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof.Signature = append(r.Bytes(), s.Bytes()...)
+	// 签名按 INT-2 契约编码为定长 r‖s（各 32B）。不可用 append(r.Bytes(), s.Bytes()...)：
+	// big.Int.Bytes() 会去掉前导零，任一分量最高字节为 0 时拼接结果不足 64B，被
+	// cryptop.VerifyP256 的 len(sig)!=64 判为无效——实测约 0.6%（理论 1/128）概率假红。
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	s.FillBytes(sig[32:])
+	proof.Signature = sig
 	return proof
 }
 
