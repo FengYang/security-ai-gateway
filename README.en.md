@@ -18,12 +18,20 @@ Enterprises want to put LLMs to work, yet hesitate to hand their data to the inf
 - Hardware TEE solutions typically **require specific confidential-computing instances**, making them hard to deploy on ordinary clusters.
 - **General-purpose AI-gateway features are already a mature open-source foundation; end-to-end confidential trust remains scarce**: auth, rate limiting, WAF and multi-model proxying are carried by the Higress plugin ecosystem rather than reimplemented here. Based on a first-hand Oct 2026 review of public documentation and demos from major AI gateways (both open-source and commercial), we have not found a comparable open-source implementation covering the full chain of confidential plugins, key management / attestation and confidential inference. Comparable open-source projects (e.g. dstack `private-ai-gateway`) remain experimental (~30★). See the [full scoring matrix (§10)](https://github.com/FengYang/security-ai-gateway-docs/blob/main/GA-技术架构方案.md).
 
-### Our differentiators
+### Key advantages of this repository
+
 1. **Zero-plaintext link (end-to-end fail-closed)**: client text is encrypted before entering the TEE enclave; decryption, inference, sampling, and re-encryption all happen inside the trusted environment. The gateway and network only ever touch ciphertext, and any component failure **refuses service rather than degrading to plaintext**.
 2. **Dual routes, no hardware binding**: Route 1 uses TEE confidential inference; Route 2 uses OTP-Mask vector encryption (per-element masking + PRG stream) to achieve confidential inference **without dedicated hardware TEEs** — one of this project's differentiating value propositions (Route 2 is under continuous evolution). The same paradigm already has commercial implementations, so this project does not claim to be first; our differentiation lies in enterprise-side gateway integration and open-source availability.
 3. **Reuse Higress's production-grade AI-gateway plugin ecosystem**: auth (key-auth/OAuth/OIDC), security (WAF/Bot/IP), traffic (rate limiting/canary/WasmPlugin hot-reload), and AI-native capabilities (MCP/multi-model proxying) are all carried by the mature Higress plugin system rather than built from scratch — confidentiality without losing the production feature surface.
 4. **Unified multi-engine governance**: TEE / OTP-Mask / C-MaaS engines are governed engine-agnostically across auth, Guardrail, audit, and multi-tenancy, so enterprises can switch backends per scenario without rewriting governance logic.
 5. **Open source, self-hosted, enterprise-controllable**: Apache-2.0 licensed, self-hosted code, with no dependency on any vendor SaaS — enterprises own their confidential-inference capability.
+6. **Verifiable security, not just claimed security**: the 23-item verification suite reruns with one command (`python3 scripts/verify-all.py`), the audit hash chain is verifiable online via `/audit/verify`, security audit evidence is on record (20/20 pentest items passed, 1 P2 item fixed), Prometheus/Grafana metrics cover the full link, and Apache-2.0 + NOTICE/SBOM supply-chain declarations are in place — adoption rests on verifiable evidence you can rerun, not on verbal claims.
+
+### How to adopt (from trial to production)
+
+1. **Trial (5 minutes)**: `bash scripts/setup-env.sh` (Windows: `scripts/setup-env.ps1`) brings up the Docker Compose dev environment in one shot; a single `curl /infer` shows SSE output over the confidential link — see Quick Start below.
+2. **Production deployment**: one-shot Helm install of `deploy/helm/otpmask` (K8s manifests include HPA/PDB and Prometheus/Grafana monitoring), or the Higress control-plane form `deploy/higress/` (recommended for production, D-0=B).
+3. **Deep integration**: API contracts in `docs/API-参考.md`, engine-agnostic multi-engine governance (`tee_gpu`/`cmaas`/`external_tee`) to switch backends per scenario; the Route 2 engine requiring no dedicated hardware lives in the standalone repo [masked-infer](https://github.com/FengYang/masked-infer).
 
 ### Comparison with the status quo
 
@@ -49,7 +57,7 @@ Enterprises want to put LLMs to work, yet hesitate to hand their data to the inf
 | Confidential inference (Route A) | Plaintext exists only inside the TEE enclave; output returns as token ciphertext, decrypted by the gateway side into SSE |
 | Unified southbound text payload (Route 1, D1) | Gateway → tee-infer encrypted throughout with K_enc (AES-256-GCM envelope, bidirectional sub-keys + anti-replay); vLLM OpenAI-compatible streaming / C-MaaS SDK channel |
 | Unified multi-engine governance (Route 1) | `tee_gpu` (self-built GPU-TEE) / `cmaas` (Bailian confidential MaaS) / `external_tee` (reserved); auth/Guardrail/audit/multi-tenancy are engine-independent |
-| OTP-Mask vector encryption (Route 2, reserved) | Per-element mod-R masking + HMAC-SHA256 PRG stream (rejection sampling, unbiased), R=2^32; vector payload path fully preserved for later advancement |
+| OTP-Mask vector encryption (Route 2) | Per-element mod-R masking + HMAC-SHA256 PRG stream (rejection sampling, unbiased), R=2^32; vector payload path fully implemented |
 | Southbound private protocol | Varint binary wire format, HMAC signature + 30s anti-replay window + request_id deduplication; text payload/streaming fields appended (backward compatible) |
 | Key lifecycle | Master key TTL 5min rotation + 30s in-flight window (forward secrecy); request key = HMAC(master, reqID\|model\|ts) |
 | Multi-tenant isolation (M9) | Independent KeyManager per tenant; cross-tenant nonce rejection |
@@ -81,7 +89,7 @@ Components:
 | `gateway/auth-service` | Go | 19200 | JWT issuance/verification (HS256, tenant auth, C-6) |
 | `gateway/embedding-service` | Go + tiktoken (cl100k_base) | 18080 | Text → token → vector (plaintext; trusted zone varies by scenario, see scenario matrix) |
 | `gateway/tee-infer-service` | Go (simulated TEE, MVP) | 19090 | Confidential inference, key management, guardrail, audit (in-memory/WORM), metrics; text payload SSE envelope stream |
-| `gateway/vllm-adapter` | Go / Python | 19190 | vLLM plaintext inference bridge (Route 2 reserved; Route 1 connects tee-infer directly to vLLM OpenAI-compatible interface) |
+| `gateway/vllm-adapter` | Go / Python | 19190 | vLLM plaintext inference bridge (Route 2; Route 1 connects tee-infer directly to the vLLM OpenAI-compatible interface) |
 | `gateway/attest-verify` | Go | 19191 | Attestation verification sidecar (D2): quote parsing + measurement baseline comparison, localhost `/verify` |
 | `gateway/teecore` | Go library | - | KeyManager + non-linear operators (TEE trusted-side core) |
 | `protocol/` | Go / Python / proto | - | Southbound protocol, three-end implementation (cross-consistency verified) |
@@ -142,7 +150,7 @@ See `docs/GA-部署指南.md` (Chinese): port mapping (gateway 10000 / Grafana 3
 
 - **Trust boundary (by scenario, do not generalize)**: **Only in scenarios where the customer does not trust the infrastructure (confidential track S2/S3)** is plaintext narrowed to the TEE enclave (`tee-infer-service`) or to tee-infer inside the customer's trusted domain (S2) and the internal embedding service; the gateway and network link only touch ciphertext. **The plaintext path `/provider/*` (S1) belongs to the "customer's self-built trusted intranet" — plaintext stays within the customer's trusted domain and is not bound by the "plaintext must not leave the enclave" constraint.** Judgment basis and single source of truth: `docs/GA-产品场景与可信区域矩阵.md` §0.1 (Chinese).
 - **Threat mitigation**: integrity (HMAC signature), anti-replay (30s window + deduplication), tenant isolation (independent KeyManager), content safety (Guardrail fail-closed), audit (hash chain), degradation policy (TEE unavailable → 503 refuse, never degrade to plaintext).
-- **Auth boundary (known MVP item)**: `X-Tenant-ID` and the remote-attestation token are demo values; production must have the gateway issue auth (JWT) and inject it via TEE signature.
+- **Production hardening requirement**: `X-Tenant-ID` and the remote-attestation token take demo values in the demo environment; production deployments must have the gateway issue auth (JWT) and inject it via TEE signature.
 - Full threat model: `otp-mask-threat-model/`; audit conclusion: `docs/Phase3-M11-安全审计与渗透测试.md` (Chinese) (20/20 pentests passed, 1 P2 item fixed).
 
 ## 6. Directory Structure
@@ -191,7 +199,7 @@ docs/            Milestone documents (M1-M12)
 
 ## 8. Status
 
-Phase 1-3 (M1-M12) all complete ✅ → **Route 1 (unified multi-engine confidential-inference gateway) M1-M3 achieved, code frozen**; gateway feature-surface core set (quota/desensitization/decoration/double-hash + Envoy base) complete; D-0 corrected to Higress control-plane form, `deploy/higress/` manifests ready pending cluster deployment. **Next: advance GF.1 (Higress control-plane landing) per `docs/GA-网关功能面研发计划.md`**; remaining work is blocked on external dependencies (M4 real machine: TDX hardware / C-MaaS account) or scheduled per the dev plan. Full progress in `docs/GA-项目总览与路线图.md` (Chinese).
+Phase 1-3 (M1-M12) all complete ✅: Route 1 (unified multi-engine confidential-inference gateway) M1-M3 achieved with code frozen; the gateway feature-surface core set (quota/desensitization/decoration/double-hash + Envoy base) is complete; the production form is the Higress control plane, with `deploy/higress/` manifests ready. Design, deployment, threat-model and verification documentation are all in place — see the documentation index above.
 
 ## 9. Contributing & License
 

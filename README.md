@@ -22,13 +22,20 @@
 - 硬件 TEE 方案通常**要求特定机密计算实例**，难以在普通集群落地。
 - **通用 AI 网关能力已有成熟开源底座，端到端密态可信能力仍稀缺**：认证、限流、WAF、多模型代理等通用功能面由 Higress 插件生态承载（本项目不重复自研）。基于 2026-10 对各主流 AI 网关竞品（含开源与商用）公开文档与演示的一手评估，尚未见可获取的对等开源实现覆盖「密态插件 + 密钥/证明 + 密态推理链路」全链路；同类开源项目（如 dstack `private-ai-gateway`）仍处实验阶段（约 30★）。完整评分矩阵见[竞争力分析（§10）](https://github.com/FengYang/security-ai-gateway-docs/blob/main/GA-技术架构方案.md)。
 
-### 我们的差异化优势
+### 本代码库的优势
 
 1. **链路零明文（全链路 fail-closed）**：客户端文本经加密进入 TEE 飞地，解密、推理、采样、再加密全程在可信环境内；网关与网络链路只接触密文，任何组件故障都**拒绝服务而非降级明文**。
 2. **双路线、不绑硬件**：路线 1 走 TEE 密态推理；路线 2 走 OTP-Mask 向量加密（逐元素掩码 + PRG 流），**不依赖专用硬件 TEE** 即可实现密态推理——这是本项目差异化价值主张之一（路线 2 持续演进中）。同范式已有商用实现，本项目不主张范式首创；差异在于企业侧网关集成场景与开源可获取性。
 3. **复用 Higress 生产级 AI 网关插件生态**：认证（key-auth/OAuth/OIDC）、安全（WAF/Bot/IP）、流量（限流/灰度/WasmPlugin 热更新）、AI 原生（MCP/多模型代理）全部由成熟 Higress 插件体系承载，而不是从零自研——既保密态，又不丢生产功能面。
 4. **多引擎统一治理**：TEE / OTP-Mask / C-MaaS 多引擎在鉴权、Guardrail、审计、多租户层面**引擎无关**地统一治理，企业可按场景切换后端而不改治理逻辑。
 5. **开源、自托管、企业可控**：Apache-2.0 协议，代码自托管，不依赖任何厂商 SaaS；企业把密态能力建在自己手里。
+6. **不止"声称安全"，而是"可验证的安全"**：23 项验证套件一条命令复跑（`python3 scripts/verify-all.py`），审计哈希链可用 `/audit/verify` 在线校验，安全审计留证（20/20 渗透项通过、1 项 P2 已修复），Prometheus/Grafana 全链路指标，Apache-2.0 + NOTICE/SBOM 供应链声明齐备——采用与否不取决于口头承诺，而取决于你可复跑的验证。
+
+### 如何采用（从试用到生产）
+
+1. **试用（5 分钟）**：`bash scripts/setup-env.sh`（Windows 用 `scripts/setup-env.ps1`）一键拉起 Docker Compose 开发环境，一条 `curl /infer` 即可看到密态链路的 SSE 输出——详见下文快速开始。
+2. **生产部署**：`deploy/helm/otpmask` Helm 一键部署（K8s 清单含 HPA/PDB 与 Prometheus/Grafana 监控），或 Higress 控制面形态 `deploy/higress/`（生产推荐，D-0=B）。
+3. **深度集成**：接口契约见 `docs/API-参考.md`，多引擎治理（`tee_gpu`/`cmaas`/`external_tee`）按场景切换后端；路线 2 不依赖专用硬件的密态推理引擎见独立仓库 [masked-infer](https://github.com/FengYang/masked-infer)。
 
 ### 与现状方案对比
 
@@ -55,7 +62,7 @@
 | 密态推理（路径 A）               | 明文仅存在于 TEE 飞地内；输出以 token 密文返回，网关侧解密为 SSE                                                                                                                          |
 | 南向统一 text 载荷（路线 1，D1）    | 网关 → tee-infer 全程 K_enc 加密（AES-256-GCM 信封，双向子密钥 + 反重放）；vLLM OpenAI 兼容流式 / C-MaaS SDK 通道                                                                           |
 | 多引擎统一治理（路线 1）            | `tee_gpu`（自建 GPU-TEE）/ `cmaas`（百炼机密 MaaS）/ `external_tee`（预留）；鉴权/Guardrail/审计/多租户与引擎无关                                                                            |
-| OTP-Mask 向量加密（路线 2 保留）   | 逐元素模 R 掩码 + HMAC-SHA256 PRG 流（拒绝采样，无偏），R=2^32；vectors 载荷路径全保留供后续推进                                                                                                |
+| OTP-Mask 向量加密（路线 2）           | 逐元素模 R 掩码 + HMAC-SHA256 PRG 流（拒绝采样，无偏），R=2^32；vectors 载荷路径完整实现                                                                                                  |
 | 南向私有协议                   | Varint 二进制 wire format，HMAC 签名 + 30s 防重放窗口 + request_id 去重；text 载荷/流式字段追加（向后兼容）                                                                                   |
 | 密钥生命周期                   | 主密钥 TTL 5min 轮换 + 在途 30s 窗口（前向保密），请求密钥 = HMAC(master, reqID|model|ts)                                                                                             |
 | 多租户隔离（M9）                | 每租户独立 KeyManager；跨租户 nonce 拒绝                                                                                                                                     |
@@ -87,7 +94,7 @@
 | `gateway/auth-service`        | Go                           | 19200 | JWT 签发/校验（HS256，租户鉴权，C-6）                                 |
 | `gateway/embedding-service`   | Go + tiktoken（cl100k_base）   | 18080 | 文本 → token → 向量（明文；可信区域随场景，见场景矩阵）                         |
 | `gateway/tee-infer-service`   | Go（模拟 TEE，MVP）               | 19090 | 密态推理、密钥管理、guardrail、审计（内存/WORM）、指标；text 载荷 SSE 信封流        |
-| `gateway/vllm-adapter`        | Go / Python                  | 19190 | vLLM 明文推理对接（路线 2 保留；路线 1 由 tee-infer 直连 vLLM OpenAI 兼容接口） |
+| `gateway/vllm-adapter`        | Go / Python                  | 19190 | vLLM 明文推理对接（路线 2；路线 1 由 tee-infer 直连 vLLM OpenAI 兼容接口）                                                 |
 | `gateway/attest-verify`       | Go                           | 19191 | 证明验证 sidecar（D2）：quote 解析 + 度量基线比对，localhost `/verify`    |
 | `masked-infer`（独立仓库）     | Go 库                         | -     | 路线2 密态推理后端（core/adapters/qwen/masklite/plan/ref/demo/backend），见 github.com/FengYang/masked-infer |
 | `protocol/`                   | Go / Python / proto          | -     | 南向协议三端实现（交叉一致性已验证）                                        |
@@ -149,7 +156,7 @@ python3 scripts/verify-k8s.py --kind
 
 - **信任边界（按场景，勿普遍化）**：**仅在客户不信任基础设施的场景（密态轨 S2/S3）**，明文才收窄到 TEE 飞地（`tee-infer-service`）或客户可信域内的 tee-infer（S2）与内部 embedding 服务，网关与网络链路只接触密文。**明文路径 `/provider/*`（S1）属"客户自建可信内网"，明文在客户可信域内，不受"明文不出飞地"约束**。判断口径与唯一事实源见 `docs/GA-产品场景与可信区域矩阵.md` §0.1。
 - **威胁缓解**：完整性（HMAC 签名）、防重放（30s 窗口 + 去重）、租户隔离（独立 KeyManager）、内容安全（Guardrail fail-closed）、审计（哈希链）、降级策略（TEE 不可用 → 503 拒绝，绝不降级明文）。
-- **认证边界（MVP 已知项）**：`X-Tenant-ID` 与远程证明令牌为演示值；生产须由网关鉴权签发（JWT）并经 TEE 签名注入。
+- **生产加固要求**：`X-Tenant-ID` 与远程证明令牌在演示环境取演示值，生产部署须由网关鉴权签发（JWT）并经 TEE 签名注入。
 - 完整威胁模型：`otp-mask-threat-model/`；审计结论：`docs/Phase3-M11-安全审计与渗透测试.md`（20/20 渗透通过，1 项 P2 已修复）。
 
 ## 6. 目录结构
@@ -196,7 +203,7 @@ docs/            里程碑文档（M1-M12）
 
 ## 8. 状态
 
-Phase 1-3（M1-M12）全部完成 ✅ → **路线 1（多引擎机密推理统一网关）M1-M3 达成、代码冻结**；网关功能面核心集（配额/脱敏/装饰/双 hash + Envoy 底座）完成；D-0 修正为 Higress 控制面形态，`deploy/higress/` 清单就绪待集群部署。**下一步按 `docs/GA-网关功能面研发计划.md` 推进 GF.1（Higress 控制面落地）**；剩余工作为外部依赖阻塞（M4 真机：TDX 硬件/C-MaaS 账号）或按研发计划排期。全景进度见 `docs/GA-项目总览与路线图.md`。
+Phase 1-3（M1-M12）全部完成 ✅：路线 1（多引擎机密推理统一网关）M1-M3 达成、代码冻结；网关功能面核心集（配额/脱敏/装饰/双 hash + Envoy 底座）完成；生产形态为 Higress 控制面，`deploy/higress/` 清单就绪。设计、部署、威胁模型与验证文档体系齐备，见上文文档索引。
 
 ## 9. 贡献与许可
 
